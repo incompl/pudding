@@ -32,6 +32,7 @@ let treeContainer: HTMLElement;
 let streamsContainer: HTMLElement;
 let libraryRootInput: HTMLInputElement;
 let manifestPathInput: HTMLInputElement;
+let sourceListeners: AbortController | null = null;
 
 function joinPath(parent: string, child: string): string {
   return parent.endsWith("/") ? parent + child : parent + "/" + child;
@@ -96,27 +97,41 @@ async function onNodeClick(node: TreeNode, li: HTMLLIElement): Promise<void> {
   }
 }
 
-function playFile(node: TreeNode): void {
-  audioEl.src = convertFileSrc(node.path);
-  nowPlayingNameEl.textContent = node.name;
+function setSource(name: string, src: string, isStream: boolean): void {
+  sourceListeners?.abort();
+  audioEl.pause();
+  audioEl.removeAttribute("src");
+  audioEl.load();
+
+  sourceListeners = new AbortController();
+  const { signal } = sourceListeners;
+
+  nowPlayingNameEl.textContent = name;
+  audioEl.src = src;
+
+  if (isStream) {
+    audioEl.addEventListener(
+      "loadedmetadata",
+      () => {
+        if (!isFinite(audioEl.duration)) return;
+        const ranges = audioEl.seekable;
+        if (ranges.length > 0) {
+          audioEl.currentTime = Math.max(0, ranges.end(ranges.length - 1) - 5);
+        }
+      },
+      { once: true, signal },
+    );
+  }
+
   void audioEl.play();
 }
 
+function playFile(node: TreeNode): void {
+  setSource(node.name, convertFileSrc(node.path), false);
+}
+
 function playStream(stream: Stream): void {
-  audioEl.src = stream.url;
-  nowPlayingNameEl.textContent = stream.name;
-  audioEl.addEventListener(
-    "loadedmetadata",
-    () => {
-      if (!isFinite(audioEl.duration)) return;
-      const ranges = audioEl.seekable;
-      if (ranges.length > 0) {
-        audioEl.currentTime = Math.max(0, ranges.end(ranges.length - 1) - 5);
-      }
-    },
-    { once: true },
-  );
-  void audioEl.play();
+  setSource(stream.name, stream.url, true);
 }
 
 function renderStreams(streams: Stream[]): void {
