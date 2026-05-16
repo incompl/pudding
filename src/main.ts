@@ -29,6 +29,11 @@ let store: Store;
 let rootNode: TreeNode | null = null;
 let audioEl: HTMLAudioElement;
 let nowPlayingNameEl: HTMLElement;
+let nowPlayingSubtitleEl: HTMLElement;
+let playPauseBtn: HTMLButtonElement;
+let seekBar: HTMLInputElement;
+let timeCurrentEl: HTMLElement;
+let timeRemainingEl: HTMLElement;
 let treeContainer: HTMLElement;
 let streamsContainer: HTMLElement;
 let libraryRootInput: HTMLInputElement;
@@ -39,6 +44,7 @@ let nowPlayingPanel: HTMLElement;
 let settingsPanel: HTMLElement;
 let splitterEl: HTMLElement;
 let sourceListeners: AbortController | null = null;
+let currentIsStream = false;
 
 function joinPath(parent: string, child: string): string {
   return parent.endsWith("/") ? parent + child : parent + "/" + child;
@@ -102,12 +108,12 @@ async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
 function renderNode(node: TreeNode): HTMLLIElement {
   const li = document.createElement("li");
   const label = document.createElement("span");
+  label.className = "node-label";
   const icon = document.createElement("span");
   icon.className = "icon";
   icon.textContent = node.isFolder ? (node.expanded ? "▼" : "▶") : "♪";
   label.appendChild(icon);
   label.appendChild(document.createTextNode(" " + node.name));
-  label.style.cursor = "pointer";
   label.addEventListener("click", () => onNodeClick(node, li));
   li.appendChild(label);
 
@@ -138,6 +144,27 @@ async function onNodeClick(node: TreeNode, li: HTMLLIElement): Promise<void> {
   }
 }
 
+function formatTime(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) seconds = 0;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function updateSeekProgress(): void {
+  const max = Number(seekBar.max);
+  const pct = max > 0 ? (Number(seekBar.value) / max) * 100 : 0;
+  seekBar.style.setProperty("--progress", `${pct}%`);
+}
+
+function resetControls(): void {
+  seekBar.value = "0";
+  seekBar.max = "0";
+  timeCurrentEl.textContent = "0:00";
+  timeRemainingEl.textContent = "-0:00";
+  updateSeekProgress();
+}
+
 function setSource(name: string, src: string, isStream: boolean): void {
   sourceListeners?.abort();
   audioEl.pause();
@@ -147,7 +174,20 @@ function setSource(name: string, src: string, isStream: boolean): void {
   sourceListeners = new AbortController();
   const { signal } = sourceListeners;
 
+  currentIsStream = isStream;
   nowPlayingNameEl.textContent = name;
+  nowPlayingSubtitleEl.classList.toggle("hidden", !isStream);
+  playPauseBtn.disabled = false;
+  seekBar.disabled = isStream;
+  resetControls();
+  if (isStream) {
+    timeCurrentEl.classList.add("hidden");
+    timeRemainingEl.classList.add("hidden");
+  } else {
+    timeCurrentEl.classList.remove("hidden");
+    timeRemainingEl.classList.remove("hidden");
+  }
+
   audioEl.src = src;
 
   if (isStream) {
@@ -165,6 +205,46 @@ function setSource(name: string, src: string, isStream: boolean): void {
   }
 
   void audioEl.play();
+}
+
+function updatePlayButton(): void {
+  const playing = !audioEl.paused;
+  playPauseBtn.textContent = playing ? "⏸" : "▶";
+  playPauseBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
+}
+
+function setupPlayerControls(): void {
+  playPauseBtn.addEventListener("click", () => {
+    if (audioEl.paused) {
+      void audioEl.play();
+    } else {
+      audioEl.pause();
+    }
+  });
+
+  seekBar.addEventListener("input", () => {
+    audioEl.currentTime = Number(seekBar.value);
+    updateSeekProgress();
+  });
+
+  audioEl.addEventListener("play", updatePlayButton);
+  audioEl.addEventListener("pause", updatePlayButton);
+
+  audioEl.addEventListener("loadedmetadata", () => {
+    if (currentIsStream || !isFinite(audioEl.duration)) return;
+    seekBar.max = String(audioEl.duration);
+    timeRemainingEl.textContent = "-" + formatTime(audioEl.duration);
+  });
+
+  audioEl.addEventListener("timeupdate", () => {
+    if (currentIsStream) return;
+    seekBar.value = String(audioEl.currentTime);
+    updateSeekProgress();
+    timeCurrentEl.textContent = formatTime(audioEl.currentTime);
+    if (isFinite(audioEl.duration)) {
+      timeRemainingEl.textContent = "-" + formatTime(audioEl.duration - audioEl.currentTime);
+    }
+  });
 }
 
 function playFile(node: TreeNode): void {
@@ -185,12 +265,12 @@ function renderStreams(streams: Stream[]): void {
   for (const stream of streams) {
     const li = document.createElement("li");
     const label = document.createElement("span");
+    label.className = "node-label";
     const icon = document.createElement("span");
     icon.className = "icon";
     icon.textContent = "♪";
     label.appendChild(icon);
     label.appendChild(document.createTextNode(" " + stream.name));
-    label.style.cursor = "pointer";
     label.addEventListener("click", () => playStream(stream));
     li.appendChild(label);
     ul.appendChild(li);
@@ -362,8 +442,13 @@ function setupSettings(): void {
 }
 
 async function init(): Promise<void> {
-  audioEl = document.querySelector("#audio") as HTMLAudioElement;
+  audioEl = new Audio();
   nowPlayingNameEl = document.querySelector("#now-playing-name") as HTMLElement;
+  nowPlayingSubtitleEl = document.querySelector("#now-playing-subtitle") as HTMLElement;
+  playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
+  seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
+  timeCurrentEl = document.querySelector("#time-current") as HTMLElement;
+  timeRemainingEl = document.querySelector("#time-remaining") as HTMLElement;
   treeContainer = document.querySelector("#folder-tree") as HTMLElement;
   streamsContainer = document.querySelector("#streams-list") as HTMLElement;
   libraryRootInput = document.querySelector("#library-root") as HTMLInputElement;
@@ -383,6 +468,7 @@ async function init(): Promise<void> {
   setupTabs();
   setupSplitter(splitterWidth);
   setupSettings();
+  setupPlayerControls();
 
   libraryRootInput.value = libraryRoot;
   manifestPathInput.value = manifestPath;

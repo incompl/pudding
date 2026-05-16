@@ -15,7 +15,12 @@
       </div>
       <div id="topbar-splitter-spacer"></div>
       <div id="topbar-actions">
-        <button id="settings-btn" type="button" aria-label="Settings" title="Settings">⚙</button>
+        <button id="settings-btn" type="button" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
         <button id="settings-back-btn" class="hidden" type="button">Back</button>
       </div>
     </header>
@@ -31,9 +36,16 @@
       <div id="splitter" role="separator" aria-orientation="vertical"></div>
       <section id="right">
         <div id="now-playing-panel">
-          <h2>Now Playing</h2>
-          <p id="now-playing-name"></p>
-          <audio id="audio" controls></audio>
+          <div id="now-playing-main">
+            <p id="now-playing-name"></p>
+            <p id="now-playing-subtitle" class="hidden">Live Broadcast</p>
+          </div>
+          <div id="now-playing-controls">
+            <button id="play-pause-btn" type="button" aria-label="Play" disabled>▶</button>
+            <span id="time-current" class="time">0:00</span>
+            <input type="range" id="seek-bar" min="0" max="0" value="0" step="0.1" disabled />
+            <span id="time-remaining" class="time">-0:00</span>
+          </div>
         </div>
         <div id="settings-panel" class="hidden">
           <h2>Settings</h2>

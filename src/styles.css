@@ -66,7 +66,6 @@ body {
 #settings-back-btn {
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
   border-radius: 6px;
   padding: 0.35em 0.7em;
   cursor: pointer;
@@ -74,11 +73,10 @@ body {
   font: inherit;
   letter-spacing: 0.02em;
   color: var(--accent);
-  transition: background 120ms ease;
+  transition: background 200ms ease;
 }
 
 #settings-btn {
-  font-size: 1.4em;
   width: 32px;
   height: 32px;
   padding: 0;
@@ -86,6 +84,12 @@ body {
   align-items: center;
   justify-content: center;
   align-self: center;
+}
+
+#settings-btn svg {
+  width: 12px;
+  height: 12px;
+  display: block;
 }
 
 #settings-back-btn {
@@ -113,20 +117,179 @@ body {
 
 #right {
   flex: 1;
-  padding: 1em 1.25em;
+  display: flex;
+  flex-direction: column;
+  padding: 0.75em 1em;
   overflow: auto;
   min-width: 200px;
+}
+
+#now-playing-panel,
+#settings-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#now-playing-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 0.4em;
+  min-height: 0;
+  padding: 1em;
+}
+
+#now-playing-name {
+  margin: 0;
+  font-size: 1.1em;
+  color: var(--text);
+  word-break: break-word;
+}
+
+#now-playing-subtitle {
+  margin: 0;
+  font-size: 0.85em;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%, 100% { color: var(--accent); }
+  50% { color: var(--surface-hover); }
+}
+
+#now-playing-controls {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+}
+
+#play-pause-btn {
+  background: var(--surface);
+  color: var(--accent);
+  border: none;
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  font-size: 1em;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 120ms ease;
+}
+
+#play-pause-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+#play-pause-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#now-playing-controls .time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  min-width: 3em;
+}
+
+#time-current {
+  text-align: right;
+}
+
+#time-remaining {
+  text-align: left;
+}
+
+#seek-bar {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  height: 0.85em;
+  margin: 0;
+  padding: 0;
+}
+
+#seek-bar::-webkit-slider-runnable-track {
+  height: 100%;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--progress, 0%),
+    var(--surface) var(--progress, 0%) 100%
+  );
+  border-radius: 2px;
+}
+
+#seek-bar::-moz-range-track {
+  height: 100%;
+  background: var(--surface);
+  border-radius: 2px;
+  border: none;
+}
+
+#seek-bar::-moz-range-progress {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+#seek-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+
+#seek-bar::-moz-range-thumb {
+  width: 0;
+  height: 0;
+  border: 0;
+  opacity: 0;
+  background: transparent;
+}
+
+#seek-bar:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 #splitter {
   flex: 0 0 var(--splitter-width);
   cursor: col-resize;
-  background: var(--surface);
+  background: transparent;
+  position: relative;
+  transition: background 200ms ease;
+}
+
+#splitter::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
 }
 
 #splitter:hover,
 #splitter.dragging {
-  background: var(--surface-hover);
+  background: var(--surface);
 }
 
 body.dragging,
@@ -162,7 +325,7 @@ body.dragging * {
 .tab-panel {
   flex: 1;
   overflow: auto;
-  padding: 0.75em 1em;
+  padding: 0.75em 0;
   min-height: 0;
 }
 
@@ -170,7 +333,7 @@ body.dragging * {
 .loading-state {
   color: var(--text-muted);
   font-style: italic;
-  padding: 0.5em 0;
+  padding: 0.5em 1em;
 }
 
 ul {
@@ -179,9 +342,17 @@ ul {
   margin: 0;
 }
 
-#folder-tree li,
-#streams-list li {
-  padding: 0.15em 0;
+#folder-tree .node-label,
+#streams-list .node-label {
+  display: block;
+  padding: 0.15em 1em;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+#folder-tree .node-label:hover,
+#streams-list .node-label:hover {
+  background: var(--surface);
 }
 
 #folder-tree .icon,
@@ -203,11 +374,6 @@ ul {
   font-size: 1.15em;
   font-weight: 600;
   letter-spacing: 0.01em;
-}
-
-#now-playing-name {
-  margin: 0 0 0.75em;
-  color: var(--text-muted);
 }
 
 .setting {
