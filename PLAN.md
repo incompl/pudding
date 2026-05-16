@@ -89,9 +89,10 @@ Implement in this order. Each phase ends in something runnable.
 
 - `pnpm create tauri-app` → Vanilla TS template.
 - Verify `pnpm tauri dev` launches an empty window.
-- Add plugin: `tauri-plugin-store`.
+- Add plugin: `tauri-plugin-store` (Rust dep + JS package).
 - Enable `protocol-asset` Cargo feature on `tauri`; set `security.assetProtocol.enable = true` in `tauri.conf.json`.
-- Register plugins in `lib.rs` and frontend.
+- Register `tauri-plugin-store` in `lib.rs`. (No frontend registration step — the JS package is just imported where used.)
+- Set a `security.csp` covering: `'self'` for own assets, `asset: http://asset.localhost` for local file playback, `https:` in `media-src` for remote MP3 streams, `ipc: http://ipc.localhost` in `connect-src` for Tauri invoke.
 
 ### Phase 1 — Local playback, hardcoded path
 
