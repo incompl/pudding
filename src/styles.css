@@ -1,3 +1,16 @@
+:root {
+  color-scheme: dark;
+  --left-width: 280px;
+  --splitter-width: 5px;
+  --bg: #0f0f0f;
+  --surface: #272727;
+  --surface-hover: #3f3f3f;
+  --text: #f1f1f1;
+  --text-muted: #aaa;
+  --accent: #b5d17a;
+  --danger: #f87171;
+}
+
 html,
 body {
   margin: 0;
@@ -8,39 +21,223 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.hidden {
+  display: none !important;
 }
 
 #topbar {
   display: flex;
-  gap: 1em;
-  padding: 0.5em 1em;
-  border-bottom: 1px solid #ccc;
+  flex-shrink: 0;
+  align-items: stretch;
+  height: 44px;
 }
 
-#topbar label {
+#tabs {
+  display: flex;
+  width: var(--left-width);
+  min-width: 120px;
+  flex-shrink: 0;
+  gap: 0.25em;
+  padding: 0 0.25em;
+}
+
+#topbar-splitter-spacer {
+  flex: 0 0 var(--splitter-width);
+}
+
+#topbar-actions {
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: 0.5em;
-  flex: 1;
+  justify-content: flex-end;
+  gap: 0.25em;
+  padding: 0 0.5em;
+  min-width: 200px;
 }
 
-#topbar input {
-  flex: 1;
+#settings-btn,
+#settings-back-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px;
+  padding: 0.35em 0.7em;
+  cursor: pointer;
+  line-height: 1;
+  font: inherit;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  transition: background 120ms ease;
 }
 
-main {
+#settings-btn {
+  font-size: 1.4em;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+}
+
+#settings-back-btn {
+  font-size: 0.95em;
+}
+
+#settings-btn:hover,
+#settings-back-btn:hover {
+  background: var(--surface);
+}
+
+#main-view {
   display: flex;
   flex: 1;
   min-height: 0;
 }
 
-#left,
-#right {
-  flex: 1;
-  padding: 0.5em 1em;
-  overflow: auto;
+#left {
+  width: var(--left-width);
+  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
-#left {
-  border-right: 1px solid #ccc;
+#right {
+  flex: 1;
+  padding: 1em 1.25em;
+  overflow: auto;
+  min-width: 200px;
+}
+
+#splitter {
+  flex: 0 0 var(--splitter-width);
+  cursor: col-resize;
+  background: var(--surface);
+}
+
+#splitter:hover,
+#splitter.dragging {
+  background: var(--surface-hover);
+}
+
+body.dragging,
+body.dragging * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+.tab {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 0.6em 1em;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  font: inherit;
+  font-size: 0.95em;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.tab-panel {
+  flex: 1;
+  overflow: auto;
+  padding: 0.75em 1em;
+  min-height: 0;
+}
+
+.empty-state,
+.loading-state {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 0.5em 0;
+}
+
+ul {
+  list-style: none;
+  padding-left: 1.25em;
+  margin: 0;
+}
+
+#folder-tree li,
+#streams-list li {
+  padding: 0.15em 0;
+}
+
+#folder-tree .icon,
+#streams-list .icon {
+  color: var(--accent);
+  display: inline-block;
+  width: 1.1em;
+}
+
+#folder-tree > ul,
+#streams-list > ul {
+  padding-left: 0;
+}
+
+#settings-panel h2,
+#now-playing-panel h2 {
+  margin-top: 0;
+  margin-bottom: 1em;
+  font-size: 1.15em;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+#now-playing-name {
+  margin: 0 0 0.75em;
+  color: var(--text-muted);
+}
+
+.setting {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  margin-bottom: 1em;
+}
+
+.setting label {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.setting input {
+  padding: 0.5em 0.6em;
+  font: inherit;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface);
+  border-radius: 6px;
+}
+
+.setting input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.setting input.invalid {
+  border-color: var(--danger);
+  outline-color: var(--danger);
 }

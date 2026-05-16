@@ -9,20 +9,43 @@
   </head>
   <body>
     <header id="topbar">
-      <label>Library root: <input type="text" id="library-root" spellcheck="false" /></label>
-      <label>Manifest path: <input type="text" id="manifest-path" spellcheck="false" /></label>
+      <div id="tabs" role="tablist">
+        <button class="tab active" type="button" role="tab" data-tab="files">Files</button>
+        <button class="tab" type="button" role="tab" data-tab="streams">Streams</button>
+      </div>
+      <div id="topbar-splitter-spacer"></div>
+      <div id="topbar-actions">
+        <button id="settings-btn" type="button" aria-label="Settings" title="Settings">⚙</button>
+        <button id="settings-back-btn" class="hidden" type="button">Back</button>
+      </div>
     </header>
-    <main>
+    <main id="main-view">
       <section id="left">
-        <h2>Library</h2>
-        <div id="folder-tree"></div>
-        <h2>Streams</h2>
-        <div id="streams-list"></div>
+        <div class="tab-panel" id="tab-files">
+          <div id="folder-tree"></div>
+        </div>
+        <div class="tab-panel hidden" id="tab-streams">
+          <div id="streams-list"></div>
+        </div>
       </section>
+      <div id="splitter" role="separator" aria-orientation="vertical"></div>
       <section id="right">
-        <h2>Now Playing</h2>
-        <p id="now-playing-name"></p>
-        <audio id="audio" controls></audio>
+        <div id="now-playing-panel">
+          <h2>Now Playing</h2>
+          <p id="now-playing-name"></p>
+          <audio id="audio" controls></audio>
+        </div>
+        <div id="settings-panel" class="hidden">
+          <h2>Settings</h2>
+          <div class="setting">
+            <label for="library-root">Library root</label>
+            <input type="text" id="library-root" spellcheck="false" />
+          </div>
+          <div class="setting">
+            <label for="manifest-path">Manifest path</label>
+            <input type="text" id="manifest-path" spellcheck="false" />
+          </div>
+        </div>
       </section>
     </main>
   </body>
