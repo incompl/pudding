@@ -4,9 +4,34 @@ body {
   height: 100%;
 }
 
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+#topbar {
+  display: flex;
+  gap: 1em;
+  padding: 0.5em 1em;
+  border-bottom: 1px solid #ccc;
+}
+
+#topbar label {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  flex: 1;
+}
+
+#topbar input {
+  flex: 1;
+}
+
 main {
   display: flex;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
 }
 
 #left,

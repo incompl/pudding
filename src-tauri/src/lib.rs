@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+use tauri_plugin_store::StoreExt;
 
-// Phase 1: hardcoded library root. Replaced by config in phase 3.
-const HARDCODED_LIBRARY_ROOT: &str = "/Users/greg/Library/CloudStorage/ProtonDrive-gsmith@incompl.com-folder/mp3s";
-
-// Phase 2: hardcoded manifest path. Replaced by config in phase 3.
-const HARDCODED_MANIFEST_PATH: &str = "/Users/greg/pudding-streams.json";
+const STORE_FILE: &str = "settings.json";
+const KEY_LIBRARY_ROOT: &str = "libraryRoot";
 
 #[derive(Serialize)]
 struct DirListing {
@@ -45,19 +43,18 @@ fn list_dir(path: String) -> Result<DirListing, String> {
 }
 
 #[tauri::command]
-fn get_library_root() -> String {
-    HARDCODED_LIBRARY_ROOT.to_string()
-}
-
-#[tauri::command]
 fn read_manifest(path: String) -> Result<Vec<Stream>, String> {
     let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     serde_json::from_str(&contents).map_err(|e| e.to_string())
 }
 
+// Asset scope is in-memory only. Re-applied on boot from the store, and
+// extended at runtime when the user changes the library root.
 #[tauri::command]
-fn get_manifest_path() -> String {
-    HARDCODED_MANIFEST_PATH.to_string()
+fn set_asset_scope(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    app.asset_protocol_scope()
+        .allow_directory(&path, true)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -65,15 +62,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
-            app.asset_protocol_scope()
-                .allow_directory(HARDCODED_LIBRARY_ROOT, true)?;
+            let store = app.store(STORE_FILE)?;
+            if let Some(value) = store.get(KEY_LIBRARY_ROOT) {
+                if let Some(path) = value.as_str() {
+                    if !path.is_empty() {
+                        app.asset_protocol_scope().allow_directory(path, true)?;
+                    }
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_dir,
-            get_library_root,
             read_manifest,
-            get_manifest_path
+            set_asset_scope
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

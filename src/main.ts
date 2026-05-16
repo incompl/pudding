@@ -1,4 +1,9 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { load, type Store } from "@tauri-apps/plugin-store";
+
+const STORE_FILE = "settings.json";
+const KEY_LIBRARY_ROOT = "libraryRoot";
+const KEY_MANIFEST_PATH = "manifestPath";
 
 interface DirListing {
   folders: string[];
@@ -19,11 +24,14 @@ interface Stream {
   url: string;
 }
 
+let store: Store;
 let rootNode: TreeNode | null = null;
 let audioEl: HTMLAudioElement;
 let nowPlayingNameEl: HTMLElement;
 let treeContainer: HTMLElement;
 let streamsContainer: HTMLElement;
+let libraryRootInput: HTMLInputElement;
+let manifestPathInput: HTMLInputElement;
 
 function joinPath(parent: string, child: string): string {
   return parent.endsWith("/") ? parent + child : parent + "/" + child;
@@ -136,15 +144,83 @@ function renderTree(): void {
   treeContainer.appendChild(ul);
 }
 
-async function loadStreams(): Promise<void> {
-  const manifestPath = await invoke<string>("get_manifest_path");
+async function refreshTree(libraryRoot: string): Promise<void> {
+  treeContainer.innerHTML = "";
+  rootNode = null;
+  if (!libraryRoot) {
+    treeContainer.textContent = "No library root set";
+    return;
+  }
+  let listing: DirListing;
+  try {
+    listing = await invoke<DirListing>("list_dir", { path: libraryRoot });
+  } catch (e) {
+    console.error("list_dir failed for", libraryRoot, e);
+    treeContainer.textContent = "Invalid library root";
+    return;
+  }
+  rootNode = {
+    path: libraryRoot,
+    name: libraryRoot,
+    isFolder: true,
+    loaded: true,
+    expanded: true,
+    children: [
+      ...listing.folders.map((name) => ({
+        path: joinPath(libraryRoot, name),
+        name,
+        isFolder: true,
+        loaded: false,
+        expanded: false,
+        children: [],
+      })),
+      ...listing.files.map((name) => ({
+        path: joinPath(libraryRoot, name),
+        name,
+        isFolder: false,
+        loaded: true,
+        expanded: false,
+        children: [],
+      })),
+    ],
+  };
+  renderTree();
+}
+
+async function refreshStreams(manifestPath: string): Promise<void> {
+  streamsContainer.innerHTML = "";
+  if (!manifestPath) {
+    streamsContainer.textContent = "No manifest path set";
+    return;
+  }
   try {
     const streams = await invoke<Stream[]>("read_manifest", { path: manifestPath });
     renderStreams(streams);
   } catch (e) {
     console.error("read_manifest failed for", manifestPath, e);
-    streamsContainer.textContent = "Failed to load manifest: " + String(e);
+    streamsContainer.textContent = "Invalid manifest path";
   }
+}
+
+async function onLibraryRootChange(): Promise<void> {
+  const value = libraryRootInput.value.trim();
+  await store.set(KEY_LIBRARY_ROOT, value);
+  await store.save();
+  if (value) {
+    try {
+      await invoke("set_asset_scope", { path: value });
+    } catch (e) {
+      console.error("set_asset_scope failed", e);
+    }
+  }
+  await refreshTree(value);
+}
+
+async function onManifestPathChange(): Promise<void> {
+  const value = manifestPathInput.value.trim();
+  await store.set(KEY_MANIFEST_PATH, value);
+  await store.save();
+  await refreshStreams(value);
 }
 
 async function init(): Promise<void> {
@@ -152,21 +228,22 @@ async function init(): Promise<void> {
   nowPlayingNameEl = document.querySelector("#now-playing-name") as HTMLElement;
   treeContainer = document.querySelector("#folder-tree") as HTMLElement;
   streamsContainer = document.querySelector("#streams-list") as HTMLElement;
+  libraryRootInput = document.querySelector("#library-root") as HTMLInputElement;
+  manifestPathInput = document.querySelector("#manifest-path") as HTMLInputElement;
 
-  const libraryRoot = await invoke<string>("get_library_root");
+  store = await load(STORE_FILE, { defaults: {}, autoSave: false });
 
-  rootNode = {
-    path: libraryRoot,
-    name: libraryRoot,
-    isFolder: true,
-    loaded: false,
-    expanded: true,
-    children: [],
-  };
+  const libraryRoot = (await store.get<string>(KEY_LIBRARY_ROOT)) ?? "";
+  const manifestPath = (await store.get<string>(KEY_MANIFEST_PATH)) ?? "";
 
-  await loadChildren(rootNode);
-  renderTree();
-  await loadStreams();
+  libraryRootInput.value = libraryRoot;
+  manifestPathInput.value = manifestPath;
+
+  libraryRootInput.addEventListener("change", onLibraryRootChange);
+  manifestPathInput.addEventListener("change", onManifestPathChange);
+
+  await refreshTree(libraryRoot);
+  await refreshStreams(manifestPath);
 }
 
 window.addEventListener("DOMContentLoaded", init);
