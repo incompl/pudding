@@ -1,13 +1,22 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 // Phase 1: hardcoded library root. Replaced by config in phase 3.
 const HARDCODED_LIBRARY_ROOT: &str = "/Users/greg/Library/CloudStorage/ProtonDrive-gsmith@incompl.com-folder/mp3s";
 
+// Phase 2: hardcoded manifest path. Replaced by config in phase 3.
+const HARDCODED_MANIFEST_PATH: &str = "/Users/greg/pudding-streams.json";
+
 #[derive(Serialize)]
 struct DirListing {
     folders: Vec<String>,
     files: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Stream {
+    name: String,
+    url: String,
 }
 
 #[tauri::command]
@@ -40,6 +49,17 @@ fn get_library_root() -> String {
     HARDCODED_LIBRARY_ROOT.to_string()
 }
 
+#[tauri::command]
+fn read_manifest(path: String) -> Result<Vec<Stream>, String> {
+    let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&contents).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_manifest_path() -> String {
+    HARDCODED_MANIFEST_PATH.to_string()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -49,7 +69,12 @@ pub fn run() {
                 .allow_directory(HARDCODED_LIBRARY_ROOT, true)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_dir, get_library_root])
+        .invoke_handler(tauri::generate_handler![
+            list_dir,
+            get_library_root,
+            read_manifest,
+            get_manifest_path
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

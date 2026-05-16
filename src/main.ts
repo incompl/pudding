@@ -14,10 +14,16 @@ interface TreeNode {
   children: TreeNode[];
 }
 
+interface Stream {
+  name: string;
+  url: string;
+}
+
 let rootNode: TreeNode | null = null;
 let audioEl: HTMLAudioElement;
 let nowPlayingNameEl: HTMLElement;
 let treeContainer: HTMLElement;
+let streamsContainer: HTMLElement;
 
 function joinPath(parent: string, child: string): string {
   return parent.endsWith("/") ? parent + child : parent + "/" + child;
@@ -88,6 +94,38 @@ function playFile(node: TreeNode): void {
   void audioEl.play();
 }
 
+function playStream(stream: Stream): void {
+  audioEl.src = stream.url;
+  nowPlayingNameEl.textContent = stream.name;
+  audioEl.addEventListener(
+    "loadedmetadata",
+    () => {
+      if (!isFinite(audioEl.duration)) return;
+      const ranges = audioEl.seekable;
+      if (ranges.length > 0) {
+        audioEl.currentTime = Math.max(0, ranges.end(ranges.length - 1) - 5);
+      }
+    },
+    { once: true },
+  );
+  void audioEl.play();
+}
+
+function renderStreams(streams: Stream[]): void {
+  streamsContainer.innerHTML = "";
+  const ul = document.createElement("ul");
+  for (const stream of streams) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = "📻 " + stream.name;
+    label.style.cursor = "pointer";
+    label.addEventListener("click", () => playStream(stream));
+    li.appendChild(label);
+    ul.appendChild(li);
+  }
+  streamsContainer.appendChild(ul);
+}
+
 function renderTree(): void {
   treeContainer.innerHTML = "";
   if (!rootNode) return;
@@ -98,10 +136,22 @@ function renderTree(): void {
   treeContainer.appendChild(ul);
 }
 
+async function loadStreams(): Promise<void> {
+  const manifestPath = await invoke<string>("get_manifest_path");
+  try {
+    const streams = await invoke<Stream[]>("read_manifest", { path: manifestPath });
+    renderStreams(streams);
+  } catch (e) {
+    console.error("read_manifest failed for", manifestPath, e);
+    streamsContainer.textContent = "Failed to load manifest: " + String(e);
+  }
+}
+
 async function init(): Promise<void> {
   audioEl = document.querySelector("#audio") as HTMLAudioElement;
   nowPlayingNameEl = document.querySelector("#now-playing-name") as HTMLElement;
   treeContainer = document.querySelector("#folder-tree") as HTMLElement;
+  streamsContainer = document.querySelector("#streams-list") as HTMLElement;
 
   const libraryRoot = await invoke<string>("get_library_root");
 
@@ -116,6 +166,7 @@ async function init(): Promise<void> {
 
   await loadChildren(rootNode);
   renderTree();
+  await loadStreams();
 }
 
 window.addEventListener("DOMContentLoaded", init);

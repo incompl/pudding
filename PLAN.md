@@ -1,3 +1,4 @@
+
 # Cryo Pudding — Plan
 
 Personal media player. Tauri-based. Plays local MP3s from a folder tree and remote MP3 Icecast streams from a manifest.
