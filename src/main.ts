@@ -7,6 +7,7 @@ const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOT = "libraryRoot";
 const KEY_MANIFEST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
+const KEY_VOLUME = "volume";
 
 interface FileEntry {
   name: string;
@@ -89,6 +90,10 @@ let playPauseBtn: HTMLButtonElement;
 let seekBar: HTMLInputElement;
 let timeCurrentEl: HTMLElement;
 let timeRemainingEl: HTMLElement;
+let volumeControlEl: HTMLElement;
+let volumeBtn: HTMLButtonElement;
+let volumePopover: HTMLElement;
+let volumeBar: HTMLInputElement;
 let treeContainer: HTMLElement;
 let streamsContainer: HTMLElement;
 let libraryRootInput: HTMLInputElement;
@@ -230,6 +235,15 @@ function updateSeekProgress(): void {
   seekBar.style.setProperty("--progress", `${pct}%`);
 }
 
+function updateVolumeProgress(): void {
+  const v = Number(volumeBar.value);
+  volumeBar.style.setProperty("--progress", `${v * 100}%`);
+  const waves = volumeBtn.querySelectorAll<SVGPathElement>(".volume-wave");
+  waves.forEach((w, i) => {
+    w.style.opacity = String(i === 0 ? v : v >= 1 ? 1 : 0);
+  });
+}
+
 function resetControls(): void {
   seekBar.value = "0";
   seekBar.max = "0";
@@ -284,6 +298,36 @@ function togglePlayPause(): void {
   } else {
     audioEl.pause();
   }
+}
+
+function setVolumePopoverOpen(open: boolean): void {
+  volumePopover.classList.toggle("open", open);
+}
+
+function setupVolumeControl(initialVolume: number): void {
+  volumeBar.value = String(initialVolume);
+  audioEl.volume = initialVolume;
+  updateVolumeProgress();
+
+  const persistVolume = debounce(async (v: number) => {
+    await store.set(KEY_VOLUME, v);
+    await store.save();
+  }, 200);
+
+  volumeBtn.addEventListener("click", () => {
+    setVolumePopoverOpen(!volumePopover.classList.contains("open"));
+  });
+
+  volumeControlEl.addEventListener("mouseleave", () => {
+    setVolumePopoverOpen(false);
+  });
+
+  volumeBar.addEventListener("input", () => {
+    const v = Number(volumeBar.value);
+    audioEl.volume = v;
+    updateVolumeProgress();
+    persistVolume(v);
+  });
 }
 
 function setupPlayerControls(): void {
@@ -678,6 +722,10 @@ async function init(): Promise<void> {
   seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
   timeCurrentEl = document.querySelector("#time-current") as HTMLElement;
   timeRemainingEl = document.querySelector("#time-remaining") as HTMLElement;
+  volumeControlEl = document.querySelector("#volume-control") as HTMLElement;
+  volumeBtn = document.querySelector("#volume-btn") as HTMLButtonElement;
+  volumePopover = document.querySelector("#volume-popover") as HTMLElement;
+  volumeBar = document.querySelector("#volume-bar") as HTMLInputElement;
   treeContainer = document.querySelector("#folder-tree") as HTMLElement;
   streamsContainer = document.querySelector("#streams-list") as HTMLElement;
   libraryRootInput = document.querySelector("#library-root") as HTMLInputElement;
@@ -693,11 +741,14 @@ async function init(): Promise<void> {
   const libraryRoot = (await store.get<string>(KEY_LIBRARY_ROOT)) ?? "";
   const manifestPath = (await store.get<string>(KEY_MANIFEST_PATH)) ?? "";
   const splitterWidth = (await store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
+  const storedVolume = await store.get<number>(KEY_VOLUME);
+  const volume = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
 
   setupTabs();
   setupSplitter(splitterWidth);
   setupSettings();
   setupPlayerControls();
+  setupVolumeControl(volume);
 
   libraryRootInput.value = libraryRoot;
   manifestPathInput.value = manifestPath;

@@ -304,6 +304,128 @@ body.platform-mac #tabs {
   cursor: default;
 }
 
+#now-playing-controls > * {
+  transition: opacity 200ms ease;
+}
+
+#now-playing-controls:has(#volume-popover.open) > *:not(#volume-control) {
+  opacity: 0.4;
+}
+
+#volume-control {
+  position: relative;
+  flex-shrink: 0;
+}
+
+#volume-btn {
+  background: var(--surface);
+  color: var(--accent);
+  border: none;
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms ease;
+}
+
+#volume-btn:hover {
+  background: var(--surface-hover);
+}
+
+#volume-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.volume-wave {
+  transition: opacity 120ms ease;
+}
+
+#volume-popover {
+  position: absolute;
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 0.6em 0.8em;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+
+#volume-popover.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#volume-popover::after {
+  content: "";
+  position: absolute;
+  left: 100%;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+}
+
+#volume-bar {
+  display: block;
+  width: 120px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  height: 0.85em;
+  margin: 0;
+  padding: 0;
+}
+
+#volume-bar::-webkit-slider-runnable-track {
+  height: 100%;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--progress, 100%),
+    var(--bg) var(--progress, 100%) 100%
+  );
+  border-radius: 2px;
+}
+
+#volume-bar::-moz-range-track {
+  height: 100%;
+  background: var(--bg);
+  border-radius: 2px;
+  border: none;
+}
+
+#volume-bar::-moz-range-progress {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+#volume-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+
+#volume-bar::-moz-range-thumb {
+  width: 0;
+  height: 0;
+  border: 0;
+  opacity: 0;
+  background: transparent;
+}
+
 #splitter {
   flex: 0 0 var(--splitter-width);
   cursor: col-resize;

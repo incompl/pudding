@@ -4,6 +4,10 @@ Vibe coded media player.
 
 I made this for myself but you're welcome to check it out.
 
+## Philosophy
+
+Two features: local file playback and internet radio. High polish, no bloat.
+
 ## TODO
 
 - Gapless playback (currently auto-advance has a small gap while the next file loads)

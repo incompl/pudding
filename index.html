@@ -48,6 +48,18 @@
             <span id="time-current" class="time">0:00</span>
             <input type="range" id="seek-bar" min="0" max="0" value="0" step="0.1" disabled />
             <span id="time-remaining" class="time">-0:00</span>
+            <div id="volume-control">
+              <button id="volume-btn" type="button" aria-label="Volume">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" />
+                  <path class="volume-wave" d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                  <path class="volume-wave" d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                </svg>
+              </button>
+              <div id="volume-popover">
+                <input type="range" id="volume-bar" min="0" max="1" step="0.01" value="1" aria-label="Volume" />
+              </div>
+            </div>
           </div>
         </div>
         <div id="settings-panel" class="hidden">
