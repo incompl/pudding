@@ -1,5 +1,7 @@
 # Pudding
 
+![Pudding screenshot](images/screenshot.png)
+
 Vibe coded media player.
 
 I made this for myself but you're welcome to use it.
@@ -7,6 +9,17 @@ I made this for myself but you're welcome to use it.
 ## Philosophy
 
 Two features: local file playback and internet radio. High polish, no bloat.
+
+## Install
+
+No prebuilt releases — build it yourself. Requires [Rust](https://www.rust-lang.org/tools/install), [Node](https://nodejs.org/), and [pnpm](https://pnpm.io/).
+
+```sh
+pnpm install
+pnpm tauri build
+```
+
+On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to go.
 
 ## Keyboard shortcuts
 
@@ -22,7 +35,7 @@ Two features: local file playback and internet radio. High polish, no bloat.
 
 ## Manifest format
 
-Defines the radio station list. Configured in settings.
+Defines the stream list. Configured in settings.
 
 ```json
 [
@@ -31,8 +44,9 @@ Defines the radio station list. Configured in settings.
 ]
 ```
 
-## TODO
+## Roadmap
 
 - Gapless playback (currently auto-advance has a small gap while the next file loads)
+- Search. Metadata is already in sqlite.
 - Watch the library folder and auto-rescan when files are added, removed, or retagged (today metadata only refreshes on explicit rescan, and `list_dir` shows new files with empty tags until then)
 - Batch the per-file metadata lookups in `list_dir` and `get_metadata` (currently N+1 SELECTs per folder)

@@ -731,6 +731,7 @@ function setupEffects(): void {
   });
   effect(() => {
     nowPlayingSubtitleEl.classList.toggle("hidden", !isStream.value);
+    nowPlayingSubtitleEl.classList.toggle("paused", !isPlaying.value);
   });
   effect(() => {
     const url = npArt.value;

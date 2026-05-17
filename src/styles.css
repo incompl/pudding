@@ -183,19 +183,32 @@ body.platform-mac #tabs {
   font-style: italic;
 }
 
+@property --live-color {
+  syntax: "<color>";
+  inherits: false;
+  initial-value: #b5d17a;
+}
+
 #now-playing-subtitle {
   margin: 0;
   margin-top: 0.4em;
   font-size: 0.85em;
-  color: var(--accent);
+  --live-color: var(--accent);
+  color: var(--live-color);
   letter-spacing: 0.05em;
   text-transform: uppercase;
   animation: live-pulse 1.8s ease-in-out infinite;
+  transition: --live-color 600ms ease;
+}
+
+#now-playing-subtitle.paused {
+  animation: none;
+  --live-color: var(--surface-hover);
 }
 
 @keyframes live-pulse {
-  0%, 100% { color: var(--accent); }
-  50% { color: var(--surface-hover); }
+  0%, 100% { --live-color: var(--accent); }
+  50% { --live-color: var(--surface-hover); }
 }
 
 #now-playing-controls {
