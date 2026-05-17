@@ -12,12 +12,16 @@ interface FileEntry {
   title: string | null;
   artist: string | null;
   album: string | null;
+  disc: number | null;
+  track: number | null;
 }
 
 interface TrackMeta {
   title: string | null;
   artist: string | null;
   album: string | null;
+  disc: number | null;
+  track: number | null;
 }
 
 interface DirListing {
@@ -31,6 +35,8 @@ interface TreeNode {
   title: string | null;
   artist: string | null;
   album: string | null;
+  disc: number | null;
+  track: number | null;
   isFolder: boolean;
   loaded: boolean;
   expanded: boolean;
@@ -38,10 +44,25 @@ interface TreeNode {
 }
 
 function displayLabel(node: TreeNode): string {
-  if (!node.isFolder && node.title) {
+  if (node.isFolder) return node.name;
+  if (node.title) {
     return node.artist ? `${node.artist} - ${node.title}` : node.title;
   }
   return node.name;
+}
+
+function compareChildren(a: TreeNode, b: TreeNode): number {
+  if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
+  if (a.isFolder) {
+    return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+  }
+  const ad = a.disc ?? 1;
+  const bd = b.disc ?? 1;
+  if (ad !== bd) return ad - bd;
+  const at = a.track ?? Number.MAX_SAFE_INTEGER;
+  const bt = b.track ?? Number.MAX_SAFE_INTEGER;
+  if (at !== bt) return at - bt;
+  return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
 }
 
 interface Stream {
@@ -70,6 +91,9 @@ let nowPlayingPanel: HTMLElement;
 let settingsPanel: HTMLElement;
 let splitterEl: HTMLElement;
 let currentIsStream = false;
+let currentNode: TreeNode | null = null;
+let currentParent: TreeNode | null = null;
+let currentStreamUrl: string | null = null;
 
 function joinPath(parent: string, child: string): string {
   return parent.endsWith("/") ? parent + child : parent + "/" + child;
@@ -109,6 +133,8 @@ async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
         title: null,
         artist: null,
         album: null,
+        disc: null,
+        track: null,
         isFolder: true,
         loaded: false,
         expanded: false,
@@ -120,6 +146,8 @@ async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
         title: f.title,
         artist: f.artist,
         album: f.album,
+        disc: f.disc,
+        track: f.track,
         isFolder: false,
         loaded: true,
         expanded: false,
@@ -136,16 +164,22 @@ async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
   }
 }
 
-function renderNode(node: TreeNode): HTMLLIElement {
+function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
   const li = document.createElement("li");
   const label = document.createElement("span");
   label.className = "node-label";
+  if (!node.isFolder) {
+    label.dataset.path = node.path;
+    if (currentNode && currentNode.path === node.path) {
+      label.classList.add("playing");
+    }
+  }
   const icon = document.createElement("span");
   icon.className = "icon";
   icon.textContent = node.isFolder ? (node.expanded ? "▼" : "▶") : "♪";
   label.appendChild(icon);
   label.appendChild(document.createTextNode(" " + displayLabel(node)));
-  label.addEventListener("click", () => onNodeClick(node, li));
+  label.addEventListener("click", () => onNodeClick(node, parent, li));
   li.appendChild(label);
 
   if (node.isFolder && node.expanded) {
@@ -157,7 +191,7 @@ function renderNode(node: TreeNode): HTMLLIElement {
       childUl.appendChild(emptyLi);
     } else {
       for (const child of node.children) {
-        childUl.appendChild(renderNode(child));
+        childUl.appendChild(renderNode(child, node));
       }
     }
     li.appendChild(childUl);
@@ -165,13 +199,13 @@ function renderNode(node: TreeNode): HTMLLIElement {
   return li;
 }
 
-async function onNodeClick(node: TreeNode, li: HTMLLIElement): Promise<void> {
+async function onNodeClick(node: TreeNode, parent: TreeNode, li: HTMLLIElement): Promise<void> {
   if (node.isFolder) {
     if (!node.loaded) await loadChildren(node, li);
     node.expanded = !node.expanded;
-    li.replaceWith(renderNode(node));
+    li.replaceWith(renderNode(node, parent));
   } else {
-    playFile(node);
+    playFile(node, parent);
   }
 }
 
@@ -235,13 +269,33 @@ function updatePlayButton(): void {
   playPauseBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
 }
 
+function togglePlayPause(): void {
+  if (playPauseBtn.disabled) return;
+  if (audioEl.paused) {
+    void audioEl.play();
+  } else {
+    audioEl.pause();
+  }
+}
+
 function setupPlayerControls(): void {
-  playPauseBtn.addEventListener("click", () => {
-    if (audioEl.paused) {
-      void audioEl.play();
-    } else {
-      audioEl.pause();
+  playPauseBtn.addEventListener("click", togglePlayPause);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== " " && e.code !== "Space") return;
+    if (e.repeat) return;
+    const target = e.target as HTMLElement | null;
+    if (target) {
+      if (target.tagName === "TEXTAREA" || target.isContentEditable) return;
+      if (target instanceof HTMLInputElement) {
+        const type = target.type.toLowerCase();
+        const textLike = type === "text" || type === "search" || type === "url" ||
+          type === "email" || type === "password" || type === "tel" || type === "number";
+        if (textLike) return;
+      }
     }
+    e.preventDefault();
+    togglePlayPause();
   });
 
   seekBar.addEventListener("input", () => {
@@ -251,6 +305,7 @@ function setupPlayerControls(): void {
 
   audioEl.addEventListener("play", updatePlayButton);
   audioEl.addEventListener("pause", updatePlayButton);
+  audioEl.addEventListener("ended", playNextInAlbum);
 
   audioEl.addEventListener("loadedmetadata", () => {
     if (currentIsStream || !isFinite(audioEl.duration)) return;
@@ -269,12 +324,45 @@ function setupPlayerControls(): void {
   });
 }
 
-function playFile(node: TreeNode): void {
+function playFile(node: TreeNode, parent: TreeNode): void {
+  currentNode = node;
+  currentParent = parent;
+  currentStreamUrl = null;
   setSource(node.title ?? node.name, node.artist, node.album, convertFileSrc(node.path), false);
+  updatePlayingHighlight();
 }
 
 function playStream(stream: Stream): void {
+  currentNode = null;
+  currentParent = null;
+  currentStreamUrl = stream.url;
   setSource(stream.name, null, null, stream.url, true);
+  updatePlayingHighlight();
+}
+
+function updatePlayingHighlight(): void {
+  document
+    .querySelectorAll("#folder-tree .node-label.playing, #streams-list .node-label.playing")
+    .forEach((el) => el.classList.remove("playing"));
+  if (currentNode) {
+    const el = document.querySelector(
+      `#folder-tree .node-label[data-path="${CSS.escape(currentNode.path)}"]`,
+    );
+    el?.classList.add("playing");
+  } else if (currentStreamUrl) {
+    const el = document.querySelector(
+      `#streams-list .node-label[data-stream-url="${CSS.escape(currentStreamUrl)}"]`,
+    );
+    el?.classList.add("playing");
+  }
+}
+
+function playNextInAlbum(): void {
+  if (currentIsStream || !currentNode || !currentParent) return;
+  const siblings = currentParent.children.filter((c) => !c.isFolder);
+  const idx = siblings.findIndex((c) => c.path === currentNode!.path);
+  if (idx < 0 || idx + 1 >= siblings.length) return;
+  playFile(siblings[idx + 1], currentParent);
 }
 
 function renderStreams(streams: Stream[]): void {
@@ -288,6 +376,10 @@ function renderStreams(streams: Stream[]): void {
     const li = document.createElement("li");
     const label = document.createElement("span");
     label.className = "node-label";
+    label.dataset.streamUrl = stream.url;
+    if (currentStreamUrl === stream.url) {
+      label.classList.add("playing");
+    }
     const icon = document.createElement("span");
     icon.className = "icon";
     icon.textContent = "♪";
@@ -309,7 +401,7 @@ function renderTree(): void {
   }
   const ul = document.createElement("ul");
   for (const child of rootNode.children) {
-    ul.appendChild(renderNode(child));
+    ul.appendChild(renderNode(child, rootNode));
   }
   treeContainer.appendChild(ul);
 }
@@ -338,6 +430,8 @@ async function refreshTree(libraryRoot: string): Promise<void> {
     title: null,
     artist: null,
     album: null,
+    disc: null,
+    track: null,
     isFolder: true,
     loaded: true,
     expanded: true,
@@ -348,6 +442,8 @@ async function refreshTree(libraryRoot: string): Promise<void> {
         title: null,
         artist: null,
         album: null,
+        disc: null,
+        track: null,
         isFolder: true,
         loaded: false,
         expanded: false,
@@ -359,6 +455,8 @@ async function refreshTree(libraryRoot: string): Promise<void> {
         title: f.title,
         artist: f.artist,
         album: f.album,
+        disc: f.disc,
+        track: f.track,
         isFolder: false,
         loaded: true,
         expanded: false,
@@ -381,6 +479,7 @@ function collectFilePaths(node: TreeNode, out: string[]): void {
 function applyMetadata(node: TreeNode, byPath: Map<string, TrackMeta>): void {
   if (node.isFolder) {
     for (const child of node.children) applyMetadata(child, byPath);
+    node.children.sort(compareChildren);
     return;
   }
   const m = byPath.get(node.path);
@@ -388,6 +487,8 @@ function applyMetadata(node: TreeNode, byPath: Map<string, TrackMeta>): void {
     node.title = m.title;
     node.artist = m.artist;
     node.album = m.album;
+    node.disc = m.disc;
+    node.track = m.track;
   }
 }
 

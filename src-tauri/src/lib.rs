@@ -20,6 +20,8 @@ struct FileEntry {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    disc: Option<u32>,
+    track: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -27,6 +29,8 @@ struct TrackMeta {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    disc: Option<u32>,
+    track: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -49,7 +53,23 @@ fn join_path(parent: &str, child: &str) -> String {
     }
 }
 
+struct Tags {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    disc: Option<u32>,
+    track: Option<u32>,
+}
+
+// The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
+// and the next startup will drop and recreate it.
+const SCHEMA_VERSION: i64 = 1;
+
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != SCHEMA_VERSION {
+        conn.execute_batch("DROP TABLE IF EXISTS tracks;")?;
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tracks (
             path TEXT PRIMARY KEY,
@@ -57,22 +77,41 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             size INTEGER NOT NULL,
             title TEXT,
             artist TEXT,
-            album TEXT
+            album TEXT,
+            disc INTEGER,
+            track INTEGER
         );",
-    )
+    )?;
+    if version != SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+    Ok(())
 }
 
-fn read_tags(path: &std::path::Path) -> (Option<String>, Option<String>, Option<String>) {
+fn read_tags(path: &std::path::Path) -> Tags {
+    let empty = Tags {
+        title: None,
+        artist: None,
+        album: None,
+        disc: None,
+        track: None,
+    };
     let Ok(tagged) = lofty::read_from_path(path) else {
-        return (None, None, None);
+        return empty;
     };
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
-        return (None, None, None);
+        return empty;
     };
     let norm = |v: Option<std::borrow::Cow<'_, str>>| {
         v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     };
-    (norm(tag.title()), norm(tag.artist()), norm(tag.album()))
+    Tags {
+        title: norm(tag.title()),
+        artist: norm(tag.artist()),
+        album: norm(tag.album()),
+        disc: tag.disk(),
+        track: tag.track(),
+    }
 }
 
 fn walk_mp3s(root: &std::path::Path, out: &mut Vec<PathBuf>) {
@@ -149,17 +188,28 @@ fn run_scan(root: PathBuf, db: Arc<Mutex<Connection>>) {
             }
         }
 
-        let (title, artist, album) = read_tags(file);
+        let tags = read_tags(file);
         let _ = tx.execute(
-            "INSERT INTO tracks (path, mtime, size, title, artist, album)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO tracks (path, mtime, size, title, artist, album, disc, track)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(path) DO UPDATE SET
                  mtime = excluded.mtime,
                  size = excluded.size,
                  title = excluded.title,
                  artist = excluded.artist,
-                 album = excluded.album",
-            params![path_str, mtime, size, title, artist, album],
+                 album = excluded.album,
+                 disc = excluded.disc,
+                 track = excluded.track",
+            params![
+                path_str,
+                mtime,
+                size,
+                tags.title,
+                tags.artist,
+                tags.album,
+                tags.disc,
+                tags.track
+            ],
         );
     }
 
@@ -196,27 +246,52 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
         }
     }
     folders.sort_by_key(|s| s.to_lowercase());
-    file_names.sort_by_key(|s| s.to_lowercase());
 
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
     for name in file_names {
         let full = join_path(&path, &name);
-        let meta: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        let meta: Option<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<u32>,
+            Option<u32>,
+        )> = conn
             .query_row(
-                "SELECT title, artist, album FROM tracks WHERE path = ?",
+                "SELECT title, artist, album, disc, track FROM tracks WHERE path = ?",
                 [&full],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .ok();
-        let (title, artist, album) = meta.unwrap_or((None, None, None));
+        let (title, artist, album, disc, track) = meta.unwrap_or((None, None, None, None, None));
         files.push(FileEntry {
             name,
             title,
             artist,
             album,
+            disc,
+            track,
         });
     }
+
+    // Sort by (disc, track, name). Missing disc is treated as disc 1; missing track sorts
+    // after numbered tracks within the same disc.
+    files.sort_by(|a, b| {
+        let ad = a.disc.unwrap_or(1);
+        let bd = b.disc.unwrap_or(1);
+        ad.cmp(&bd)
+            .then_with(|| a.track.unwrap_or(u32::MAX).cmp(&b.track.unwrap_or(u32::MAX)))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
 
     Ok(DirListing { folders, files })
 }
@@ -250,18 +325,34 @@ fn get_metadata(paths: Vec<String>, db: State<DbHandle>) -> Result<Vec<TrackMeta
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut out: Vec<TrackMeta> = Vec::with_capacity(paths.len());
     for path in &paths {
-        let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        let row: Option<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<u32>,
+            Option<u32>,
+        )> = conn
             .query_row(
-                "SELECT title, artist, album FROM tracks WHERE path = ?",
+                "SELECT title, artist, album, disc, track FROM tracks WHERE path = ?",
                 [path],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .ok();
-        let (title, artist, album) = row.unwrap_or((None, None, None));
+        let (title, artist, album, disc, track) = row.unwrap_or((None, None, None, None, None));
         out.push(TrackMeta {
             title,
             artist,
             album,
+            disc,
+            track,
         });
     }
     Ok(out)

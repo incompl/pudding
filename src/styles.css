@@ -375,6 +375,11 @@ ul {
   background: var(--surface);
 }
 
+#folder-tree .node-label.playing,
+#streams-list .node-label.playing {
+  color: var(--accent);
+}
+
 #folder-tree .icon,
 #streams-list .icon {
   color: var(--accent);
