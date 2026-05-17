@@ -150,6 +150,15 @@ body.platform-mac #tabs {
   padding: 1em;
 }
 
+#now-playing-art {
+  display: block;
+  max-width: min(100%, 60vh);
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: 6px;
+  margin-bottom: 1em;
+}
+
 #now-playing-title,
 #now-playing-artist,
 #now-playing-album {
@@ -204,7 +213,7 @@ body.platform-mac #tabs {
   width: 36px;
   height: 36px;
   padding: 0;
-  font-size: 1em;
+  font-size: 1.5em;
   line-height: 1;
   cursor: pointer;
   display: inline-flex;

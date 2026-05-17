@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
+use base64::Engine;
 use lofty::prelude::*;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
@@ -12,7 +14,10 @@ const STORE_FILE: &str = "settings.json";
 const KEY_LIBRARY_ROOT: &str = "libraryRoot";
 const DB_FILE: &str = "metadata.db";
 
-struct DbHandle(Arc<Mutex<Connection>>);
+struct DbHandle {
+    conn: Arc<Mutex<Connection>>,
+    path: PathBuf,
+}
 
 #[derive(Serialize)]
 struct FileEntry {
@@ -45,6 +50,12 @@ struct Stream {
     url: String,
 }
 
+#[derive(Serialize, Clone)]
+struct ScanResult {
+    ok: bool,
+    error: Option<String>,
+}
+
 fn join_path(parent: &str, child: &str) -> String {
     if parent.ends_with('/') {
         format!("{}{}", parent, child)
@@ -64,6 +75,15 @@ struct Tags {
 // The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
 // and the next startup will drop and recreate it.
 const SCHEMA_VERSION: i64 = 1;
+
+// WAL lets the scan's write transaction run without blocking concurrent reads
+// (list_dir, get_metadata) on the main connection.
+fn open_connection(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    conn.busy_timeout(Duration::from_millis(5000))?;
+    Ok(conn)
+}
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -114,18 +134,28 @@ fn read_tags(path: &std::path::Path) -> Tags {
     }
 }
 
-fn walk_mp3s(root: &std::path::Path, out: &mut Vec<PathBuf>) {
+fn walk_mp3s(root: &std::path::Path, out: &mut Vec<PathBuf>, visited: &mut HashSet<PathBuf>) {
+    // Canonicalize so a symlink loop (e.g. /foo/back -> /foo) gets caught regardless
+    // of which path we entered the cycle from.
+    let Ok(canon) = std::fs::canonicalize(root) else {
+        return;
+    };
+    if !visited.insert(canon) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
+        let path = entry.path();
+        // std::fs::metadata follows symlinks; entry.file_type() does not. Following lets
+        // a user organize their library with symlinks to dirs / files.
+        let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        let path = entry.path();
-        if file_type.is_dir() {
-            walk_mp3s(&path, out);
-        } else if file_type.is_file() {
+        if meta.is_dir() {
+            walk_mp3s(&path, out, visited);
+        } else if meta.is_file() {
             let name = entry.file_name();
             if name.to_string_lossy().to_lowercase().ends_with(".mp3") {
                 out.push(path);
@@ -134,30 +164,24 @@ fn walk_mp3s(root: &std::path::Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn run_scan(root: PathBuf, db: Arc<Mutex<Connection>>) {
+fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
     let mut files = Vec::new();
-    walk_mp3s(&root, &mut files);
+    let mut visited = HashSet::new();
+    walk_mp3s(&root, &mut files, &mut visited);
 
-    let mut conn = match db.lock() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let tx = match conn.transaction() {
-        Ok(tx) => tx,
-        Err(e) => {
-            eprintln!("scan: begin tx failed: {}", e);
-            return;
-        }
-    };
+    let mut conn = open_connection(&db_path)
+        .map_err(|e| format!("open scan connection failed: {}", e))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin tx failed: {}", e))?;
 
-    if let Err(e) = tx.execute(
+    tx.execute(
         "CREATE TEMP TABLE IF NOT EXISTS scan_current (path TEXT PRIMARY KEY)",
         [],
-    ) {
-        eprintln!("scan: create temp table failed: {}", e);
-        return;
-    }
-    let _ = tx.execute("DELETE FROM scan_current", []);
+    )
+    .map_err(|e| format!("create temp table failed: {}", e))?;
+    tx.execute("DELETE FROM scan_current", [])
+        .map_err(|e| format!("clear temp table failed: {}", e))?;
 
     for file in &files {
         let Ok(meta) = file.metadata() else { continue };
@@ -181,7 +205,8 @@ fn run_scan(root: PathBuf, db: Arc<Mutex<Connection>>) {
                 [&path_str],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .ok();
+            .optional()
+            .map_err(|e| format!("query existing row failed: {}", e))?;
         if let Some((m, s)) = existing {
             if m == mtime && s == size {
                 continue;
@@ -213,20 +238,27 @@ fn run_scan(root: PathBuf, db: Arc<Mutex<Connection>>) {
         );
     }
 
-    let root_str = root.to_string_lossy().to_string();
-    let root_like = format!("{}/%", root_str.trim_end_matches('/'));
-    if let Err(e) = tx.execute(
-        "DELETE FROM tracks
-         WHERE (path = ?1 OR path LIKE ?2)
-           AND path NOT IN (SELECT path FROM scan_current)",
-        params![root_str, root_like],
-    ) {
-        eprintln!("scan: delete missing failed: {}", e);
-    }
+    // Remove every row not in this scan. This both drops files that disappeared under
+    // the current root and clears orphans left behind by a previous library root.
+    tx.execute(
+        "DELETE FROM tracks WHERE path NOT IN (SELECT path FROM scan_current)",
+        [],
+    )
+    .map_err(|e| format!("delete missing failed: {}", e))?;
 
-    if let Err(e) = tx.commit() {
-        eprintln!("scan: commit failed: {}", e);
-    }
+    tx.commit().map_err(|e| format!("commit failed: {}", e))?;
+    Ok(())
+}
+
+fn scan_and_emit(root: PathBuf, db_path: PathBuf, app: AppHandle) {
+    let payload = match run_scan(root, db_path) {
+        Ok(()) => ScanResult { ok: true, error: None },
+        Err(e) => {
+            eprintln!("scan failed: {}", e);
+            ScanResult { ok: false, error: Some(e) }
+        }
+    };
+    let _ = app.emit("library-scanned", payload);
 }
 
 #[tauri::command]
@@ -237,17 +269,22 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
     let mut file_names: Vec<String> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
-        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        let entry_path = entry.path();
+        // Follow symlinks so a link to a dir/file shows up under its true type.
+        // Broken links and permission errors are skipped silently.
+        let Ok(meta) = std::fs::metadata(&entry_path) else {
+            continue;
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
-        if file_type.is_dir() {
+        if meta.is_dir() {
             folders.push(name);
-        } else if file_type.is_file() && name.to_lowercase().ends_with(".mp3") {
+        } else if meta.is_file() && name.to_lowercase().ends_with(".mp3") {
             file_names.push(name);
         }
     }
     folders.sort_by_key(|s| s.to_lowercase());
 
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
     for name in file_names {
         let full = join_path(&path, &name);
@@ -271,7 +308,8 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
                     ))
                 },
             )
-            .ok();
+            .optional()
+            .map_err(|e| e.to_string())?;
         let (title, artist, album, disc, track) = meta.unwrap_or((None, None, None, None, None));
         files.push(FileEntry {
             name,
@@ -313,16 +351,25 @@ fn set_asset_scope(app: tauri::AppHandle, path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn rescan_library(path: String, db: State<DbHandle>, app: AppHandle) {
-    let db = db.0.clone();
+    let db_path = db.path.clone();
     std::thread::spawn(move || {
-        run_scan(PathBuf::from(path), db);
-        let _ = app.emit("library-scanned", ());
+        scan_and_emit(PathBuf::from(path), db_path, app);
     });
 }
 
 #[tauri::command]
+fn get_art(path: String) -> Option<String> {
+    let tagged = lofty::read_from_path(std::path::Path::new(&path)).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let pic = tag.pictures().first()?;
+    let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(pic.data());
+    Some(format!("data:{};base64,{}", mime, encoded))
+}
+
+#[tauri::command]
 fn get_metadata(paths: Vec<String>, db: State<DbHandle>) -> Result<Vec<TrackMeta>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut out: Vec<TrackMeta> = Vec::with_capacity(paths.len());
     for path in &paths {
         let row: Option<(
@@ -345,7 +392,8 @@ fn get_metadata(paths: Vec<String>, db: State<DbHandle>) -> Result<Vec<TrackMeta
                     ))
                 },
             )
-            .ok();
+            .optional()
+            .map_err(|e| e.to_string())?;
         let (title, artist, album, disc, track) = row.unwrap_or((None, None, None, None, None));
         out.push(TrackMeta {
             title,
@@ -366,23 +414,20 @@ pub fn run() {
             let app_data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data)?;
             let db_path = app_data.join(DB_FILE);
-            let conn = Connection::open(&db_path)?;
+            let conn = open_connection(&db_path)?;
             init_schema(&conn)?;
-            let db = Arc::new(Mutex::new(conn));
-            app.manage(DbHandle(db.clone()));
+            app.manage(DbHandle {
+                conn: Arc::new(Mutex::new(conn)),
+                path: db_path,
+            });
 
             let store = app.store(STORE_FILE)?;
             if let Some(value) = store.get(KEY_LIBRARY_ROOT) {
                 if let Some(path) = value.as_str() {
                     if !path.is_empty() {
+                        // Allow asset-protocol access immediately so audio playback works
+                        // before the frontend kicks off its scan.
                         app.asset_protocol_scope().allow_directory(path, true)?;
-                        let path_owned = path.to_string();
-                        let db_clone = db.clone();
-                        let app_handle = app.handle().clone();
-                        std::thread::spawn(move || {
-                            run_scan(PathBuf::from(path_owned), db_clone);
-                            let _ = app_handle.emit("library-scanned", ());
-                        });
                     }
                 }
             }
@@ -393,7 +438,8 @@ pub fn run() {
             read_manifest,
             set_asset_scope,
             rescan_library,
-            get_metadata
+            get_metadata,
+            get_art
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

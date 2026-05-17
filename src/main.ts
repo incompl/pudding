@@ -71,6 +71,11 @@ interface Stream {
   url: string;
 }
 
+interface ScanResult {
+  ok: boolean;
+  error: string | null;
+}
+
 let store: Store;
 let rootNode: TreeNode | null = null;
 let audioEl: HTMLAudioElement;
@@ -78,6 +83,8 @@ let nowPlayingTitleEl: HTMLElement;
 let nowPlayingArtistEl: HTMLElement;
 let nowPlayingAlbumEl: HTMLElement;
 let nowPlayingSubtitleEl: HTMLElement;
+let nowPlayingArtEl: HTMLImageElement;
+let artRequestId = 0;
 let playPauseBtn: HTMLButtonElement;
 let seekBar: HTMLInputElement;
 let timeCurrentEl: HTMLElement;
@@ -331,6 +338,7 @@ function playFile(node: TreeNode, parent: TreeNode): void {
   currentStreamUrl = null;
   setSource(node.title ?? node.name, node.artist, node.album, convertFileSrc(node.path), false);
   updatePlayingHighlight();
+  void loadArt(node.path);
 }
 
 function playStream(stream: Stream): void {
@@ -339,6 +347,30 @@ function playStream(stream: Stream): void {
   currentStreamUrl = stream.url;
   setSource(stream.name, null, null, stream.url, true);
   updatePlayingHighlight();
+  clearArt();
+}
+
+function clearArt(): void {
+  artRequestId++;
+  nowPlayingArtEl.removeAttribute("src");
+  nowPlayingArtEl.classList.add("hidden");
+}
+
+async function loadArt(path: string): Promise<void> {
+  const id = ++artRequestId;
+  nowPlayingArtEl.removeAttribute("src");
+  nowPlayingArtEl.classList.add("hidden");
+  let dataUrl: string | null;
+  try {
+    dataUrl = await invoke<string | null>("get_art", { path });
+  } catch (e) {
+    console.error("get_art failed for", path, e);
+    return;
+  }
+  if (id !== artRequestId) return;
+  if (!dataUrl) return;
+  nowPlayingArtEl.src = dataUrl;
+  nowPlayingArtEl.classList.remove("hidden");
 }
 
 function updatePlayingHighlight(): void {
@@ -641,6 +673,7 @@ async function init(): Promise<void> {
   nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;
   nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
   nowPlayingSubtitleEl = document.querySelector("#now-playing-subtitle") as HTMLElement;
+  nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
   playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
   seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
   timeCurrentEl = document.querySelector("#time-current") as HTMLElement;
@@ -672,12 +705,20 @@ async function init(): Promise<void> {
   libraryRootInput.addEventListener("input", debounce(onLibraryRootChange, 400));
   manifestPathInput.addEventListener("input", debounce(onManifestPathChange, 400));
 
-  await listen("library-scanned", () => {
+  await listen<ScanResult>("library-scanned", (event) => {
+    if (!event.payload.ok) {
+      console.error("library scan failed:", event.payload.error);
+      return;
+    }
     void refreshMetadata();
   });
 
   await refreshTree(libraryRoot);
   await refreshStreams(manifestPath);
+
+  if (libraryRoot) {
+    void invoke("rescan_library", { path: libraryRoot });
+  }
 }
 
 window.addEventListener("DOMContentLoaded", init);

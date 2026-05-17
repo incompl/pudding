@@ -2408,6 +2408,7 @@ dependencies = [
 name = "pudding"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "lofty",
  "rusqlite",
  "serde",
