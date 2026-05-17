@@ -1,4 +1,5 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { load, type Store } from "@tauri-apps/plugin-store";
 
 const STORE_FILE = "settings.json";
@@ -6,18 +7,41 @@ const KEY_LIBRARY_ROOT = "libraryRoot";
 const KEY_MANIFEST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
 
+interface FileEntry {
+  name: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+}
+
+interface TrackMeta {
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+}
+
 interface DirListing {
   folders: string[];
-  files: string[];
+  files: FileEntry[];
 }
 
 interface TreeNode {
   path: string;
   name: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
   isFolder: boolean;
   loaded: boolean;
   expanded: boolean;
   children: TreeNode[];
+}
+
+function displayLabel(node: TreeNode): string {
+  if (!node.isFolder && node.title) {
+    return node.artist ? `${node.artist} - ${node.title}` : node.title;
+  }
+  return node.name;
 }
 
 interface Stream {
@@ -28,7 +52,9 @@ interface Stream {
 let store: Store;
 let rootNode: TreeNode | null = null;
 let audioEl: HTMLAudioElement;
-let nowPlayingNameEl: HTMLElement;
+let nowPlayingTitleEl: HTMLElement;
+let nowPlayingArtistEl: HTMLElement;
+let nowPlayingAlbumEl: HTMLElement;
 let nowPlayingSubtitleEl: HTMLElement;
 let playPauseBtn: HTMLButtonElement;
 let seekBar: HTMLInputElement;
@@ -43,7 +69,6 @@ let settingsBackBtn: HTMLButtonElement;
 let nowPlayingPanel: HTMLElement;
 let settingsPanel: HTMLElement;
 let splitterEl: HTMLElement;
-let sourceListeners: AbortController | null = null;
 let currentIsStream = false;
 
 function joinPath(parent: string, child: string): string {
@@ -78,17 +103,23 @@ async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
   try {
     const listing = await invoke<DirListing>("list_dir", { path: node.path });
     node.children = [
-      ...listing.folders.map((name) => ({
+      ...listing.folders.map<TreeNode>((name) => ({
         path: joinPath(node.path, name),
         name,
+        title: null,
+        artist: null,
+        album: null,
         isFolder: true,
         loaded: false,
         expanded: false,
         children: [],
       })),
-      ...listing.files.map((name) => ({
-        path: joinPath(node.path, name),
-        name,
+      ...listing.files.map<TreeNode>((f) => ({
+        path: joinPath(node.path, f.name),
+        name: f.name,
+        title: f.title,
+        artist: f.artist,
+        album: f.album,
         isFolder: false,
         loaded: true,
         expanded: false,
@@ -113,7 +144,7 @@ function renderNode(node: TreeNode): HTMLLIElement {
   icon.className = "icon";
   icon.textContent = node.isFolder ? (node.expanded ? "▼" : "▶") : "♪";
   label.appendChild(icon);
-  label.appendChild(document.createTextNode(" " + node.name));
+  label.appendChild(document.createTextNode(" " + displayLabel(node)));
   label.addEventListener("click", () => onNodeClick(node, li));
   li.appendChild(label);
 
@@ -165,17 +196,23 @@ function resetControls(): void {
   updateSeekProgress();
 }
 
-function setSource(name: string, src: string, isStream: boolean): void {
-  sourceListeners?.abort();
+function setSource(
+  title: string,
+  artist: string | null,
+  album: string | null,
+  src: string,
+  isStream: boolean,
+): void {
   audioEl.pause();
   audioEl.removeAttribute("src");
   audioEl.load();
 
-  sourceListeners = new AbortController();
-  const { signal } = sourceListeners;
-
   currentIsStream = isStream;
-  nowPlayingNameEl.textContent = name;
+  nowPlayingTitleEl.textContent = title;
+  nowPlayingArtistEl.textContent = artist ?? "";
+  nowPlayingArtistEl.classList.toggle("hidden", !artist);
+  nowPlayingAlbumEl.textContent = album ?? "";
+  nowPlayingAlbumEl.classList.toggle("hidden", !album);
   nowPlayingSubtitleEl.classList.toggle("hidden", !isStream);
   playPauseBtn.disabled = false;
   seekBar.disabled = isStream;
@@ -189,21 +226,6 @@ function setSource(name: string, src: string, isStream: boolean): void {
   }
 
   audioEl.src = src;
-
-  if (isStream) {
-    audioEl.addEventListener(
-      "loadedmetadata",
-      () => {
-        if (!isFinite(audioEl.duration)) return;
-        const ranges = audioEl.seekable;
-        if (ranges.length > 0) {
-          audioEl.currentTime = Math.max(0, ranges.end(ranges.length - 1) - 5);
-        }
-      },
-      { once: true, signal },
-    );
-  }
-
   void audioEl.play();
 }
 
@@ -248,11 +270,11 @@ function setupPlayerControls(): void {
 }
 
 function playFile(node: TreeNode): void {
-  setSource(node.name, convertFileSrc(node.path), false);
+  setSource(node.title ?? node.name, node.artist, node.album, convertFileSrc(node.path), false);
 }
 
 function playStream(stream: Stream): void {
-  setSource(stream.name, stream.url, true);
+  setSource(stream.name, null, null, stream.url, true);
 }
 
 function renderStreams(streams: Stream[]): void {
@@ -313,21 +335,30 @@ async function refreshTree(libraryRoot: string): Promise<void> {
   rootNode = {
     path: libraryRoot,
     name: libraryRoot,
+    title: null,
+    artist: null,
+    album: null,
     isFolder: true,
     loaded: true,
     expanded: true,
     children: [
-      ...listing.folders.map((name) => ({
+      ...listing.folders.map<TreeNode>((name) => ({
         path: joinPath(libraryRoot, name),
         name,
+        title: null,
+        artist: null,
+        album: null,
         isFolder: true,
         loaded: false,
         expanded: false,
         children: [],
       })),
-      ...listing.files.map((name) => ({
-        path: joinPath(libraryRoot, name),
-        name,
+      ...listing.files.map<TreeNode>((f) => ({
+        path: joinPath(libraryRoot, f.name),
+        name: f.name,
+        title: f.title,
+        artist: f.artist,
+        album: f.album,
         isFolder: false,
         loaded: true,
         expanded: false,
@@ -336,6 +367,49 @@ async function refreshTree(libraryRoot: string): Promise<void> {
     ],
   };
   renderTree();
+}
+
+function collectFilePaths(node: TreeNode, out: string[]): void {
+  if (!node.isFolder) {
+    out.push(node.path);
+    return;
+  }
+  if (!node.loaded) return;
+  for (const child of node.children) collectFilePaths(child, out);
+}
+
+function applyMetadata(node: TreeNode, byPath: Map<string, TrackMeta>): void {
+  if (node.isFolder) {
+    for (const child of node.children) applyMetadata(child, byPath);
+    return;
+  }
+  const m = byPath.get(node.path);
+  if (m) {
+    node.title = m.title;
+    node.artist = m.artist;
+    node.album = m.album;
+  }
+}
+
+async function refreshMetadata(): Promise<void> {
+  if (!rootNode) return;
+  const paths: string[] = [];
+  collectFilePaths(rootNode, paths);
+  if (paths.length === 0) return;
+  let metas: TrackMeta[];
+  try {
+    metas = await invoke<TrackMeta[]>("get_metadata", { paths });
+  } catch (e) {
+    console.error("get_metadata failed", e);
+    return;
+  }
+  const byPath = new Map<string, TrackMeta>();
+  for (let i = 0; i < paths.length; i++) byPath.set(paths[i], metas[i]);
+  applyMetadata(rootNode, byPath);
+  const filesTab = document.getElementById("tab-files");
+  const scrollTop = filesTab?.scrollTop ?? 0;
+  renderTree();
+  if (filesTab) filesTab.scrollTop = scrollTop;
 }
 
 async function refreshStreams(manifestPath: string): Promise<void> {
@@ -366,6 +440,7 @@ async function onLibraryRootChange(): Promise<void> {
     } catch (e) {
       console.error("set_asset_scope failed", e);
     }
+    void invoke("rescan_library", { path: value });
   }
   await refreshTree(value);
 }
@@ -443,7 +518,9 @@ function setupSettings(): void {
 
 async function init(): Promise<void> {
   audioEl = new Audio();
-  nowPlayingNameEl = document.querySelector("#now-playing-name") as HTMLElement;
+  nowPlayingTitleEl = document.querySelector("#now-playing-title") as HTMLElement;
+  nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;
+  nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
   nowPlayingSubtitleEl = document.querySelector("#now-playing-subtitle") as HTMLElement;
   playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
   seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
@@ -475,6 +552,10 @@ async function init(): Promise<void> {
 
   libraryRootInput.addEventListener("input", debounce(onLibraryRootChange, 400));
   manifestPathInput.addEventListener("input", debounce(onManifestPathChange, 400));
+
+  await listen("library-scanned", () => {
+    void refreshMetadata();
+  });
 
   await refreshTree(libraryRoot);
   await refreshStreams(manifestPath);
