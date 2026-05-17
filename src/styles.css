@@ -487,7 +487,7 @@ body.dragging * {
 
 .empty-state,
 .loading-state {
-  color: var(--text-muted);
+  color: var(--surface-hover);
   font-style: italic;
   padding: 0.5em 1em;
 }

@@ -85,6 +85,7 @@ let nowPlayingArtistEl: HTMLElement;
 let nowPlayingAlbumEl: HTMLElement;
 let nowPlayingSubtitleEl: HTMLElement;
 let nowPlayingArtEl: HTMLImageElement;
+let nowPlayingEmptyEl: HTMLElement;
 let artRequestId = 0;
 let playPauseBtn: HTMLButtonElement;
 let seekBar: HTMLInputElement;
@@ -264,6 +265,7 @@ function setSource(
   audioEl.load();
 
   currentIsStream = isStream;
+  nowPlayingEmptyEl.classList.add("hidden");
   nowPlayingTitleEl.textContent = title;
   nowPlayingArtistEl.textContent = artist ?? "";
   nowPlayingArtistEl.classList.toggle("hidden", !artist);
@@ -718,6 +720,7 @@ async function init(): Promise<void> {
   nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
   nowPlayingSubtitleEl = document.querySelector("#now-playing-subtitle") as HTMLElement;
   nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
+  nowPlayingEmptyEl = document.querySelector("#now-playing-empty") as HTMLElement;
   playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
   seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
   timeCurrentEl = document.querySelector("#time-current") as HTMLElement;
