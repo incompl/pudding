@@ -67,11 +67,17 @@
           <h2>Settings</h2>
           <div class="setting">
             <label for="library-root">Library root</label>
-            <input type="text" id="library-root" spellcheck="false" />
+            <div class="path-picker">
+              <input type="text" id="library-root" spellcheck="false" readonly placeholder="No folder selected" />
+              <button type="button" id="library-root-browse">Choose…</button>
+            </div>
           </div>
           <div class="setting">
             <label for="manifest-path">Manifest path</label>
-            <input type="text" id="manifest-path" spellcheck="false" />
+            <div class="path-picker">
+              <input type="text" id="manifest-path" spellcheck="false" readonly placeholder="No file selected" />
+              <button type="button" id="manifest-path-browse">Choose…</button>
+            </div>
           </div>
         </div>
       </section>

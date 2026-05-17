@@ -2,6 +2,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
+import { open } from "@tauri-apps/plugin-dialog";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOT = "libraryRoot";
@@ -98,7 +99,9 @@ let volumeBar: HTMLInputElement;
 let treeContainer: HTMLElement;
 let streamsContainer: HTMLElement;
 let libraryRootInput: HTMLInputElement;
+let libraryRootBrowseBtn: HTMLButtonElement;
 let manifestPathInput: HTMLInputElement;
+let manifestPathBrowseBtn: HTMLButtonElement;
 let settingsBtn: HTMLButtonElement;
 let settingsBackBtn: HTMLButtonElement;
 let nowPlayingPanel: HTMLElement;
@@ -654,8 +657,8 @@ async function refreshStreams(manifestPath: string): Promise<void> {
   }
 }
 
-async function onLibraryRootChange(): Promise<void> {
-  const value = libraryRootInput.value.trim();
+async function setLibraryRoot(value: string): Promise<void> {
+  libraryRootInput.value = value;
   await store.set(KEY_LIBRARY_ROOT, value);
   await store.save();
   if (value) {
@@ -669,11 +672,34 @@ async function onLibraryRootChange(): Promise<void> {
   await refreshTree(value);
 }
 
-async function onManifestPathChange(): Promise<void> {
-  const value = manifestPathInput.value.trim();
+async function setManifestPath(value: string): Promise<void> {
+  manifestPathInput.value = value;
   await store.set(KEY_MANIFEST_PATH, value);
   await store.save();
   await refreshStreams(value);
+}
+
+async function browseLibraryRoot(): Promise<void> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    defaultPath: libraryRootInput.value || undefined,
+  });
+  if (typeof selected === "string") {
+    await setLibraryRoot(selected);
+  }
+}
+
+async function browseManifestPath(): Promise<void> {
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    defaultPath: manifestPathInput.value || undefined,
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  if (typeof selected === "string") {
+    await setManifestPath(selected);
+  }
 }
 
 function setupTabs(): void {
@@ -776,7 +802,9 @@ async function init(): Promise<void> {
   treeContainer = document.querySelector("#folder-tree") as HTMLElement;
   streamsContainer = document.querySelector("#streams-list") as HTMLElement;
   libraryRootInput = document.querySelector("#library-root") as HTMLInputElement;
+  libraryRootBrowseBtn = document.querySelector("#library-root-browse") as HTMLButtonElement;
   manifestPathInput = document.querySelector("#manifest-path") as HTMLInputElement;
+  manifestPathBrowseBtn = document.querySelector("#manifest-path-browse") as HTMLButtonElement;
   settingsBtn = document.querySelector("#settings-btn") as HTMLButtonElement;
   settingsBackBtn = document.querySelector("#settings-back-btn") as HTMLButtonElement;
   nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
@@ -800,8 +828,8 @@ async function init(): Promise<void> {
   libraryRootInput.value = libraryRoot;
   manifestPathInput.value = manifestPath;
 
-  libraryRootInput.addEventListener("input", debounce(onLibraryRootChange, 400));
-  manifestPathInput.addEventListener("input", debounce(onManifestPathChange, 400));
+  libraryRootBrowseBtn.addEventListener("click", () => void browseLibraryRoot());
+  manifestPathBrowseBtn.addEventListener("click", () => void browseManifestPath());
 
   await listen<ScanResult>("library-scanned", (event) => {
     if (!event.payload.ok) {
