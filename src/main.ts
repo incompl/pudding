@@ -306,15 +306,30 @@ function setVolumePopoverOpen(open: boolean): void {
   volumePopover.classList.toggle("open", open);
 }
 
+const persistVolume = debounce(async (v: number) => {
+  await store.set(KEY_VOLUME, v);
+  await store.save();
+}, 200);
+
+function setVolume(v: number): void {
+  const clamped = Math.max(0, Math.min(1, v));
+  audioEl.volume = clamped;
+  volumeBar.value = String(clamped);
+  updateVolumeProgress();
+  persistVolume(clamped);
+}
+
+function seekBy(seconds: number): void {
+  if (currentIsStream) return;
+  const dur = audioEl.duration;
+  if (!isFinite(dur) || dur <= 0) return;
+  audioEl.currentTime = Math.max(0, Math.min(dur, audioEl.currentTime + seconds));
+}
+
 function setupVolumeControl(initialVolume: number): void {
   volumeBar.value = String(initialVolume);
   audioEl.volume = initialVolume;
   updateVolumeProgress();
-
-  const persistVolume = debounce(async (v: number) => {
-    await store.set(KEY_VOLUME, v);
-    await store.save();
-  }, 200);
 
   volumeBtn.addEventListener("click", () => {
     setVolumePopoverOpen(!volumePopover.classList.contains("open"));
@@ -325,31 +340,60 @@ function setupVolumeControl(initialVolume: number): void {
   });
 
   volumeBar.addEventListener("input", () => {
-    const v = Number(volumeBar.value);
-    audioEl.volume = v;
-    updateVolumeProgress();
-    persistVolume(v);
+    setVolume(Number(volumeBar.value));
   });
+}
+
+function isTextInputTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.tagName === "TEXTAREA" || target.isContentEditable) return true;
+  if (target instanceof HTMLInputElement) {
+    const type = target.type.toLowerCase();
+    return type === "text" || type === "search" || type === "url" ||
+      type === "email" || type === "password" || type === "tel" || type === "number";
+  }
+  return false;
 }
 
 function setupPlayerControls(): void {
   playPauseBtn.addEventListener("click", togglePlayPause);
 
   document.addEventListener("keydown", (e) => {
-    if (e.key !== " " && e.code !== "Space") return;
-    if (e.repeat) return;
-    const target = e.target as HTMLElement | null;
-    if (target) {
-      if (target.tagName === "TEXTAREA" || target.isContentEditable) return;
-      if (target instanceof HTMLInputElement) {
-        const type = target.type.toLowerCase();
-        const textLike = type === "text" || type === "search" || type === "url" ||
-          type === "email" || type === "password" || type === "tel" || type === "number";
-        if (textLike) return;
-      }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isTextInputTarget(e.target)) return;
+
+    if (e.key === " " || e.code === "Space") {
+      if (e.repeat) return;
+      e.preventDefault();
+      togglePlayPause();
+      return;
     }
-    e.preventDefault();
-    togglePlayPause();
+
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setVolume(audioEl.volume + 0.1);
+      return;
+    }
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setVolume(audioEl.volume - 0.1);
+      return;
+    }
+
+    if (e.key === "ArrowLeft") {
+      if (currentIsStream) return;
+      e.preventDefault();
+      seekBy(-10);
+      return;
+    }
+
+    if (e.key === "ArrowRight") {
+      if (currentIsStream) return;
+      e.preventDefault();
+      seekBy(10);
+      return;
+    }
   });
 
   seekBar.addEventListener("input", () => {
