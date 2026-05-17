@@ -47,6 +47,11 @@ body {
   flex-shrink: 0;
   gap: 0.25em;
   padding: 0 0.25em;
+  box-sizing: border-box;
+}
+
+body.platform-mac #tabs {
+  padding-left: 78px;
 }
 
 #topbar-splitter-spacer {

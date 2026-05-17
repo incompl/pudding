@@ -1,5 +1,6 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
 
 const STORE_FILE = "settings.json";
@@ -618,6 +619,23 @@ function setupSettings(): void {
 }
 
 async function init(): Promise<void> {
+  if (navigator.userAgent.includes("Mac")) {
+    document.body.classList.add("platform-mac");
+  }
+
+  const appWindow = getCurrentWindow();
+  document.addEventListener("mousedown", (e) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    if (target.closest("button, input, select, textarea, a, [role='slider']")) return;
+    if (!target.closest("[data-tauri-drag-region]")) return;
+    if (e.detail === 2) {
+      void appWindow.toggleMaximize();
+    } else {
+      void appWindow.startDragging();
+    }
+  });
+
   audioEl = new Audio();
   nowPlayingTitleEl = document.querySelector("#now-playing-title") as HTMLElement;
   nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;

@@ -8,13 +8,13 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
-    <header id="topbar">
-      <div id="tabs" role="tablist">
+    <header id="topbar" data-tauri-drag-region>
+      <div id="tabs" role="tablist" data-tauri-drag-region>
         <button class="tab active" type="button" role="tab" data-tab="files">Files</button>
         <button class="tab" type="button" role="tab" data-tab="streams">Streams</button>
       </div>
-      <div id="topbar-splitter-spacer"></div>
-      <div id="topbar-actions">
+      <div id="topbar-splitter-spacer" data-tauri-drag-region></div>
+      <div id="topbar-actions" data-tauri-drag-region>
         <button id="settings-btn" type="button" aria-label="Settings" title="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="3" />
