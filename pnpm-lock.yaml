@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@preact/signals-core':
+        specifier: ^1.14.2
+        version: 1.14.2
       '@tauri-apps/api':
         specifier: ^2
         version: 2.11.0
@@ -185,6 +188,9 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@preact/signals-core@1.14.2':
+    resolution: {integrity: sha512-RZHdBj9ZF4n40Rp4jS052EHHjBWf96P9oNdXPfhQTovCuWY9iQn3Gq+gOTJSgBO9A/JBuPfMOWsSX/lIU9Pc/A==}
 
   '@rollup/rollup-android-arm-eabi@4.60.4':
     resolution: {integrity: sha512-F5QXMSiFebS9hKZj02XhWLLnRpJ3B3AROP0tWbFBSj+6kCbg5m9j5JoHKd4mmSVy5mS/IMQloYgYxCuJC0fxEQ==}
@@ -566,6 +572,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.25.12':
     optional: true
+
+  '@preact/signals-core@1.14.2': {}
 
   '@rollup/rollup-android-arm-eabi@4.60.4':
     optional: true

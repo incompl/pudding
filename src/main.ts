@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { open } from "@tauri-apps/plugin-dialog";
+import { signal, effect } from "@preact/signals-core";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOT = "libraryRoot";
@@ -46,6 +47,42 @@ interface TreeNode {
   children: TreeNode[];
 }
 
+interface Stream {
+  name: string;
+  url: string;
+}
+
+interface ScanResult {
+  ok: boolean;
+  error: string | null;
+}
+
+// --- Reactive state ---
+
+const hasTrack = signal(false);
+const npTitle = signal("");
+const npArtist = signal<string | null>(null);
+const npAlbum = signal<string | null>(null);
+const npArt = signal<string | null>(null);
+
+const isStream = signal(false);
+const isPlaying = signal(false);
+const canPlay = signal(false);
+const currentTime = signal(0);
+const duration = signal(0);
+const volume = signal(1);
+const volumePopoverOpen = signal(false);
+
+const currentNodePath = signal<string | null>(null);
+const currentStreamUrl = signal<string | null>(null);
+
+const settingsOpen = signal(false);
+const activeTab = signal<"files" | "streams">("files");
+const libraryRootValid = signal(true);
+const manifestPathValid = signal(true);
+
+// --- Helpers ---
+
 function displayLabel(node: TreeNode): string {
   if (node.isFolder) return node.name;
   if (node.title) {
@@ -68,26 +105,59 @@ function compareChildren(a: TreeNode, b: TreeNode): number {
   return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
 }
 
-interface Stream {
-  name: string;
-  url: string;
+function joinPath(parent: string, child: string): string {
+  return parent.endsWith("/") ? parent + child : parent + "/" + child;
 }
 
-interface ScanResult {
-  ok: boolean;
-  error: string | null;
+function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): (...args: A) => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return (...args: A) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
 }
+
+function formatTime(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) seconds = 0;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function isTextInputTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.tagName === "TEXTAREA" || target.isContentEditable) return true;
+  if (target instanceof HTMLInputElement) {
+    const type = target.type.toLowerCase();
+    return type === "text" || type === "search" || type === "url" ||
+      type === "email" || type === "password" || type === "tel" || type === "number";
+  }
+  return false;
+}
+
+function setEmpty(container: HTMLElement, message: string, kind: "empty" | "loading" = "empty"): void {
+  container.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = kind === "loading" ? "loading-state" : "empty-state";
+  div.textContent = message;
+  container.appendChild(div);
+}
+
+// --- Module state (non-reactive) ---
 
 let store: Store;
 let rootNode: TreeNode | null = null;
 let audioEl: HTMLAudioElement;
+let currentNode: TreeNode | null = null;
+let currentParent: TreeNode | null = null;
+let artRequestId = 0;
+
 let nowPlayingTitleEl: HTMLElement;
 let nowPlayingArtistEl: HTMLElement;
 let nowPlayingAlbumEl: HTMLElement;
 let nowPlayingSubtitleEl: HTMLElement;
 let nowPlayingArtEl: HTMLImageElement;
 let nowPlayingEmptyEl: HTMLElement;
-let artRequestId = 0;
 let playPauseBtn: HTMLButtonElement;
 let seekBar: HTMLInputElement;
 let timeCurrentEl: HTMLElement;
@@ -107,30 +177,8 @@ let settingsBackBtn: HTMLButtonElement;
 let nowPlayingPanel: HTMLElement;
 let settingsPanel: HTMLElement;
 let splitterEl: HTMLElement;
-let currentIsStream = false;
-let currentNode: TreeNode | null = null;
-let currentParent: TreeNode | null = null;
-let currentStreamUrl: string | null = null;
 
-function joinPath(parent: string, child: string): string {
-  return parent.endsWith("/") ? parent + child : parent + "/" + child;
-}
-
-function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): (...args: A) => void {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return (...args: A) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), ms);
-  };
-}
-
-function setEmpty(container: HTMLElement, message: string, kind: "empty" | "loading" = "empty"): void {
-  container.innerHTML = "";
-  const div = document.createElement("div");
-  div.className = kind === "loading" ? "loading-state" : "empty-state";
-  div.textContent = message;
-  container.appendChild(div);
-}
+// --- Tree ---
 
 async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
   if (node.loaded || !node.isFolder) return;
@@ -187,7 +235,7 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
   label.className = "node-label";
   if (!node.isFolder) {
     label.dataset.path = node.path;
-    if (currentNode && currentNode.path === node.path) {
+    if (currentNodePath.value === node.path) {
       label.classList.add("playing");
     }
   }
@@ -226,298 +274,6 @@ async function onNodeClick(node: TreeNode, parent: TreeNode, li: HTMLLIElement):
   }
 }
 
-function formatTime(seconds: number): string {
-  if (!isFinite(seconds) || seconds < 0) seconds = 0;
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-function updateSeekProgress(): void {
-  const max = Number(seekBar.max);
-  const pct = max > 0 ? (Number(seekBar.value) / max) * 100 : 0;
-  seekBar.style.setProperty("--progress", `${pct}%`);
-}
-
-function updateVolumeProgress(): void {
-  const v = Number(volumeBar.value);
-  volumeBar.style.setProperty("--progress", `${v * 100}%`);
-  const waves = volumeBtn.querySelectorAll<SVGPathElement>(".volume-wave");
-  waves.forEach((w, i) => {
-    w.style.opacity = String(i === 0 ? v : v >= 1 ? 1 : 0);
-  });
-}
-
-function resetControls(): void {
-  seekBar.value = "0";
-  seekBar.max = "0";
-  timeCurrentEl.textContent = "0:00";
-  timeRemainingEl.textContent = "-0:00";
-  updateSeekProgress();
-}
-
-function setSource(
-  title: string,
-  artist: string | null,
-  album: string | null,
-  src: string,
-  isStream: boolean,
-): void {
-  audioEl.pause();
-  audioEl.removeAttribute("src");
-  audioEl.load();
-
-  currentIsStream = isStream;
-  nowPlayingEmptyEl.classList.add("hidden");
-  nowPlayingTitleEl.textContent = title;
-  nowPlayingArtistEl.textContent = artist ?? "";
-  nowPlayingArtistEl.classList.toggle("hidden", !artist);
-  nowPlayingAlbumEl.textContent = album ?? "";
-  nowPlayingAlbumEl.classList.toggle("hidden", !album);
-  nowPlayingSubtitleEl.classList.toggle("hidden", !isStream);
-  playPauseBtn.disabled = false;
-  seekBar.disabled = isStream;
-  resetControls();
-  if (isStream) {
-    timeCurrentEl.classList.add("hidden");
-    timeRemainingEl.classList.add("hidden");
-  } else {
-    timeCurrentEl.classList.remove("hidden");
-    timeRemainingEl.classList.remove("hidden");
-  }
-
-  audioEl.src = src;
-  void audioEl.play();
-}
-
-function updatePlayButton(): void {
-  const playing = !audioEl.paused;
-  playPauseBtn.textContent = playing ? "⏸" : "▶";
-  playPauseBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
-}
-
-function togglePlayPause(): void {
-  if (playPauseBtn.disabled) return;
-  if (audioEl.paused) {
-    void audioEl.play();
-  } else {
-    audioEl.pause();
-  }
-}
-
-function setVolumePopoverOpen(open: boolean): void {
-  volumePopover.classList.toggle("open", open);
-}
-
-const persistVolume = debounce(async (v: number) => {
-  await store.set(KEY_VOLUME, v);
-  await store.save();
-}, 200);
-
-function setVolume(v: number): void {
-  const clamped = Math.max(0, Math.min(1, v));
-  audioEl.volume = clamped;
-  volumeBar.value = String(clamped);
-  updateVolumeProgress();
-  persistVolume(clamped);
-}
-
-function seekBy(seconds: number): void {
-  if (currentIsStream) return;
-  const dur = audioEl.duration;
-  if (!isFinite(dur) || dur <= 0) return;
-  audioEl.currentTime = Math.max(0, Math.min(dur, audioEl.currentTime + seconds));
-}
-
-function setupVolumeControl(initialVolume: number): void {
-  volumeBar.value = String(initialVolume);
-  audioEl.volume = initialVolume;
-  updateVolumeProgress();
-
-  volumeBtn.addEventListener("click", () => {
-    setVolumePopoverOpen(!volumePopover.classList.contains("open"));
-  });
-
-  volumeControlEl.addEventListener("mouseleave", () => {
-    setVolumePopoverOpen(false);
-  });
-
-  volumeBar.addEventListener("input", () => {
-    setVolume(Number(volumeBar.value));
-  });
-}
-
-function isTextInputTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.tagName === "TEXTAREA" || target.isContentEditable) return true;
-  if (target instanceof HTMLInputElement) {
-    const type = target.type.toLowerCase();
-    return type === "text" || type === "search" || type === "url" ||
-      type === "email" || type === "password" || type === "tel" || type === "number";
-  }
-  return false;
-}
-
-function setupPlayerControls(): void {
-  playPauseBtn.addEventListener("click", togglePlayPause);
-
-  document.addEventListener("keydown", (e) => {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    if (isTextInputTarget(e.target)) return;
-
-    if (e.key === " " || e.code === "Space") {
-      if (e.repeat) return;
-      e.preventDefault();
-      togglePlayPause();
-      return;
-    }
-
-    if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setVolume(audioEl.volume + 0.1);
-      return;
-    }
-
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setVolume(audioEl.volume - 0.1);
-      return;
-    }
-
-    if (e.key === "ArrowLeft") {
-      if (currentIsStream) return;
-      e.preventDefault();
-      seekBy(-10);
-      return;
-    }
-
-    if (e.key === "ArrowRight") {
-      if (currentIsStream) return;
-      e.preventDefault();
-      seekBy(10);
-      return;
-    }
-  });
-
-  seekBar.addEventListener("input", () => {
-    audioEl.currentTime = Number(seekBar.value);
-    updateSeekProgress();
-  });
-
-  audioEl.addEventListener("play", updatePlayButton);
-  audioEl.addEventListener("pause", updatePlayButton);
-  audioEl.addEventListener("ended", playNextInAlbum);
-
-  audioEl.addEventListener("loadedmetadata", () => {
-    if (currentIsStream || !isFinite(audioEl.duration)) return;
-    seekBar.max = String(audioEl.duration);
-    timeRemainingEl.textContent = "-" + formatTime(audioEl.duration);
-  });
-
-  audioEl.addEventListener("timeupdate", () => {
-    if (currentIsStream) return;
-    seekBar.value = String(audioEl.currentTime);
-    updateSeekProgress();
-    timeCurrentEl.textContent = formatTime(audioEl.currentTime);
-    if (isFinite(audioEl.duration)) {
-      timeRemainingEl.textContent = "-" + formatTime(audioEl.duration - audioEl.currentTime);
-    }
-  });
-}
-
-function playFile(node: TreeNode, parent: TreeNode): void {
-  currentNode = node;
-  currentParent = parent;
-  currentStreamUrl = null;
-  setSource(node.title ?? node.name, node.artist, node.album, convertFileSrc(node.path), false);
-  updatePlayingHighlight();
-  void loadArt(node.path);
-}
-
-function playStream(stream: Stream): void {
-  currentNode = null;
-  currentParent = null;
-  currentStreamUrl = stream.url;
-  setSource(stream.name, null, null, stream.url, true);
-  updatePlayingHighlight();
-  clearArt();
-}
-
-function clearArt(): void {
-  artRequestId++;
-  nowPlayingArtEl.removeAttribute("src");
-  nowPlayingArtEl.classList.add("hidden");
-}
-
-async function loadArt(path: string): Promise<void> {
-  const id = ++artRequestId;
-  nowPlayingArtEl.removeAttribute("src");
-  nowPlayingArtEl.classList.add("hidden");
-  let dataUrl: string | null;
-  try {
-    dataUrl = await invoke<string | null>("get_art", { path });
-  } catch (e) {
-    console.error("get_art failed for", path, e);
-    return;
-  }
-  if (id !== artRequestId) return;
-  if (!dataUrl) return;
-  nowPlayingArtEl.src = dataUrl;
-  nowPlayingArtEl.classList.remove("hidden");
-}
-
-function updatePlayingHighlight(): void {
-  document
-    .querySelectorAll("#folder-tree .node-label.playing, #streams-list .node-label.playing")
-    .forEach((el) => el.classList.remove("playing"));
-  if (currentNode) {
-    const el = document.querySelector(
-      `#folder-tree .node-label[data-path="${CSS.escape(currentNode.path)}"]`,
-    );
-    el?.classList.add("playing");
-  } else if (currentStreamUrl) {
-    const el = document.querySelector(
-      `#streams-list .node-label[data-stream-url="${CSS.escape(currentStreamUrl)}"]`,
-    );
-    el?.classList.add("playing");
-  }
-}
-
-function playNextInAlbum(): void {
-  if (currentIsStream || !currentNode || !currentParent) return;
-  const siblings = currentParent.children.filter((c) => !c.isFolder);
-  const idx = siblings.findIndex((c) => c.path === currentNode!.path);
-  if (idx < 0 || idx + 1 >= siblings.length) return;
-  playFile(siblings[idx + 1], currentParent);
-}
-
-function renderStreams(streams: Stream[]): void {
-  streamsContainer.innerHTML = "";
-  if (streams.length === 0) {
-    setEmpty(streamsContainer, "Manifest is empty");
-    return;
-  }
-  const ul = document.createElement("ul");
-  for (const stream of streams) {
-    const li = document.createElement("li");
-    const label = document.createElement("span");
-    label.className = "node-label";
-    label.dataset.streamUrl = stream.url;
-    if (currentStreamUrl === stream.url) {
-      label.classList.add("playing");
-    }
-    const icon = document.createElement("span");
-    icon.className = "icon";
-    icon.textContent = "♪";
-    label.appendChild(icon);
-    label.appendChild(document.createTextNode(" " + stream.name));
-    label.addEventListener("click", () => playStream(stream));
-    li.appendChild(label);
-    ul.appendChild(li);
-  }
-  streamsContainer.appendChild(ul);
-}
-
 function renderTree(): void {
   treeContainer.innerHTML = "";
   if (!rootNode) return;
@@ -532,10 +288,138 @@ function renderTree(): void {
   treeContainer.appendChild(ul);
 }
 
+function renderStreams(streams: Stream[]): void {
+  streamsContainer.innerHTML = "";
+  if (streams.length === 0) {
+    setEmpty(streamsContainer, "Manifest is empty");
+    return;
+  }
+  const ul = document.createElement("ul");
+  for (const stream of streams) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.className = "node-label";
+    label.dataset.streamUrl = stream.url;
+    if (currentStreamUrl.value === stream.url) {
+      label.classList.add("playing");
+    }
+    const icon = document.createElement("span");
+    icon.className = "icon";
+    icon.textContent = "♪";
+    label.appendChild(icon);
+    label.appendChild(document.createTextNode(" " + stream.name));
+    label.addEventListener("click", () => playStream(stream));
+    li.appendChild(label);
+    ul.appendChild(li);
+  }
+  streamsContainer.appendChild(ul);
+}
+
+// --- Playback ---
+
+function setSource(
+  title: string,
+  artist: string | null,
+  album: string | null,
+  src: string,
+  stream: boolean,
+): void {
+  audioEl.pause();
+  audioEl.removeAttribute("src");
+  audioEl.load();
+
+  hasTrack.value = true;
+  npTitle.value = title;
+  npArtist.value = artist;
+  npAlbum.value = album;
+  isStream.value = stream;
+  canPlay.value = true;
+  currentTime.value = 0;
+  duration.value = 0;
+
+  audioEl.src = src;
+  void audioEl.play();
+}
+
+function togglePlayPause(): void {
+  if (!canPlay.value) return;
+  if (audioEl.paused) {
+    void audioEl.play();
+  } else {
+    audioEl.pause();
+  }
+}
+
+const persistVolume = debounce(async (v: number) => {
+  await store.set(KEY_VOLUME, v);
+  await store.save();
+}, 200);
+
+function setVolume(v: number): void {
+  const clamped = Math.max(0, Math.min(1, v));
+  if (clamped === volume.value) return;
+  volume.value = clamped;
+  persistVolume(clamped);
+}
+
+function seekBy(seconds: number): void {
+  if (isStream.value) return;
+  const dur = audioEl.duration;
+  if (!isFinite(dur) || dur <= 0) return;
+  audioEl.currentTime = Math.max(0, Math.min(dur, audioEl.currentTime + seconds));
+}
+
+function playFile(node: TreeNode, parent: TreeNode): void {
+  currentNode = node;
+  currentParent = parent;
+  currentNodePath.value = node.path;
+  currentStreamUrl.value = null;
+  setSource(node.title ?? node.name, node.artist, node.album, convertFileSrc(node.path), false);
+  void loadArt(node.path);
+}
+
+function playStream(stream: Stream): void {
+  currentNode = null;
+  currentParent = null;
+  currentNodePath.value = null;
+  currentStreamUrl.value = stream.url;
+  setSource(stream.name, null, null, stream.url, true);
+  clearArt();
+}
+
+function clearArt(): void {
+  artRequestId++;
+  npArt.value = null;
+}
+
+async function loadArt(path: string): Promise<void> {
+  const id = ++artRequestId;
+  npArt.value = null;
+  let dataUrl: string | null;
+  try {
+    dataUrl = await invoke<string | null>("get_art", { path });
+  } catch (e) {
+    console.error("get_art failed for", path, e);
+    return;
+  }
+  if (id !== artRequestId) return;
+  npArt.value = dataUrl;
+}
+
+function playNextInAlbum(): void {
+  if (isStream.value || !currentNode || !currentParent) return;
+  const siblings = currentParent.children.filter((c) => !c.isFolder);
+  const idx = siblings.findIndex((c) => c.path === currentNode!.path);
+  if (idx < 0 || idx + 1 >= siblings.length) return;
+  playFile(siblings[idx + 1], currentParent);
+}
+
+// --- Library / streams loading ---
+
 async function refreshTree(libraryRoot: string): Promise<void> {
   rootNode = null;
   if (!libraryRoot) {
-    libraryRootInput.classList.remove("invalid");
+    libraryRootValid.value = true;
     setEmpty(treeContainer, "No library root set");
     return;
   }
@@ -545,11 +429,11 @@ async function refreshTree(libraryRoot: string): Promise<void> {
     listing = await invoke<DirListing>("list_dir", { path: libraryRoot });
   } catch (e) {
     console.error("list_dir failed for", libraryRoot, e);
-    libraryRootInput.classList.add("invalid");
+    libraryRootValid.value = false;
     setEmpty(treeContainer, "Invalid library root");
     return;
   }
-  libraryRootInput.classList.remove("invalid");
+  libraryRootValid.value = true;
   rootNode = {
     path: libraryRoot,
     name: libraryRoot,
@@ -641,18 +525,18 @@ async function refreshMetadata(): Promise<void> {
 
 async function refreshStreams(manifestPath: string): Promise<void> {
   if (!manifestPath) {
-    manifestPathInput.classList.remove("invalid");
+    manifestPathValid.value = true;
     setEmpty(streamsContainer, "No manifest path set");
     return;
   }
   setEmpty(streamsContainer, "Loading…", "loading");
   try {
     const streams = await invoke<Stream[]>("read_manifest", { path: manifestPath });
-    manifestPathInput.classList.remove("invalid");
+    manifestPathValid.value = true;
     renderStreams(streams);
   } catch (e) {
     console.error("read_manifest failed for", manifestPath, e);
-    manifestPathInput.classList.add("invalid");
+    manifestPathValid.value = false;
     setEmpty(streamsContainer, "Invalid manifest path");
   }
 }
@@ -702,18 +586,13 @@ async function browseManifestPath(): Promise<void> {
   }
 }
 
+// --- Event wiring ---
+
 function setupTabs(): void {
   const tabs = document.querySelectorAll<HTMLButtonElement>(".tab");
-  const panels = {
-    files: document.getElementById("tab-files") as HTMLElement,
-    streams: document.getElementById("tab-streams") as HTMLElement,
-  };
   for (const btn of tabs) {
     btn.addEventListener("click", () => {
-      const target = btn.dataset.tab as "files" | "streams";
-      for (const t of tabs) t.classList.toggle("active", t === btn);
-      panels.files.classList.toggle("hidden", target !== "files");
-      panels.streams.classList.toggle("hidden", target !== "streams");
+      activeTab.value = btn.dataset.tab as "files" | "streams";
     });
   }
 }
@@ -754,17 +633,201 @@ function setupSplitter(initialWidth: string | null): void {
   });
 }
 
-function setSettingsOpen(open: boolean): void {
-  settingsPanel.classList.toggle("hidden", !open);
-  nowPlayingPanel.classList.toggle("hidden", open);
-  settingsBtn.classList.toggle("hidden", open);
-  settingsBackBtn.classList.toggle("hidden", !open);
+function setupSettings(): void {
+  settingsBtn.addEventListener("click", () => { settingsOpen.value = true; });
+  settingsBackBtn.addEventListener("click", () => { settingsOpen.value = false; });
 }
 
-function setupSettings(): void {
-  settingsBtn.addEventListener("click", () => setSettingsOpen(true));
-  settingsBackBtn.addEventListener("click", () => setSettingsOpen(false));
+function setupPlayerControls(): void {
+  playPauseBtn.addEventListener("click", togglePlayPause);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isTextInputTarget(e.target)) return;
+
+    if (e.key === " " || e.code === "Space") {
+      if (e.repeat) return;
+      e.preventDefault();
+      togglePlayPause();
+      return;
+    }
+
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setVolume(volume.value + 0.1);
+      return;
+    }
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setVolume(volume.value - 0.1);
+      return;
+    }
+
+    if (e.key === "ArrowLeft") {
+      if (isStream.value) return;
+      e.preventDefault();
+      seekBy(-10);
+      return;
+    }
+
+    if (e.key === "ArrowRight") {
+      if (isStream.value) return;
+      e.preventDefault();
+      seekBy(10);
+      return;
+    }
+  });
+
+  seekBar.addEventListener("input", () => {
+    audioEl.currentTime = Number(seekBar.value);
+  });
+
+  audioEl.addEventListener("play", () => { isPlaying.value = true; });
+  audioEl.addEventListener("pause", () => { isPlaying.value = false; });
+  audioEl.addEventListener("ended", playNextInAlbum);
+
+  audioEl.addEventListener("loadedmetadata", () => {
+    if (isStream.value || !isFinite(audioEl.duration)) return;
+    duration.value = audioEl.duration;
+  });
+
+  audioEl.addEventListener("timeupdate", () => {
+    if (isStream.value) return;
+    currentTime.value = audioEl.currentTime;
+  });
 }
+
+function setupVolumeControl(): void {
+  volumeBtn.addEventListener("click", () => {
+    volumePopoverOpen.value = !volumePopoverOpen.value;
+  });
+
+  volumeControlEl.addEventListener("mouseleave", () => {
+    volumePopoverOpen.value = false;
+  });
+
+  volumeBar.addEventListener("input", () => {
+    setVolume(Number(volumeBar.value));
+  });
+}
+
+// --- Effects: declarative DOM sync ---
+
+function setupEffects(): void {
+  effect(() => {
+    nowPlayingEmptyEl.classList.toggle("hidden", hasTrack.value);
+  });
+  effect(() => {
+    nowPlayingTitleEl.textContent = npTitle.value;
+  });
+  effect(() => {
+    nowPlayingArtistEl.textContent = npArtist.value ?? "";
+    nowPlayingArtistEl.classList.toggle("hidden", !npArtist.value);
+  });
+  effect(() => {
+    nowPlayingAlbumEl.textContent = npAlbum.value ?? "";
+    nowPlayingAlbumEl.classList.toggle("hidden", !npAlbum.value);
+  });
+  effect(() => {
+    nowPlayingSubtitleEl.classList.toggle("hidden", !isStream.value);
+  });
+  effect(() => {
+    const url = npArt.value;
+    if (url) {
+      nowPlayingArtEl.src = url;
+      nowPlayingArtEl.classList.remove("hidden");
+    } else {
+      nowPlayingArtEl.removeAttribute("src");
+      nowPlayingArtEl.classList.add("hidden");
+    }
+  });
+
+  effect(() => {
+    playPauseBtn.textContent = isPlaying.value ? "⏸" : "▶";
+    playPauseBtn.setAttribute("aria-label", isPlaying.value ? "Pause" : "Play");
+  });
+  effect(() => {
+    playPauseBtn.disabled = !canPlay.value;
+  });
+  effect(() => {
+    seekBar.disabled = isStream.value;
+    timeCurrentEl.classList.toggle("hidden", isStream.value);
+    timeRemainingEl.classList.toggle("hidden", isStream.value);
+  });
+  effect(() => {
+    const t = currentTime.value;
+    const d = duration.value;
+    seekBar.max = String(d);
+    seekBar.value = String(t);
+    const pct = d > 0 ? (t / d) * 100 : 0;
+    seekBar.style.setProperty("--progress", `${pct}%`);
+  });
+  effect(() => {
+    timeCurrentEl.textContent = formatTime(currentTime.value);
+    timeRemainingEl.textContent = "-" + formatTime(
+      Math.max(0, duration.value - currentTime.value),
+    );
+  });
+
+  effect(() => {
+    const v = volume.value;
+    audioEl.volume = v;
+    volumeBar.value = String(v);
+    volumeBar.style.setProperty("--progress", `${v * 100}%`);
+    const waves = volumeBtn.querySelectorAll<SVGPathElement>(".volume-wave");
+    waves.forEach((w, i) => {
+      w.style.opacity = String(i === 0 ? v : v >= 1 ? 1 : 0);
+    });
+  });
+  effect(() => {
+    volumePopover.classList.toggle("open", volumePopoverOpen.value);
+  });
+
+  effect(() => {
+    const path = currentNodePath.value;
+    const url = currentStreamUrl.value;
+    document
+      .querySelectorAll("#folder-tree .node-label.playing, #streams-list .node-label.playing")
+      .forEach((el) => el.classList.remove("playing"));
+    if (path) {
+      document
+        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(path)}"]`)
+        ?.classList.add("playing");
+    }
+    if (url) {
+      document
+        .querySelector(`#streams-list .node-label[data-stream-url="${CSS.escape(url)}"]`)
+        ?.classList.add("playing");
+    }
+  });
+
+  effect(() => {
+    const tab = activeTab.value;
+    document.querySelectorAll<HTMLButtonElement>(".tab").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.tab === tab);
+    });
+    document.getElementById("tab-files")?.classList.toggle("hidden", tab !== "files");
+    document.getElementById("tab-streams")?.classList.toggle("hidden", tab !== "streams");
+  });
+
+  effect(() => {
+    const open = settingsOpen.value;
+    settingsPanel.classList.toggle("hidden", !open);
+    nowPlayingPanel.classList.toggle("hidden", open);
+    settingsBtn.classList.toggle("hidden", open);
+    settingsBackBtn.classList.toggle("hidden", !open);
+  });
+
+  effect(() => {
+    libraryRootInput.classList.toggle("invalid", !libraryRootValid.value);
+  });
+  effect(() => {
+    manifestPathInput.classList.toggle("invalid", !manifestPathValid.value);
+  });
+}
+
+// --- Init ---
 
 async function init(): Promise<void> {
   if (navigator.userAgent.includes("Mac")) {
@@ -817,13 +880,14 @@ async function init(): Promise<void> {
   const manifestPath = (await store.get<string>(KEY_MANIFEST_PATH)) ?? "";
   const splitterWidth = (await store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
   const storedVolume = await store.get<number>(KEY_VOLUME);
-  const volume = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
+  volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
 
   setupTabs();
   setupSplitter(splitterWidth);
   setupSettings();
   setupPlayerControls();
-  setupVolumeControl(volume);
+  setupVolumeControl();
+  setupEffects();
 
   libraryRootInput.value = libraryRoot;
   manifestPathInput.value = manifestPath;
