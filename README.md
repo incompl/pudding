@@ -2,11 +2,34 @@
 
 Vibe coded media player.
 
-I made this for myself but you're welcome to check it out.
+I made this for myself but you're welcome to use it.
 
 ## Philosophy
 
 Two features: local file playback and internet radio. High polish, no bloat.
+
+## Keyboard shortcuts
+
+- `Space` — play / pause
+- `↑` / `↓` — volume up / down (10%)
+- `←` / `→` — seek back / forward 10s (files only)
+
+## Tech stack
+
+- [Tauri](https://tauri.app/) 2 — desktop shell
+- Rust backend with [rusqlite](https://github.com/rusqlite/rusqlite) for the metadata cache and [lofty](https://github.com/Serial-ATA/lofty-rs) for tag reading
+- TypeScript frontend built with [Vite](https://vitejs.dev/)
+
+## Manifest format
+
+Defines the radio station list. Configured in settings.
+
+```json
+[
+  { "name": "SomaFM Groove Salad", "url": "https://ice5.somafm.com/groovesalad-128-mp3" },
+  { "name": "NightRide FM", "url": "https://stream.nightride.fm/nightride.mp3" }
+]
+```
 
 ## TODO
 
