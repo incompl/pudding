@@ -9,6 +9,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
 
@@ -722,6 +723,47 @@ pub fn run() {
             if let Some(path) = find_audio_in_argv(&argv) {
                 deliver_open_file(&app.handle(), path);
             }
+
+            // The native macOS About panel only renders name/version/copyright
+            // and the credits string, so the developer name + URL go in credits
+            // (authors/website are still set for the Win/Linux about dialog).
+            let about = AboutMetadataBuilder::new()
+                .name(Some("Pudding"))
+                .version(Some(env!("CARGO_PKG_VERSION")))
+                .copyright(Some("© 2026 Greg Smith"))
+                .authors(Some(vec!["Greg Smith".into()]))
+                .website(Some("https://incompl.com"))
+                .website_label(Some("incompl.com"))
+                .build();
+
+            let app_menu = SubmenuBuilder::new(app, "Pudding")
+                .about(Some(about))
+                .separator()
+                .services()
+                .separator()
+                .hide()
+                .hide_others()
+                .show_all()
+                .separator()
+                .quit()
+                .build()?;
+
+            // Setting a custom menu replaces the default, so the Edit submenu is
+            // re-added here — without it ⌘C/⌘V/⌘Z stop working in the webview.
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+
+            let menu = MenuBuilder::new(app)
+                .items(&[&app_menu, &edit_menu])
+                .build()?;
+            app.set_menu(menu)?;
 
             Ok(())
         })
