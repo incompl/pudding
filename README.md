@@ -12,7 +12,7 @@ Two features: local file playback and internet radio. High polish, no bloat.
 
 ## Install
 
-No prebuilt releases — build it yourself. Requires [Rust](https://www.rust-lang.org/tools/install), [Node](https://nodejs.org/), and [pnpm](https://pnpm.io/).
+No prebuilt releases - build it yourself. Requires [Rust](https://www.rust-lang.org/tools/install), [Node](https://nodejs.org/), and [pnpm](https://pnpm.io/).
 
 ```sh
 pnpm install
@@ -23,13 +23,13 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 
 ## Keyboard shortcuts
 
-- `Space` — play / pause
-- `↑` / `↓` — volume up / down (10%)
-- `←` / `→` — seek back / forward 10s (files only)
+- `Space` - play / pause
+- `↑` / `↓` - volume up / down (10%)
+- `←` / `→` - seek back / forward 10s (files only)
 
 ## Tech stack
 
-- [Tauri](https://tauri.app/) 2 — desktop shell
+- [Tauri](https://tauri.app/) 2 - desktop shell
 - Rust backend with [rusqlite](https://github.com/rusqlite/rusqlite) for the metadata cache and [lofty](https://github.com/Serial-ATA/lofty-rs) for tag reading
 - TypeScript frontend built with [Vite](https://vitejs.dev/)
 
@@ -46,7 +46,6 @@ Defines the stream list. Configured in settings.
 
 ## Roadmap
 
-- Gapless playback (currently auto-advance has a small gap while the next file loads)
 - Search. Metadata is already in sqlite.
 - Watch the library folder and auto-rescan when files are added, removed, or retagged (today metadata only refreshes on explicit rescan, and `list_dir` shows new files with empty tags until then)
 - Batch the per-file metadata lookups in `list_dir` and `get_metadata` (currently N+1 SELECTs per folder)

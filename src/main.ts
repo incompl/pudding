@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { open } from "@tauri-apps/plugin-dialog";
 import { signal, effect } from "@preact/signals-core";
+import { GaplessEngine } from "./audio-engine";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOT = "libraryRoot";
@@ -147,10 +148,52 @@ function setEmpty(container: HTMLElement, message: string, kind: "empty" | "load
 
 let store: Store;
 let rootNode: TreeNode | null = null;
-let audioEl: HTMLAudioElement;
+// <audio> element used only for radio streams and for the rare codec-fallback
+// path (a file the WebView's decodeAudioData cannot decode). All normal file
+// playback goes through the gapless Web Audio engine.
+let streamEl: HTMLAudioElement;
+// True while a file is playing through `streamEl` because Web Audio could not
+// decode it (non-gapless for that one file).
+let elementFallback = false;
 let currentNode: TreeNode | null = null;
 let currentParent: TreeNode | null = null;
 let artRequestId = 0;
+
+// Library-file lookups for the engine (which speaks paths only). Auto-advance
+// stays within the current album folder, so currentParent's children are the
+// universe; external/streamed playback has no parent and never advances.
+function siblingByPath(path: string): TreeNode | null {
+  if (!currentParent) return null;
+  return (
+    currentParent.children.find((c) => !c.isFolder && c.path === path) ?? null
+  );
+}
+
+function nextSiblingPath(path: string): string | null {
+  if (!currentParent) return null;
+  const siblings = currentParent.children.filter((c) => !c.isFolder);
+  const idx = siblings.findIndex((c) => c.path === path);
+  if (idx < 0 || idx + 1 >= siblings.length) return null;
+  return siblings[idx + 1].path;
+}
+
+const engine = new GaplessEngine({
+  getNextPath: (path) => nextSiblingPath(path),
+  onAdvance: (path) => {
+    // currentParent stays the album folder across an album.
+    const node = siblingByPath(path);
+    if (!node) return;
+    currentNode = node;
+    currentNodePath.value = node.path;
+    currentStreamUrl.value = null;
+    setNowPlaying(node.title ?? node.name, node.artist, node.album);
+    void loadArt(node.path);
+  },
+  onTime: (t) => { currentTime.value = t; },
+  onDuration: (d) => { duration.value = d; },
+  onPlayingChange: (p) => { isPlaying.value = p; },
+  onUnsupported: (path) => { fallbackToElement(path); },
+});
 
 let nowPlayingTitleEl: HTMLElement;
 let nowPlayingArtistEl: HTMLElement;
@@ -317,36 +360,25 @@ function renderStreams(streams: Stream[]): void {
 
 // --- Playback ---
 
-function setSource(
+function setNowPlaying(
   title: string,
   artist: string | null,
   album: string | null,
-  src: string,
-  stream: boolean,
 ): void {
-  audioEl.pause();
-  audioEl.removeAttribute("src");
-  audioEl.load();
-
   hasTrack.value = true;
   npTitle.value = title;
   npArtist.value = artist;
   npAlbum.value = album;
-  isStream.value = stream;
   canPlay.value = true;
-  currentTime.value = 0;
-  duration.value = 0;
-
-  audioEl.src = src;
-  void audioEl.play();
 }
 
 function togglePlayPause(): void {
   if (!canPlay.value) return;
-  if (audioEl.paused) {
-    void audioEl.play();
+  if (isStream.value || elementFallback) {
+    if (streamEl.paused) void streamEl.play();
+    else streamEl.pause();
   } else {
-    audioEl.pause();
+    engine.togglePause();
   }
 }
 
@@ -364,26 +396,78 @@ function setVolume(v: number): void {
 
 function seekBy(seconds: number): void {
   if (isStream.value) return;
-  const dur = audioEl.duration;
-  if (!isFinite(dur) || dur <= 0) return;
-  audioEl.currentTime = Math.max(0, Math.min(dur, audioEl.currentTime + seconds));
+  if (elementFallback) {
+    const dur = streamEl.duration;
+    if (!isFinite(dur) || dur <= 0) return;
+    streamEl.currentTime = Math.max(0, Math.min(dur, streamEl.currentTime + seconds));
+    return;
+  }
+  engine.seekBy(seconds);
+}
+
+function seekTo(seconds: number): void {
+  if (isStream.value) return;
+  if (elementFallback) {
+    streamEl.currentTime = seconds;
+    return;
+  }
+  engine.seekTo(seconds);
 }
 
 function playFile(node: TreeNode, parent: TreeNode): void {
+  streamEl.pause();
+  elementFallback = false;
   currentNode = node;
   currentParent = parent;
   currentNodePath.value = node.path;
   currentStreamUrl.value = null;
-  setSource(node.title ?? node.name, node.artist, node.album, convertFileSrc(node.path), false);
+  isStream.value = false;
+  currentTime.value = 0;
+  duration.value = 0;
+  setNowPlaying(node.title ?? node.name, node.artist, node.album);
   void loadArt(node.path);
+  void engine.play(node.path);
+}
+
+// Fallback when the engine cannot play a file (codec the WebView can't decode,
+// oversize PCM, or fetch failure). Plays the single file through the <audio>
+// element — not gapless, but it plays. If the file is a library track, the
+// element's `ended` handler advances to the next sibling (back through the
+// gapless engine); for an external file there is no successor.
+function fallbackToElement(path: string): void {
+  engine.stop();
+  elementFallback = true;
+  isStream.value = false;
+  currentTime.value = 0;
+  duration.value = 0;
+  const node = siblingByPath(path);
+  if (node) {
+    // Library track: take over the now-playing UI and row highlight.
+    currentNode = node;
+    currentNodePath.value = node.path;
+    currentStreamUrl.value = null;
+    setNowPlaying(node.title ?? node.name, node.artist, node.album);
+    void loadArt(node.path);
+  }
+  // Otherwise (external file) now-playing was already set by the caller and
+  // currentNode stays null so the tree is untouched.
+  streamEl.src = convertFileSrc(path);
+  void streamEl.play();
 }
 
 function playStream(stream: Stream): void {
+  engine.stop();
+  elementFallback = false;
   currentNode = null;
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = stream.url;
-  setSource(stream.name, null, null, stream.url, true);
+  isStream.value = true;
+  currentTime.value = 0;
+  duration.value = 0;
+  setNowPlaying(stream.name, null, null);
+  streamEl.src = stream.url;
+  void streamEl.play();
   clearArt();
 }
 
@@ -399,13 +483,21 @@ async function openExternalFile(path: string): Promise<void> {
     console.error("prepare_external_file failed", path, e);
     return;
   }
+  streamEl.pause();
+  elementFallback = false;
+  // Leaves currentNode/currentParent null so the tree is untouched, no row is
+  // highlighted, and album-advance is a no-op (engine.getNext returns null).
   currentNode = null;
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = null;
+  isStream.value = false;
+  currentTime.value = 0;
+  duration.value = 0;
   const fallback = path.split(/[\\/]/).pop() ?? path;
-  setSource(meta.title ?? fallback, meta.artist, meta.album, convertFileSrc(path), false);
+  setNowPlaying(meta.title ?? fallback, meta.artist, meta.album);
   void loadArt(path);
+  void engine.play(path);
 }
 
 function clearArt(): void {
@@ -427,12 +519,14 @@ async function loadArt(path: string): Promise<void> {
   npArt.value = dataUrl;
 }
 
-function playNextInAlbum(): void {
-  if (isStream.value || !currentNode || !currentParent) return;
-  const siblings = currentParent.children.filter((c) => !c.isFolder);
-  const idx = siblings.findIndex((c) => c.path === currentNode!.path);
-  if (idx < 0 || idx + 1 >= siblings.length) return;
-  playFile(siblings[idx + 1], currentParent);
+// Advance after a codec-fallback file finishes on the <audio> element. The
+// gapless engine handles advancement for all normally-decoded files itself.
+function advanceAfterFallback(): void {
+  if (!currentNode || !currentParent) return;
+  const nextPath = nextSiblingPath(currentNode.path);
+  if (!nextPath) return;
+  const next = siblingByPath(nextPath);
+  if (next) playFile(next, currentParent);
 }
 
 // --- Library / streams loading ---
@@ -701,21 +795,30 @@ function setupPlayerControls(): void {
   });
 
   seekBar.addEventListener("input", () => {
-    audioEl.currentTime = Number(seekBar.value);
+    seekTo(Number(seekBar.value));
   });
 
-  audioEl.addEventListener("play", () => { isPlaying.value = true; });
-  audioEl.addEventListener("pause", () => { isPlaying.value = false; });
-  audioEl.addEventListener("ended", playNextInAlbum);
-
-  audioEl.addEventListener("loadedmetadata", () => {
-    if (isStream.value || !isFinite(audioEl.duration)) return;
-    duration.value = audioEl.duration;
+  // streamEl handles radio streams and the codec-fallback file path only;
+  // these listeners are no-ops while the gapless engine is driving playback
+  // (the engine reports isPlaying/time/duration via its callbacks).
+  streamEl.addEventListener("play", () => {
+    if (isStream.value || elementFallback) isPlaying.value = true;
+  });
+  streamEl.addEventListener("pause", () => {
+    if (isStream.value || elementFallback) isPlaying.value = false;
+  });
+  streamEl.addEventListener("ended", () => {
+    if (elementFallback) advanceAfterFallback();
   });
 
-  audioEl.addEventListener("timeupdate", () => {
-    if (isStream.value) return;
-    currentTime.value = audioEl.currentTime;
+  streamEl.addEventListener("loadedmetadata", () => {
+    if (!elementFallback || !isFinite(streamEl.duration)) return;
+    duration.value = streamEl.duration;
+  });
+
+  streamEl.addEventListener("timeupdate", () => {
+    if (!elementFallback) return;
+    currentTime.value = streamEl.currentTime;
   });
 }
 
@@ -794,7 +897,8 @@ function setupEffects(): void {
 
   effect(() => {
     const v = volume.value;
-    audioEl.volume = v;
+    engine.setVolume(v);
+    streamEl.volume = v;
     volumeBar.value = String(v);
     volumeBar.style.setProperty("--progress", `${v * 100}%`);
     const waves = volumeBtn.querySelectorAll<SVGPathElement>(".volume-wave");
@@ -869,7 +973,7 @@ async function init(): Promise<void> {
     }
   });
 
-  audioEl = new Audio();
+  streamEl = new Audio();
   nowPlayingTitleEl = document.querySelector("#now-playing-title") as HTMLElement;
   nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;
   nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
