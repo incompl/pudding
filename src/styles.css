@@ -107,6 +107,96 @@ body.platform-mac #tabs {
   background: var(--surface);
 }
 
+#search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+#search-input {
+  width: 180px;
+  padding: 0.4em 0.6em;
+  font: inherit;
+  font-size: 0.9em;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--surface-hover);
+  border-radius: 6px;
+  transition: width 160ms ease, border-color 120ms ease;
+}
+
+#search-input:hover {
+  border-color: var(--text-muted);
+}
+
+#search-input:focus {
+  outline: none;
+  width: 240px;
+  border-color: var(--accent);
+}
+
+#search-input::placeholder {
+  color: var(--surface-hover);
+  transition: color 120ms ease;
+}
+
+#search-input:hover::placeholder,
+#search-input:focus::placeholder {
+  color: var(--text-muted);
+}
+
+#search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 20;
+  padding: 0.25em 0;
+}
+
+.search-result {
+  display: flex;
+  align-items: baseline;
+  padding: 0.4em 0.8em;
+  cursor: pointer;
+}
+
+.search-result:hover,
+.search-result.active {
+  background: var(--surface-hover);
+}
+
+.search-result .text {
+  min-width: 0;
+  flex: 1;
+}
+
+.search-result .primary {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-result .secondary {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-empty {
+  padding: 0.5em 0.8em;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 #main-view {
   display: flex;
   flex: 1;

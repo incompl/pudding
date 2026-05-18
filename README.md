@@ -43,7 +43,3 @@ Defines the stream list. Configured in settings.
   { "name": "NightRide FM", "url": "https://stream.nightride.fm/nightride.mp3" }
 ]
 ```
-
-## Roadmap
-
-- Search. Metadata is already in sqlite.

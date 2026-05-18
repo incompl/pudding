@@ -53,6 +53,19 @@ interface Stream {
   url: string;
 }
 
+interface SearchTrack {
+  path: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+}
+
+// Discriminated rows shown in the search dropdown: library files (from the
+// SQLite metadata cache) and manifest streams (filtered client-side).
+type SearchItem =
+  | { kind: "file"; track: SearchTrack }
+  | { kind: "stream"; stream: Stream };
+
 interface ScanResult {
   ok: boolean;
   error: string | null;
@@ -148,6 +161,9 @@ function setEmpty(container: HTMLElement, message: string, kind: "empty" | "load
 
 let store: Store;
 let rootNode: TreeNode | null = null;
+// Last manifest streams loaded by refreshStreams, kept so search can filter
+// them without re-reading the manifest on every keystroke.
+let allStreams: Stream[] = [];
 // <audio> element used only for radio streams and for the rare codec-fallback
 // path (a file the WebView's decodeAudioData cannot decode). All normal file
 // playback goes through the gapless Web Audio engine.
@@ -217,6 +233,8 @@ let manifestPathInput: HTMLInputElement;
 let manifestPathBrowseBtn: HTMLButtonElement;
 let settingsBtn: HTMLButtonElement;
 let settingsBackBtn: HTMLButtonElement;
+let searchInput: HTMLInputElement;
+let searchResultsEl: HTMLElement;
 let nowPlayingPanel: HTMLElement;
 let settingsPanel: HTMLElement;
 let splitterEl: HTMLElement;
@@ -471,6 +489,27 @@ function playStream(stream: Stream): void {
   clearArt();
 }
 
+// Plays a library file picked from the search dropdown. currentParent stays
+// null so there's no album auto-advance (a search hit isn't a folder context);
+// setting currentNodePath still lights up the row if that folder is expanded in
+// the tree. Asset access is already granted by set_asset_scope on the library
+// root, so engine.play can fetch it directly — no prepare step needed.
+function playSearchTrack(t: SearchTrack): void {
+  streamEl.pause();
+  elementFallback = false;
+  currentNode = null;
+  currentParent = null;
+  currentNodePath.value = t.path;
+  currentStreamUrl.value = null;
+  isStream.value = false;
+  currentTime.value = 0;
+  duration.value = 0;
+  const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
+  setNowPlaying(t.title ?? fallbackName, t.artist, t.album);
+  void loadArt(t.path);
+  void engine.play(t.path);
+}
+
 // Plays a file from outside the library (passed in via OS file association).
 // Intentionally leaves currentNode/currentParent null so the tree is not
 // touched, no row is highlighted, and album-advance on end is a no-op. The
@@ -712,6 +751,7 @@ async function refreshLibrary(): Promise<void> {
 
 async function refreshStreams(manifestPath: string): Promise<void> {
   if (!manifestPath) {
+    allStreams = [];
     manifestPathValid.value = true;
     setEmpty(streamsContainer, "No manifest path set");
     return;
@@ -719,10 +759,12 @@ async function refreshStreams(manifestPath: string): Promise<void> {
   setEmpty(streamsContainer, "Loading…", "loading");
   try {
     const streams = await invoke<Stream[]>("read_manifest", { path: manifestPath });
+    allStreams = streams;
     manifestPathValid.value = true;
     renderStreams(streams);
   } catch (e) {
     console.error("read_manifest failed for", manifestPath, e);
+    allStreams = [];
     manifestPathValid.value = false;
     setEmpty(streamsContainer, "Invalid manifest path");
   }
@@ -827,6 +869,144 @@ function setupSplitter(initialWidth: string | null): void {
 function setupSettings(): void {
   settingsBtn.addEventListener("click", () => { settingsOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => { settingsOpen.value = false; });
+}
+
+function searchLabel(t: SearchTrack): { primary: string; secondary: string } {
+  const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
+  return {
+    primary: t.title ?? fallbackName,
+    secondary: [t.artist, t.album].filter(Boolean).join(" · "),
+  };
+}
+
+function setupSearch(): void {
+  let items: SearchItem[] = [];
+  let activeIndex = -1;
+  // Bumped per query so a slow search_tracks that resolves after a newer
+  // keystroke can't overwrite fresher results.
+  let queryToken = 0;
+  const searchBox = document.getElementById("search") as HTMLElement;
+
+  function close(): void {
+    items = [];
+    activeIndex = -1;
+    searchResultsEl.classList.add("hidden");
+    searchResultsEl.innerHTML = "";
+  }
+
+  function choose(item: SearchItem): void {
+    if (item.kind === "file") playSearchTrack(item.track);
+    else playStream(item.stream);
+    searchInput.value = "";
+    searchInput.blur();
+    close();
+  }
+
+  function render(): void {
+    searchResultsEl.innerHTML = "";
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "search-empty";
+      empty.textContent = "No results";
+      searchResultsEl.appendChild(empty);
+      searchResultsEl.classList.remove("hidden");
+      return;
+    }
+    let activeRow: HTMLElement | null = null;
+    items.forEach((item, i) => {
+      const row = document.createElement("div");
+      row.className = "search-result";
+      row.setAttribute("role", "option");
+      if (i === activeIndex) {
+        row.classList.add("active");
+        activeRow = row;
+      }
+      const text = document.createElement("span");
+      text.className = "text";
+      const primary = document.createElement("div");
+      primary.className = "primary";
+      const secondary = document.createElement("div");
+      secondary.className = "secondary";
+      if (item.kind === "file") {
+        const l = searchLabel(item.track);
+        primary.textContent = l.primary;
+        secondary.textContent = l.secondary;
+      } else {
+        primary.textContent = item.stream.name;
+      }
+      text.appendChild(primary);
+      if (secondary.textContent) text.appendChild(secondary);
+      row.appendChild(text);
+      // mousedown, not click: clicking a row blurs the input first, and a blur
+      // handler that closed the dropdown would remove the row before click.
+      row.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        choose(item);
+      });
+      searchResultsEl.appendChild(row);
+    });
+    searchResultsEl.classList.remove("hidden");
+    if (activeRow) (activeRow as HTMLElement).scrollIntoView({ block: "nearest" });
+  }
+
+  const runSearch = debounce(async (raw: string) => {
+    const token = ++queryToken;
+    const query = raw.trim();
+    if (!query) {
+      close();
+      return;
+    }
+    const needle = query.toLowerCase();
+    const streamItems: SearchItem[] = allStreams
+      .filter((s) => s.name.toLowerCase().includes(needle))
+      .map((s) => ({ kind: "stream", stream: s }));
+    let fileItems: SearchItem[] = [];
+    try {
+      const tracks = await invoke<SearchTrack[]>("search_tracks", { query });
+      fileItems = tracks.map((t) => ({ kind: "file", track: t }));
+    } catch (e) {
+      console.error("search_tracks failed", e);
+    }
+    if (token !== queryToken) return;
+    items = [...streamItems, ...fileItems];
+    activeIndex = items.length > 0 ? 0 : -1;
+    render();
+  }, 150);
+
+  searchInput.addEventListener("input", () => runSearch(searchInput.value));
+  searchInput.addEventListener("focus", () => {
+    if (searchInput.value.trim()) runSearch(searchInput.value);
+  });
+
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      searchInput.value = "";
+      close();
+      searchInput.blur();
+      return;
+    }
+    if (searchResultsEl.classList.contains("hidden") || items.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      activeIndex = (activeIndex + 1) % items.length;
+      render();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      activeIndex = (activeIndex - 1 + items.length) % items.length;
+      render();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      choose(items[activeIndex >= 0 ? activeIndex : 0]);
+    }
+  });
+
+  // Swallow mousedown inside the widget so it never reaches the document-level
+  // drag-region handler (which would otherwise start a window drag) or the
+  // outside-click closer below.
+  searchBox.addEventListener("mousedown", (e) => e.stopPropagation());
+
+  // Any mousedown that escapes the widget closes the dropdown.
+  document.addEventListener("mousedown", () => close());
 }
 
 function setupPlayerControls(): void {
@@ -1072,6 +1252,8 @@ async function init(): Promise<void> {
   manifestPathBrowseBtn = document.querySelector("#manifest-path-browse") as HTMLButtonElement;
   settingsBtn = document.querySelector("#settings-btn") as HTMLButtonElement;
   settingsBackBtn = document.querySelector("#settings-back-btn") as HTMLButtonElement;
+  searchInput = document.querySelector("#search-input") as HTMLInputElement;
+  searchResultsEl = document.querySelector("#search-results") as HTMLElement;
   nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
   settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
   splitterEl = document.querySelector("#splitter") as HTMLElement;
@@ -1087,6 +1269,7 @@ async function init(): Promise<void> {
   setupTabs();
   setupSplitter(splitterWidth);
   setupSettings();
+  setupSearch();
   setupPlayerControls();
   setupVolumeControl();
   setupEffects();

@@ -15,6 +15,17 @@
       </div>
       <div id="topbar-splitter-spacer" data-tauri-drag-region></div>
       <div id="topbar-actions" data-tauri-drag-region>
+        <div id="search">
+          <input
+            type="search"
+            id="search-input"
+            placeholder="Search…"
+            spellcheck="false"
+            autocomplete="off"
+            aria-label="Search library and streams"
+          />
+          <div id="search-results" class="hidden" role="listbox"></div>
+        </div>
         <button id="settings-btn" type="button" aria-label="Settings" title="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="3" />

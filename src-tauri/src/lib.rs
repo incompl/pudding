@@ -79,6 +79,14 @@ struct ScanResult {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+struct SearchResult {
+    path: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
 fn join_path(parent: &str, child: &str) -> String {
     if parent.ends_with('/') {
         format!("{}{}", parent, child)
@@ -634,6 +642,54 @@ fn get_metadata(paths: Vec<String>, db: State<DbHandle>) -> Result<Vec<TrackMeta
     Ok(out)
 }
 
+// Substring search over the cached metadata (title/artist/album) and the file
+// path (so a filename match works even when a track has no tags). The query is
+// matched literally — LIKE wildcards in user input are escaped so a typed '%'
+// finds a literal '%'. Capped so a one-character query can't return the whole
+// library into the dropdown.
+#[tauri::command]
+fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let escaped = q
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let like = format!("%{}%", escaped);
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, title, artist, album FROM tracks
+             WHERE title LIKE ?1 ESCAPE '\\'
+                OR artist LIKE ?1 ESCAPE '\\'
+                OR album LIKE ?1 ESCAPE '\\'
+                OR path LIKE ?1 ESCAPE '\\'
+             ORDER BY artist IS NULL, artist COLLATE NOCASE,
+                      album COLLATE NOCASE, disc, track,
+                      title COLLATE NOCASE
+             LIMIT 50",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&like], |row| {
+            Ok(SearchResult {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -697,6 +753,7 @@ pub fn run() {
             rescan_library,
             watch_library,
             get_metadata,
+            search_tracks,
             get_art,
             frontend_ready,
             prepare_external_file
