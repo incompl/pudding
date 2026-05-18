@@ -1,6 +1,10 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  getCurrentWindow,
+  PhysicalSize,
+  PhysicalPosition,
+} from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { open } from "@tauri-apps/plugin-dialog";
 import { signal, effect } from "@preact/signals-core";
@@ -11,6 +15,8 @@ const KEY_LIBRARY_ROOT = "libraryRoot";
 const KEY_MANIFEST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
 const KEY_VOLUME = "volume";
+const KEY_WINDOW_SIZE = "windowSize";
+const KEY_WINDOW_POSITION = "windowPosition";
 
 interface FileEntry {
   name: string;
@@ -913,6 +919,44 @@ function setupSplitter(initialWidth: string | null): void {
   });
 }
 
+async function setupWindowSize(
+  appWindow: ReturnType<typeof getCurrentWindow>,
+): Promise<void> {
+  const stored = await store.get<{ width: number; height: number }>(
+    KEY_WINDOW_SIZE,
+  );
+  if (stored && stored.width > 0 && stored.height > 0) {
+    await appWindow.setSize(new PhysicalSize(stored.width, stored.height));
+  }
+
+  const persistSize = debounce(async (width: number, height: number) => {
+    await store.set(KEY_WINDOW_SIZE, { width, height });
+    await store.save();
+  }, 400);
+
+  await appWindow.onResized(({ payload }) => {
+    if (payload.width > 0 && payload.height > 0) {
+      persistSize(payload.width, payload.height);
+    }
+  });
+
+  const storedPos = await store.get<{ x: number; y: number }>(
+    KEY_WINDOW_POSITION,
+  );
+  if (storedPos) {
+    await appWindow.setPosition(new PhysicalPosition(storedPos.x, storedPos.y));
+  }
+
+  const persistPos = debounce(async (x: number, y: number) => {
+    await store.set(KEY_WINDOW_POSITION, { x, y });
+    await store.save();
+  }, 400);
+
+  await appWindow.onMoved(({ payload }) => {
+    persistPos(payload.x, payload.y);
+  });
+}
+
 function setupSettings(): void {
   settingsBtn.addEventListener("click", () => { settingsOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => { settingsOpen.value = false; });
@@ -1337,6 +1381,7 @@ async function init(): Promise<void> {
   volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
 
   setupTabs();
+  await setupWindowSize(appWindow);
   setupSplitter(splitterWidth);
   setupSettings();
   setupSearch();
