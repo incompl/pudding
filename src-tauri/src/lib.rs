@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use base64::Engine;
 use lofty::prelude::*;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -17,6 +19,13 @@ const DB_FILE: &str = "metadata.db";
 struct DbHandle {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
+}
+
+// Holds the recursive filesystem watcher for the current library root. Replaced
+// (the old debouncer dropped, which stops its thread) whenever the root changes;
+// None when no library root is set.
+struct WatcherState {
+    inner: Mutex<Option<Debouncer<RecommendedWatcher, FileIdMap>>>,
 }
 
 #[derive(Serialize)]
@@ -264,6 +273,62 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+struct ScanCoalesce {
+    running: bool,
+    // While a scan runs, holds the most recent (root, db_path) for exactly one
+    // follow-up pass. A burst of watcher flushes during a long scan collapses
+    // into a single extra scan rather than a thread (and full library walk) per
+    // flush, and a library-root change mid-scan is still honored.
+    pending: Option<(PathBuf, PathBuf)>,
+}
+
+// Mutex guards only the bools/Option above for very short critical sections;
+// the data is trivially valid, so a poisoned lock is recovered rather than
+// propagated (a panicked scan must not wedge all future scans).
+fn scan_coalesce() -> &'static Mutex<ScanCoalesce> {
+    static C: OnceLock<Mutex<ScanCoalesce>> = OnceLock::new();
+    C.get_or_init(|| {
+        Mutex::new(ScanCoalesce {
+            running: false,
+            pending: None,
+        })
+    })
+}
+
+// Single entry point for every scan (explicit rescan + watcher). At most one
+// scan thread exists at a time; concurrent requests fold into one follow-up
+// pass. This both serializes the SQLite write transaction (no busy-timeout
+// races between an explicit rescan and a watcher scan) and prevents a burst of
+// filesystem events from stacking redundant full-library walks.
+fn request_scan(root: PathBuf, db_path: PathBuf, app: AppHandle) {
+    {
+        let mut c = scan_coalesce().lock().unwrap_or_else(|e| e.into_inner());
+        if c.running {
+            c.pending = Some((root, db_path));
+            return;
+        }
+        c.running = true;
+    }
+    std::thread::spawn(move || {
+        let mut root = root;
+        let mut db_path = db_path;
+        loop {
+            scan_and_emit(root.clone(), db_path.clone(), app.clone());
+            let mut c = scan_coalesce().lock().unwrap_or_else(|e| e.into_inner());
+            match c.pending.take() {
+                Some((r, d)) => {
+                    root = r;
+                    db_path = d;
+                }
+                None => {
+                    c.running = false;
+                    return;
+                }
+            }
+        }
+    });
+}
+
 fn scan_and_emit(root: PathBuf, db_path: PathBuf, app: AppHandle) {
     let payload = match run_scan(root, db_path) {
         Ok(()) => ScanResult { ok: true, error: None },
@@ -365,10 +430,58 @@ fn set_asset_scope(app: tauri::AppHandle, path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn rescan_library(path: String, db: State<DbHandle>, app: AppHandle) {
+    request_scan(PathBuf::from(path), db.path.clone(), app);
+}
+
+// Starts (or replaces) a recursive watcher on the library root. Any filesystem
+// change under it triggers a debounced incremental rescan, which emits
+// "library-scanned" exactly like an explicit rescan so the frontend refreshes
+// uniformly. An empty path just tears the watcher down.
+#[tauri::command]
+fn watch_library(
+    path: String,
+    app: AppHandle,
+    db: State<DbHandle>,
+    watcher: State<WatcherState>,
+) -> Result<(), String> {
+    let mut guard = watcher.inner.lock().map_err(|e| e.to_string())?;
+    // Drop the old debouncer first so we never hold two watchers on overlapping
+    // trees during a root change.
+    *guard = None;
+    if path.is_empty() {
+        return Ok(());
+    }
+
+    let root = PathBuf::from(&path);
     let db_path = db.path.clone();
-    std::thread::spawn(move || {
-        scan_and_emit(PathBuf::from(path), db_path, app);
-    });
+    let app_handle = app.clone();
+    let scan_root = root.clone();
+    let mut debouncer = new_debouncer(
+        Duration::from_secs(2),
+        None,
+        move |res: DebounceEventResult| {
+            // Watcher-internal errors (e.g. transient rename races) are ignored
+            // — the next event re-syncs. request_scan coalesces: a burst of
+            // flushes during an in-flight scan collapses into one follow-up
+            // pass rather than a thread + full walk per flush.
+            if res.is_ok() {
+                request_scan(scan_root.clone(), db_path.clone(), app_handle.clone());
+            }
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Watches the root itself: if it is deleted or renamed at runtime the watch
+    // goes dead and does not self-heal until the root is set again (which calls
+    // this command afresh). Acceptable for a music library; the explicit-rescan
+    // and boot paths still function.
+    debouncer
+        .watcher()
+        .watch(&root, RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+    debouncer.cache().add_root(&root, RecursiveMode::Recursive);
+    *guard = Some(debouncer);
+    Ok(())
 }
 
 #[tauri::command]
@@ -540,6 +653,9 @@ pub fn run() {
                 conn: Arc::new(Mutex::new(conn)),
                 path: db_path,
             });
+            app.manage(WatcherState {
+                inner: Mutex::new(None),
+            });
 
             let store = app.store(STORE_FILE)?;
             if let Some(value) = store.get(KEY_LIBRARY_ROOT) {
@@ -566,6 +682,7 @@ pub fn run() {
             read_manifest,
             set_asset_scope,
             rescan_library,
+            watch_library,
             get_metadata,
             get_art,
             frontend_ready,

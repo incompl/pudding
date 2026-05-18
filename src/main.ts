@@ -592,50 +592,122 @@ async function refreshTree(libraryRoot: string): Promise<void> {
   renderTree();
 }
 
-function collectFilePaths(node: TreeNode, out: string[]): void {
-  if (!node.isFolder) {
-    out.push(node.path);
-    return;
-  }
-  if (!node.loaded) return;
-  for (const child of node.children) collectFilePaths(child, out);
-}
-
-function applyMetadata(node: TreeNode, byPath: Map<string, TrackMeta>): void {
-  if (node.isFolder) {
-    for (const child of node.children) applyMetadata(child, byPath);
-    node.children.sort(compareChildren);
-    return;
-  }
-  const m = byPath.get(node.path);
-  if (m) {
-    node.title = m.title;
-    node.artist = m.artist;
-    node.album = m.album;
-    node.disc = m.disc;
-    node.track = m.track;
-  }
-}
-
-async function refreshMetadata(): Promise<void> {
-  if (!rootNode) return;
-  const paths: string[] = [];
-  collectFilePaths(rootNode, paths);
-  if (paths.length === 0) return;
-  let metas: TrackMeta[];
+// Re-lists every folder the user has opened, merging the fresh listing into the
+// existing tree: new files/folders appear, deleted ones drop, and metadata is
+// taken from list_dir (which joins the freshly-scanned DB). Expansion and
+// loaded state of surviving folders is preserved so an auto-rescan never
+// collapses the tree out from under the user. Unopened folders are left as lazy
+// stubs — they'll list correctly when clicked.
+async function reconcileNode(node: TreeNode): Promise<void> {
+  if (!node.isFolder || !node.loaded) return;
+  let listing: DirListing;
   try {
-    metas = await invoke<TrackMeta[]>("get_metadata", { paths });
+    listing = await invoke<DirListing>("list_dir", { path: node.path });
   } catch (e) {
-    console.error("get_metadata failed", e);
+    // Folder vanished or became unreadable; leave its stale children in place.
+    // The parent's reconcile will drop this node entirely if it's truly gone.
+    console.error("list_dir failed during reconcile for", node.path, e);
     return;
   }
-  const byPath = new Map<string, TrackMeta>();
-  for (let i = 0; i < paths.length; i++) byPath.set(paths[i], metas[i]);
-  applyMetadata(rootNode, byPath);
-  const filesTab = document.getElementById("tab-files");
-  const scrollTop = filesTab?.scrollTop ?? 0;
-  renderTree();
-  if (filesTab) filesTab.scrollTop = scrollTop;
+  const oldFolders = new Map<string, TreeNode>();
+  for (const c of node.children) if (c.isFolder) oldFolders.set(c.name, c);
+
+  const next: TreeNode[] = [
+    ...listing.folders.map<TreeNode>(
+      (name) =>
+        oldFolders.get(name) ?? {
+          path: joinPath(node.path, name),
+          name,
+          title: null,
+          artist: null,
+          album: null,
+          disc: null,
+          track: null,
+          isFolder: true,
+          loaded: false,
+          expanded: false,
+          children: [],
+        },
+    ),
+    ...listing.files.map<TreeNode>((f) => ({
+      path: joinPath(node.path, f.name),
+      name: f.name,
+      title: f.title,
+      artist: f.artist,
+      album: f.album,
+      disc: f.disc,
+      track: f.track,
+      isFolder: false,
+      loaded: true,
+      expanded: false,
+      children: [],
+    })),
+  ];
+  next.sort(compareChildren);
+  node.children = next;
+  // Reconcile sibling subtrees concurrently: each level must await its own
+  // list_dir before it knows its children, but independent branches have no
+  // ordering between them, so fan them out instead of serializing N round trips.
+  await Promise.all(
+    next
+      .filter((child) => child.isFolder && child.loaded)
+      .map((child) => reconcileNode(child)),
+  );
+}
+
+function findNode(
+  root: TreeNode,
+  path: string,
+): { node: TreeNode; parent: TreeNode } | null {
+  for (const child of root.children) {
+    if (child.path === path) return { node: child, parent: root };
+    if (child.isFolder && child.loaded) {
+      const found = findNode(child, path);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+let libraryRefreshing = false;
+let libraryRefreshPending = false;
+
+// Serialized + coalesced: scans can emit "library-scanned" repeatedly, and two
+// overlapping reconciles would both mutate node.children and both renderTree
+// (tearing the visible tree). Mirrors the backend's request_scan — at most one
+// reconcile runs; events arriving during it collapse into a single follow-up.
+async function refreshLibrary(): Promise<void> {
+  if (libraryRefreshing) {
+    libraryRefreshPending = true;
+    return;
+  }
+  libraryRefreshing = true;
+  try {
+    do {
+      libraryRefreshPending = false;
+      if (!rootNode) break;
+      await reconcileNode(rootNode);
+      // reconcile rebuilds node objects, so the currentNode/currentParent
+      // captured at play time now point outside the tree. Re-bind them by path
+      // so the playing-row highlight and album auto-advance keep working. If
+      // the playing file was deleted, leave the stale references — playback
+      // continues and the next selection replaces them.
+      const path = currentNodePath.value;
+      if (path) {
+        const found = findNode(rootNode, path);
+        if (found) {
+          currentNode = found.node;
+          currentParent = found.parent;
+        }
+      }
+      const filesTab = document.getElementById("tab-files");
+      const scrollTop = filesTab?.scrollTop ?? 0;
+      renderTree();
+      if (filesTab) filesTab.scrollTop = scrollTop;
+    } while (libraryRefreshPending);
+  } finally {
+    libraryRefreshing = false;
+  }
 }
 
 async function refreshStreams(manifestPath: string): Promise<void> {
@@ -668,6 +740,10 @@ async function setLibraryRoot(value: string): Promise<void> {
     }
     void invoke("rescan_library", { path: value });
   }
+  // Watch the new root (or, when value is "", tear the old watcher down).
+  void invoke("watch_library", { path: value }).catch((e) =>
+    console.error("watch_library failed", e),
+  );
   await refreshTree(value);
 }
 
@@ -1026,7 +1102,7 @@ async function init(): Promise<void> {
       console.error("library scan failed:", event.payload.error);
       return;
     }
-    void refreshMetadata();
+    void refreshLibrary();
   });
 
   await listen<string>("open-file", (event) => {
@@ -1045,6 +1121,9 @@ async function init(): Promise<void> {
 
   if (libraryRoot) {
     void invoke("rescan_library", { path: libraryRoot });
+    void invoke("watch_library", { path: libraryRoot }).catch((e) =>
+      console.error("watch_library failed", e),
+    );
   }
 }
 

@@ -47,5 +47,4 @@ Defines the stream list. Configured in settings.
 ## Roadmap
 
 - Search. Metadata is already in sqlite.
-- Watch the library folder and auto-rescan when files are added, removed, or retagged (today metadata only refreshes on explicit rescan, and `list_dir` shows new files with empty tags until then)
 - Batch the per-file metadata lookups in `list_dir` and `get_metadata` (currently N+1 SELECTs per folder)

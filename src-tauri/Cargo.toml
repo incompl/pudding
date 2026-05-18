@@ -27,4 +27,6 @@ tauri-plugin-single-instance = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 lofty = "0.21"
 base64 = "0.22"
+notify = "6"
+notify-debouncer-full = "0.3"
 
