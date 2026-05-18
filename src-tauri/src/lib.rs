@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
@@ -7,7 +7,7 @@ use base64::Engine;
 use lofty::prelude::*;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
@@ -340,6 +340,49 @@ fn scan_and_emit(root: PathBuf, db_path: PathBuf, app: AppHandle) {
     let _ = app.emit("library-scanned", payload);
 }
 
+type MetaRow = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u32>,
+    Option<u32>,
+);
+
+// Fetches (title, artist, album, disc, track) for many paths in one round trip
+// instead of a SELECT per path. SQLite caps bound parameters (default 999), so
+// paths are chunked. Paths missing from the cache simply don't appear in the
+// map; callers substitute a None-filled row.
+fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, MetaRow>, String> {
+    let mut map: HashMap<String, MetaRow> = HashMap::with_capacity(paths.len());
+    for chunk in paths.chunks(900) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT path, title, artist, album, disc, track FROM tracks WHERE path IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params_from_iter(chunk), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            let (path, meta) = r.map_err(|e| e.to_string())?;
+            map.insert(path, meta);
+        }
+    }
+    Ok(map)
+}
+
 #[tauri::command]
 fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
     let entries = std::fs::read_dir(&path).map_err(|e| e.to_string())?;
@@ -363,33 +406,17 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
     }
     folders.sort_by_key(|s| s.to_lowercase());
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let fulls: Vec<String> = file_names.iter().map(|n| join_path(&path, n)).collect();
+    let meta_map = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        fetch_meta(&conn, &fulls)?
+    };
     let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
-    for name in file_names {
-        let full = join_path(&path, &name);
-        let meta: Option<(
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<u32>,
-            Option<u32>,
-        )> = conn
-            .query_row(
-                "SELECT title, artist, album, disc, track FROM tracks WHERE path = ?",
-                [&full],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        let (title, artist, album, disc, track) = meta.unwrap_or((None, None, None, None, None));
+    for (name, full) in file_names.into_iter().zip(fulls.into_iter()) {
+        let (title, artist, album, disc, track) = meta_map
+            .get(&full)
+            .cloned()
+            .unwrap_or((None, None, None, None, None));
         files.push(FileEntry {
             name,
             title,
@@ -584,40 +611,26 @@ fn prepare_external_file(path: String, app: AppHandle) -> Result<TrackMeta, Stri
 
 #[tauri::command]
 fn get_metadata(paths: Vec<String>, db: State<DbHandle>) -> Result<Vec<TrackMeta>, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut out: Vec<TrackMeta> = Vec::with_capacity(paths.len());
-    for path in &paths {
-        let row: Option<(
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<u32>,
-            Option<u32>,
-        )> = conn
-            .query_row(
-                "SELECT title, artist, album, disc, track FROM tracks WHERE path = ?",
-                [path],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        let (title, artist, album, disc, track) = row.unwrap_or((None, None, None, None, None));
-        out.push(TrackMeta {
-            title,
-            artist,
-            album,
-            disc,
-            track,
-        });
-    }
+    let meta_map = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        fetch_meta(&conn, &paths)?
+    };
+    let out: Vec<TrackMeta> = paths
+        .iter()
+        .map(|p| {
+            let (title, artist, album, disc, track) = meta_map
+                .get(p)
+                .cloned()
+                .unwrap_or((None, None, None, None, None));
+            TrackMeta {
+                title,
+                artist,
+                album,
+                disc,
+                track,
+            }
+        })
+        .collect();
     Ok(out)
 }
 

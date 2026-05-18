@@ -47,4 +47,3 @@ Defines the stream list. Configured in settings.
 ## Roadmap
 
 - Search. Metadata is already in sqlite.
-- Batch the per-file metadata lookups in `list_dir` and `get_metadata` (currently N+1 SELECTs per folder)
