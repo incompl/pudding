@@ -546,7 +546,10 @@ function clearArt(): void {
 
 async function loadArt(path: string): Promise<void> {
   const id = ++artRequestId;
-  npArt.value = null;
+  // Note: we intentionally do NOT clear npArt here. Keeping the previous
+  // track's art on screen until the new one is fetched and decoded avoids a
+  // black flash on track change — most noticeably between tracks of the same
+  // album, where the art is identical and shouldn't visibly change at all.
   let dataUrl: string | null;
   try {
     dataUrl = await invoke<string | null>("get_art", { path });
@@ -555,6 +558,18 @@ async function loadArt(path: string): Promise<void> {
     return;
   }
   if (id !== artRequestId) return;
+  if (dataUrl) {
+    // Decode off-screen so the on-screen swap is instantaneous rather than
+    // showing a half-painted image.
+    const img = new Image();
+    img.src = dataUrl;
+    try {
+      await img.decode();
+    } catch {
+      /* decode can reject on detached images; assign anyway */
+    }
+    if (id !== artRequestId) return;
+  }
   npArt.value = dataUrl;
 }
 
@@ -1129,7 +1144,11 @@ function setupEffects(): void {
   effect(() => {
     const url = npArt.value;
     if (url) {
-      nowPlayingArtEl.src = url;
+      // Avoid reassigning an identical src (same-album tracks): a no-op set
+      // would still trigger a reload/repaint and flicker.
+      if (nowPlayingArtEl.getAttribute("src") !== url) {
+        nowPlayingArtEl.src = url;
+      }
       nowPlayingArtEl.classList.remove("hidden");
     } else {
       nowPlayingArtEl.removeAttribute("src");
