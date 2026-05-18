@@ -416,7 +416,11 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
 
     let fulls: Vec<String> = file_names.iter().map(|n| join_path(&path, n)).collect();
     let meta_map = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        // Recover a poisoned lock rather than propagate it: the Connection is
+        // still valid after a panic that didn't corrupt an open transaction, and
+        // wedging every future DB read for the session is worse than the rare
+        // inconsistency. Mirrors scan_coalesce's poison handling.
+        let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
         fetch_meta(&conn, &fulls)?
     };
     let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
@@ -617,31 +621,6 @@ fn prepare_external_file(path: String, app: AppHandle) -> Result<TrackMeta, Stri
     })
 }
 
-#[tauri::command]
-fn get_metadata(paths: Vec<String>, db: State<DbHandle>) -> Result<Vec<TrackMeta>, String> {
-    let meta_map = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        fetch_meta(&conn, &paths)?
-    };
-    let out: Vec<TrackMeta> = paths
-        .iter()
-        .map(|p| {
-            let (title, artist, album, disc, track) = meta_map
-                .get(p)
-                .cloned()
-                .unwrap_or((None, None, None, None, None));
-            TrackMeta {
-                title,
-                artist,
-                album,
-                disc,
-                track,
-            }
-        })
-        .collect();
-    Ok(out)
-}
-
 // Substring search over the cached metadata (title/artist/album) and the file
 // path (so a filename match works even when a track has no tags). The query is
 // matched literally — LIKE wildcards in user input are escaped so a typed '%'
@@ -659,7 +638,7 @@ fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>
         .replace('_', "\\_");
     let like = format!("%{}%", escaped);
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn
         .prepare(
             "SELECT path, title, artist, album FROM tracks
@@ -752,7 +731,6 @@ pub fn run() {
             set_asset_scope,
             rescan_library,
             watch_library,
-            get_metadata,
             search_tracks,
             get_art,
             frontend_ready,

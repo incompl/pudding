@@ -1067,6 +1067,19 @@ function setupPlayerControls(): void {
     if (elementFallback) advanceAfterFallback();
   });
 
+  // A failed stream/fallback file (bad URL, CSP block, dead radio host,
+  // undecodable codec) otherwise dies silently. Surface it: drop the playing
+  // state so the play button stops claiming it's playing, and log the cause.
+  streamEl.addEventListener("error", () => {
+    if (!isStream.value && !elementFallback) return;
+    isPlaying.value = false;
+    console.error(
+      "stream/fallback playback error",
+      streamEl.currentSrc || streamEl.src,
+      streamEl.error,
+    );
+  });
+
   streamEl.addEventListener("loadedmetadata", () => {
     if (!elementFallback || !isFinite(streamEl.duration)) return;
     duration.value = streamEl.duration;
