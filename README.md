@@ -8,7 +8,7 @@ I made this for myself but you're welcome to use it.
 
 ## Philosophy
 
-Two features: local file playback and internet radio. High polish, no bloat.
+Local file playback and internet radio. High polish, no bloat.
 
 ## Install
 

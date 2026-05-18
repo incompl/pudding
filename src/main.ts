@@ -241,15 +241,8 @@ let splitterEl: HTMLElement;
 
 // --- Tree ---
 
-async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
+async function fetchChildren(node: TreeNode): Promise<void> {
   if (node.loaded || !node.isFolder) return;
-  const loadingLi = document.createElement("li");
-  loadingLi.className = "loading-state";
-  loadingLi.textContent = "Loading…";
-  const childUl = document.createElement("ul");
-  childUl.appendChild(loadingLi);
-  li.appendChild(childUl);
-
   try {
     const listing = await invoke<DirListing>("list_dir", { path: node.path });
     node.children = [
@@ -285,6 +278,19 @@ async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
     console.error("list_dir failed for", node.path, e);
     node.loaded = true;
     node.children = [];
+  }
+}
+
+async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
+  if (node.loaded || !node.isFolder) return;
+  const loadingLi = document.createElement("li");
+  loadingLi.className = "loading-state";
+  loadingLi.textContent = "Loading…";
+  const childUl = document.createElement("ul");
+  childUl.appendChild(loadingLi);
+  li.appendChild(childUl);
+  try {
+    await fetchChildren(node);
   } finally {
     childUl.remove();
   }
@@ -347,6 +353,32 @@ function renderTree(): void {
     ul.appendChild(renderNode(child, rootNode));
   }
   treeContainer.appendChild(ul);
+}
+
+// Reveals a library file in the tree: walks root → file, lazily loading and
+// expanding each ancestor folder, re-renders, then scrolls the file's
+// directory to the top of the pane. Bails quietly if the path can't be
+// located (e.g. file removed, or path scheme doesn't match the tree).
+async function revealInTree(path: string): Promise<void> {
+  if (!rootNode) return;
+  let node: TreeNode = rootNode;
+  while (node.path !== path) {
+    if (!node.loaded) await fetchChildren(node);
+    const child = node.children.find(
+      (c) => c.path === path || (c.isFolder && path.startsWith(c.path + "/")),
+    );
+    if (!child) return;
+    if (child.isFolder) child.expanded = true;
+    node = child;
+  }
+  renderTree();
+  const label = treeContainer.querySelector<HTMLElement>(
+    `.node-label[data-path="${CSS.escape(path)}"]`,
+  );
+  // The file's <li> sits inside its directory's child <ul>; scroll that
+  // directory's <li> into view so the folder header and file are both shown.
+  const dirLi = label?.closest("li")?.parentElement?.closest("li");
+  (dirLi ?? label)?.scrollIntoView({ block: "start" });
 }
 
 function renderStreams(streams: Stream[]): void {
@@ -910,8 +942,14 @@ function setupSearch(): void {
   }
 
   function choose(item: SearchItem): void {
-    if (item.kind === "file") playSearchTrack(item.track);
-    else playStream(item.stream);
+    if (item.kind === "file") {
+      activeTab.value = "files";
+      playSearchTrack(item.track);
+      void revealInTree(item.track.path);
+    } else {
+      activeTab.value = "streams";
+      playStream(item.stream);
+    }
     searchInput.value = "";
     searchInput.blur();
     close();
