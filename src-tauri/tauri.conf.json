@@ -37,6 +37,64 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["mp3"],
+        "name": "MP3 Audio",
+        "description": "MP3 audio file",
+        "role": "Viewer",
+        "mimeType": "audio/mpeg"
+      },
+      {
+        "ext": ["wav"],
+        "name": "WAV Audio",
+        "description": "Waveform audio file",
+        "role": "Viewer",
+        "mimeType": "audio/wav"
+      },
+      {
+        "ext": ["flac"],
+        "name": "FLAC Audio",
+        "description": "FLAC audio file",
+        "role": "Viewer",
+        "mimeType": "audio/flac"
+      },
+      {
+        "ext": ["m4a"],
+        "name": "M4A Audio",
+        "description": "MPEG-4 audio file",
+        "role": "Viewer",
+        "mimeType": "audio/mp4"
+      },
+      {
+        "ext": ["aac"],
+        "name": "AAC Audio",
+        "description": "AAC audio file",
+        "role": "Viewer",
+        "mimeType": "audio/aac"
+      },
+      {
+        "ext": ["ogg", "oga"],
+        "name": "Ogg Audio",
+        "description": "Ogg audio file",
+        "role": "Viewer",
+        "mimeType": "audio/ogg"
+      },
+      {
+        "ext": ["opus"],
+        "name": "Opus Audio",
+        "description": "Opus audio file",
+        "role": "Viewer",
+        "mimeType": "audio/opus"
+      },
+      {
+        "ext": ["aiff", "aif"],
+        "name": "AIFF Audio",
+        "description": "AIFF audio file",
+        "role": "Viewer",
+        "mimeType": "audio/aiff"
+      }
     ]
   }
 }

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -36,6 +36,20 @@ struct TrackMeta {
     album: Option<String>,
     disc: Option<u32>,
     track: Option<u32>,
+}
+
+// Holds a file path passed at launch (CLI arg on Win/Linux, Apple Event on macOS)
+// until the frontend has registered its open-file listener and asks for it.
+// `ready` and `path` share one mutex so deliver_open_file's decision (emit vs.
+// queue) and frontend_ready's drain cannot interleave across threads.
+#[derive(Default)]
+struct PendingState {
+    ready: bool,
+    path: Option<String>,
+}
+
+struct PendingOpen {
+    inner: Mutex<PendingState>,
 }
 
 #[derive(Serialize)]
@@ -367,6 +381,94 @@ fn get_art(path: String) -> Option<String> {
     Some(format!("data:{};base64,{}", mime, encoded))
 }
 
+// Audio extensions we accept via OS file associations. Must match the
+// fileAssociations list in tauri.conf.json so the registered handlers and the
+// runtime gate agree.
+const AUDIO_EXTS: &[&str] = &[
+    "mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aiff", "aif",
+];
+
+fn is_audio_path(s: &str) -> bool {
+    Path::new(s)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_ascii_lowercase();
+            AUDIO_EXTS.iter().any(|x| *x == lower)
+        })
+        .unwrap_or(false)
+}
+
+// Picks the first arg that looks like an audio file path. We can't assume
+// position because launchers / OS shells pass argv differently (macOS adds
+// -psn flags, some Windows shells quote oddly).
+fn find_audio_in_argv(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .skip(1)
+        .find(|a| is_audio_path(a) && Path::new(a).exists())
+        .cloned()
+}
+
+fn deliver_open_file(app: &AppHandle, path: String) {
+    if !is_audio_path(&path) {
+        return;
+    }
+    // Grant asset-protocol access to just this file so the webview can load it
+    // via convertFileSrc without widening scope to its parent directory.
+    let _ = app.asset_protocol_scope().allow_file(&path);
+
+    // try_state, not state(): on a macOS cold-start file open the Opened Apple
+    // Event fires before setup() runs. state() would panic if PendingOpen were
+    // not yet managed, and that panic cannot unwind through the ObjC callback
+    // (it aborts the process). PendingOpen is managed on the builder so this
+    // should always resolve, but stay non-panicking regardless.
+    let Some(state) = app.try_state::<PendingOpen>() else {
+        return;
+    };
+    let Ok(mut guard) = state.inner.lock() else {
+        return;
+    };
+    if guard.ready {
+        // Drop the lock before emitting; emit doesn't touch it, but holding a
+        // lock across an event dispatch is needless.
+        drop(guard);
+        let _ = app.emit("open-file", path);
+    } else {
+        guard.path = Some(path);
+    }
+}
+
+// Called by the frontend once its open-file listener is wired. Marks the
+// frontend ready (so future opens are emitted live) and returns any path that
+// was queued before the listener existed.
+#[tauri::command]
+fn frontend_ready(state: State<PendingOpen>) -> Option<String> {
+    let mut guard = state.inner.lock().ok()?;
+    guard.ready = true;
+    guard.path.take()
+}
+
+// Prepares an externally-opened file for playback: grants asset access and
+// returns tags read directly from the file (it may not be in the library DB).
+#[tauri::command]
+fn prepare_external_file(path: String, app: AppHandle) -> Result<TrackMeta, String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("file not found: {}", path));
+    }
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|e| e.to_string())?;
+    let tags = read_tags(p);
+    Ok(TrackMeta {
+        title: tags.title,
+        artist: tags.artist,
+        album: tags.album,
+        disc: tags.disc,
+        track: tags.track,
+    })
+}
+
 #[tauri::command]
 fn get_metadata(paths: Vec<String>, db: State<DbHandle>) -> Result<Vec<TrackMeta>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -409,6 +511,23 @@ fn get_metadata(paths: Vec<String>, db: State<DbHandle>) -> Result<Vec<TrackMeta
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Managed on the builder, not in setup(): a macOS cold-start file open
+        // delivers its Apple Event before setup() runs, and deliver_open_file
+        // needs this state to exist by then.
+        .manage(PendingOpen {
+            inner: Mutex::new(PendingState::default()),
+        })
+        // Single-instance must be the first plugin. When a second launch happens
+        // (e.g. user double-clicks another mp3 on Windows/Linux), this callback
+        // fires in the running instance with the new process's argv.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_focus();
+            }
+            if let Some(path) = find_audio_in_argv(&argv) {
+                deliver_open_file(app, path);
+            }
+        }))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -432,6 +551,14 @@ pub fn run() {
                     }
                 }
             }
+
+            // Cold-start file open on Windows/Linux arrives as a CLI arg. On macOS
+            // it arrives later via RunEvent::Opened (handled below).
+            let argv: Vec<String> = std::env::args().collect();
+            if let Some(path) = find_audio_in_argv(&argv) {
+                deliver_open_file(&app.handle(), path);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -440,8 +567,26 @@ pub fn run() {
             set_asset_scope,
             rescan_library,
             get_metadata,
-            get_art
+            get_art,
+            frontend_ready,
+            prepare_external_file
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // macOS: file associations and "open with" deliver paths via Apple
+            // Events, surfaced here as file:// URLs. Fires both on cold start
+            // (after setup) and while the app is already running.
+            if let tauri::RunEvent::Opened { urls } = event {
+                for url in urls {
+                    if url.scheme() == "file" {
+                        if let Ok(path) = url.to_file_path() {
+                            if let Some(s) = path.to_str() {
+                                deliver_open_file(app, s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        });
 }

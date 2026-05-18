@@ -387,6 +387,27 @@ function playStream(stream: Stream): void {
   clearArt();
 }
 
+// Plays a file from outside the library (passed in via OS file association).
+// Intentionally leaves currentNode/currentParent null so the tree is not
+// touched, no row is highlighted, and album-advance on end is a no-op. The
+// next library or stream selection replaces this state entirely.
+async function openExternalFile(path: string): Promise<void> {
+  let meta: TrackMeta;
+  try {
+    meta = await invoke<TrackMeta>("prepare_external_file", { path });
+  } catch (e) {
+    console.error("prepare_external_file failed", path, e);
+    return;
+  }
+  currentNode = null;
+  currentParent = null;
+  currentNodePath.value = null;
+  currentStreamUrl.value = null;
+  const fallback = path.split(/[\\/]/).pop() ?? path;
+  setSource(meta.title ?? fallback, meta.artist, meta.album, convertFileSrc(path), false);
+  void loadArt(path);
+}
+
 function clearArt(): void {
   artRequestId++;
   npArt.value = null;
@@ -903,6 +924,17 @@ async function init(): Promise<void> {
     }
     void refreshMetadata();
   });
+
+  await listen<string>("open-file", (event) => {
+    void openExternalFile(event.payload);
+  });
+
+  // Drain any file passed at launch (cold start). Must happen after the
+  // open-file listener is registered so the ready-flag race is closed.
+  const pendingOpen = await invoke<string | null>("frontend_ready");
+  if (pendingOpen) {
+    void openExternalFile(pendingOpen);
+  }
 
   await refreshTree(libraryRoot);
   await refreshStreams(manifestPath);
