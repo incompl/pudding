@@ -91,6 +91,10 @@ export class GaplessEngine {
   // True when the current track ended before its successor finished decoding;
   // the in-flight decode then starts immediately instead of at the boundary.
   private currentEndedEarly = false;
+  // True when the last track in the folder played through to completion.
+  // `current` still points at the (now-dead) voice so togglePause can rebuild
+  // a fresh source from its buffer and restart from the top.
+  private endedAtEnd = false;
 
   // Abort in-flight fetches on interruption so rapid track-skipping does not
   // stack full background downloads/decodes.
@@ -138,6 +142,7 @@ export class GaplessEngine {
   private teardown(): void {
     this.decodeGen++;
     this.currentEndedEarly = false;
+    this.endedAtEnd = false;
     this.currentAbort?.abort();
     this.nextAbort?.abort();
     this.currentAbort = null;
@@ -334,10 +339,12 @@ export class GaplessEngine {
       case "none":
       case "idle":
       default: {
-        // Last track (or successor never resolved): playback finished.
+        // Last track (or successor never resolved): playback finished. Leave
+        // `current` set so togglePause can restart it from the top.
         const cur = this.current;
         this.stopRaf();
         if (cur) this.cb.onTime(cur.buffer.duration);
+        this.endedAtEnd = true;
         this.cb.onPlayingChange(false);
         return;
       }
@@ -375,6 +382,15 @@ export class GaplessEngine {
 
   togglePause(): void {
     if (!this.ctx || !this.current) return;
+    if (this.endedAtEnd) {
+      // Last track finished; rebuild the source from the buffer and restart.
+      // An AudioBufferSourceNode is one-shot, so we can't just resume — seekTo
+      // recreates it and (since we were endedAtEnd) syncs the UI. We resume
+      // ctx defensively in case it auto-suspended while idle.
+      this.seekTo(0);
+      if (this.ctx.state === "suspended") void this.ctx.resume();
+      return;
+    }
     if (this.ctx.state === "running") {
       void this.ctx.suspend().then(() => {
         this.cb.onPlayingChange(false);
@@ -396,8 +412,10 @@ export class GaplessEngine {
     if (!this.current || !this.ctx) return;
     const cur = this.current;
     const pos = Math.max(0, Math.min(cur.buffer.duration, seconds));
+    const wasEnded = this.endedAtEnd;
     const gen = ++this.decodeGen; // invalidate the old scheduled `next`
     this.currentEndedEarly = false;
+    this.endedAtEnd = false;
 
     this.stopVoice(cur);
     this.nextAbort?.abort();
@@ -412,6 +430,12 @@ export class GaplessEngine {
     cur.startOffset = pos;
     this.attachEnded(source, gen);
     this.cb.onTime(pos);
+    if (wasEnded) {
+      // Seek resurrected a finished track — the new source is actively
+      // playing, so sync the UI (which still showed the stopped state).
+      this.cb.onPlayingChange(true);
+      this.startRaf();
+    }
     void this.scheduleNext(gen);
   }
 
