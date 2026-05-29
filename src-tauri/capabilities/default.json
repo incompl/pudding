@@ -9,6 +9,7 @@
     "core:window:allow-set-size",
     "core:window:allow-set-position",
     "store:default",
-    "dialog:default"
+    "dialog:default",
+    "log:default"
   ]
 }

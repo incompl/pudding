@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use lofty::prelude::*;
@@ -11,6 +11,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 use tauri_plugin_store::StoreExt;
 
 const STORE_FILE: &str = "settings.json";
@@ -107,6 +108,79 @@ struct Tags {
 // The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
 // and the next startup will drop and recreate it.
 const SCHEMA_VERSION: i64 = 1;
+
+// Bounds disk use from the audio-debug logging. tauri-plugin-log rotates by
+// size but never deletes rotated files (KeepAll), so without this they would
+// accumulate forever. KeepOne would be simpler but too coarse: if rotation
+// fires just before the silent-audio bug reproduces, the leading context is
+// gone. A week of history is plenty to retrieve a reproduction after-the-fact.
+const LOG_RETENTION_DAYS: u64 = 7;
+
+// Native heartbeat for the silent-after-idle audio bug. The WebView's
+// setInterval is throttled (or fully paused) when the window is hidden, so
+// JS-side heartbeats can blackout for tens of minutes during the period the
+// bug is most likely to develop. This thread is owned by the Rust process —
+// not subject to WebKit's throttling — and its tick gives us a continuous
+// timeline across the dead period. Secondarily, if wall-clock has advanced
+// far more than the thread slept for, the OS suspended the process: that's
+// the cleanest signal we get that the machine actually slept (vs. App Nap,
+// audio session dormancy, etc.), since `Instant` would have paused but
+// `SystemTime` does not.
+const POWER_TICK_INTERVAL_SECS: u64 = 60;
+const POWER_GAP_WARN_SECS: u64 = POWER_TICK_INTERVAL_SECS + 30;
+
+fn spawn_power_heartbeat() {
+    std::thread::spawn(|| {
+        let interval = Duration::from_secs(POWER_TICK_INTERVAL_SECS);
+        let mut last = SystemTime::now();
+        log::info!("power.heartbeat.started interval_secs={}", POWER_TICK_INTERVAL_SECS);
+        loop {
+            std::thread::sleep(interval);
+            let now = SystemTime::now();
+            let gap = now.duration_since(last).unwrap_or(Duration::ZERO);
+            let gap_secs = gap.as_secs();
+            if gap_secs > POWER_GAP_WARN_SECS {
+                // Wall time advanced far more than we slept for: either the
+                // process was suspended (system sleep, app nap) or something
+                // else stole many seconds. Either way, correlate with audio
+                // logs around this timestamp.
+                log::info!("power.resumed gap_seconds={}", gap_secs);
+            }
+            log::info!("power.tick gap_seconds={}", gap_secs);
+            last = now;
+        }
+    });
+}
+
+fn prune_old_logs(log_dir: &Path) {
+    let cutoff = match std::time::SystemTime::now()
+        .checked_sub(Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60))
+    {
+        Some(t) => t,
+        None => return,
+    };
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_log = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("log"))
+            .unwrap_or(false);
+        if !is_log {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if modified < cutoff {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
 
 // WAL lets the scan's write transaction run without blocking concurrent reads
 // (list_dir, get_metadata) on the main connection.
@@ -690,9 +764,35 @@ pub fn run() {
                 deliver_open_file(app, path);
             }
         }))
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::LogDir { file_name: None }),
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::Webview),
+                ])
+                .max_file_size(8 * 1024 * 1024)
+                .rotation_strategy(RotationStrategy::KeepAll)
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            if let Ok(log_dir) = app.path().app_log_dir() {
+                prune_old_logs(&log_dir);
+            }
+            // Boot marker: lets us distinguish a full app relaunch (this line
+            // appears) from a WebView-only reload (sid changes in audio logs
+            // but no new app.boot). The Rust process runs setup() exactly once
+            // per launch.
+            log::info!(
+                "app.boot version={} pid={}",
+                env!("CARGO_PKG_VERSION"),
+                std::process::id()
+            );
+            spawn_power_heartbeat();
+
             let app_data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data)?;
             let db_path = app_data.join(DB_FILE);
