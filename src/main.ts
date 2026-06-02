@@ -1,4 +1,4 @@
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   getCurrentWindow,
@@ -170,18 +170,25 @@ let rootNode: TreeNode | null = null;
 // Last manifest streams loaded by refreshStreams, kept so search can filter
 // them without re-reading the manifest on every keystroke.
 let allStreams: Stream[] = [];
-// <audio> element used only for radio streams and for the rare codec-fallback
-// path (a file the WebView's decodeAudioData cannot decode). All normal file
-// playback goes through the gapless Web Audio engine.
+// <audio> element used only for radio streams. All file playback (any format
+// the native engine supports) goes through the gapless Rust engine.
 let streamEl: HTMLAudioElement;
-// True while a file is playing through `streamEl` because Web Audio could not
-// decode it (non-gapless for that one file).
-let elementFallback = false;
-let currentNode: TreeNode | null = null;
+// Album-folder context for the currently playing track. Held so an
+// auto-advance event from the engine can look up the matching TreeNode (for
+// the row highlight + now-playing UI) via siblingByPath. Null while playing
+// a stream, a search hit, or an external file — those have no album context.
 let currentParent: TreeNode | null = null;
 let artRequestId = 0;
+// Last queue + index handed to the engine. Held so play-after-queue-ended
+// restarts from the same track the user last heard (the existing UX: hit play
+// after the album finishes → resume from the last track).
+let lastQueue: string[] = [];
+let lastIndex = 0;
+// True once the engine has played through the queue's last track. Cleared on
+// the next Play (file selection, seek, or restart-from-end via play button).
+let queueEnded = false;
 
-// Library-file lookups for the engine (which speaks paths only). Auto-advance
+// Library-file lookup for the engine's track-changed events. Auto-advance
 // stays within the current album folder, so currentParent's children are the
 // universe; external/streamed playback has no parent and never advances.
 function siblingByPath(path: string): TreeNode | null {
@@ -191,21 +198,13 @@ function siblingByPath(path: string): TreeNode | null {
   );
 }
 
-function nextSiblingPath(path: string): string | null {
-  if (!currentParent) return null;
-  const siblings = currentParent.children.filter((c) => !c.isFolder);
-  const idx = siblings.findIndex((c) => c.path === path);
-  if (idx < 0 || idx + 1 >= siblings.length) return null;
-  return siblings[idx + 1].path;
-}
-
 const engine = new GaplessEngine({
-  getNextPath: (path) => nextSiblingPath(path),
   onAdvance: (path) => {
-    // currentParent stays the album folder across an album.
+    // currentParent stays the album folder across an album. For external/
+    // search playback there is no parent and no sibling row to highlight; the
+    // UI was already set by the caller (playSearchTrack / openExternalFile).
     const node = siblingByPath(path);
     if (!node) return;
-    currentNode = node;
     currentNodePath.value = node.path;
     currentStreamUrl.value = null;
     setNowPlaying(node.title ?? node.name, node.artist, node.album);
@@ -214,7 +213,12 @@ const engine = new GaplessEngine({
   onTime: (t) => { currentTime.value = t; },
   onDuration: (d) => { duration.value = d; },
   onPlayingChange: (p) => { isPlaying.value = p; },
-  onUnsupported: (path) => { fallbackToElement(path); },
+  onError: (path, message) => {
+    console.error("audio: track failed", path, message);
+  },
+  onQueueEnded: () => {
+    queueEnded = true;
+  },
 });
 
 let nowPlayingTitleEl: HTMLElement;
@@ -430,12 +434,20 @@ function setNowPlaying(
 
 function togglePlayPause(): void {
   if (!canPlay.value) return;
-  if (isStream.value || elementFallback) {
+  if (isStream.value) {
     if (streamEl.paused) void streamEl.play();
     else streamEl.pause();
-  } else {
-    engine.togglePause();
+    return;
   }
+  if (queueEnded && lastQueue.length > 0) {
+    // Last track of the queue ran to the end; restart it from the top. Matches
+    // the prior UX where hitting play after an album finished resumed the
+    // final track.
+    queueEnded = false;
+    void engine.play(lastQueue, lastIndex);
+    return;
+  }
+  void engine.togglePause();
 }
 
 const persistVolume = debounce(async (v: number) => {
@@ -452,75 +464,51 @@ function setVolume(v: number): void {
 
 function seekBy(seconds: number): void {
   if (isStream.value) return;
-  if (elementFallback) {
-    const dur = streamEl.duration;
-    if (!isFinite(dur) || dur <= 0) return;
-    streamEl.currentTime = Math.max(0, Math.min(dur, streamEl.currentTime + seconds));
-    return;
-  }
-  engine.seekBy(seconds);
+  queueEnded = false;
+  void engine.seekBy(seconds);
 }
 
 function seekTo(seconds: number): void {
   if (isStream.value) return;
-  if (elementFallback) {
-    streamEl.currentTime = seconds;
-    return;
-  }
-  engine.seekTo(seconds);
+  queueEnded = false;
+  void engine.seekTo(seconds);
 }
 
 function playFile(node: TreeNode, parent: TreeNode): void {
   streamEl.pause();
-  elementFallback = false;
-  currentNode = node;
   currentParent = parent;
   currentNodePath.value = node.path;
   currentStreamUrl.value = null;
   isStream.value = false;
   currentTime.value = 0;
   duration.value = 0;
+  queueEnded = false;
   setNowPlaying(node.title ?? node.name, node.artist, node.album);
   void loadArt(node.path);
-  void engine.play(node.path);
-}
-
-// Fallback when the engine cannot play a file (codec the WebView can't decode,
-// oversize PCM, or fetch failure). Plays the single file through the <audio>
-// element — not gapless, but it plays. If the file is a library track, the
-// element's `ended` handler advances to the next sibling (back through the
-// gapless engine); for an external file there is no successor.
-function fallbackToElement(path: string): void {
-  engine.stop();
-  elementFallback = true;
-  isStream.value = false;
-  currentTime.value = 0;
-  duration.value = 0;
-  const node = siblingByPath(path);
-  if (node) {
-    // Library track: take over the now-playing UI and row highlight.
-    currentNode = node;
-    currentNodePath.value = node.path;
-    currentStreamUrl.value = null;
-    setNowPlaying(node.title ?? node.name, node.artist, node.album);
-    void loadArt(node.path);
-  }
-  // Otherwise (external file) now-playing was already set by the caller and
-  // currentNode stays null so the tree is untouched.
-  streamEl.src = convertFileSrc(path);
-  void streamEl.play();
+  // Queue the rest of the album so the engine auto-advances gaplessly. The
+  // engine treats this list as the complete queue; clicking another file later
+  // replaces it.
+  const siblings = parent.children.filter((c) => !c.isFolder);
+  const idx = Math.max(
+    0,
+    siblings.findIndex((c) => c.path === node.path),
+  );
+  const tracks = siblings.map((c) => c.path);
+  lastQueue = tracks;
+  lastIndex = idx;
+  void engine.play(tracks, idx);
 }
 
 function playStream(stream: Stream): void {
-  engine.stop();
-  elementFallback = false;
-  currentNode = null;
+  void engine.stop();
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = stream.url;
   isStream.value = true;
   currentTime.value = 0;
   duration.value = 0;
+  queueEnded = false;
+  lastQueue = [];
   setNowPlaying(stream.name, null, null);
   streamEl.src = stream.url;
   void streamEl.play();
@@ -534,18 +522,19 @@ function playStream(stream: Stream): void {
 // root, so engine.play can fetch it directly — no prepare step needed.
 function playSearchTrack(t: SearchTrack): void {
   streamEl.pause();
-  elementFallback = false;
-  currentNode = null;
   currentParent = null;
   currentNodePath.value = t.path;
   currentStreamUrl.value = null;
   isStream.value = false;
   currentTime.value = 0;
   duration.value = 0;
+  queueEnded = false;
+  lastQueue = [t.path];
+  lastIndex = 0;
   const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
   setNowPlaying(t.title ?? fallbackName, t.artist, t.album);
   void loadArt(t.path);
-  void engine.play(t.path);
+  void engine.play([t.path], 0);
 }
 
 // Plays a file from outside the library (passed in via OS file association).
@@ -561,20 +550,21 @@ async function openExternalFile(path: string): Promise<void> {
     return;
   }
   streamEl.pause();
-  elementFallback = false;
-  // Leaves currentNode/currentParent null so the tree is untouched, no row is
-  // highlighted, and album-advance is a no-op (engine.getNext returns null).
-  currentNode = null;
+  // Leaves currentParent null so the tree is untouched, no row is highlighted,
+  // and album-advance is a no-op (single-track queue).
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = null;
   isStream.value = false;
   currentTime.value = 0;
   duration.value = 0;
+  queueEnded = false;
+  lastQueue = [path];
+  lastIndex = 0;
   const fallback = path.split(/[\\/]/).pop() ?? path;
   setNowPlaying(meta.title ?? fallback, meta.artist, meta.album);
   void loadArt(path);
-  void engine.play(path);
+  void engine.play([path], 0);
 }
 
 function clearArt(): void {
@@ -609,16 +599,6 @@ async function loadArt(path: string): Promise<void> {
     if (id !== artRequestId) return;
   }
   npArt.value = dataUrl;
-}
-
-// Advance after a codec-fallback file finishes on the <audio> element. The
-// gapless engine handles advancement for all normally-decoded files itself.
-function advanceAfterFallback(): void {
-  if (!currentNode || !currentParent) return;
-  const nextPath = nextSiblingPath(currentNode.path);
-  if (!nextPath) return;
-  const next = siblingByPath(nextPath);
-  if (next) playFile(next, currentParent);
 }
 
 // --- Library / streams loading ---
@@ -779,16 +759,15 @@ async function refreshLibrary(): Promise<void> {
       libraryRefreshPending = false;
       if (!rootNode) break;
       await reconcileNode(rootNode);
-      // reconcile rebuilds node objects, so the currentNode/currentParent
-      // captured at play time now point outside the tree. Re-bind them by path
-      // so the playing-row highlight and album auto-advance keep working. If
-      // the playing file was deleted, leave the stale references — playback
-      // continues and the next selection replaces them.
+      // reconcile rebuilds node objects, so the currentParent captured at
+      // play time now points outside the tree. Re-bind it by path so the
+      // playing-row highlight and album auto-advance keep working. If the
+      // playing file was deleted, leave the stale reference — playback
+      // continues and the next selection replaces it.
       const path = currentNodePath.value;
       if (path) {
         const found = findNode(rootNode, path);
         if (found) {
-          currentNode = found.node;
           currentParent = found.parent;
         }
       }
@@ -1151,40 +1130,30 @@ function setupPlayerControls(): void {
     seekTo(Number(seekBar.value));
   });
 
-  // streamEl handles radio streams and the codec-fallback file path only;
-  // these listeners are no-ops while the gapless engine is driving playback
-  // (the engine reports isPlaying/time/duration via its callbacks).
+  // streamEl handles radio streams only; file playback runs through the
+  // native engine. These listeners only fire for streams; engine events drive
+  // playback state for files.
   streamEl.addEventListener("play", () => {
-    if (isStream.value || elementFallback) isPlaying.value = true;
+    if (isStream.value) isPlaying.value = true;
   });
   streamEl.addEventListener("pause", () => {
-    if (isStream.value || elementFallback) isPlaying.value = false;
+    if (isStream.value) isPlaying.value = false;
   });
   streamEl.addEventListener("ended", () => {
-    if (elementFallback) advanceAfterFallback();
+    if (isStream.value) isPlaying.value = false;
   });
 
-  // A failed stream/fallback file (bad URL, CSP block, dead radio host,
-  // undecodable codec) otherwise dies silently. Surface it: drop the playing
-  // state so the play button stops claiming it's playing, and log the cause.
+  // A failed stream (bad URL, CSP block, dead radio host) otherwise dies
+  // silently. Drop the playing state so the play button stops claiming it's
+  // playing, and log the cause.
   streamEl.addEventListener("error", () => {
-    if (!isStream.value && !elementFallback) return;
+    if (!isStream.value) return;
     isPlaying.value = false;
     console.error(
-      "stream/fallback playback error",
+      "stream playback error",
       streamEl.currentSrc || streamEl.src,
       streamEl.error,
     );
-  });
-
-  streamEl.addEventListener("loadedmetadata", () => {
-    if (!elementFallback || !isFinite(streamEl.duration)) return;
-    duration.value = streamEl.duration;
-  });
-
-  streamEl.addEventListener("timeupdate", () => {
-    if (!elementFallback) return;
-    currentTime.value = streamEl.currentTime;
   });
 }
 
@@ -1267,7 +1236,7 @@ function setupEffects(): void {
 
   effect(() => {
     const v = volume.value;
-    engine.setVolume(v);
+    void engine.setVolume(v);
     streamEl.volume = v;
     volumeBar.value = String(v);
     volumeBar.style.setProperty("--progress", `${v * 100}%`);

@@ -1,3 +1,5 @@
+mod audio;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -240,7 +242,7 @@ fn read_tags(path: &std::path::Path) -> Tags {
     }
 }
 
-fn walk_mp3s(root: &std::path::Path, out: &mut Vec<PathBuf>, visited: &mut HashSet<PathBuf>) {
+fn walk_audio(root: &std::path::Path, out: &mut Vec<PathBuf>, visited: &mut HashSet<PathBuf>) {
     // Canonicalize so a symlink loop (e.g. /foo/back -> /foo) gets caught regardless
     // of which path we entered the cycle from.
     let Ok(canon) = std::fs::canonicalize(root) else {
@@ -260,12 +262,9 @@ fn walk_mp3s(root: &std::path::Path, out: &mut Vec<PathBuf>, visited: &mut HashS
             continue;
         };
         if meta.is_dir() {
-            walk_mp3s(&path, out, visited);
-        } else if meta.is_file() {
-            let name = entry.file_name();
-            if name.to_string_lossy().to_lowercase().ends_with(".mp3") {
-                out.push(path);
-            }
+            walk_audio(&path, out, visited);
+        } else if meta.is_file() && is_audio_path(&path.to_string_lossy()) {
+            out.push(path);
         }
     }
 }
@@ -273,7 +272,7 @@ fn walk_mp3s(root: &std::path::Path, out: &mut Vec<PathBuf>, visited: &mut HashS
 fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
     let mut files = Vec::new();
     let mut visited = HashSet::new();
-    walk_mp3s(&root, &mut files, &mut visited);
+    walk_audio(&root, &mut files, &mut visited);
 
     let mut conn = open_connection(&db_path)
         .map_err(|e| format!("open scan connection failed: {}", e))?;
@@ -483,7 +482,7 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
         let name = entry.file_name().to_string_lossy().into_owned();
         if meta.is_dir() {
             folders.push(name);
-        } else if meta.is_file() && name.to_lowercase().ends_with(".mp3") {
+        } else if meta.is_file() && is_audio_path(&name) {
             file_names.push(name);
         }
     }
@@ -701,6 +700,41 @@ fn prepare_external_file(path: String, app: AppHandle) -> Result<TrackMeta, Stri
 // matched literally — LIKE wildcards in user input are escaped so a typed '%'
 // finds a literal '%'. Capped so a one-character query can't return the whole
 // library into the dropdown.
+// === Audio playback commands ===
+//
+// The native audio engine runs on its own threads (output, decode, position).
+// These commands are thin wrappers that forward to its command channel; they
+// return immediately and do not block the IPC worker.
+
+#[tauri::command]
+fn audio_play(tracks: Vec<String>, start_index: usize, engine: State<audio::AudioEngine>) {
+    let paths: Vec<PathBuf> = tracks.into_iter().map(PathBuf::from).collect();
+    engine.send(audio::Command::Play {
+        tracks: paths,
+        start_index,
+    });
+}
+
+#[tauri::command]
+fn audio_toggle_pause(engine: State<audio::AudioEngine>) {
+    engine.send(audio::Command::TogglePause);
+}
+
+#[tauri::command]
+fn audio_seek(seconds: f64, engine: State<audio::AudioEngine>) {
+    engine.send(audio::Command::Seek(seconds));
+}
+
+#[tauri::command]
+fn audio_stop(engine: State<audio::AudioEngine>) {
+    engine.send(audio::Command::Stop);
+}
+
+#[tauri::command]
+fn audio_set_volume(volume: f32, engine: State<audio::AudioEngine>) {
+    engine.set_volume(volume);
+}
+
 #[tauri::command]
 fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
     let q = query.trim();
@@ -806,6 +840,14 @@ pub fn run() {
                 inner: Mutex::new(None),
             });
 
+            // Bring the audio engine up before the frontend can issue play
+            // commands. Failure here is fatal: the app is a media player.
+            let engine = audio::start(app.handle().clone()).map_err(|e| {
+                log::error!("audio engine failed to start: {e}");
+                format!("audio engine: {e}")
+            })?;
+            app.manage(engine);
+
             let store = app.store(STORE_FILE)?;
             if let Some(value) = store.get(KEY_LIBRARY_ROOT) {
                 if let Some(path) = value.as_str() {
@@ -876,7 +918,12 @@ pub fn run() {
             search_tracks,
             get_art,
             frontend_ready,
-            prepare_external_file
+            prepare_external_file,
+            audio_play,
+            audio_toggle_pause,
+            audio_seek,
+            audio_stop,
+            audio_set_volume,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

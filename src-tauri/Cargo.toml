@@ -31,4 +31,9 @@ lofty = "0.21"
 base64 = "0.22"
 notify = "6"
 notify-debouncer-full = "0.3"
+symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "alac", "vorbis", "isomp4", "ogg"] }
+cpal = "0.15"
+rtrb = "0.3"
+rubato = "0.16"
+crossbeam-channel = "0.5"
 
