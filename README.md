@@ -32,7 +32,7 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - [Tauri](https://tauri.app/) 2 - desktop shell
 - Rust backend with [rusqlite](https://github.com/rusqlite/rusqlite) for the metadata cache, [lofty](https://github.com/Serial-ATA/lofty-rs) for tag reading, and [notify](https://github.com/notify-rs/notify) for live library watching
 - TypeScript frontend built with [Vite](https://vitejs.dev/) - no UI framework, reactivity via [Preact signals](https://github.com/preactjs/signals)
-- Custom Web Audio engine for gapless playback, with an `<audio>` fallback for streams and unsupported codecs
+- Native Rust audio engine ([symphonia](https://github.com/pdeljanov/Symphonia) + [cpal](https://github.com/RustAudio/cpal)) for gapless file playback and internet radio with in-band ICY now-playing metadata
 
 ## Manifest format
 

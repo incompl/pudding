@@ -87,7 +87,6 @@ const npArt = signal<string | null>(null);
 
 const isStream = signal(false);
 const isPlaying = signal(false);
-const canPlay = signal(false);
 const currentTime = signal(0);
 const duration = signal(0);
 const volume = signal(1);
@@ -170,9 +169,10 @@ let rootNode: TreeNode | null = null;
 // Last manifest streams loaded by refreshStreams, kept so search can filter
 // them without re-reading the manifest on every keystroke.
 let allStreams: Stream[] = [];
-// <audio> element used only for radio streams. All file playback (any format
-// the native engine supports) goes through the gapless Rust engine.
-let streamEl: HTMLAudioElement;
+// Manifest name of the currently playing stream, shown as the now-playing
+// station line. Kept separately from currentStreamUrl because ICY metadata
+// events re-render the now-playing panel after the fact.
+let currentStreamName: string | null = null;
 // Album-folder context for the currently playing track. Held so an
 // auto-advance event from the engine can look up the matching TreeNode (for
 // the row highlight + now-playing UI) via siblingByPath. Null while playing
@@ -218,6 +218,23 @@ const engine = new GaplessEngine({
   },
   onQueueEnded: () => {
     queueEnded = true;
+  },
+  // ICY now-playing for radio. The title is conventionally "Artist - Song";
+  // split on the first separator, keeping the whole string as the song when
+  // there is none. The manifest's stream name wins over the server's icy-name
+  // (manifest names are user-curated; icy-name is often a slogan) and shows
+  // on the album line under the song.
+  onStreamMetadata: (station, title) => {
+    if (!isStream.value) return;
+    const stationName = currentStreamName ?? station;
+    if (title) {
+      const sep = title.indexOf(" - ");
+      const artist = sep > 0 ? title.slice(0, sep).trim() : null;
+      const song = sep > 0 ? title.slice(sep + 3).trim() : title;
+      setNowPlaying(song || title, artist, stationName);
+    } else {
+      setNowPlaying(stationName ?? "Stream", null, null);
+    }
   },
 });
 
@@ -429,16 +446,12 @@ function setNowPlaying(
   npTitle.value = title;
   npArtist.value = artist;
   npAlbum.value = album;
-  canPlay.value = true;
 }
 
 function togglePlayPause(): void {
-  if (!canPlay.value) return;
-  if (isStream.value) {
-    if (streamEl.paused) void streamEl.play();
-    else streamEl.pause();
-    return;
-  }
+  if (!hasTrack.value) return;
+  // Streams also route through togglePause: the engine implements live-radio
+  // semantics natively (pause disconnects, resume rejoins the live edge).
   if (queueEnded && lastQueue.length > 0) {
     // Last track of the queue ran to the end; restart it from the top. Matches
     // the prior UX where hitting play after an album finished resumed the
@@ -475,7 +488,6 @@ function seekTo(seconds: number): void {
 }
 
 function playFile(node: TreeNode, parent: TreeNode): void {
-  streamEl.pause();
   currentParent = parent;
   currentNodePath.value = node.path;
   currentStreamUrl.value = null;
@@ -500,18 +512,19 @@ function playFile(node: TreeNode, parent: TreeNode): void {
 }
 
 function playStream(stream: Stream): void {
-  void engine.stop();
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = stream.url;
+  currentStreamName = stream.name;
   isStream.value = true;
   currentTime.value = 0;
   duration.value = 0;
   queueEnded = false;
   lastQueue = [];
+  // Station name until the first ICY title arrives (or forever, for stations
+  // that don't send titles).
   setNowPlaying(stream.name, null, null);
-  streamEl.src = stream.url;
-  void streamEl.play();
+  void engine.playStream(stream.url);
   clearArt();
 }
 
@@ -521,7 +534,6 @@ function playStream(stream: Stream): void {
 // the tree. Asset access is already granted by set_asset_scope on the library
 // root, so engine.play can fetch it directly — no prepare step needed.
 function playSearchTrack(t: SearchTrack): void {
-  streamEl.pause();
   currentParent = null;
   currentNodePath.value = t.path;
   currentStreamUrl.value = null;
@@ -549,7 +561,6 @@ async function openExternalFile(path: string): Promise<void> {
     console.error("prepare_external_file failed", path, e);
     return;
   }
-  streamEl.pause();
   // Leaves currentParent null so the tree is untouched, no row is highlighted,
   // and album-advance is a no-op (single-track queue).
   currentParent = null;
@@ -1129,32 +1140,6 @@ function setupPlayerControls(): void {
   seekBar.addEventListener("input", () => {
     seekTo(Number(seekBar.value));
   });
-
-  // streamEl handles radio streams only; file playback runs through the
-  // native engine. These listeners only fire for streams; engine events drive
-  // playback state for files.
-  streamEl.addEventListener("play", () => {
-    if (isStream.value) isPlaying.value = true;
-  });
-  streamEl.addEventListener("pause", () => {
-    if (isStream.value) isPlaying.value = false;
-  });
-  streamEl.addEventListener("ended", () => {
-    if (isStream.value) isPlaying.value = false;
-  });
-
-  // A failed stream (bad URL, CSP block, dead radio host) otherwise dies
-  // silently. Drop the playing state so the play button stops claiming it's
-  // playing, and log the cause.
-  streamEl.addEventListener("error", () => {
-    if (!isStream.value) return;
-    isPlaying.value = false;
-    console.error(
-      "stream playback error",
-      streamEl.currentSrc || streamEl.src,
-      streamEl.error,
-    );
-  });
 }
 
 function setupVolumeControl(): void {
@@ -1212,7 +1197,7 @@ function setupEffects(): void {
     playPauseBtn.setAttribute("aria-label", isPlaying.value ? "Pause" : "Play");
   });
   effect(() => {
-    playPauseBtn.disabled = !canPlay.value;
+    playPauseBtn.disabled = !hasTrack.value;
   });
   effect(() => {
     seekBar.disabled = isStream.value;
@@ -1237,7 +1222,6 @@ function setupEffects(): void {
   effect(() => {
     const v = volume.value;
     void engine.setVolume(v);
-    streamEl.volume = v;
     volumeBar.value = String(v);
     volumeBar.style.setProperty("--progress", `${v * 100}%`);
     const waves = volumeBtn.querySelectorAll<SVGPathElement>(".volume-wave");
@@ -1312,7 +1296,6 @@ async function init(): Promise<void> {
     }
   });
 
-  streamEl = new Audio();
   nowPlayingTitleEl = document.querySelector("#now-playing-title") as HTMLElement;
   nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;
   nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;

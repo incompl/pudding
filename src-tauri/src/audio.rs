@@ -19,13 +19,19 @@
 // Seek/stop/queue-change use a flush generation counter (AtomicU64). The decode
 // thread bumps it; the callback notices and drains the ring buffer's stale
 // contents on its next invocation.
+//
+// Internet radio runs through the same pipeline: PlayStream swaps the decode
+// thread's source from a file queue to an HTTP connection (icy.rs strips the
+// in-band ICY metadata before symphonia sees the bytes). Live-stream policy
+// lives here: pause disconnects (resume rejoins the live edge instead of
+// playing a stale buffer), and a dropped connection reconnects with backoff.
 
 use std::collections::VecDeque;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
@@ -44,6 +50,8 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 use tauri::{AppHandle, Emitter};
+
+use crate::icy;
 
 // We force stereo output. Devices that don't support stereo are exotic enough
 // that supporting them isn't worth the per-frame channel-count branching in
@@ -64,12 +72,24 @@ const POSITION_EMIT_INTERVAL_MS: u64 = 50;
 // smaller = lower latency. 1024 is the conventional sweet spot.
 const RESAMPLER_CHUNK_FRAMES: usize = 1024;
 
+// Stream reconnect policy, mirroring what mature web radio players ship
+// (icecast-metadata-player defaults): quick first retry, exponential backoff
+// to a small cap, and a bounded total outage before reporting failure and
+// stopping. On give-up the session is kept paused rather than discarded, so
+// the play button doubles as "try again".
+const STREAM_RETRY_INITIAL: Duration = Duration::from_millis(500);
+const STREAM_RETRY_MAX: Duration = Duration::from_secs(4);
+const STREAM_GIVE_UP: Duration = Duration::from_secs(30);
+
 // === Commands from the frontend ===
 
 pub enum Command {
     Play {
         tracks: Vec<PathBuf>,
         start_index: usize,
+    },
+    PlayStream {
+        url: String,
     },
     TogglePause,
     Seek(f64),
@@ -175,6 +195,15 @@ pub struct StateEvent {
 pub struct ErrorEvent {
     pub path: String,
     pub message: String,
+}
+
+// Now-playing info for a radio stream. `station` comes from the icy-name
+// response header on connect; `title` is the latest in-band StreamTitle.
+// Emitted on every (re)connect and whenever the title changes.
+#[derive(Serialize, Clone)]
+pub struct StreamMetadataEvent {
+    pub station: Option<String>,
+    pub title: Option<String>,
 }
 
 // === Public handle ===
@@ -477,6 +506,9 @@ fn decode_loop(
     let mut queue: Vec<PathBuf> = Vec::new();
     let mut queue_idx: usize = 0;
     let mut current: Option<TrackReader> = None;
+    // Radio session. Mutually exclusive with `current`: Play/PlayStream/Stop
+    // each clear the other mode before installing their own source.
+    let mut stream: Option<StreamSession> = None;
 
     // Producer-side cumulative stereo frames pushed since the last full reset
     // (Play command). Matches shared.total_produced.
@@ -498,6 +530,7 @@ fn decode_loop(
                         let start = start_index.min(tracks.len().saturating_sub(1));
                         queue = tracks;
                         queue_idx = start;
+                        stream = None;
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         emit_state(&app, true, true);
@@ -515,14 +548,38 @@ fn decode_loop(
                             emit_state(&app, false, false);
                         }
                     }
+                    Command::PlayStream { url } => {
+                        queue.clear();
+                        queue_idx = 0;
+                        current = None;
+                        producer_frames = 0;
+                        reset_for_new_playback(&shared, &origins);
+                        emit_state(&app, true, true);
+                        stream = Some(StreamSession::new(url));
+                    }
                     Command::TogglePause => {
-                        // Only meaningful if there's a current track. Toggling
-                        // pause with no track loaded is a no-op so the UI's
+                        // Only meaningful if there's a current source. Toggling
+                        // pause with nothing loaded is a no-op so the UI's
                         // "play button after queue ended" can call Play
                         // (frontend's responsibility, not ours).
-                        if current.is_some() {
+                        if current.is_some() || stream.is_some() {
                             let now = !shared.paused.load(Ordering::Relaxed);
                             shared.paused.store(now, Ordering::Relaxed);
+                            if let Some(ref mut s) = stream {
+                                if now {
+                                    // Live radio pause = disconnect. Resume
+                                    // must rejoin the live edge, not replay a
+                                    // stale buffer, so drop the connection and
+                                    // drain what's already decoded.
+                                    s.reader = None;
+                                    flush_and_wait(&shared);
+                                } else {
+                                    // Resume = fresh connection at the live
+                                    // edge, with retry state cleared so a
+                                    // give-up doesn't inherit old backoff.
+                                    s.reset_retry();
+                                }
+                            }
                             emit_state(&app, !now, true);
                         }
                     }
@@ -576,6 +633,7 @@ fn decode_loop(
                         queue.clear();
                         queue_idx = 0;
                         current = None;
+                        stream = None;
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         shared.queue_exhausted.store(true, Ordering::Relaxed);
@@ -587,18 +645,36 @@ fn decode_loop(
             }
         }
 
-        // Idle conditions: no track loaded, or paused. In both cases sleep
+        // Idle conditions: paused, or nothing loaded. In both cases sleep
         // briefly and re-check commands. We don't block on the channel because
         // the audio callback continues running and we want fast response on
-        // resume.
-        if current.is_none() || shared.paused.load(Ordering::Relaxed) {
+        // resume. A paused stream holds no connection (dropped at pause time),
+        // so idling here costs nothing.
+        if shared.paused.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+
+        // Radio mode: connect / decode / reconnect as needed.
+        if let Some(ref mut s) = stream {
+            if !stream_step(s, &mut rb, &shared, &app, &mut producer_frames, output_rate) {
+                // Outage exceeded the give-up budget. Keep the session but
+                // pause it: the play button becomes "try again" (unpause
+                // resets retry state and reconnects).
+                shared.paused.store(true, Ordering::Relaxed);
+                emit_state(&app, false, true);
+            }
+            continue;
+        }
+
+        if current.is_none() {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
 
         // Decode + push the next chunk.
         let tr = current.as_mut().unwrap();
-        match decode_and_push(tr, &mut rb, &shared, &mut producer_frames, output_rate) {
+        match decode_and_push(tr, &mut rb, &shared, &mut producer_frames) {
             Ok(StepOutcome::Continue) => {}
             Ok(StepOutcome::TrackEnded) => {
                 queue_idx += 1;
@@ -645,6 +721,222 @@ enum StepOutcome {
     TrackEnded,
 }
 
+// === Radio streams ===
+//
+// A StreamSession outlives its connection: `reader` is Some while connected
+// and None while paused, between reconnect attempts, or after give-up. The
+// URL and retry bookkeeping persist so pause/resume and reconnects don't
+// lose the station.
+
+struct StreamSession {
+    url: String,
+    reader: Option<TrackReader>,
+    // Shared with the IcyReader inside `reader`'s media source; it writes
+    // titles as they arrive in-band, we poll between decode steps.
+    title: Arc<Mutex<Option<String>>>,
+    station: Option<String>,
+    last_title: Option<String>,
+    retry_delay: Duration,
+    next_attempt_at: Instant,
+    // When the current outage began (first failed connect or the moment the
+    // connection dropped). None while healthy. Give-up triggers when an
+    // outage outlasts STREAM_GIVE_UP.
+    outage_since: Option<Instant>,
+}
+
+impl StreamSession {
+    fn new(url: String) -> Self {
+        Self {
+            url,
+            reader: None,
+            title: Arc::new(Mutex::new(None)),
+            station: None,
+            last_title: None,
+            retry_delay: STREAM_RETRY_INITIAL,
+            next_attempt_at: Instant::now(),
+            outage_since: None,
+        }
+    }
+
+    fn reset_retry(&mut self) {
+        self.retry_delay = STREAM_RETRY_INITIAL;
+        self.next_attempt_at = Instant::now();
+        self.outage_since = None;
+    }
+
+    // Records a failed connect and schedules the next attempt with backoff.
+    // Returns false when the outage has exhausted the give-up budget.
+    fn connect_failed(&mut self, app: &AppHandle, err: &str) -> bool {
+        log::warn!("audio: stream {}: {err}", self.url);
+        let now = Instant::now();
+        let began = *self.outage_since.get_or_insert(now);
+        if now.duration_since(began) >= STREAM_GIVE_UP {
+            emit_error(
+                app,
+                &PathBuf::from(&self.url),
+                &format!("stream unavailable: {err}"),
+            );
+            return false;
+        }
+        self.next_attempt_at = now + self.retry_delay;
+        self.retry_delay = (self.retry_delay * 2).min(STREAM_RETRY_MAX);
+        true
+    }
+}
+
+// One iteration of radio playback: surface title changes, (re)connect when
+// disconnected, otherwise decode a chunk into the ring buffer. Returns false
+// when the session should give up (caller pauses it).
+fn stream_step(
+    s: &mut StreamSession,
+    rb: &mut RbProducer<f32>,
+    shared: &Arc<SharedState>,
+    app: &AppHandle,
+    producer_frames: &mut u64,
+    output_rate: u32,
+) -> bool {
+    if s.reader.is_none() {
+        if Instant::now() < s.next_attempt_at {
+            std::thread::sleep(Duration::from_millis(10));
+            return true;
+        }
+        let opened = icy::connect(&s.url).and_then(|conn| open_stream(conn, &s.url, output_rate));
+        match opened {
+            Ok(o) => {
+                log::info!(
+                    "audio: stream connected url={} station={:?}",
+                    s.url,
+                    o.station
+                );
+                s.reader = Some(o.reader);
+                s.title = o.title;
+                s.station = o.station;
+                s.last_title = None;
+                s.reset_retry();
+                // Announce the station immediately; the first title follows
+                // via the change-detection below once it arrives in-band.
+                emit_stream_metadata(app, &s.station, &None);
+            }
+            Err(e) => return s.connect_failed(app, &e),
+        }
+        return true;
+    }
+
+    // Title changes arrive interleaved with audio, exactly on song
+    // boundaries; polling between decode steps adds at most one packet of
+    // latency (~tens of ms).
+    let latest = s.title.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if latest != s.last_title {
+        s.last_title = latest.clone();
+        emit_stream_metadata(app, &s.station, &latest);
+    }
+
+    let tr = s.reader.as_mut().unwrap();
+    match decode_and_push(tr, rb, shared, producer_frames) {
+        Ok(StepOutcome::Continue) => true,
+        Ok(StepOutcome::TrackEnded) => {
+            // The server closed the connection (EOF). Reconnect immediately;
+            // whatever is still in the ring buffer plays out meanwhile.
+            log::warn!("audio: stream {} disconnected, reconnecting", s.url);
+            s.reader = None;
+            s.outage_since = Some(Instant::now());
+            s.next_attempt_at = Instant::now();
+            true
+        }
+        Err(e) => {
+            // Read timeout, socket error, or the codec lost sync past
+            // recovery. Same remedy: fresh connection.
+            log::warn!("audio: stream {} error: {e}, reconnecting", s.url);
+            s.reader = None;
+            s.outage_since = Some(Instant::now());
+            s.next_attempt_at = Instant::now();
+            true
+        }
+    }
+}
+
+struct OpenedStream {
+    reader: TrackReader,
+    title: Arc<Mutex<Option<String>>>,
+    station: Option<String>,
+}
+
+// Builds the decode chain for a connected stream. Mirrors open_track, except
+// the source is non-seekable, duration is unknown (0 = "live" to the UI),
+// and gapless trimming is meaningless mid-stream.
+fn open_stream(
+    conn: icy::IcyConnection,
+    url: &str,
+    output_rate: u32,
+) -> Result<OpenedStream, String> {
+    let title = Arc::clone(&conn.title);
+    let station = conn.station_name.clone();
+
+    let mss = MediaSourceStream::new(
+        Box::new(icy::NetSource::new(conn.reader)),
+        Default::default(),
+    );
+    let mut hint = Hint::new();
+    if let Some(ct) = conn.content_type.as_deref() {
+        hint.mime_type(ct);
+    }
+    let fmt_opts = FormatOptions {
+        enable_gapless: false,
+        ..Default::default()
+    };
+    let meta_opts: MetadataOptions = Default::default();
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &fmt_opts, &meta_opts)
+        .map_err(|e| format!("probe: {e}"))?;
+    let reader = probed.format;
+
+    let track = reader
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| "no decodable audio in stream".to_string())?;
+    let track_id = track.id;
+    let input_rate = track.codec_params.sample_rate.unwrap_or(44_100);
+    let input_channels = track
+        .codec_params
+        .channels
+        .map(|c| c.count())
+        .unwrap_or(2)
+        .max(1);
+    let decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| format!("codec init: {e}"))?;
+    let resampler = make_resampler(input_rate, output_rate, input_channels);
+
+    Ok(OpenedStream {
+        reader: TrackReader {
+            reader,
+            decoder,
+            track_id,
+            input_rate,
+            input_channels,
+            duration_seconds: 0.0,
+            path: url.to_string(),
+            resampler,
+            pending_in: vec![Vec::new(); input_channels],
+            flushed: false,
+        },
+        title,
+        station,
+    })
+}
+
+fn emit_stream_metadata(app: &AppHandle, station: &Option<String>, title: &Option<String>) {
+    let _ = app.emit(
+        "audio:stream-metadata",
+        StreamMetadataEvent {
+            station: station.clone(),
+            title: title.clone(),
+        },
+    );
+}
+
 // Open the next playable track at or after queue_idx, skipping (and reporting)
 // any that fail to open. Returns None when the queue is exhausted. On success,
 // publishes the new track's origin so the position-emit thread will pick it up
@@ -685,7 +977,6 @@ fn decode_and_push(
     rb: &mut RbProducer<f32>,
     shared: &Arc<SharedState>,
     producer_frames: &mut u64,
-    _output_rate: u32,
 ) -> Result<StepOutcome, String> {
     // Step 1: pull a packet → decode → append to pending_in (planar).
     let packet = match tr.reader.next_packet() {
@@ -701,7 +992,7 @@ fn decode_and_push(
                 tr.flushed = true;
                 if !tail.is_empty() {
                     let interleaved = interleave_stereo(&tail, tr.input_channels);
-                    push_blocking(rb, shared, &interleaved);
+                    push_blocking(rb, &interleaved);
                     let frames = (interleaved.len() / OUT_CHANNELS) as u64;
                     *producer_frames += frames;
                     shared.total_produced.fetch_add(frames, Ordering::Relaxed);
@@ -740,7 +1031,7 @@ fn decode_and_push(
             .process(&in_refs, None)
             .map_err(|e| format!("resample: {e}"))?;
         let interleaved = interleave_stereo(&out_planar, tr.input_channels);
-        push_blocking(rb, shared, &interleaved);
+        push_blocking(rb, &interleaved);
         let frames = (interleaved.len() / OUT_CHANNELS) as u64;
         *producer_frames += frames;
         shared.total_produced.fetch_add(frames, Ordering::Relaxed);
@@ -753,7 +1044,7 @@ fn decode_and_push(
 // don't watch for commands here because commands change shared state (atomics)
 // and the next loop iteration picks them up — the worst case is one chunk of
 // latency on Pause, ~10ms, which is imperceptible.
-fn push_blocking(rb: &mut RbProducer<f32>, _shared: &Arc<SharedState>, samples: &[f32]) {
+fn push_blocking(rb: &mut RbProducer<f32>, samples: &[f32]) {
     let mut idx = 0;
     while idx < samples.len() {
         let avail = rb.slots();
@@ -787,7 +1078,7 @@ fn push_blocking(rb: &mut RbProducer<f32>, _shared: &Arc<SharedState>, samples: 
 
 // === Symphonia helpers ===
 
-fn open_track(path: &std::path::Path, _output_rate: u32) -> Option<TrackReader> {
+fn open_track(path: &std::path::Path, output_rate: u32) -> Option<TrackReader> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
@@ -845,7 +1136,7 @@ fn open_track(path: &std::path::Path, _output_rate: u32) -> Option<TrackReader> 
         }
     };
 
-    let resampler = make_resampler(input_rate, _output_rate, input_channels);
+    let resampler = make_resampler(input_rate, output_rate, input_channels);
 
     Some(TrackReader {
         reader,

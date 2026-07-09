@@ -3,8 +3,9 @@
 // happen there; this file translates frontend calls into Tauri commands and
 // surfaces engine events back to UI callbacks.
 //
-// The webview no longer touches audio for local files. Internet radio streams
-// stay on the HTMLAudioElement in main.ts (separate code path).
+// The webview does not touch audio at all. Local files and internet radio
+// both play through the native engine; radio additionally reports in-band
+// ICY metadata via onStreamMetadata.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -26,6 +27,10 @@ export interface AudioEngineCallbacks {
   // remembered so a subsequent play() with the same queue can restart from the
   // last track that ran.
   onQueueEnded: () => void;
+  // Radio-stream now-playing info. `station` is the server's icy-name header
+  // (arrives on connect/reconnect); `title` is the latest in-band StreamTitle,
+  // null until the first one arrives or when the station clears it.
+  onStreamMetadata: (station: string | null, title: string | null) => void;
 }
 
 interface TrackChangedEvent {
@@ -42,6 +47,10 @@ interface StateEvent {
 interface ErrorEvent {
   path: string;
   message: string;
+}
+interface StreamMetadataEvent {
+  station: string | null;
+  title: string | null;
 }
 
 export class GaplessEngine {
@@ -93,6 +102,11 @@ export class GaplessEngine {
         this.cb.onQueueEnded();
       }),
     );
+    this.unlistens.push(
+      await listen<StreamMetadataEvent>("audio:stream-metadata", (e) => {
+        this.cb.onStreamMetadata(e.payload.station, e.payload.title);
+      }),
+    );
   }
 
   async setVolume(v: number): Promise<void> {
@@ -115,6 +129,19 @@ export class GaplessEngine {
     this.currentPath = tracks[start];
     this.playing = true;
     await invoke("audio_play", { tracks, startIndex: start });
+  }
+
+  // Start (or replace) playback with an internet radio stream. The engine
+  // owns the connection, live-edge pause/resume semantics, and reconnects;
+  // now-playing info flows back through onStreamMetadata.
+  async playStream(url: string): Promise<void> {
+    // Optimistic, mirroring play(): streams emit no track-changed event, so
+    // claim the source immediately for hasTrack()/isPaused().
+    this.currentPath = url;
+    this.currentDuration = 0;
+    this.currentPosition = 0;
+    this.playing = true;
+    await invoke("audio_play_stream", { url });
   }
 
   hasTrack(): boolean {
