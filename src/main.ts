@@ -1011,6 +1011,16 @@ function setupSearch(): void {
   // Bumped per query so a slow search_tracks that resolves after a newer
   // keystroke can't overwrite fresher results.
   let queryToken = 0;
+  // Query and caret held while the input is blurred. Blur empties the visible
+  // box (the collapsed field just shows clipped stale text otherwise) but the
+  // search isn't discarded: refocusing restores the query, its selection, and
+  // reopens its results.
+  let stash: {
+    query: string;
+    start: number;
+    end: number;
+    dir: "forward" | "backward" | "none";
+  } | null = null;
   const searchBox = document.getElementById("search") as HTMLElement;
 
   function close(): void {
@@ -1107,7 +1117,32 @@ function setupSearch(): void {
 
   searchInput.addEventListener("input", () => runSearch(searchInput.value));
   searchInput.addEventListener("focus", () => {
+    if (stash && !searchInput.value) {
+      searchInput.value = stash.query;
+      // Restores the caret for keyboard-driven focus (tab, window
+      // reactivation). On mouse focus the browser places the caret from the
+      // click position afterward, which is the better behavior there anyway.
+      searchInput.setSelectionRange(stash.start, stash.end, stash.dir);
+    }
     if (searchInput.value.trim()) runSearch(searchInput.value);
+  });
+
+  // Escape and choose() clear the value before blurring, so only abandoned
+  // queries survive the round trip. The runSearch("") call supersedes any
+  // pending debounced keystroke that would otherwise reopen the dropdown
+  // after the box has visually emptied.
+  searchInput.addEventListener("blur", () => {
+    stash = searchInput.value
+      ? {
+          query: searchInput.value,
+          start: searchInput.selectionStart ?? searchInput.value.length,
+          end: searchInput.selectionEnd ?? searchInput.value.length,
+          dir: searchInput.selectionDirection ?? "none",
+        }
+      : null;
+    searchInput.value = "";
+    close();
+    runSearch("");
   });
 
   searchInput.addEventListener("keydown", (e) => {
