@@ -7,6 +7,7 @@ import {
 } from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { signal, effect } from "@preact/signals-core";
 import { GaplessEngine } from "./audio-engine";
 
@@ -995,6 +996,14 @@ async function setupWindowSize(
 function setupSettings(): void {
   settingsBtn.addEventListener("click", () => { settingsOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => { settingsOpen.value = false; });
+
+  // External links must go to the OS browser, not navigate the webview.
+  document.addEventListener("click", (e) => {
+    const link = (e.target as Element).closest?.("a[href^='http']");
+    if (!(link instanceof HTMLAnchorElement)) return;
+    e.preventDefault();
+    void openUrl(link.href);
+  });
 }
 
 function searchLabel(t: SearchTrack): { primary: string; secondary: string } {

@@ -719,6 +719,20 @@ ul {
   outline-color: var(--danger);
 }
 
+#settings-panel .credit {
+  margin-top: 2em;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  opacity: 0.6;
+  letter-spacing: 0.02em;
+  text-align: center;
+}
+
+#settings-panel .credit a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
 .path-picker {
   display: flex;
   gap: 0.4em;
