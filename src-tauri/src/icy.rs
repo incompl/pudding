@@ -208,9 +208,11 @@ impl<R: Read> Read for IcyReader<R> {
 }
 
 // Extracts the value of StreamTitle='...'; from a metadata block. Titles are
-// NUL-padded and occasionally contain apostrophes, so match the closing
-// quote-semicolon pair rather than the first apostrophe. Empty titles (some
-// stations send StreamTitle=''; between songs) map to None.
+// NUL-padded and occasionally contain apostrophes: most encoders leave them
+// bare (so match the closing quote-semicolon pair, not the first apostrophe),
+// but some (notably liquidsoap) backslash-escape them, so skip escaped quotes
+// when scanning and unescape the result. Empty titles (some stations send
+// StreamTitle=''; between songs) map to None.
 fn parse_stream_title(meta: &[u8]) -> Option<String> {
     // Metadata is nominally Latin-1 or UTF-8 with no declaration; lossy UTF-8
     // keeps the common case intact and mangles rather than drops the rest.
@@ -218,13 +220,51 @@ fn parse_stream_title(meta: &[u8]) -> Option<String> {
     let text = text.trim_end_matches('\0');
     let start = text.find("StreamTitle='")? + "StreamTitle='".len();
     let rest = &text[start..];
-    let end = rest.find("';").or_else(|| rest.rfind('\''))?;
-    let title = rest[..end].trim();
+    let end = find_title_end(rest)?;
+    let title = unescape_title(rest[..end].trim());
     if title.is_empty() {
         None
     } else {
-        Some(title.to_string())
+        Some(title)
     }
+}
+
+// Byte offset of the closing quote: the first "';" whose quote isn't
+// backslash-escaped. Falls back to the last apostrophe for truncated blocks
+// that lost their terminator.
+fn find_title_end(rest: &str) -> Option<usize> {
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'\'' if bytes.get(i + 1) == Some(&b';') => return Some(i),
+            _ => i += 1,
+        }
+    }
+    rest.rfind('\'')
+}
+
+// Undo backslash-escaping of quotes and backslashes; any other backslash is
+// treated as literal since most encoders don't escape at all.
+fn unescape_title(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n @ ('\'' | '"' | '\\')) => out.push(n),
+                Some(n) => {
+                    out.push(c);
+                    out.push(n);
+                }
+                None => out.push(c),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // === symphonia adapter ===
@@ -342,6 +382,18 @@ mod tests {
             t("StreamTitle='Don't Stop';StreamUrl='';"),
             Some("Don't Stop".into())
         );
+        // Backslash-escaped apostrophe (liquidsoap-style, e.g. Vintage
+        // Obscura) is unescaped, and an escaped "\';" doesn't end the title.
+        assert_eq!(
+            t("StreamTitle='W\\'s - Dungeon Chains';StreamUrl='';"),
+            Some("W's - Dungeon Chains".into())
+        );
+        assert_eq!(
+            t("StreamTitle='odd \\'; mid-title';StreamUrl='';"),
+            Some("odd '; mid-title".into())
+        );
+        // Escaped backslash before the real closing quote.
+        assert_eq!(t("StreamTitle='back\\\\';"), Some("back\\".into()));
         // Empty title → None.
         assert_eq!(t("StreamTitle='';"), None);
         // No StreamTitle field at all.
