@@ -1219,6 +1219,43 @@ function applyStreamMeta(
   streamMetaArtistEl.classList.toggle("hidden", !meta?.artist);
 }
 
+// The live-pulse keyframes start and end on the paused gray, so stopping
+// doesn't cut the pulse off mid-cycle: clamp the infinite animation to the
+// end of its current iteration, then pin the .paused color once it lands
+// there. Resuming mid-wind-down just lifts the clamp.
+function setLiveIndicatorPaused(paused: boolean): void {
+  const pulse = liveIndicatorEl
+    .getAnimations()
+    .find(
+      (a): a is CSSAnimation =>
+        a instanceof CSSAnimation && a.animationName === "live-pulse",
+    );
+  if (!paused) {
+    liveIndicatorEl.classList.remove("paused");
+    if (pulse) {
+      pulse.onfinish = null;
+      pulse.effect?.updateTiming({ iterations: Infinity });
+    }
+    return;
+  }
+  if (!pulse || pulse.playState !== "running") {
+    liveIndicatorEl.classList.add("paused");
+    return;
+  }
+  const time = typeof pulse.currentTime === "number" ? pulse.currentTime : 0;
+  const timing = pulse.effect?.getComputedTiming();
+  const duration = typeof timing?.duration === "number" ? timing.duration : 0;
+  if (duration <= 0) {
+    liveIndicatorEl.classList.add("paused");
+    return;
+  }
+  pulse.effect?.updateTiming({
+    iterations: Math.max(1, Math.ceil(time / duration)),
+    fill: "forwards",
+  });
+  pulse.onfinish = () => liveIndicatorEl.classList.add("paused");
+}
+
 function setupEffects(): void {
   effect(() => {
     nowPlayingEmptyEl.classList.toggle("hidden", hasTrack.value);
@@ -1236,7 +1273,7 @@ function setupEffects(): void {
   });
   effect(() => {
     liveIndicatorEl.classList.toggle("hidden", !isStream.value);
-    liveIndicatorEl.classList.toggle("paused", !isPlaying.value);
+    setLiveIndicatorPaused(!isPlaying.value);
   });
   effect(() => {
     // In the layout (invisibly) for the whole stream; .visible fades the text

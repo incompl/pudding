@@ -340,9 +340,12 @@ body.platform-mac #tabs {
   --live-color: var(--surface-hover);
 }
 
+/* Gray sits at the iteration boundaries so pausing can let the in-flight
+   cycle run to completion and land exactly on the .paused color — see
+   setLiveIndicatorPaused in main.ts. */
 @keyframes live-pulse {
-  0%, 100% { --live-color: var(--accent); }
-  50% { --live-color: var(--surface-hover); }
+  0%, 100% { --live-color: var(--surface-hover); }
+  50% { --live-color: var(--accent); }
 }
 
 #now-playing-controls {
