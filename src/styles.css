@@ -251,9 +251,20 @@ body.platform-mac #tabs {
   margin-bottom: 1em;
 }
 
+/* Anchor for the stream metadata: full width so the absolutely positioned
+   block below wraps at panel width, not at the station name's width. */
+#now-playing-text {
+  position: relative;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+}
+
 #now-playing-title,
 #now-playing-artist,
-#now-playing-album {
+#now-playing-album,
+#now-playing-stream-meta p {
   margin: 0;
   word-break: break-word;
 }
@@ -265,14 +276,39 @@ body.platform-mac #tabs {
   line-height: 1.25;
 }
 
-#now-playing-artist {
+#now-playing-artist,
+#stream-meta-song {
   font-size: 1em;
 }
 
-#now-playing-album {
+#now-playing-album,
+#stream-meta-artist {
   font-size: 0.85em;
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* Hangs below the station name without participating in the centered column,
+   so ICY metadata can arrive — and wrap to multiple lines — without moving
+   anything else. */
+#now-playing-stream-meta {
+  position: absolute;
+  top: calc(100% + 0.4em);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  opacity: 0;
+  /* Fade-out is quicker than fade-in so mid-stream song changes (which
+     cross-fade through blank) don't feel sluggish. The 250ms here is mirrored
+     by the swap timer in main.ts. */
+  transition: opacity 250ms ease;
+}
+
+#now-playing-stream-meta.visible {
+  opacity: 1;
+  transition: opacity 600ms ease;
 }
 
 @property --live-color {
@@ -281,9 +317,15 @@ body.platform-mac #tabs {
   initial-value: #b5d17a;
 }
 
-#now-playing-subtitle {
-  margin: 0;
-  margin-top: 0.4em;
+/* Sits in the controls row where the seek bar goes for files; streams have no
+   seekable timeline, so the slot is repurposed instead of showing a disabled
+   bar. */
+#live-indicator {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
   font-size: 0.85em;
   --live-color: var(--accent);
   color: var(--live-color);
@@ -293,7 +335,7 @@ body.platform-mac #tabs {
   transition: --live-color 600ms ease;
 }
 
-#now-playing-subtitle.paused {
+#live-indicator.paused {
   animation: none;
   --live-color: var(--surface-hover);
 }

@@ -50,15 +50,21 @@
           <div id="now-playing-main">
             <p id="now-playing-empty" class="empty-state">Pudding time.</p>
             <img id="now-playing-art" class="hidden" alt="" />
-            <p id="now-playing-title"></p>
-            <p id="now-playing-artist" class="hidden"></p>
-            <p id="now-playing-album" class="hidden"></p>
-            <p id="now-playing-subtitle" class="hidden">Live Broadcast</p>
+            <div id="now-playing-text">
+              <p id="now-playing-title"></p>
+              <p id="now-playing-artist" class="hidden"></p>
+              <p id="now-playing-album" class="hidden"></p>
+              <div id="now-playing-stream-meta" class="hidden">
+                <p id="stream-meta-song"></p>
+                <p id="stream-meta-artist" class="hidden"></p>
+              </div>
+            </div>
           </div>
           <div id="now-playing-controls">
             <button id="play-pause-btn" type="button" aria-label="Play" disabled>▶</button>
             <span id="time-current" class="time">0:00</span>
             <input type="range" id="seek-bar" min="0" max="0" value="0" step="0.1" disabled />
+            <span id="live-indicator" class="hidden">Live Broadcast</span>
             <span id="time-remaining" class="time">-0:00</span>
             <div id="volume-control">
               <button id="volume-btn" type="button" aria-label="Volume">

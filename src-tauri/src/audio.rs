@@ -735,6 +735,9 @@ struct StreamSession {
     // titles as they arrive in-band, we poll between decode steps.
     title: Arc<Mutex<Option<String>>>,
     station: Option<String>,
+    // Last title emitted to the frontend. Deliberately survives reconnects
+    // (pause/resume, outage recovery) so the now-playing line isn't blanked
+    // just to fade the same text back in moments later.
     last_title: Option<String>,
     retry_delay: Duration,
     next_attempt_at: Instant,
@@ -811,11 +814,12 @@ fn stream_step(
                 s.reader = Some(o.reader);
                 s.title = o.title;
                 s.station = o.station;
-                s.last_title = None;
                 s.reset_retry();
-                // Announce the station immediately; the first title follows
-                // via the change-detection below once it arrives in-band.
-                emit_stream_metadata(app, &s.station, &None);
+                // Announce the station immediately, carrying the last known
+                // title across the (re)connect. If the song changed while
+                // disconnected, the first in-band title corrects it within
+                // seconds.
+                emit_stream_metadata(app, &s.station, &s.last_title);
             }
             Err(e) => return s.connect_failed(app, &e),
         }
@@ -824,9 +828,12 @@ fn stream_step(
 
     // Title changes arrive interleaved with audio, exactly on song
     // boundaries; polling between decode steps adds at most one packet of
-    // latency (~tens of ms).
+    // latency (~tens of ms). The Arc only ever moves None -> Some (IcyReader
+    // ignores empty StreamTitle blocks), so None means "nothing has arrived
+    // on this connection yet", not "title cleared" — without the is_some
+    // guard a fresh connection would wipe the carried title.
     let latest = s.title.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if latest != s.last_title {
+    if latest.is_some() && latest != s.last_title {
         s.last_title = latest.clone();
         emit_stream_metadata(app, &s.station, &latest);
     }

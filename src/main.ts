@@ -84,6 +84,13 @@ const npTitle = signal("");
 const npArtist = signal<string | null>(null);
 const npAlbum = signal<string | null>(null);
 const npArt = signal<string | null>(null);
+// ICY now-playing (song + artist) shown under the station name during
+// streams. Null until the first title arrives (or forever, for stations that
+// never send one); the block is absolutely positioned so its arrival never
+// shifts the station name.
+const npStreamMeta = signal<{ song: string; artist: string | null } | null>(
+  null,
+);
 
 const isStream = signal(false);
 const isPlaying = signal(false);
@@ -188,6 +195,36 @@ let lastIndex = 0;
 // the next Play (file selection, seek, or restart-from-end via play button).
 let queueEnded = false;
 
+// Some stations relay scraped playlists and broadcast titles that were never
+// cleaned for ICY: HTML entities still encoded ("&#23665;" for 山) and the
+// whole string wrapped in the source's quoting ("'Artist - Song'"). Decoded
+// by hand rather than via DOMParser/innerHTML so a literal "<" in a title
+// can't be eaten as a tag. Unknown entities pass through unchanged.
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+};
+
+function cleanStreamText(raw: string): string {
+  let s = raw.replace(/&(#[xX]?[0-9a-fA-F]+|[a-zA-Z]+);/g, (m, body) => {
+    if (body.startsWith("#")) {
+      const hex = body[1] === "x" || body[1] === "X";
+      const cp = parseInt(body.slice(hex ? 2 : 1), hex ? 16 : 10);
+      return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+    }
+    return NAMED_ENTITIES[body.toLowerCase()] ?? m;
+  });
+  s = s.trim();
+  if (s.length >= 2 && s.startsWith("'") && s.endsWith("'")) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
 // Library-file lookup for the engine's track-changed events. Auto-advance
 // stays within the current album folder, so currentParent's children are the
 // universe; external/streamed playback has no parent and never advances.
@@ -219,21 +256,25 @@ const engine = new GaplessEngine({
   onQueueEnded: () => {
     queueEnded = true;
   },
-  // ICY now-playing for radio. The title is conventionally "Artist - Song";
-  // split on the first separator, keeping the whole string as the song when
-  // there is none. The manifest's stream name wins over the server's icy-name
-  // (manifest names are user-curated; icy-name is often a slogan) and shows
-  // on the album line under the song.
+  // ICY now-playing for radio. The station name stays on the title line no
+  // matter what so the layout never shifts when metadata arrives; the ICY
+  // title fades in below it. The manifest's stream name wins over the
+  // server's icy-name (manifest names are user-curated; icy-name is often a
+  // slogan). The title is conventionally "Artist - Song"; split on the first
+  // separator, keeping the whole string as the song when there is none.
   onStreamMetadata: (station, title) => {
     if (!isStream.value) return;
-    const stationName = currentStreamName ?? station;
-    if (title) {
-      const sep = title.indexOf(" - ");
-      const artist = sep > 0 ? title.slice(0, sep).trim() : null;
-      const song = sep > 0 ? title.slice(sep + 3).trim() : title;
-      setNowPlaying(song || title, artist, stationName);
+    const stationName =
+      currentStreamName ?? (station ? cleanStreamText(station) : null);
+    setNowPlaying(stationName || "Stream", null, null);
+    const cleaned = title ? cleanStreamText(title) : "";
+    if (cleaned) {
+      const sep = cleaned.indexOf(" - ");
+      const artist = sep > 0 ? cleaned.slice(0, sep).trim() : null;
+      const song = sep > 0 ? cleaned.slice(sep + 3).trim() : cleaned;
+      npStreamMeta.value = { song: song || cleaned, artist };
     } else {
-      setNowPlaying(stationName ?? "Stream", null, null);
+      npStreamMeta.value = null;
     }
   },
 });
@@ -241,7 +282,10 @@ const engine = new GaplessEngine({
 let nowPlayingTitleEl: HTMLElement;
 let nowPlayingArtistEl: HTMLElement;
 let nowPlayingAlbumEl: HTMLElement;
-let nowPlayingSubtitleEl: HTMLElement;
+let nowPlayingStreamMetaEl: HTMLElement;
+let streamMetaSongEl: HTMLElement;
+let streamMetaArtistEl: HTMLElement;
+let liveIndicatorEl: HTMLElement;
 let nowPlayingArtEl: HTMLImageElement;
 let nowPlayingEmptyEl: HTMLElement;
 let playPauseBtn: HTMLButtonElement;
@@ -524,6 +568,7 @@ function playStream(stream: Stream): void {
   // Station name until the first ICY title arrives (or forever, for stations
   // that don't send titles).
   setNowPlaying(stream.name, null, null);
+  npStreamMeta.value = null;
   void engine.playStream(stream.url);
   clearArt();
 }
@@ -1158,6 +1203,22 @@ function setupVolumeControl(): void {
 
 // --- Effects: declarative DOM sync ---
 
+// What the stream-meta block currently shows, tracked outside the signal so
+// title changes can cross-fade: fade the old text out, swap, fade the new one
+// in. Re-emits of the identical title (the engine re-announces on every
+// stream reconnect, e.g. pause/resume) are no-ops.
+let renderedStreamMeta: { song: string; artist: string | null } | null = null;
+let streamMetaFadeTimer: ReturnType<typeof setTimeout> | undefined;
+
+function applyStreamMeta(
+  meta: { song: string; artist: string | null } | null,
+): void {
+  renderedStreamMeta = meta;
+  streamMetaSongEl.textContent = meta?.song ?? "";
+  streamMetaArtistEl.textContent = meta?.artist ?? "";
+  streamMetaArtistEl.classList.toggle("hidden", !meta?.artist);
+}
+
 function setupEffects(): void {
   effect(() => {
     nowPlayingEmptyEl.classList.toggle("hidden", hasTrack.value);
@@ -1174,8 +1235,43 @@ function setupEffects(): void {
     nowPlayingAlbumEl.classList.toggle("hidden", !npAlbum.value);
   });
   effect(() => {
-    nowPlayingSubtitleEl.classList.toggle("hidden", !isStream.value);
-    nowPlayingSubtitleEl.classList.toggle("paused", !isPlaying.value);
+    liveIndicatorEl.classList.toggle("hidden", !isStream.value);
+    liveIndicatorEl.classList.toggle("paused", !isPlaying.value);
+  });
+  effect(() => {
+    // In the layout (invisibly) for the whole stream; .visible fades the text
+    // in once metadata exists. Layout-inert either way — see the CSS.
+    const meta = npStreamMeta.value;
+    const streaming = isStream.value;
+    clearTimeout(streamMetaFadeTimer);
+    nowPlayingStreamMetaEl.classList.toggle("hidden", !streaming);
+    if (!streaming || !meta) {
+      // Leaving streams, or a new stream starting (playStream nulls the
+      // meta): reset instantly so the previous track can't linger over the
+      // fresh station name.
+      applyStreamMeta(null);
+      nowPlayingStreamMetaEl.classList.remove("visible");
+      return;
+    }
+    if (
+      renderedStreamMeta?.song === meta.song &&
+      renderedStreamMeta?.artist === meta.artist
+    ) {
+      return;
+    }
+    if (!renderedStreamMeta) {
+      // First title of this stream: fade in over the reserved spot.
+      applyStreamMeta(meta);
+      nowPlayingStreamMetaEl.classList.add("visible");
+    } else {
+      // Song changed mid-stream: fade out, swap once invisible, fade in.
+      // The delay matches the fade-out duration in the CSS.
+      nowPlayingStreamMetaEl.classList.remove("visible");
+      streamMetaFadeTimer = setTimeout(() => {
+        applyStreamMeta(meta);
+        nowPlayingStreamMetaEl.classList.add("visible");
+      }, 250);
+    }
   });
   effect(() => {
     const url = npArt.value;
@@ -1200,7 +1296,10 @@ function setupEffects(): void {
     playPauseBtn.disabled = !hasTrack.value;
   });
   effect(() => {
+    // Streams swap the whole seek row for the live indicator: no timeline to
+    // scrub, so a disabled bar would just be dead chrome.
     seekBar.disabled = isStream.value;
+    seekBar.classList.toggle("hidden", isStream.value);
     timeCurrentEl.classList.toggle("hidden", isStream.value);
     timeRemainingEl.classList.toggle("hidden", isStream.value);
   });
@@ -1299,7 +1398,10 @@ async function init(): Promise<void> {
   nowPlayingTitleEl = document.querySelector("#now-playing-title") as HTMLElement;
   nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;
   nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
-  nowPlayingSubtitleEl = document.querySelector("#now-playing-subtitle") as HTMLElement;
+  nowPlayingStreamMetaEl = document.querySelector("#now-playing-stream-meta") as HTMLElement;
+  streamMetaSongEl = document.querySelector("#stream-meta-song") as HTMLElement;
+  streamMetaArtistEl = document.querySelector("#stream-meta-artist") as HTMLElement;
+  liveIndicatorEl = document.querySelector("#live-indicator") as HTMLElement;
   nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
   nowPlayingEmptyEl = document.querySelector("#now-playing-empty") as HTMLElement;
   playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
