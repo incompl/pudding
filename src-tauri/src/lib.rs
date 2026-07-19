@@ -15,10 +15,7 @@ use serde::{Deserialize, Serialize};
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_log::{Target, TargetKind};
-use tauri_plugin_store::StoreExt;
 
-const STORE_FILE: &str = "settings.json";
-const KEY_LIBRARY_ROOT: &str = "libraryRoot";
 const DB_FILE: &str = "metadata.db";
 
 struct DbHandle {
@@ -48,8 +45,6 @@ struct TrackMeta {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
-    disc: Option<u32>,
-    track: Option<u32>,
 }
 
 // Holds a file path passed at launch (CLI arg on Win/Linux, Apple Event on macOS)
@@ -460,15 +455,6 @@ fn read_manifest(path: String) -> Result<Vec<Stream>, String> {
     serde_json::from_str(&contents).map_err(|e| e.to_string())
 }
 
-// Asset scope is in-memory only. Re-applied on boot from the store, and
-// extended at runtime when the user changes the library root.
-#[tauri::command]
-fn set_asset_scope(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    app.asset_protocol_scope()
-        .allow_directory(&path, true)
-        .map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 fn rescan_library(path: String, db: State<DbHandle>, app: AppHandle) {
     request_scan(PathBuf::from(path), db.path.clone(), app);
@@ -567,10 +553,6 @@ fn deliver_open_file(app: &AppHandle, path: String) {
     if !is_audio_path(&path) {
         return;
     }
-    // Grant asset-protocol access to just this file so the webview can load it
-    // via convertFileSrc without widening scope to its parent directory.
-    let _ = app.asset_protocol_scope().allow_file(&path);
-
     // try_state, not state(): on a macOS cold-start file open the Opened Apple
     // Event fires before setup() runs. state() would panic if PendingOpen were
     // not yet managed, and that panic cannot unwind through the ObjC callback
@@ -602,32 +584,22 @@ fn frontend_ready(state: State<PendingOpen>) -> Option<String> {
     guard.path.take()
 }
 
-// Prepares an externally-opened file for playback: grants asset access and
-// returns tags read directly from the file (it may not be in the library DB).
+// Tags for an externally-opened file, read directly from the file (it may not
+// be in the library DB).
 #[tauri::command]
-fn prepare_external_file(path: String, app: AppHandle) -> Result<TrackMeta, String> {
+fn prepare_external_file(path: String) -> Result<TrackMeta, String> {
     let p = Path::new(&path);
     if !p.exists() {
         return Err(format!("file not found: {}", path));
     }
-    app.asset_protocol_scope()
-        .allow_file(&path)
-        .map_err(|e| e.to_string())?;
     let tags = read_tags(p);
     Ok(TrackMeta {
         title: tags.title,
         artist: tags.artist,
         album: tags.album,
-        disc: tags.disc,
-        track: tags.track,
     })
 }
 
-// Substring search over the cached metadata (title/artist/album) and the file
-// path (so a filename match works even when a track has no tags). The query is
-// matched literally — LIKE wildcards in user input are escaped so a typed '%'
-// finds a literal '%'. Capped so a one-character query can't return the whole
-// library into the dropdown.
 // === Audio playback commands ===
 //
 // The native audio engine runs on its own threads (output, decode, position).
@@ -661,15 +633,15 @@ fn audio_seek(seconds: f64, engine: State<audio::AudioEngine>) {
 }
 
 #[tauri::command]
-fn audio_stop(engine: State<audio::AudioEngine>) {
-    engine.send(audio::Command::Stop);
-}
-
-#[tauri::command]
 fn audio_set_volume(volume: f32, engine: State<audio::AudioEngine>) {
     engine.set_volume(volume);
 }
 
+// Substring search over the cached metadata (title/artist/album) and the file
+// path (so a filename match works even when a track has no tags). The query is
+// matched literally — LIKE wildcards in user input are escaped so a typed '%'
+// finds a literal '%'. Capped so a one-character query can't return the whole
+// library into the dropdown.
 #[tauri::command]
 fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
     let q = query.trim();
@@ -774,17 +746,6 @@ pub fn run() {
             })?;
             app.manage(engine);
 
-            let store = app.store(STORE_FILE)?;
-            if let Some(value) = store.get(KEY_LIBRARY_ROOT) {
-                if let Some(path) = value.as_str() {
-                    if !path.is_empty() {
-                        // Allow asset-protocol access immediately so audio playback works
-                        // before the frontend kicks off its scan.
-                        app.asset_protocol_scope().allow_directory(path, true)?;
-                    }
-                }
-            }
-
             // Cold-start file open on Windows/Linux arrives as a CLI arg. On macOS
             // it arrives later via RunEvent::Opened (handled below).
             let argv: Vec<String> = std::env::args().collect();
@@ -838,7 +799,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_dir,
             read_manifest,
-            set_asset_scope,
             rescan_library,
             watch_library,
             search_tracks,
@@ -849,7 +809,6 @@ pub fn run() {
             audio_play_stream,
             audio_toggle_pause,
             audio_seek,
-            audio_stop,
             audio_set_volume,
         ])
         .build(tauri::generate_context!())

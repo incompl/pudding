@@ -54,12 +54,11 @@ interface StreamMetadataEvent {
 }
 
 export class GaplessEngine {
-  // Mirror of the engine's notion of "current track" so the UI can answer
-  // hasTrack() / isPaused() / seekBy() synchronously without an IPC round-trip.
+  // Mirror of the engine's notion of "current track" so seekBy()/seekTo() can
+  // compute and guard seek targets synchronously without an IPC round-trip.
   private currentPath: string | null = null;
   private currentDuration = 0;
   private currentPosition = 0;
-  private playing = false;
   private unlistens: UnlistenFn[] = [];
 
   constructor(private cb: AudioEngineCallbacks) {
@@ -83,7 +82,6 @@ export class GaplessEngine {
     );
     this.unlistens.push(
       await listen<StateEvent>("audio:state", (e) => {
-        this.playing = e.payload.playing;
         this.cb.onPlayingChange(e.payload.playing);
         if (!e.payload.has_track) {
           this.currentPath = null;
@@ -113,21 +111,16 @@ export class GaplessEngine {
     await invoke("audio_set_volume", { volume: v });
   }
 
-  async stop(): Promise<void> {
-    await invoke("audio_stop");
-  }
-
   // Start (or replace) playback with a queue of file paths. start_index picks
   // which entry to play first; the engine auto-advances through the rest
   // gaplessly.
   async play(tracks: string[], startIndex: number = 0): Promise<void> {
     if (tracks.length === 0) return;
-    // Optimistic: claim the start track immediately so the UI's
-    // hasTrack()/isPaused() reflect intent before the track-changed event
-    // round-trips back from the engine.
+    // Optimistic: claim the start track immediately so a seek issued before
+    // the track-changed event round-trips back from the engine isn't dropped
+    // by the currentPath guard.
     const start = Math.max(0, Math.min(tracks.length - 1, startIndex));
     this.currentPath = tracks[start];
-    this.playing = true;
     await invoke("audio_play", { tracks, startIndex: start });
   }
 
@@ -136,24 +129,12 @@ export class GaplessEngine {
   // now-playing info flows back through onStreamMetadata.
   async playStream(url: string): Promise<void> {
     // Optimistic, mirroring play(): streams emit no track-changed event, so
-    // claim the source immediately for hasTrack()/isPaused().
+    // claim the source immediately. Duration/position stay 0 — live streams
+    // have no timeline and the UI disables seeking.
     this.currentPath = url;
     this.currentDuration = 0;
     this.currentPosition = 0;
-    this.playing = true;
     await invoke("audio_play_stream", { url });
-  }
-
-  hasTrack(): boolean {
-    return this.currentPath !== null;
-  }
-
-  isPaused(): boolean {
-    return this.currentPath !== null && !this.playing;
-  }
-
-  isPlaying(): boolean {
-    return this.playing;
   }
 
   async togglePause(): Promise<void> {

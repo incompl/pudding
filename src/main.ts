@@ -32,8 +32,6 @@ interface TrackMeta {
   title: string | null;
   artist: string | null;
   album: string | null;
-  disc: number | null;
-  track: number | null;
 }
 
 interface DirListing {
@@ -116,20 +114,6 @@ function displayLabel(node: TreeNode): string {
     return node.artist ? `${node.artist} - ${node.title}` : node.title;
   }
   return node.name;
-}
-
-function compareChildren(a: TreeNode, b: TreeNode): number {
-  if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
-  if (a.isFolder) {
-    return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-  }
-  const ad = a.disc ?? 1;
-  const bd = b.disc ?? 1;
-  if (ad !== bd) return ad - bd;
-  const at = a.track ?? Number.MAX_SAFE_INTEGER;
-  const bt = b.track ?? Number.MAX_SAFE_INTEGER;
-  if (at !== bt) return at - bt;
-  return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
 }
 
 function joinPath(parent: string, child: string): string {
@@ -313,38 +297,54 @@ let splitterEl: HTMLElement;
 
 // --- Tree ---
 
+// Child nodes for one directory listing. Display order comes entirely from
+// the backend: list_dir returns folders sorted by name and files sorted by
+// (disc, track, name), and folders-before-files holds by construction here.
+// `oldFolders` lets reconcileNode carry over an existing folder node (with its
+// loaded/expanded state and children) instead of resetting it to a lazy stub.
+function nodesFromListing(
+  parentPath: string,
+  listing: DirListing,
+  oldFolders?: Map<string, TreeNode>,
+): TreeNode[] {
+  return [
+    ...listing.folders.map<TreeNode>(
+      (name) =>
+        oldFolders?.get(name) ?? {
+          path: joinPath(parentPath, name),
+          name,
+          title: null,
+          artist: null,
+          album: null,
+          disc: null,
+          track: null,
+          isFolder: true,
+          loaded: false,
+          expanded: false,
+          children: [],
+        },
+    ),
+    ...listing.files.map<TreeNode>((f) => ({
+      path: joinPath(parentPath, f.name),
+      name: f.name,
+      title: f.title,
+      artist: f.artist,
+      album: f.album,
+      disc: f.disc,
+      track: f.track,
+      isFolder: false,
+      loaded: true,
+      expanded: false,
+      children: [],
+    })),
+  ];
+}
+
 async function fetchChildren(node: TreeNode): Promise<void> {
   if (node.loaded || !node.isFolder) return;
   try {
     const listing = await invoke<DirListing>("list_dir", { path: node.path });
-    node.children = [
-      ...listing.folders.map<TreeNode>((name) => ({
-        path: joinPath(node.path, name),
-        name,
-        title: null,
-        artist: null,
-        album: null,
-        disc: null,
-        track: null,
-        isFolder: true,
-        loaded: false,
-        expanded: false,
-        children: [],
-      })),
-      ...listing.files.map<TreeNode>((f) => ({
-        path: joinPath(node.path, f.name),
-        name: f.name,
-        title: f.title,
-        artist: f.artist,
-        album: f.album,
-        disc: f.disc,
-        track: f.track,
-        isFolder: false,
-        loaded: true,
-        expanded: false,
-        children: [],
-      })),
-    ];
+    node.children = nodesFromListing(node.path, listing);
     node.loaded = true;
   } catch (e) {
     console.error("list_dir failed for", node.path, e);
@@ -577,8 +577,7 @@ function playStream(stream: Stream): void {
 // Plays a library file picked from the search dropdown. currentParent stays
 // null so there's no album auto-advance (a search hit isn't a folder context);
 // setting currentNodePath still lights up the row if that folder is expanded in
-// the tree. Asset access is already granted by set_asset_scope on the library
-// root, so engine.play can fetch it directly — no prepare step needed.
+// the tree. The native engine opens the file directly — no prepare step needed.
 function playSearchTrack(t: SearchTrack): void {
   currentParent = null;
   currentNodePath.value = t.path;
@@ -689,34 +688,7 @@ async function refreshTree(libraryRoot: string): Promise<void> {
     isFolder: true,
     loaded: true,
     expanded: true,
-    children: [
-      ...listing.folders.map<TreeNode>((name) => ({
-        path: joinPath(libraryRoot, name),
-        name,
-        title: null,
-        artist: null,
-        album: null,
-        disc: null,
-        track: null,
-        isFolder: true,
-        loaded: false,
-        expanded: false,
-        children: [],
-      })),
-      ...listing.files.map<TreeNode>((f) => ({
-        path: joinPath(libraryRoot, f.name),
-        name: f.name,
-        title: f.title,
-        artist: f.artist,
-        album: f.album,
-        disc: f.disc,
-        track: f.track,
-        isFolder: false,
-        loaded: true,
-        expanded: false,
-        children: [],
-      })),
-    ],
+    children: nodesFromListing(libraryRoot, listing),
   };
   renderTree();
 }
@@ -741,38 +713,7 @@ async function reconcileNode(node: TreeNode): Promise<void> {
   const oldFolders = new Map<string, TreeNode>();
   for (const c of node.children) if (c.isFolder) oldFolders.set(c.name, c);
 
-  const next: TreeNode[] = [
-    ...listing.folders.map<TreeNode>(
-      (name) =>
-        oldFolders.get(name) ?? {
-          path: joinPath(node.path, name),
-          name,
-          title: null,
-          artist: null,
-          album: null,
-          disc: null,
-          track: null,
-          isFolder: true,
-          loaded: false,
-          expanded: false,
-          children: [],
-        },
-    ),
-    ...listing.files.map<TreeNode>((f) => ({
-      path: joinPath(node.path, f.name),
-      name: f.name,
-      title: f.title,
-      artist: f.artist,
-      album: f.album,
-      disc: f.disc,
-      track: f.track,
-      isFolder: false,
-      loaded: true,
-      expanded: false,
-      children: [],
-    })),
-  ];
-  next.sort(compareChildren);
+  const next = nodesFromListing(node.path, listing, oldFolders);
   node.children = next;
   // Reconcile sibling subtrees concurrently: each level must await its own
   // list_dir before it knows its children, but independent branches have no
@@ -864,11 +805,6 @@ async function setLibraryRoot(value: string): Promise<void> {
   await store.set(KEY_LIBRARY_ROOT, value);
   await store.save();
   if (value) {
-    try {
-      await invoke("set_asset_scope", { path: value });
-    } catch (e) {
-      console.error("set_asset_scope failed", e);
-    }
     void invoke("rescan_library", { path: value });
   }
   // Watch the new root (or, when value is "", tear the old watcher down).

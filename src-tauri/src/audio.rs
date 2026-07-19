@@ -16,7 +16,7 @@
 // It only reads samples out of the ring buffer, applies volume, and counts
 // frames played.
 //
-// Seek/stop/queue-change use a flush generation counter (AtomicU64). The decode
+// Seek and queue-change use a flush generation counter (AtomicU64). The decode
 // thread bumps it; the callback notices and drains the ring buffer's stale
 // contents on its next invocation.
 //
@@ -93,7 +93,6 @@ pub enum Command {
     },
     TogglePause,
     Seek(f64),
-    Stop,
 }
 
 // === Shared atomics ===
@@ -109,7 +108,7 @@ pub struct SharedState {
     // consumer's space when publishing origins. Reset alongside frames_played.
     total_drained: AtomicU64,
     // Bumped by the decode thread whenever the buffered audio must be
-    // discarded (seek, stop, new Play). The audio callback compares it to its
+    // discarded (seek, new Play). The audio callback compares it to its
     // local cache; on mismatch, it drains its end of the ring before reading.
     flush_gen: AtomicU64,
     // Written by the audio callback after it observes flush_gen change and
@@ -506,7 +505,7 @@ fn decode_loop(
     let mut queue: Vec<PathBuf> = Vec::new();
     let mut queue_idx: usize = 0;
     let mut current: Option<TrackReader> = None;
-    // Radio session. Mutually exclusive with `current`: Play/PlayStream/Stop
+    // Radio session. Mutually exclusive with `current`: Play and PlayStream
     // each clear the other mode before installing their own source.
     let mut stream: Option<StreamSession> = None;
 
@@ -516,7 +515,7 @@ fn decode_loop(
 
     loop {
         // Drain commands non-blocking. Most iterations have none; when a
-        // command does arrive it's usually one of TogglePause/Seek/Stop.
+        // command does arrive it's usually TogglePause or Seek.
         loop {
             match cmd_rx.try_recv() {
                 Ok(cmd) => match cmd {
@@ -628,16 +627,6 @@ fn decode_loop(
                                 emit_state(&app, true, true);
                             }
                         }
-                    }
-                    Command::Stop => {
-                        queue.clear();
-                        queue_idx = 0;
-                        current = None;
-                        stream = None;
-                        producer_frames = 0;
-                        reset_for_new_playback(&shared, &origins);
-                        shared.queue_exhausted.store(true, Ordering::Relaxed);
-                        emit_state(&app, false, false);
                     }
                 },
                 Err(TryRecvError::Empty) => break,
