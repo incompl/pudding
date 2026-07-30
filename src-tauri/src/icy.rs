@@ -214,9 +214,17 @@ impl<R: Read> Read for IcyReader<R> {
 // when scanning and unescape the result. Empty titles (some stations send
 // StreamTitle=''; between songs) map to None.
 fn parse_stream_title(meta: &[u8]) -> Option<String> {
-    // Metadata is nominally Latin-1 or UTF-8 with no declaration; lossy UTF-8
-    // keeps the common case intact and mangles rather than drops the rest.
-    let text = String::from_utf8_lossy(meta);
+    // ICY metadata is nominally Latin-1 but many modern stations send UTF-8.
+    // Try UTF-8 first; if it fails, decode as Latin-1 (each byte maps directly
+    // to the same Unicode code point, so `b as char` is correct).
+    let owned;
+    let text = match std::str::from_utf8(meta) {
+        Ok(s) => std::borrow::Cow::Borrowed(s),
+        Err(_) => {
+            owned = meta.iter().map(|&b| b as char).collect::<String>();
+            std::borrow::Cow::Owned(owned)
+        }
+    };
     let text = text.trim_end_matches('\0');
     let start = text.find("StreamTitle='")? + "StreamTitle='".len();
     let rest = &text[start..];
@@ -402,6 +410,11 @@ mod tests {
         assert_eq!(
             parse_stream_title(b"StreamTitle='A';\0\0\0\0"),
             Some("A".into())
+        );
+        // Latin-1 encoded title (ì = 0xEC in Latin-1, invalid UTF-8).
+        assert_eq!(
+            parse_stream_title(b"StreamTitle='Luned\xec Ore 7,45';"),
+            Some("Lunedì Ore 7,45".into())
         );
     }
 
