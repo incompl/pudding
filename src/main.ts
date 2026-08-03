@@ -17,11 +17,9 @@ const KEY_MANIFEST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
 const KEY_VOLUME = "volume";
 // Window size is remembered per layout mode so the double-click toggle can
-// restore the size you last used in the *other* mode. KEY_WINDOW_LAST_MODE
-// records which mode was active at quit so launch reopens at the right size.
+// restore the size you last used in the *other* mode.
 const KEY_WINDOW_SIZE_NORMAL = "windowSizeNormal";
 const KEY_WINDOW_SIZE_MINI = "windowSizeMini";
-const KEY_WINDOW_LAST_MODE = "windowLastMode";
 const KEY_WINDOW_POSITION = "windowPosition";
 
 // Below this logical (CSS-px) height the layout collapses to the mini player.
@@ -980,12 +978,10 @@ async function setupWindowSize(
   if (storedMini && storedMini.width > 0 && storedMini.height > 0 && storedMini.height <= MINI_MAX_HEIGHT) {
     miniSize = storedMini;
   }
-  const lastMode =
-    (await store.get<string>(KEY_WINDOW_LAST_MODE)) === "mini"
-      ? "mini"
-      : "normal";
-  const restore = lastMode === "mini" ? miniSize : normalSize;
-  await appWindow.setSize(new LogicalSize(restore.width, restore.height));
+  // Always start in normal mode. Mini hides the library/settings, so launching
+  // into it would leave the user unable to pick anything to play without first
+  // expanding the window.
+  await appWindow.setSize(new LogicalSize(normalSize.width, normalSize.height));
 
   // Persist the current logical size under the active mode's key. Reading
   // window.inner* (rather than the resize event's physical payload) keeps
@@ -994,15 +990,13 @@ async function setupWindowSize(
     const width = window.innerWidth;
     const height = window.innerHeight;
     if (width <= 0 || height <= 0) return;
-    const mode = isMiniViewport() ? "mini" : "normal";
-    if (mode === "mini") {
+    if (isMiniViewport()) {
       miniSize = { width, height };
       await store.set(KEY_WINDOW_SIZE_MINI, miniSize);
     } else {
       normalSize = { width, height };
       await store.set(KEY_WINDOW_SIZE_NORMAL, normalSize);
     }
-    await store.set(KEY_WINDOW_LAST_MODE, mode);
     await store.save();
   }, 400);
 
