@@ -2,8 +2,6 @@
 
 ![Pudding screenshot](images/screenshot.png)
 
-Vibe coded media player.
-
 I made this for myself but you're welcome to use it.
 
 ## Philosophy
@@ -32,6 +30,10 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `Space` - play / pause
 - `↑` / `↓` - volume up / down (10%)
 - `←` / `→` - seek back / forward 10s (files only)
+
+## Mini player
+
+Double click the now playing area to switch between mini player and normal player.
 
 ## Tech stack
 
