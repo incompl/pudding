@@ -529,8 +529,12 @@ const persistVolume = debounce(async (v: number) => {
   await store.save();
 }, 200);
 
+// Most recent non-muted volume, restored when unmuting via the volume button.
+let lastNonZeroVolume = 1;
+
 function setVolume(v: number): void {
   const clamped = Math.max(0, Math.min(1, v));
+  if (clamped > 0) lastNonZeroVolume = clamped;
   if (clamped === volume.value) return;
   volume.value = clamped;
   persistVolume(clamped);
@@ -1261,7 +1265,11 @@ function setupPlayerControls(): void {
 
 function setupVolumeControl(): void {
   volumeBtn.addEventListener("click", () => {
-    volumePopoverOpen.value = !volumePopoverOpen.value;
+    setVolume(volume.value > 0 ? 0 : lastNonZeroVolume);
+  });
+
+  volumeControlEl.addEventListener("mouseenter", () => {
+    volumePopoverOpen.value = true;
   });
 
   volumeControlEl.addEventListener("mouseleave", () => {
@@ -1567,6 +1575,7 @@ async function init(): Promise<void> {
   const splitterWidth = (await store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
   const storedVolume = await store.get<number>(KEY_VOLUME);
   volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
+  if (volume.value > 0) lastNonZeroVolume = volume.value;
 
   setupTabs();
   await setupWindowSize(appWindow);
