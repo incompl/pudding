@@ -2,7 +2,8 @@
   color-scheme: dark;
   --left-width: 280px;
   --splitter-width: 5px;
-  --bg: #0f0f0f;
+  --bg: #000;
+  --panel: #0f0f0f;
   --surface: #272727;
   --surface-hover: #3f3f3f;
   --text: #f1f1f1;
@@ -42,6 +43,7 @@ body {
 
 #tabs {
   display: flex;
+  align-items: center;
   width: var(--left-width);
   min-width: 120px;
   flex-shrink: 0;
@@ -211,6 +213,10 @@ body.platform-mac #tabs {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  margin: 0 0 0.5em 0.5em;
+  background: var(--panel);
+  border-radius: 10px;
+  overflow: hidden;
 }
 
 #right {
@@ -581,6 +587,7 @@ body.platform-mac #tabs {
   cursor: col-resize;
   background: transparent;
   position: relative;
+  margin-bottom: 0.5em;
   transition: background 200ms ease;
 }
 
@@ -608,7 +615,7 @@ body.dragging * {
   flex: 1;
   background: none;
   border: none;
-  padding: 0.6em 1em;
+  padding: 0.6em 1em 0.3em;
   cursor: pointer;
   border-bottom: 2px solid transparent;
   font: inherit;
