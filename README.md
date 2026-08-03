@@ -10,6 +10,12 @@ I made this for myself but you're welcome to use it.
 
 Local file playback and internet radio. High polish, no bloat.
 
+## Features
+
+- Gapless local file playback
+- Internet radio with in-band metadata
+- A compact mini player mode
+
 ## Install
 
 No prebuilt releases - build it yourself. Requires [Rust](https://www.rust-lang.org/tools/install), [Node](https://nodejs.org/), and [pnpm](https://pnpm.io/).
