@@ -33,6 +33,14 @@
           </svg>
         </button>
         <button id="settings-back-btn" class="hidden" type="button">Back</button>
+        <button id="expand-btn" type="button" aria-label="Expand" title="Expand">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 3 21 3 21 9" />
+            <polyline points="9 21 3 21 3 15" />
+            <line x1="21" y1="3" x2="14" y2="10" />
+            <line x1="3" y1="21" x2="10" y2="14" />
+          </svg>
+        </button>
       </div>
     </header>
     <main id="main-view">
@@ -51,12 +59,12 @@
             <p id="now-playing-empty" class="empty-state">Pudding time.</p>
             <img id="now-playing-art" class="hidden" alt="" />
             <div id="now-playing-text">
-              <p id="now-playing-title"></p>
-              <p id="now-playing-artist" class="hidden"></p>
-              <p id="now-playing-album" class="hidden"></p>
+              <p id="now-playing-title"><span class="marquee-inner"></span></p>
+              <p id="now-playing-artist" class="hidden"><span class="marquee-inner"></span></p>
+              <p id="now-playing-album" class="hidden"><span class="marquee-inner"></span></p>
               <div id="now-playing-stream-meta" class="hidden">
-                <p id="stream-meta-song"></p>
-                <p id="stream-meta-artist" class="hidden"></p>
+                <p id="stream-meta-song"><span class="marquee-inner"></span></p>
+                <p id="stream-meta-artist" class="hidden"><span class="marquee-inner"></span></p>
               </div>
             </div>
           </div>

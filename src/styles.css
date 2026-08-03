@@ -104,6 +104,34 @@ body.platform-mac #tabs {
   font-size: 0.95em;
 }
 
+/* Only appears in the mini player (see the media query below); occupies the
+   same top-right slot as the settings icon and toggles back to full view. */
+#expand-btn {
+  display: none;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  cursor: pointer;
+  color: var(--accent);
+  transition: background 200ms ease;
+}
+
+#expand-btn:hover {
+  background: var(--surface);
+}
+
+#expand-btn svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
 #settings-btn:hover,
 #settings-back-btn:hover {
   background: var(--surface);
@@ -246,6 +274,9 @@ body.platform-mac #tabs {
   gap: 0.4em;
   min-height: 0;
   padding: 1em;
+  /* double-click here toggles the mini player; don't select the title text */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 #now-playing-art {
@@ -580,6 +611,160 @@ body.platform-mac #tabs {
   border: 0;
   opacity: 0;
   background: transparent;
+}
+
+/* --- Mini player ---
+   Purely responsive: whenever the window is short enough — via the
+   double-click toggle or a manual resize — the library, tabs, search, and
+   settings collapse and the now-playing panel becomes a compact horizontal
+   bar (album art on the left if present, then title/artist, over a full-width
+   controls row). The breakpoint mirrors MINI_MAX_HEIGHT in main.ts. */
+@media (max-height: 480px) {
+  #tabs,
+  #search,
+  #settings-btn,
+  #settings-back-btn,
+  #left,
+  #splitter {
+    display: none;
+  }
+
+  /* The expand button is the one topbar action left in mini. Pin it to the top
+     with the same 6px gap the settings icon has in full view (32px icon
+     centered in the 44px topbar), rather than centering it in the shorter
+     26px mini topbar. */
+  #expand-btn {
+    display: inline-flex;
+    align-self: flex-start;
+    margin-top: 6px;
+  }
+
+  /* A thin drag strip is all that's left of the topbar (macOS traffic lights
+     overlay it); everything else is the now-playing bar. */
+  #topbar {
+    height: 26px;
+  }
+
+  /* Settings is unreachable in mini (its button is hidden), so force the
+     now-playing panel visible even if settings was open when the window
+     shrank. ID beats the .hidden class, so no !important war with the toggle. */
+  #settings-panel {
+    display: none !important;
+  }
+  #now-playing-panel {
+    display: flex !important;
+    /* Small gap between the art/text and the controls row. Kept tighter than
+       the top gap so the content sits closer to the controls it drives. */
+    gap: 0.7em;
+  }
+
+  /* Top padding lifts the art/text off the thin topbar (traffic lights + expand
+     button) so it doesn't butt against them; bottom padding keeps the controls
+     off the window edge. */
+  #right {
+    padding: 0.7em 0.75em;
+  }
+
+  #now-playing-main {
+    flex-direction: row;
+    align-items: stretch;
+    justify-content: flex-start;
+    text-align: left;
+    gap: 0.75em;
+    padding: 0;
+  }
+
+  /* No art: the bar is only text, so center it (title/artist included). The
+     text is shorter than this flex region and gets centered within it, but the
+     region is bounded by a thin topbar above and the taller controls row below.
+     Left raw that asymmetry makes the text sit high, so add a top padding
+     (~gap + controls height minus the topbar) to pull it to the window's center.
+     Not needed when art is present: the art fills the region top-to-bottom. */
+  #now-playing-main:has(#now-playing-art.hidden) {
+    text-align: center;
+    padding-top: 0.8em;
+  }
+
+  /* Default (no track) state: the placeholder is the lone visible item, but the
+     empty #now-playing-text still carries flex: 1 and shoves it to the left.
+     Zero that sibling and center the row so the placeholder lands mid-bar. It
+     matches the no-art rule above (text-align: center + the 1.3em top padding),
+     so it sits exactly where a no-art track's text does — centered between the
+     topbar and controls rather than in the whole window. */
+  #now-playing-main:has(#now-playing-empty:not(.hidden)) {
+    justify-content: center;
+  }
+  #now-playing-main:has(#now-playing-empty:not(.hidden)) #now-playing-text {
+    flex: 0;
+  }
+
+  /* Album art fills the bar's height as a square, rather than the fixed
+     thumbnail it is in the full layout. */
+  #now-playing-art {
+    height: 100%;
+    width: auto;
+    max-width: none;
+    max-height: none;
+    aspect-ratio: 1 / 1;
+    object-fit: cover;
+    margin-bottom: 0;
+    align-self: stretch;
+    flex-shrink: 0;
+  }
+
+  /* Claim the width left of the art so the lines have a box to overflow (and
+     so centered no-art text centers on the bar, not on its own width). */
+  #now-playing-text {
+    flex: 1;
+    min-width: 0;
+    align-self: center;
+  }
+
+  #now-playing-title {
+    font-size: 1.1em;
+  }
+
+  /* Every metadata line — title/station name, artist, album, and the stream
+     song/artist — stays on one line and marquees when too long (distance and
+     duration come from updateMarquee in main.ts). */
+  #now-playing-title,
+  #now-playing-artist,
+  #now-playing-album,
+  #stream-meta-song,
+  #stream-meta-artist {
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .marquee-inner {
+    display: inline-block;
+  }
+  /* Pin to the left while scrolling so translateX(0) shows the start of the
+     text — otherwise a centered over-wide line would clip both ends. */
+  .marquee {
+    text-align: left;
+  }
+  .marquee .marquee-inner {
+    animation: marquee var(--marquee-duration, 6s) ease-in-out 1s infinite
+      alternate;
+  }
+
+  /* Streams: show the ICY song/artist under the station name. In full view this
+     block hangs absolutely-positioned below the title; in the bar there's no
+     reserved space, so let it flow in the text column instead. The first title
+     grows the centered column from one line to three (the station name shifts
+     up once), but thereafter mid-stream track changes swap text within the same
+     three lines and never reflow. Show/hide is still driven by the .hidden
+     toggle (streams only) and the .visible fade. */
+  #now-playing-stream-meta {
+    position: static;
+  }
+}
+
+/* Dwells at each end so the start/end of the text is readable before it
+   reverses (animation is `alternate`). Distance is set per-line in JS. */
+@keyframes marquee {
+  0%, 12% { transform: translateX(0); }
+  88%, 100% { transform: translateX(var(--marquee-distance, 0)); }
 }
 
 #splitter {

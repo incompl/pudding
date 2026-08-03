@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   getCurrentWindow,
-  PhysicalSize,
+  LogicalSize,
   PhysicalPosition,
 } from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
@@ -16,8 +16,19 @@ const KEY_LIBRARY_ROOT = "libraryRoot";
 const KEY_MANIFEST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
 const KEY_VOLUME = "volume";
-const KEY_WINDOW_SIZE = "windowSize";
+// Window size is remembered per layout mode so the double-click toggle can
+// restore the size you last used in the *other* mode. KEY_WINDOW_LAST_MODE
+// records which mode was active at quit so launch reopens at the right size.
+const KEY_WINDOW_SIZE_NORMAL = "windowSizeNormal";
+const KEY_WINDOW_SIZE_MINI = "windowSizeMini";
+const KEY_WINDOW_LAST_MODE = "windowLastMode";
 const KEY_WINDOW_POSITION = "windowPosition";
+
+// Below this logical (CSS-px) height the layout collapses to the mini player.
+// Mirrors the `max-height` breakpoint in styles.css — keep the two in sync.
+const MINI_MAX_HEIGHT = 480;
+const DEFAULT_NORMAL_SIZE = { width: 800, height: 600 };
+const DEFAULT_MINI_SIZE = { width: 367, height: 168 };
 
 interface FileEntry {
   name: string;
@@ -265,11 +276,16 @@ const engine = new GaplessEngine({
 });
 
 let nowPlayingTitleEl: HTMLElement;
+let nowPlayingTitleInner: HTMLElement;
 let nowPlayingArtistEl: HTMLElement;
+let nowPlayingArtistInner: HTMLElement;
 let nowPlayingAlbumEl: HTMLElement;
+let nowPlayingAlbumInner: HTMLElement;
 let nowPlayingStreamMetaEl: HTMLElement;
 let streamMetaSongEl: HTMLElement;
+let streamMetaSongInner: HTMLElement;
 let streamMetaArtistEl: HTMLElement;
+let streamMetaArtistInner: HTMLElement;
 let liveIndicatorEl: HTMLElement;
 let nowPlayingArtEl: HTMLImageElement;
 let nowPlayingEmptyEl: HTMLElement;
@@ -891,26 +907,102 @@ function setupSplitter(initialWidth: string | null): void {
   });
 }
 
+// Last size the window had in each layout mode, in logical (CSS) px. Seeded
+// from the store on launch and updated on every resize; the double-click toggle
+// resizes to whichever of these belongs to the mode it's switching into.
+let normalSize = { ...DEFAULT_NORMAL_SIZE };
+let miniSize = { ...DEFAULT_MINI_SIZE };
+
+// The layout mode is derived purely from the current viewport height, so a
+// manual resize past the breakpoint and the double-click toggle land on the
+// exact same CSS state. window.innerHeight is logical px (matches the media
+// query and MINI_MAX_HEIGHT) regardless of display scale factor.
+function isMiniViewport(): boolean {
+  return window.innerHeight <= MINI_MAX_HEIGHT;
+}
+
+// Double-click handler for the now-playing area: jump across the breakpoint to
+// the other mode, restoring that mode's last-used size. CSS reflows the rest.
+async function toggleMiniPlayer(): Promise<void> {
+  const target = isMiniViewport() ? normalSize : miniSize;
+  await getCurrentWindow().setSize(new LogicalSize(target.width, target.height));
+}
+
+// Marquee the title/artist lines when they'd overflow the mini bar (they must
+// stay on one line there). Off in normal mode, where the lines wrap freely. The
+// distance/duration ride on CSS custom properties so the keyframes are static;
+// speed is a fixed px/sec so long titles don't scroll faster than short ones.
+function updateMarquee(pEl: HTMLElement): void {
+  pEl.classList.remove("marquee");
+  pEl.style.removeProperty("--marquee-distance");
+  pEl.style.removeProperty("--marquee-duration");
+  if (!isMiniViewport()) return;
+  const overflow = pEl.scrollWidth - pEl.clientWidth;
+  if (overflow <= 1) return;
+  pEl.classList.add("marquee");
+  pEl.style.setProperty("--marquee-distance", `-${overflow}px`);
+  // Duration scales with distance so every line scrolls at the same rate
+  // (~25 px/s of overflow, but the keyframes dwell at each end so only ~76% of
+  // the duration is spent moving → ~33 px/s of visible motion). The 3s floor
+  // keeps short overflows from whipping past.
+  pEl.style.setProperty("--marquee-duration", `${Math.max(3, overflow / 25)}s`);
+}
+
+function updateMarquees(): void {
+  updateMarquee(nowPlayingTitleEl);
+  updateMarquee(nowPlayingArtistEl);
+  updateMarquee(nowPlayingAlbumEl);
+  updateMarquee(streamMetaSongEl);
+  updateMarquee(streamMetaArtistEl);
+}
+
 async function setupWindowSize(
   appWindow: ReturnType<typeof getCurrentWindow>,
 ): Promise<void> {
-  const stored = await store.get<{ width: number; height: number }>(
-    KEY_WINDOW_SIZE,
+  // A stored size only counts for a mode if it's on that mode's side of the
+  // breakpoint. This self-heals if the breakpoint changes: a normal size that's
+  // now in the mini range (or vice versa) is discarded in favor of the default,
+  // so the toggle can never get stuck resizing to a size that stays in the same
+  // mode.
+  const storedNormal = await store.get<{ width: number; height: number }>(
+    KEY_WINDOW_SIZE_NORMAL,
   );
-  if (stored && stored.width > 0 && stored.height > 0) {
-    await appWindow.setSize(new PhysicalSize(stored.width, stored.height));
+  if (storedNormal && storedNormal.width > 0 && storedNormal.height > MINI_MAX_HEIGHT) {
+    normalSize = storedNormal;
   }
+  const storedMini = await store.get<{ width: number; height: number }>(
+    KEY_WINDOW_SIZE_MINI,
+  );
+  if (storedMini && storedMini.width > 0 && storedMini.height > 0 && storedMini.height <= MINI_MAX_HEIGHT) {
+    miniSize = storedMini;
+  }
+  const lastMode =
+    (await store.get<string>(KEY_WINDOW_LAST_MODE)) === "mini"
+      ? "mini"
+      : "normal";
+  const restore = lastMode === "mini" ? miniSize : normalSize;
+  await appWindow.setSize(new LogicalSize(restore.width, restore.height));
 
-  const persistSize = debounce(async (width: number, height: number) => {
-    await store.set(KEY_WINDOW_SIZE, { width, height });
+  // Persist the current logical size under the active mode's key. Reading
+  // window.inner* (rather than the resize event's physical payload) keeps
+  // storage in logical px, so restored sizes stay stable across scale factors.
+  const persistSize = debounce(async () => {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    if (width <= 0 || height <= 0) return;
+    const mode = isMiniViewport() ? "mini" : "normal";
+    if (mode === "mini") {
+      miniSize = { width, height };
+      await store.set(KEY_WINDOW_SIZE_MINI, miniSize);
+    } else {
+      normalSize = { width, height };
+      await store.set(KEY_WINDOW_SIZE_NORMAL, normalSize);
+    }
+    await store.set(KEY_WINDOW_LAST_MODE, mode);
     await store.save();
   }, 400);
 
-  await appWindow.onResized(({ payload }) => {
-    if (payload.width > 0 && payload.height > 0) {
-      persistSize(payload.width, payload.height);
-    }
-  });
+  window.addEventListener("resize", () => persistSize());
 
   const storedPos = await store.get<{ x: number; y: number }>(
     KEY_WINDOW_POSITION,
@@ -1194,9 +1286,11 @@ function applyStreamMeta(
   meta: { song: string; artist: string | null } | null,
 ): void {
   renderedStreamMeta = meta;
-  streamMetaSongEl.textContent = meta?.song ?? "";
-  streamMetaArtistEl.textContent = meta?.artist ?? "";
+  streamMetaSongInner.textContent = meta?.song ?? "";
+  streamMetaArtistInner.textContent = meta?.artist ?? "";
   streamMetaArtistEl.classList.toggle("hidden", !meta?.artist);
+  updateMarquee(streamMetaSongEl);
+  updateMarquee(streamMetaArtistEl);
 }
 
 // The live-pulse keyframes start and end on the paused gray, so stopping
@@ -1241,15 +1335,18 @@ function setupEffects(): void {
     nowPlayingEmptyEl.classList.toggle("hidden", hasTrack.value);
   });
   effect(() => {
-    nowPlayingTitleEl.textContent = npTitle.value;
+    nowPlayingTitleInner.textContent = npTitle.value;
+    updateMarquee(nowPlayingTitleEl);
   });
   effect(() => {
-    nowPlayingArtistEl.textContent = npArtist.value ?? "";
+    nowPlayingArtistInner.textContent = npArtist.value ?? "";
     nowPlayingArtistEl.classList.toggle("hidden", !npArtist.value);
+    updateMarquee(nowPlayingArtistEl);
   });
   effect(() => {
-    nowPlayingAlbumEl.textContent = npAlbum.value ?? "";
+    nowPlayingAlbumInner.textContent = npAlbum.value ?? "";
     nowPlayingAlbumEl.classList.toggle("hidden", !npAlbum.value);
+    updateMarquee(nowPlayingAlbumEl);
   });
   effect(() => {
     liveIndicatorEl.classList.toggle("hidden", !isStream.value);
@@ -1303,6 +1400,9 @@ function setupEffects(): void {
       nowPlayingArtEl.removeAttribute("src");
       nowPlayingArtEl.classList.add("hidden");
     }
+    // Art presence changes the width left for the text, so the lines may start
+    // or stop overflowing.
+    updateMarquees();
   });
 
   effect(() => {
@@ -1412,12 +1512,29 @@ async function init(): Promise<void> {
     }
   });
 
+  // Double-click the art/title area (not the controls row) to toggle the mini
+  // player. Not a drag region, so this never conflicts with the topbar's
+  // double-click-to-maximize.
+  const nowPlayingMainEl = document.querySelector("#now-playing-main") as HTMLElement;
+  nowPlayingMainEl.addEventListener("dblclick", () => void toggleMiniPlayer());
+  // Recompute the title/artist marquees on every resize (width change or a
+  // mode switch across the breakpoint both change whether the lines overflow).
+  window.addEventListener("resize", updateMarquees);
+  // Mini-only expand button (shown where the settings icon sits in full view).
+  const expandBtn = document.querySelector("#expand-btn") as HTMLButtonElement;
+  expandBtn.addEventListener("click", () => void toggleMiniPlayer());
+
   nowPlayingTitleEl = document.querySelector("#now-playing-title") as HTMLElement;
+  nowPlayingTitleInner = nowPlayingTitleEl.querySelector(".marquee-inner") as HTMLElement;
   nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;
+  nowPlayingArtistInner = nowPlayingArtistEl.querySelector(".marquee-inner") as HTMLElement;
   nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
+  nowPlayingAlbumInner = nowPlayingAlbumEl.querySelector(".marquee-inner") as HTMLElement;
   nowPlayingStreamMetaEl = document.querySelector("#now-playing-stream-meta") as HTMLElement;
   streamMetaSongEl = document.querySelector("#stream-meta-song") as HTMLElement;
+  streamMetaSongInner = streamMetaSongEl.querySelector(".marquee-inner") as HTMLElement;
   streamMetaArtistEl = document.querySelector("#stream-meta-artist") as HTMLElement;
+  streamMetaArtistInner = streamMetaArtistEl.querySelector(".marquee-inner") as HTMLElement;
   liveIndicatorEl = document.querySelector("#live-indicator") as HTMLElement;
   nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
   nowPlayingEmptyEl = document.querySelector("#now-playing-empty") as HTMLElement;
