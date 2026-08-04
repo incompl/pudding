@@ -38,4 +38,5 @@ rtrb = "0.3"
 rubato = "0.16"
 crossbeam-channel = "0.5"
 ureq = "2"
+url = "2"
 

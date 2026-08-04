@@ -70,7 +70,11 @@ pub fn connect(url: &str) -> Result<IcyConnection, String> {
 
         let content_type = {
             let ct = resp.content_type().trim().to_ascii_lowercase();
-            if ct.is_empty() { None } else { Some(ct) }
+            if ct.is_empty() {
+                None
+            } else {
+                Some(ct)
+            }
         };
 
         if looks_like_playlist(content_type.as_deref(), &target) {
@@ -131,7 +135,11 @@ fn looks_like_playlist(content_type: Option<&str>, url: &str) -> bool {
             return true;
         }
     }
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
     path.ends_with(".pls") || path.ends_with(".m3u") || path.ends_with(".m3u8")
 }
 

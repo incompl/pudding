@@ -2,6 +2,7 @@ mod audio;
 mod icy;
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
@@ -71,6 +72,10 @@ struct DirListing {
 struct Stream {
     name: String,
     url: String,
+    // Optional station art: an http(s) or file:// URL. `default` so existing
+    // manifests without the field still deserialize.
+    #[serde(default)]
+    image: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -197,8 +202,8 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
     let mut visited = HashSet::new();
     walk_audio(&root, &mut files, &mut visited);
 
-    let mut conn = open_connection(&db_path)
-        .map_err(|e| format!("open scan connection failed: {}", e))?;
+    let mut conn =
+        open_connection(&db_path).map_err(|e| format!("open scan connection failed: {}", e))?;
     let tx = conn
         .transaction()
         .map_err(|e| format!("begin tx failed: {}", e))?;
@@ -336,10 +341,16 @@ fn request_scan(root: PathBuf, db_path: PathBuf, app: AppHandle) {
 
 fn scan_and_emit(root: PathBuf, db_path: PathBuf, app: AppHandle) {
     let payload = match run_scan(root, db_path) {
-        Ok(()) => ScanResult { ok: true, error: None },
+        Ok(()) => ScanResult {
+            ok: true,
+            error: None,
+        },
         Err(e) => {
             eprintln!("scan failed: {}", e);
-            ScanResult { ok: false, error: Some(e) }
+            ScanResult {
+                ok: false,
+                error: Some(e),
+            }
         }
     };
     let _ = app.emit("library-scanned", payload);
@@ -442,17 +453,77 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
         let ad = a.disc.unwrap_or(1);
         let bd = b.disc.unwrap_or(1);
         ad.cmp(&bd)
-            .then_with(|| a.track.unwrap_or(u32::MAX).cmp(&b.track.unwrap_or(u32::MAX)))
+            .then_with(|| {
+                a.track
+                    .unwrap_or(u32::MAX)
+                    .cmp(&b.track.unwrap_or(u32::MAX))
+            })
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
     Ok(DirListing { folders, files })
 }
 
+// The manifest is canonically a JSON array of {name, url}, but any .m3u the
+// user already has works too: JSON is tried first, and on failure the file is
+// parsed as extended M3U.
 #[tauri::command]
 fn read_manifest(path: String) -> Result<Vec<Stream>, String> {
     let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&contents).map_err(|e| e.to_string())
+    let json_err = match serde_json::from_str::<Vec<Stream>>(&contents) {
+        Ok(streams) => return Ok(streams),
+        Err(e) => e,
+    };
+    parse_m3u_manifest(&contents).ok_or_else(|| json_err.to_string())
+}
+
+// Lenient like icy::parse_playlist: #EXTINF is optional, its title (after the
+// first comma) names the following URL, and any non-comment line containing
+// "://" counts as a stream. Unnamed entries fall back to their hostname so the
+// station list never shows a raw URL. Returns None when the body has neither
+// an #EXTM3U header nor a single URL — read_manifest then reports the JSON
+// error rather than presenting arbitrary text as an empty manifest.
+fn parse_m3u_manifest(body: &str) -> Option<Vec<Stream>> {
+    let mut saw_header = false;
+    let mut pending_title: Option<String> = None;
+    let mut streams = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            pending_title = rest
+                .split_once(',')
+                .map(|(_, title)| title.trim().to_string())
+                .filter(|title| !title.is_empty());
+        } else if line.starts_with('#') {
+            saw_header |= line.starts_with("#EXTM3U");
+        } else if line.contains("://") {
+            let name = pending_title
+                .take()
+                .unwrap_or_else(|| m3u_fallback_name(line).to_string());
+            streams.push(Stream {
+                name,
+                url: line.to_string(),
+                image: None,
+            });
+        }
+    }
+    (saw_header || !streams.is_empty()).then_some(streams)
+}
+
+// Hostname portion of a URL, or the URL itself if it has no obvious host.
+fn m3u_fallback_name(url: &str) -> &str {
+    let Some((_, rest)) = url.split_once("://") else {
+        return url;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if host.is_empty() {
+        url
+    } else {
+        host
+    }
 }
 
 #[tauri::command]
@@ -519,6 +590,85 @@ fn get_art(path: String) -> Option<String> {
     let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
     let encoded = base64::engine::general_purpose::STANDARD.encode(pic.data());
     Some(format!("data:{};base64,{}", mime, encoded))
+}
+
+// Ceiling on a manifest station image. Anything larger than this is not
+// plausible station art and would balloon the data URL held in the DOM.
+const MAX_STREAM_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+// Station art for a manifest stream: `image` is an http(s) or file:// URL.
+// Returned as a data URL for the same reason get_art's is: the webview CSP
+// only permits 'self' and data: image sources, so neither remote URLs nor
+// arbitrary local files can be given to <img> directly.
+#[tauri::command]
+fn get_stream_image(image: String) -> Option<String> {
+    let (bytes, mime) = if image.starts_with("http://") || image.starts_with("https://") {
+        let resp = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .get(&image)
+            .call()
+            .map_err(|e| log::warn!("stream image fetch failed for {image}: {e}"))
+            .ok()?;
+        // Servers routinely mislabel static files; trust the header only when
+        // it says image, otherwise fall back to the URL's extension.
+        let mime = match resp.content_type() {
+            ct if ct.starts_with("image/") => ct.to_string(),
+            _ => image_mime_from_ext(&image).to_string(),
+        };
+        let mut bytes = Vec::new();
+        // take() caps memory; reading one byte past the limit distinguishes
+        // "exactly at the cap" from "truncated", which must be rejected rather
+        // than decoded as a broken image.
+        resp.into_reader()
+            .take(MAX_STREAM_IMAGE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_STREAM_IMAGE_BYTES {
+            log::warn!("stream image too large for {image}");
+            return None;
+        }
+        (bytes, mime)
+    } else if let Some(path) = file_url_to_path(&image) {
+        let meta = std::fs::metadata(&path).ok()?;
+        if meta.len() > MAX_STREAM_IMAGE_BYTES {
+            log::warn!("stream image too large for {image}");
+            return None;
+        }
+        let bytes = std::fs::read(&path).ok()?;
+        (bytes, image_mime_from_ext(&path.to_string_lossy()).to_string())
+    } else {
+        log::warn!("stream image is not an http(s) or file URL: {image}");
+        return None;
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:{};base64,{}", mime, encoded))
+}
+
+// file:// URL → local path. Url::to_file_path percent-decodes and handles
+// host/drive quirks per platform; anything that isn't a valid file URL is None.
+fn file_url_to_path(image: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(image).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    url.to_file_path().ok()
+}
+
+fn image_mime_from_ext(path: &str) -> &'static str {
+    let ext = path
+        .rsplit('.')
+        .next()
+        .map(|e| e.split(['?', '#']).next().unwrap_or(e).to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        _ => "image/jpeg",
+    }
 }
 
 // Audio extensions we accept via OS file associations. Must match the
@@ -803,6 +953,7 @@ pub fn run() {
             watch_library,
             search_tracks,
             get_art,
+            get_stream_image,
             frontend_ready,
             prepare_external_file,
             audio_play,
@@ -829,4 +980,86 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn m3u_manifest_named_and_bare_entries() {
+        let streams = parse_m3u_manifest(
+            "#EXTM3U\r\n#EXTINF:-1,SomaFM Groove Salad\r\nhttps://ice5.somafm.com/groovesalad-128-mp3\r\n\r\nhttps://stream.nightride.fm/nightride.mp3\r\n",
+        )
+        .unwrap();
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0].name, "SomaFM Groove Salad");
+        assert_eq!(
+            streams[0].url,
+            "https://ice5.somafm.com/groovesalad-128-mp3"
+        );
+        // No #EXTINF: hostname stands in for the name.
+        assert_eq!(streams[1].name, "stream.nightride.fm");
+    }
+
+    #[test]
+    fn m3u_manifest_headerless_and_title_variants() {
+        // Bare URL list with no #EXTM3U header is still a valid manifest.
+        let streams = parse_m3u_manifest("http://ex.am/ple\n").unwrap();
+        assert_eq!(streams[0].name, "ex.am");
+
+        // Attribute-style EXTINF: title is everything after the first comma.
+        let streams =
+            parse_m3u_manifest("#EXTINF:-1 tvg-id=\"x\",My Station\nhttp://ex.am/s\n").unwrap();
+        assert_eq!(streams[0].name, "My Station");
+
+        // Empty EXTINF title falls back like a bare URL; other comments
+        // between EXTINF and URL don't eat the pending title.
+        let streams = parse_m3u_manifest(
+            "#EXTINF:-1,Named\n#EXTVLCOPT:network-caching=1000\nhttp://ex.am/a\n#EXTINF:-1,\nhttp://ex.am/b\n",
+        )
+        .unwrap();
+        assert_eq!(streams[0].name, "Named");
+        assert_eq!(streams[1].name, "ex.am");
+    }
+
+    #[test]
+    fn json_manifest_image_optional() {
+        let streams: Vec<Stream> = serde_json::from_str(
+            r#"[
+                {"name": "Plain", "url": "http://ex.am/a"},
+                {"name": "Remote", "url": "http://ex.am/c", "image": "https://ex.am/c.png"}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(streams[0].image, None);
+        assert_eq!(streams[1].image.as_deref(), Some("https://ex.am/c.png"));
+    }
+
+    #[test]
+    fn file_url_to_path_conversion() {
+        assert_eq!(
+            file_url_to_path("file:///art/My%20Station.png"),
+            Some(PathBuf::from("/art/My Station.png"))
+        );
+        // Non-file URLs and bare paths are not local files.
+        assert_eq!(file_url_to_path("https://ex.am/c.png"), None);
+        assert_eq!(file_url_to_path("art/b.png"), None);
+        assert_eq!(file_url_to_path("/art/b.png"), None);
+    }
+
+    #[test]
+    fn image_mime_guessing() {
+        assert_eq!(image_mime_from_ext("/a/cover.PNG"), "image/png");
+        assert_eq!(image_mime_from_ext("https://x/logo.webp?v=2"), "image/webp");
+        assert_eq!(image_mime_from_ext("noextension"), "image/jpeg");
+    }
+
+    #[test]
+    fn m3u_manifest_rejects_non_playlists() {
+        // Arbitrary text with no header and no URLs is not a manifest.
+        assert!(parse_m3u_manifest("just some notes\nnothing here\n").is_none());
+        // A header alone is a valid, empty manifest.
+        assert_eq!(parse_m3u_manifest("#EXTM3U\n").unwrap().len(), 0);
+    }
 }

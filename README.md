@@ -28,7 +28,7 @@ Local file playback and internet radio. High polish, high completeness, fast, no
 ### Internet radio
 
 - Icecast / SHOUTcast streams with in-band ICY now-playing metadata
-- Customizable station list via a simple JSON manifest
+- Customizable station list via a simple JSON manifest — or point it at any `.m3u` you already have
 - Automatic reconnect with backoff; pausing disconnects, resuming rejoins the live edge
 - `.pls` / `.m3u` playlist URLs resolve automatically
 
@@ -71,4 +71,26 @@ Defines the stream list. Configured in settings.
   { "name": "SomaFM Groove Salad", "url": "https://ice5.somafm.com/groovesalad-128-mp3" },
   { "name": "NightRide FM", "url": "https://stream.nightride.fm/nightride.mp3" }
 ]
+```
+
+Each entry can optionally include an `image` — shown where album art normally appears while the station plays. It's a URL, either http(s) or `file://`.
+
+```json
+[
+  {
+    "name": "SomaFM Groove Salad",
+    "url": "https://ice5.somafm.com/groovesalad-128-mp3",
+    "image": "file:///Users/me/radio-art/groove-salad.png"
+  }
+]
+```
+
+Extended M3U works too, so an existing station list from another player can be used as-is. `#EXTINF` titles become station names; entries without one are named after their hostname.
+
+```
+#EXTM3U
+#EXTINF:-1,SomaFM Groove Salad
+https://ice5.somafm.com/groovesalad-128-mp3
+#EXTINF:-1,NightRide FM
+https://stream.nightride.fm/nightride.mp3
 ```

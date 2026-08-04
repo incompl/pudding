@@ -284,19 +284,14 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
         std::thread::Builder::new()
             .name("audio-output".into())
             .spawn(move || {
-                let stream = match build_stream(
-                    &device,
-                    &stream_cfg,
-                    sample_format,
-                    rb_consumer,
-                    shared,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
-                };
+                let stream =
+                    match build_stream(&device, &stream_cfg, sample_format, rb_consumer, shared) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e));
+                            return;
+                        }
+                    };
                 if let Err(e) = stream.play() {
                     let _ = ready_tx.send(Err(format!("stream.play: {e}")));
                     return;
@@ -466,7 +461,10 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
 
     // Frame-count update. `written` is in samples; divide by channels.
     let frames = (written / OUT_CHANNELS) as u64;
-    state.shared.frames_played.fetch_add(frames, Ordering::Relaxed);
+    state
+        .shared
+        .frames_played
+        .fetch_add(frames, Ordering::Relaxed);
 }
 
 // === Decode loop ===
@@ -588,7 +586,8 @@ fn decode_loop(
                             // Reset resampler state — internal sinc taps from
                             // the old position would otherwise bleed a few ms
                             // of old audio into the new position.
-                            tr.resampler = make_resampler(tr.input_rate, output_rate, tr.input_channels);
+                            tr.resampler =
+                                make_resampler(tr.input_rate, output_rate, tr.input_channels);
                             tr.pending_in = vec![Vec::new(); tr.input_channels];
                             tr.flushed = false;
                             seek_track(tr, target);
@@ -977,9 +976,7 @@ fn decode_and_push(
     // Step 1: pull a packet → decode → append to pending_in (planar).
     let packet = match tr.reader.next_packet() {
         Ok(p) => p,
-        Err(SymError::IoError(ref e))
-            if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-        {
+        Err(SymError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
             // EOF: flush the resampler's tail, push it, then signal end.
             if !tr.flushed {
                 let tail = resample_flush(&mut tr.resampler, &tr.pending_in, tr.input_channels)
@@ -1247,13 +1244,21 @@ fn append_planar(decoded: &AudioBufferRef<'_>, into: &mut [Vec<f32>], expected_c
         AudioBufferRef::U32(buf) => {
             let scale = 1.0 / (u32::MAX as f32 / 2.0);
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| (v as f32 - u32::MAX as f32 / 2.0) * scale));
+                into[c].extend(
+                    buf.chan(c)
+                        .iter()
+                        .map(|&v| (v as f32 - u32::MAX as f32 / 2.0) * scale),
+                );
             }
         }
         AudioBufferRef::U24(buf) => {
             let scale = 1.0 / 8_388_608.0;
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| (v.inner() as f32 - 8_388_608.0) * scale));
+                into[c].extend(
+                    buf.chan(c)
+                        .iter()
+                        .map(|&v| (v.inner() as f32 - 8_388_608.0) * scale),
+                );
             }
         }
         AudioBufferRef::U16(buf) => {
@@ -1409,8 +1414,8 @@ fn position_emit_loop(
         match active_origin {
             Some(origin) => {
                 let delta_frames = frames_played.saturating_sub(origin.at_consumer_frame);
-                let position = origin.start_offset_seconds
-                    + delta_frames as f64 / output_rate as f64;
+                let position =
+                    origin.start_offset_seconds + delta_frames as f64 / output_rate as f64;
                 let position = position.min(origin.duration_seconds);
 
                 if advanced_to_new_track
@@ -1436,9 +1441,7 @@ fn position_emit_loop(
 
                 // Queue-ended detection: producer is done AND playback has
                 // caught up to total_produced.
-                if shared.queue_exhausted.load(Ordering::Relaxed)
-                    && !queue_ended_sent
-                {
+                if shared.queue_exhausted.load(Ordering::Relaxed) && !queue_ended_sent {
                     let produced = shared.total_produced.load(Ordering::Relaxed);
                     if frames_played >= produced {
                         let _ = app.emit("audio:queue-ended", ());

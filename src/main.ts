@@ -65,6 +65,8 @@ interface TreeNode {
 interface Stream {
   name: string;
   url: string;
+  // Optional station art from the JSON manifest: an http(s) or file:// URL.
+  image?: string | null;
 }
 
 interface SearchTrack {
@@ -589,7 +591,15 @@ function playStream(stream: Stream): void {
   setNowPlaying(stream.name, null, null);
   npStreamMeta.value = null;
   void engine.playStream(stream.url);
-  clearArt();
+  // Manifest station art shows in the same spot as album art. Like loadArt,
+  // the previous art stays up until the new image is ready (a failed or absent
+  // fetch resolves to null, which clears it); stations without an image clear
+  // immediately.
+  if (stream.image) {
+    void loadStreamArt(stream.image);
+  } else {
+    clearArt();
+  }
 }
 
 // Plays a library file picked from the search dropdown. currentParent stays
@@ -647,6 +657,20 @@ function clearArt(): void {
 }
 
 async function loadArt(path: string): Promise<void> {
+  await applyArt(() => invoke<string | null>("get_art", { path }), path);
+}
+
+// Station art declared in the stream manifest, fetched by the backend (the
+// CSP forbids remote/file <img> sources, so it arrives as a data URL just
+// like embedded track art).
+async function loadStreamArt(image: string): Promise<void> {
+  await applyArt(() => invoke<string | null>("get_stream_image", { image }), image);
+}
+
+async function applyArt(
+  fetchArt: () => Promise<string | null>,
+  source: string,
+): Promise<void> {
   const id = ++artRequestId;
   // Note: we intentionally do NOT clear npArt here. Keeping the previous
   // track's art on screen until the new one is fetched and decoded avoids a
@@ -654,9 +678,9 @@ async function loadArt(path: string): Promise<void> {
   // album, where the art is identical and shouldn't visibly change at all.
   let dataUrl: string | null;
   try {
-    dataUrl = await invoke<string | null>("get_art", { path });
+    dataUrl = await fetchArt();
   } catch (e) {
-    console.error("get_art failed for", path, e);
+    console.error("art load failed for", source, e);
     return;
   }
   if (id !== artRequestId) return;
@@ -855,7 +879,7 @@ async function browseManifestPath(): Promise<void> {
     directory: false,
     multiple: false,
     defaultPath: manifestPathInput.value || undefined,
-    filters: [{ name: "JSON", extensions: ["json"] }],
+    filters: [{ name: "Manifest", extensions: ["json", "m3u", "m3u8"] }],
   });
   if (typeof selected === "string") {
     await setManifestPath(selected);

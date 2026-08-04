@@ -286,6 +286,10 @@ body.platform-mac #tabs {
   object-fit: contain;
   border-radius: 6px;
   margin-bottom: 1em;
+  /* Let the art shrink (aspect ratio preserved) when the column doesn't fit —
+     e.g. the stream-meta reservation below plus a short window — rather than
+     overflow the panel. */
+  min-height: 0;
 }
 
 /* Anchor for the stream metadata: full width so the absolutely positioned
@@ -346,6 +350,20 @@ body.platform-mac #tabs {
 #now-playing-stream-meta.visible {
   opacity: 1;
   transition: opacity 600ms ease;
+}
+
+/* With station art the centered column ends just above the controls row, so
+   the hanging stream-meta block would crowd the live indicator. Reserve the
+   block's height below the text (margin, not padding — the block anchors to
+   the text's padding-box bottom, so padding would move it down too). Keyed on
+   .hidden, which flips at stream start, not .visible (metadata arrival):
+   the reservation is in place before any text fades in, so nothing shifts.
+   The 3.4em is the meta's own height: 0.4em offset + song line + 0.4em gap
+   + artist line. No-art streams keep today's dead-center title; they have
+   ample room below and don't need the reservation. */
+#now-playing-main:has(#now-playing-art:not(.hidden))
+  #now-playing-text:has(#now-playing-stream-meta:not(.hidden)) {
+  margin-bottom: 3.4em;
 }
 
 @property --live-color {
@@ -757,6 +775,26 @@ body.platform-mac #tabs {
      toggle (streams only) and the .visible fade. */
   #now-playing-stream-meta {
     position: static;
+  }
+
+  /* Until a station sends an ICY title the block's song/artist spans are empty.
+     Flowing an empty block still costs the column its 0.4em gap, lifting the
+     station name off the bar's vertical center. Drop it from layout entirely
+     while it holds no text so the name centers. Keyed on "no non-empty span",
+     not .visible: a mid-stream song change briefly clears .visible to cross-
+     fade but leaves the old text in place until the 250ms swap, so the block
+     never empties and the name doesn't bounce — only the genuine no-metadata
+     case (and the one-time first title) changes the column height. */
+  #now-playing-stream-meta:not(:has(.marquee-inner:not(:empty))) {
+    display: none;
+  }
+
+  /* The full-view reservation for the hanging block (same selector there) is
+     meaningless here where the meta flows in the column — without this reset
+     it would just push the bar's text off-center. */
+  #now-playing-main:has(#now-playing-art:not(.hidden))
+    #now-playing-text:has(#now-playing-stream-meta:not(.hidden)) {
+    margin-bottom: 0;
   }
 }
 
