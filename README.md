@@ -64,7 +64,7 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 
 ## Manifest format
 
-Defines the stream list. Configured in settings.
+Defines the stream list. Configured in settings — point it at a local file or a remote `http(s)` URL.
 
 ```json
 [
