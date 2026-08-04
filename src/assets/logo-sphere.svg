@@ -25,16 +25,6 @@
       <stop offset="0%" stop-color="#000000" stop-opacity="0.35"/>
       <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="inset-face" x1="0" y1="0" x2="0.35" y2="1">
-      <stop offset="0%" stop-color="#3a4a1e" stop-opacity="0.18"/>
-      <stop offset="100%" stop-color="#6e8a3f" stop-opacity="0.05"/>
-    </linearGradient>
-    <clipPath id="tri-clip">
-      <path d="M106 88 L174 128 L106 168 Z"/>
-    </clipPath>
-    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="2"/>
-    </filter>
   </defs>
 
   <ellipse cx="128" cy="226" rx="78" ry="10" fill="url(#shadow)"/>
@@ -45,14 +35,4 @@
 
   <ellipse cx="100" cy="92" rx="34" ry="22" fill="url(#highlight)" transform="rotate(-28 100 92)"/>
   <ellipse cx="86" cy="78" rx="10" ry="6" fill="#ffffff" opacity="0.85" transform="rotate(-28 86 78)"/>
-
-  <!-- lower lip of the inset catches the light -->
-  <path d="M106 88 L174 128 L106 168 Z" transform="translate(2.5 2.5)" fill="#f3fbdc" opacity="0.6" filter="url(#soft)"/>
-  <!-- recessed face sits in shade, interrupting the surface gloss -->
-  <path d="M106 88 L174 128 L106 168 Z" fill="#cbe39e"/>
-  <path d="M106 88 L174 128 L106 168 Z" fill="url(#inset-face)"/>
-  <g clip-path="url(#tri-clip)">
-    <!-- walls facing the light are in shadow -->
-    <path d="M106 88 L174 128 L106 168 Z" transform="translate(3.5 3.5)" fill="none" stroke="#3a4a1e" stroke-width="6" opacity="0.6" filter="url(#soft)"/>
-  </g>
 </svg>
