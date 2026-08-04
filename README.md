@@ -2,17 +2,41 @@
 
 ![Pudding screenshot](images/screenshot.png)
 
-I made this for myself but you're welcome to use it.
+Desktop media player. I made this for myself but you're welcome to use it.
 
 ## Philosophy
 
-Local file playback and internet radio. High polish, no bloat.
+Local file playback and internet radio. High polish, high completeness, fast, no bloat.
 
 ## Features
 
-- Gapless local file playback
-- Internet radio with in-band metadata
-- A compact mini player mode
+### Local playback
+
+- Custom Rust audio engine (symphonia + cpal) with gapless playback: tracks are joined sample-to-sample in a single continuous output stream
+- Plays MP3, FLAC, WAV, AAC/M4A, Ogg/Opus, and AIFF
+- High-quality sinc resampling to match your output device
+
+### Library
+
+- Point it at a folder: no import step, your files browsed as they are
+- Fast SQLite metadata cache, scanned in the background
+- Live library watching: add or edit files on disk and the app updates itself
+- Search across title, artist, album, and filename
+- Embedded album art, and disc/track-number-aware sorting
+- Registered for audio file types: double-click a file in Finder and it plays here (single instance)
+
+### Internet radio
+
+- Icecast / SHOUTcast streams with in-band ICY now-playing metadata
+- Customizable station list via a simple JSON manifest
+- Automatic reconnect with backoff; pausing disconnects, resuming rejoins the live edge
+- `.pls` / `.m3u` playlist URLs resolve automatically
+
+### Interface
+
+- Compact mini player mode (double click now playing)
+- Window size and position remembered separately for mini and normal modes
+- Keyboard shortcuts for playback, volume, and seeking (see below)
 
 ## Install
 
@@ -30,10 +54,6 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `Space` - play / pause
 - `↑` / `↓` - volume up / down (10%)
 - `←` / `→` - seek back / forward 10s (files only)
-
-## Mini player
-
-Double click the now playing area to switch between mini player and normal player.
 
 ## Tech stack
 
