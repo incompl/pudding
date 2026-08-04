@@ -19,6 +19,12 @@ use tauri_plugin_log::{Target, TargetKind};
 
 const DB_FILE: &str = "metadata.db";
 
+// Identifies the app on every outbound HTTP request: manifest and station-art
+// fetches here, plus the ICY stream connection in the icy module. Public
+// directories like radio-browser.info ask clients to send a descriptive
+// User-Agent and may throttle generic ones; the version tracks Cargo.toml.
+pub const USER_AGENT: &str = concat!("pudding/", env!("CARGO_PKG_VERSION"));
+
 struct DbHandle {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
@@ -466,10 +472,23 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
 
 // The manifest is canonically a JSON array of {name, url}, but any .m3u the
 // user already has works too: JSON is tried first, and on failure the file is
-// parsed as extended M3U.
+// parsed as extended M3U. The path is a local file or an http(s) URL (remote
+// manifests are fetched here rather than in the webview, which the CSP blocks).
 #[tauri::command]
 fn read_manifest(path: String) -> Result<Vec<Stream>, String> {
-    let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let contents = if path.starts_with("http://") || path.starts_with("https://") {
+        ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(15))
+            .user_agent(USER_AGENT)
+            .build()
+            .get(&path)
+            .call()
+            .map_err(|e| e.to_string())?
+            .into_string()
+            .map_err(|e| e.to_string())?
+    } else {
+        std::fs::read_to_string(&path).map_err(|e| e.to_string())?
+    };
     let json_err = match serde_json::from_str::<Vec<Stream>>(&contents) {
         Ok(streams) => return Ok(streams),
         Err(e) => e,
@@ -605,6 +624,7 @@ fn get_stream_image(image: String) -> Option<String> {
     let (bytes, mime) = if image.starts_with("http://") || image.starts_with("https://") {
         let resp = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(15))
+            .user_agent(USER_AGENT)
             .build()
             .get(&image)
             .call()

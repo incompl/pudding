@@ -1610,6 +1610,16 @@ async function init(): Promise<void> {
   libraryRootBrowseBtn.addEventListener("click", () => void browseLibraryRoot());
   manifestPathBrowseBtn.addEventListener("click", () => void browseManifestPath());
 
+  // The manifest field also accepts a typed/pasted path or URL: Enter commits
+  // (blur fires "change"), and change re-reads the manifest via the same path
+  // as the Choose… button.
+  manifestPathInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") manifestPathInput.blur();
+  });
+  manifestPathInput.addEventListener("change", () => {
+    void setManifestPath(manifestPathInput.value.trim());
+  });
+
   await listen<ScanResult>("library-scanned", (event) => {
     if (!event.payload.ok) {
       console.error("library scan failed:", event.payload.error);

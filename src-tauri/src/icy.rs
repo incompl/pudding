@@ -52,7 +52,7 @@ fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(CONNECT_TIMEOUT)
         .timeout_read(READ_TIMEOUT)
-        .user_agent(concat!("Pudding/", env!("CARGO_PKG_VERSION")))
+        .user_agent(crate::USER_AGENT)
         .build()
 }
 
