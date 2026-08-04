@@ -292,6 +292,19 @@ body.platform-mac #tabs {
   min-height: 0;
 }
 
+/* While streaming, the ICY metadata hangs absolutely below the station name
+   (see #now-playing-stream-meta), so it's invisible to the flex layout and can
+   ride down over the controls when the art is near full height. Trim the art a
+   touch so the centered art+title group sits higher, leaving the hanging block
+   room above the controls row. The clamp is symmetric (shrinks the group, not
+   an offset), so the no-metadata state stays balanced. Keyed on the meta block
+   existing (flips at stream start), not .visible, so nothing shifts when a
+   title actually arrives. File playback has no hanging block and keeps full
+   art. */
+#now-playing-main:has(#now-playing-stream-meta:not(.hidden)) #now-playing-art {
+  max-height: calc(60vh - 5em);
+}
+
 /* Anchor for the stream metadata: full width so the absolutely positioned
    block below wraps at panel width, not at the station name's width. */
 #now-playing-text {
@@ -350,20 +363,6 @@ body.platform-mac #tabs {
 #now-playing-stream-meta.visible {
   opacity: 1;
   transition: opacity 600ms ease;
-}
-
-/* With station art the centered column ends just above the controls row, so
-   the hanging stream-meta block would crowd the live indicator. Reserve the
-   block's height below the text (margin, not padding — the block anchors to
-   the text's padding-box bottom, so padding would move it down too). Keyed on
-   .hidden, which flips at stream start, not .visible (metadata arrival):
-   the reservation is in place before any text fades in, so nothing shifts.
-   The 3.4em is the meta's own height: 0.4em offset + song line + 0.4em gap
-   + artist line. No-art streams keep today's dead-center title; they have
-   ample room below and don't need the reservation. */
-#now-playing-main:has(#now-playing-art:not(.hidden))
-  #now-playing-text:has(#now-playing-stream-meta:not(.hidden)) {
-  margin-bottom: 3.4em;
 }
 
 @property --live-color {
@@ -730,6 +729,13 @@ body.platform-mac #tabs {
     flex-shrink: 0;
   }
 
+  /* The full-view streaming clamp above has higher specificity and would
+     otherwise cap this bar-height art. Here the meta flows inline in the bar,
+     so there's nothing to make room for — undo it. */
+  #now-playing-main:has(#now-playing-stream-meta:not(.hidden)) #now-playing-art {
+    max-height: none;
+  }
+
   /* Claim the width left of the art so the lines have a box to overflow (and
      so centered no-art text centers on the bar, not on its own width). */
   #now-playing-text {
@@ -787,14 +793,6 @@ body.platform-mac #tabs {
      case (and the one-time first title) changes the column height. */
   #now-playing-stream-meta:not(:has(.marquee-inner:not(:empty))) {
     display: none;
-  }
-
-  /* The full-view reservation for the hanging block (same selector there) is
-     meaningless here where the meta flows in the column — without this reset
-     it would just push the bar's text off-center. */
-  #now-playing-main:has(#now-playing-art:not(.hidden))
-    #now-playing-text:has(#now-playing-stream-meta:not(.hidden)) {
-    margin-bottom: 0;
   }
 }
 
