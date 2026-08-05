@@ -623,14 +623,21 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
     });
   } else {
     // Right-click a track to jump to its artist or album as a queue page. Each
-    // item is only offered when that tag exists (an untagged track has neither,
-    // so no menu opens at all).
+    // item is only offered when that tag exists. An untagged track (common for
+    // OST rips named purely by filename) has neither, so fall back to "Play
+    // folder" on its containing folder — right-click always does something.
     label.addEventListener("contextmenu", (e) => {
       const items = trackContextItems({
         artist: node.artist,
         album: node.album,
         albumArtist: node.albumArtist,
       });
+      if (items.length === 0 && parent.isFolder) {
+        items.push({
+          label: "Play folder",
+          action: () => void playFolder({ path: parent.path, name: parent.name }),
+        });
+      }
       if (items.length === 0) return;
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, items);
