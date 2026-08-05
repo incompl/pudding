@@ -2,6 +2,8 @@
 
 ![Pudding screenshot](images/screenshot.png)
 
+![Mini player screenshot](images/mini.png)
+
 Desktop media player. I made this for myself but you're welcome to use it.
 
 ## Philosophy
