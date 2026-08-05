@@ -1156,14 +1156,19 @@ async function playFolder(folder: SearchFolder): Promise<void> {
 
 // Opens a queue in the right pane and starts it. Playback reuses the album path
 // via a synthetic parent (so shuffle/repeat/gapless all work); the queue view is
-// what makes it visible. Always starts on the first track — the page's natural
-// order — even under shuffle, which still governs what plays next. The synthetic
+// what makes it visible. Under shuffle we start on a random track (matching
+// playFolder) so replaying the same artist/album doesn't always open on track 1;
+// straight play starts on the first track, the page's natural order. Either way
+// the view keeps natural order and just highlights the playing row. The synthetic
 // path is unique per queue and never a real tree path, so the rescan re-bind
 // (suppressed while activeQueue is set) can't repoint currentParent at a folder.
 function playQueue(queue: Queue, syntheticPath: string): void {
   if (queue.tracks.length === 0) return;
   const parent = syntheticParent(syntheticPath, queue.title, queue.tracks);
-  playFile(parent.children[0], parent);
+  const start = shuffleMode.value
+    ? parent.children[Math.floor(Math.random() * parent.children.length)]
+    : parent.children[0];
+  playFile(start, parent);
   activeQueue.value = queue;
 }
 
