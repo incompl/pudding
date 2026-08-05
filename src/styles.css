@@ -44,12 +44,20 @@ body {
   display: flex;
   flex-shrink: 0;
   align-items: stretch;
-  height: 44px;
+  /* 40px (not taller) so the topbar's centered contents — tabs, search, and the
+     mini-player button — sit tight to the top. At this height the mini-player
+     glyph lands ~13px from the top and ~13.5px from the right, i.e. equidistant
+     from the corner; a taller bar pushes it top-heavy. */
+  height: 40px;
 }
 
 #tabs {
   display: flex;
-  align-items: center;
+  /* Bottom-align so the active tab's underline lands on the topbar's bottom edge
+     regardless of tab font size, instead of floating on the leftover slack from
+     vertical centering. That makes the gap down to the #left panel a fixed,
+     controllable margin (see #left) rather than a font-dependent byproduct. */
+  align-items: flex-end;
   width: var(--left-width);
   min-width: 120px;
   flex-shrink: 0;
@@ -350,7 +358,13 @@ body.platform-mac #tabs {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  margin: 0 0 0.5em 0.5em;
+  /* Bottom/left inset 0.5em; top is a smaller 0.3em so the gap from the active
+     tab's underline down to the panel equals the 0.5em gap from the panel to the
+     window bottom. The top margin is measured from the topbar's bottom edge but
+     the underline floats ~3px above that (see .tab margin-bottom), so the top
+     margin is reduced by that much to keep the two visible gaps equal. Right
+     stays flush against the splitter. */
+  margin: 0.3em 0 0.5em 0.5em;
   background: var(--panel);
   border-radius: 10px;
   overflow: hidden;
@@ -758,7 +772,7 @@ body.platform-mac #tabs {
 
   /* The expand button is the one topbar action left in mini. Pin it to the top
      with roughly the same top gap the settings icon has in full view (~27px icon
-     centered in the 44px topbar), rather than centering it in the shorter
+     centered in the 40px topbar), rather than centering it in the shorter
      26px mini topbar. Shuffle/repeat are set-once mode toggles that belong to
      the full view, so mini leaves only expand here — a calmer drag strip. */
   #expand-btn {
@@ -947,7 +961,15 @@ body.dragging * {
   flex: 1;
   background: none;
   border: none;
-  padding: 0.6em 1em 0.3em;
+  /* Two knobs work together while the tab is bottom-aligned in the topbar (see
+     #tabs). margin-bottom lifts the whole box — and thus the underline — up off
+     the bar's bottom edge, tightening the gap between the label and its
+     underline. Bottom padding then sets where the label sits inside the box, so
+     it's tuned to keep the label at the bar's vertical center (aligned with the
+     centered search/mode controls) even as the box floats up. margin+padding sum
+     is roughly constant to hold that alignment. */
+  padding: 0.6em 1em 0.35em;
+  margin-bottom: 0.21em;
   cursor: pointer;
   border-bottom: 2px solid transparent;
   font: inherit;
