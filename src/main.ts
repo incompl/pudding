@@ -513,6 +513,18 @@ async function fetchChildren(node: TreeNode): Promise<void> {
   }
 }
 
+// Recursively loads and expands a folder and every subfolder beneath it, so
+// "Play folder" leaves the whole played subtree open in the tree. Lazy folders
+// are fetched on the way down; already-expanded branches are left untouched.
+async function expandFolderTree(node: TreeNode): Promise<void> {
+  if (!node.isFolder) return;
+  if (!node.loaded) await fetchChildren(node);
+  node.expanded = true;
+  for (const child of node.children) {
+    if (child.isFolder) await expandFolderTree(child);
+  }
+}
+
 async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
   if (node.loaded || !node.isFolder) return;
   const loadingLi = document.createElement("li");
@@ -617,7 +629,12 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
       showContextMenu(e.clientX, e.clientY, [
         {
           label: "Play folder",
-          action: () => void playFolder({ path: node.path, name: node.name }),
+          action: () => {
+            // Expand the played subtree, then reveal + scroll to the folder,
+            // the same way clicking through from search results does.
+            void expandFolderTree(node).then(() => revealInTree(node.path));
+            void playFolder({ path: node.path, name: node.name });
+          },
         },
       ]);
     });
