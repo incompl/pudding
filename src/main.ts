@@ -451,6 +451,7 @@ let settingsPanel: HTMLElement;
 let splitterEl: HTMLElement;
 let queueTitleEl: HTMLElement;
 let queueSubtitleEl: HTMLElement;
+let queueArtEl: HTMLImageElement;
 let queueListEl: HTMLElement;
 
 // --- Tree ---
@@ -770,14 +771,47 @@ function renderStreams(streams: Stream[]): void {
 // playing track changes (both cheap: a queue is at most a few hundred rows).
 // The current track's row is highlighted and scrolled into view; clicking any
 // row plays it within the queue.
+// The queue whose header cover art is currently shown, tracked by identity so
+// renderQueue only re-fetches when the queue actually changes (not on every
+// in-queue track advance). Doubles as the async guard: a load result is only
+// applied if its queue is still the one on screen.
+let loadedArtQueue: Queue | null = null;
+
+async function loadQueueArt(queue: Queue): Promise<void> {
+  const first = queue.tracks[0];
+  if (!first) return;
+  let dataUrl: string | null;
+  try {
+    dataUrl = await invoke<string | null>("get_art", { path: first.path });
+  } catch (e) {
+    console.error("queue art load failed for", first.path, e);
+    return;
+  }
+  // A newer queue was opened while this fetch was in flight — drop the result.
+  if (queue !== loadedArtQueue) return;
+  queueArtEl.src = dataUrl ?? "";
+  queueArtEl.classList.toggle("hidden", !dataUrl);
+}
+
 function renderQueue(queue: Queue | null): void {
   if (!queue) {
     queueListEl.innerHTML = "";
+    loadedArtQueue = null;
+    queueArtEl.classList.add("hidden");
     return;
   }
   queueTitleEl.textContent = queue.title;
   queueSubtitleEl.textContent = queue.subtitle ?? "";
   queueSubtitleEl.classList.toggle("hidden", !queue.subtitle);
+  // renderQueue re-runs on every in-queue track advance; the header cover only
+  // depends on the queue itself, so fetch it once per queue (by identity) rather
+  // than on each advance. Only album queues have a single cover — an artist
+  // queue spans albums, so it stays text-only.
+  if (queue !== loadedArtQueue) {
+    loadedArtQueue = queue;
+    queueArtEl.classList.add("hidden");
+    if (queue.kind === "album") void loadQueueArt(queue);
+  }
 
   const playing = currentNodePath.value;
   queueListEl.innerHTML = "";
@@ -2396,6 +2430,7 @@ async function init(): Promise<void> {
   splitterEl = document.querySelector("#splitter") as HTMLElement;
   queueTitleEl = document.querySelector("#queue-title") as HTMLElement;
   queueSubtitleEl = document.querySelector("#queue-subtitle") as HTMLElement;
+  queueArtEl = document.querySelector("#queue-art") as HTMLImageElement;
   queueListEl = document.querySelector("#queue-list") as HTMLElement;
 
   store = await load(STORE_FILE, { defaults: {}, autoSave: false });

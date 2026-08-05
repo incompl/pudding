@@ -554,9 +554,28 @@ body.platform-mac #tabs {
 
 #queue-header {
   flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.7em;
   padding: 0 0.25em 0.6em;
   border-bottom: 1px solid var(--surface-hover);
   margin-bottom: 0.4em;
+}
+
+/* Album cover shown left of the title; artist queues have no single cover, so
+   it stays hidden and the header collapses back to text-only via the flex gap
+   only applying between rendered children. Sized to the title+subtitle height
+   so an album header is no taller than a text-only artist header. */
+#queue-art {
+  flex: none;
+  width: 2.75em;
+  height: 2.75em;
+  object-fit: cover;
+  border-radius: 5px;
+}
+
+#queue-header-text {
+  min-width: 0;
 }
 
 #queue-title {
