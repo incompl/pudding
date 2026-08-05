@@ -418,6 +418,71 @@ async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
   }
 }
 
+// Lightweight cursor-positioned context menu for tree rows. A single reusable
+// element, repopulated and repositioned per open, styled like the search
+// dropdown (dark lifted surface). Dismisses on any outside press, another
+// right-click, Escape, scroll, or resize.
+let contextMenuEl: HTMLElement | null = null;
+
+function hideContextMenu(): void {
+  contextMenuEl?.classList.add("hidden");
+}
+
+function showContextMenu(
+  x: number,
+  y: number,
+  items: { label: string; action: () => void }[],
+): void {
+  if (!contextMenuEl) {
+    contextMenuEl = document.createElement("div");
+    contextMenuEl.id = "context-menu";
+    contextMenuEl.className = "hidden";
+    document.body.appendChild(contextMenuEl);
+    // A press anywhere outside the menu dismisses it; the menu's own items run
+    // on click, which fires after this mousedown leaves the menu open. Capture
+    // phase so it fires even if a descendant (e.g. the search input's native
+    // shadow DOM) swallows the bubbling event.
+    document.addEventListener(
+      "mousedown",
+      (e) => {
+        if (contextMenuEl && !contextMenuEl.contains(e.target as Node)) hideContextMenu();
+      },
+      true,
+    );
+    // Focus moving out of the menu also dismisses it — covers focusing the
+    // search box (or any control) by click or keyboard, where the mousedown
+    // outside-press alone doesn't reliably reach us.
+    document.addEventListener("focusin", (e) => {
+      if (contextMenuEl && !contextMenuEl.contains(e.target as Node)) hideContextMenu();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hideContextMenu();
+    });
+    window.addEventListener("resize", hideContextMenu);
+    // Capture so a scroll in any container (e.g. the tree) closes the menu,
+    // since its fixed position would otherwise detach from the row.
+    window.addEventListener("scroll", hideContextMenu, true);
+  }
+  contextMenuEl.innerHTML = "";
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "context-menu-item";
+    row.textContent = item.label;
+    row.addEventListener("click", () => {
+      hideContextMenu();
+      item.action();
+    });
+    contextMenuEl.appendChild(row);
+  }
+  contextMenuEl.classList.remove("hidden");
+  // Clamp to the viewport so a row near an edge doesn't push the menu offscreen.
+  const rect = contextMenuEl.getBoundingClientRect();
+  const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
+  const top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4));
+  contextMenuEl.style.left = `${left}px`;
+  contextMenuEl.style.top = `${top}px`;
+}
+
 function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
   const li = document.createElement("li");
   const label = document.createElement("span");
@@ -434,6 +499,19 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
   label.appendChild(icon);
   label.appendChild(document.createTextNode(" " + displayLabel(node)));
   label.addEventListener("click", () => onNodeClick(node, parent, li));
+  // Right-click a folder to play it as one recursive album (all tracks beneath
+  // it, at any depth) — the same behavior as choosing a folder from search.
+  if (node.isFolder) {
+    label.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showContextMenu(e.clientX, e.clientY, [
+        {
+          label: "Play folder",
+          action: () => void playFolder({ path: node.path, name: node.name }),
+        },
+      ]);
+    });
+  }
   li.appendChild(label);
 
   if (node.isFolder && node.expanded) {
