@@ -98,6 +98,12 @@ struct SearchResult {
     album: Option<String>,
 }
 
+#[derive(Serialize)]
+struct FolderResult {
+    path: String,
+    name: String,
+}
+
 fn join_path(parent: &str, child: &str) -> String {
     if parent.ends_with('/') {
         format!("{}{}", parent, child)
@@ -814,6 +820,14 @@ fn audio_set_volume(volume: f32, engine: State<audio::AudioEngine>) {
     engine.set_volume(volume);
 }
 
+// Escapes LIKE wildcards in user input so a typed '%' or '_' matches literally
+// (used with `ESCAPE '\'`). Also doubles backslashes so a literal '\' matches.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 // Substring search over the cached metadata (title/artist/album) and the file
 // path (so a filename match works even when a track has no tags). The query is
 // matched literally — LIKE wildcards in user input are escaped so a typed '%'
@@ -825,11 +839,7 @@ fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    let escaped = q
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    let like = format!("%{}%", escaped);
+    let like = format!("%{}%", escape_like(q));
 
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn
@@ -843,6 +853,102 @@ fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>
                       album COLLATE NOCASE, disc, track,
                       title COLLATE NOCASE
              LIMIT 50",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&like], |row| {
+            Ok(SearchResult {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// Folders whose name (any path segment above a track) contains the query.
+// Folders aren't stored as rows — they're the ancestor directories of cached
+// track paths — so they're derived here: every track path matching the query
+// somewhere is split into its ancestor dirs, and each dir whose own name
+// matches is kept once. Matches search_tracks' literal (escaped) substring
+// semantics and cap.
+#[tauri::command]
+fn search_folders(query: String, db: State<DbHandle>) -> Result<Vec<FolderResult>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let needle = q.to_lowercase();
+    // A folder name only matches if the query is a substring of the full path,
+    // so pre-filter in SQL to avoid walking every track on each keystroke.
+    let like = format!("%{}%", escape_like(q));
+
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn
+        .prepare("SELECT path FROM tracks WHERE path LIKE ?1 ESCAPE '\\'")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&like], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+
+    let mut seen = HashSet::new();
+    let mut out: Vec<FolderResult> = Vec::new();
+    for r in rows {
+        let path = r.map_err(|e| e.to_string())?;
+        // Each '/' (past a leading one) closes an ancestor directory; the final
+        // component is the file itself and is skipped by only looking at slices
+        // ending at a separator.
+        for (i, ch) in path.char_indices() {
+            if ch != '/' || i == 0 {
+                continue;
+            }
+            let dir = &path[..i];
+            let name = dir.rsplit('/').next().unwrap_or(dir);
+            if name.to_lowercase().contains(&needle) && seen.insert(dir.to_string()) {
+                out.push(FolderResult {
+                    path: dir.to_string(),
+                    name: name.to_string(),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    out.truncate(50);
+    Ok(out)
+}
+
+// Every cached track under a folder (recursively), ordered for playback:
+// grouped by album, then disc/track, so an album folder plays in track order
+// and an artist folder plays album by album. Backs the "play a folder from
+// search" action.
+#[tauri::command]
+fn folder_tracks(path: String, db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
+    // Trailing slash so `/a/b` matches `/a/b/…` but not a sibling `/a/bc/…`.
+    let prefix = if path.ends_with('/') {
+        path.clone()
+    } else {
+        format!("{}/", path)
+    };
+    let like = format!("{}%", escape_like(&prefix));
+
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, title, artist, album FROM tracks
+             WHERE path LIKE ?1 ESCAPE '\\'
+             ORDER BY album IS NULL, album COLLATE NOCASE,
+                      disc, track, path COLLATE NOCASE",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -993,6 +1099,8 @@ pub fn run() {
             rescan_library,
             watch_library,
             search_tracks,
+            search_folders,
+            folder_tracks,
             get_art,
             get_stream_image,
             frontend_ready,

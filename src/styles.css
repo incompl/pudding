@@ -270,6 +270,18 @@ body.platform-mac #tabs {
   background: var(--surface-hover);
 }
 
+.search-result .search-icon {
+  flex: none;
+  align-self: center;
+  margin-right: 0.5em;
+  font-size: 0.9em;
+  line-height: 1;
+  /* align-self centers it on the row's geometric middle; the taller title line
+     makes that read a hair high, so nudge it down to sit between the two lines. */
+  position: relative;
+  top: 2px;
+}
+
 .search-result .text {
   min-width: 0;
   flex: 1;

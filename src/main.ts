@@ -76,9 +76,16 @@ interface SearchTrack {
   album: string | null;
 }
 
-// Discriminated rows shown in the search dropdown: library files (from the
-// SQLite metadata cache) and manifest streams (filtered client-side).
+interface SearchFolder {
+  path: string;
+  name: string;
+}
+
+// Discriminated rows shown in the search dropdown: library folders and files
+// (from the SQLite metadata cache) and manifest streams (filtered
+// client-side).
 type SearchItem =
+  | { kind: "folder"; folder: SearchFolder }
   | { kind: "file"; track: SearchTrack }
   | { kind: "stream"; stream: Stream };
 
@@ -415,11 +422,11 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
   const li = document.createElement("li");
   const label = document.createElement("span");
   label.className = "node-label";
-  if (!node.isFolder) {
-    label.dataset.path = node.path;
-    if (currentNodePath.value === node.path) {
-      label.classList.add("playing");
-    }
+  // Every row carries its path so revealInTree can scroll to it; only files
+  // ever match currentNodePath, so the playing highlight stays file-only.
+  label.dataset.path = node.path;
+  if (!node.isFolder && currentNodePath.value === node.path) {
+    label.classList.add("playing");
   }
   const icon = document.createElement("span");
   icon.className = "icon";
@@ -470,10 +477,10 @@ function renderTree(): void {
   treeContainer.appendChild(ul);
 }
 
-// Reveals a library file in the tree: walks root → file, lazily loading and
-// expanding each ancestor folder, re-renders, then scrolls the file's
-// directory to the top of the pane. Bails quietly if the path can't be
-// located (e.g. file removed, or path scheme doesn't match the tree).
+// Reveals a library file or folder in the tree: walks root → target, lazily
+// loading and expanding each ancestor folder, re-renders, then scrolls it into
+// view. Bails quietly if the path can't be located (e.g. removed, or path
+// scheme doesn't match the tree).
 async function revealInTree(path: string): Promise<void> {
   if (!rootNode) return;
   let node: TreeNode = rootNode;
@@ -486,14 +493,22 @@ async function revealInTree(path: string): Promise<void> {
     if (child.isFolder) child.expanded = true;
     node = child;
   }
+  // A folder target is expanded above, so load its children too — otherwise the
+  // expanded row renders as "(empty)" until it's clicked.
+  if (node.isFolder && !node.loaded) await fetchChildren(node);
   renderTree();
   const label = treeContainer.querySelector<HTMLElement>(
     `.node-label[data-path="${CSS.escape(path)}"]`,
   );
-  // The file's <li> sits inside its directory's child <ul>; scroll that
-  // directory's <li> into view so the folder header and file are both shown.
-  const dirLi = label?.closest("li")?.parentElement?.closest("li");
-  (dirLi ?? label)?.scrollIntoView({ block: "start" });
+  if (node.isFolder) {
+    // Scroll the folder's own row to the top so its header and tracks show.
+    label?.closest("li")?.scrollIntoView({ block: "start" });
+  } else {
+    // The file's <li> sits inside its directory's child <ul>; scroll that
+    // directory's <li> into view so the folder header and file are both shown.
+    const dirLi = label?.closest("li")?.parentElement?.closest("li");
+    (dirLi ?? label)?.scrollIntoView({ block: "start" });
+  }
 }
 
 function renderStreams(streams: Stream[]): void {
@@ -758,6 +773,54 @@ function playSearchTrack(t: SearchTrack): void {
   setNowPlaying(t.title ?? fallbackName, t.artist, t.album);
   void loadArt(t.path);
   void engine.play([t.path], 0);
+}
+
+// Plays a folder chosen from the search dropdown. Fetches every track under it
+// and plays them as an ad-hoc album via a synthetic parent node that stands in
+// for a real tree folder, so all the existing album machinery works unchanged:
+// gapless straight-through play, now-playing updates on auto-advance (onAdvance
+// → siblingByPath find the child in currentParent), and shuffle/repeat. The
+// node isn't part of the real tree; a later library rescan re-binds currentParent
+// to the matching tree folder by path if one is loaded. Shuffle starts on a
+// random track (playFile shuffles the rest); straight play starts on the first.
+async function playFolder(folder: SearchFolder): Promise<void> {
+  let tracks: SearchTrack[];
+  try {
+    tracks = await invoke<SearchTrack[]>("folder_tracks", { path: folder.path });
+  } catch (e) {
+    console.error("folder_tracks failed", folder.path, e);
+    return;
+  }
+  if (tracks.length === 0) return;
+  const parent: TreeNode = {
+    path: folder.path,
+    name: folder.name,
+    title: null,
+    artist: null,
+    album: null,
+    disc: null,
+    track: null,
+    isFolder: true,
+    loaded: true,
+    expanded: false,
+    children: tracks.map((t) => ({
+      path: t.path,
+      name: t.path.split(/[\\/]/).pop() ?? t.path,
+      title: t.title,
+      artist: t.artist,
+      album: t.album,
+      disc: null,
+      track: null,
+      isFolder: false,
+      loaded: true,
+      expanded: false,
+      children: [],
+    })),
+  };
+  const start = shuffleMode.value
+    ? parent.children[Math.floor(Math.random() * parent.children.length)]
+    : parent.children[0];
+  playFile(start, parent);
 }
 
 // Plays a file from outside the library (passed in via OS file association).
@@ -1268,7 +1331,11 @@ function setupSearch(): void {
   }
 
   function choose(item: SearchItem): void {
-    if (item.kind === "file") {
+    if (item.kind === "folder") {
+      activeTab.value = "files";
+      void playFolder(item.folder);
+      void revealInTree(item.folder.path);
+    } else if (item.kind === "file") {
       activeTab.value = "files";
       playSearchTrack(item.track);
       void revealInTree(item.track.path);
@@ -1306,7 +1373,25 @@ function setupSearch(): void {
       primary.className = "primary";
       const secondary = document.createElement("div");
       secondary.className = "secondary";
-      if (item.kind === "file") {
+      if (item.kind === "folder") {
+        // A folder icon distinguishes "play this whole folder" rows from the
+        // single-track and stream rows around them.
+        const icon = document.createElement("span");
+        icon.className = "search-icon";
+        icon.textContent = "📁";
+        row.appendChild(icon);
+        primary.textContent = item.folder.name;
+        // The containing folder's path (relative to the library root) gives
+        // context — which artist an album sits under. Skipped for top-level
+        // folders, where the parent is the root itself and adds only noise.
+        const parentPath = item.folder.path.split("/").slice(0, -1).join("/");
+        const root = rootNode?.path ?? "";
+        if (parentPath !== root) {
+          secondary.textContent = parentPath.startsWith(root + "/")
+            ? parentPath.slice(root.length + 1)
+            : parentPath;
+        }
+      } else if (item.kind === "file") {
         const l = searchLabel(item.track);
         primary.textContent = l.primary;
         secondary.textContent = l.secondary;
@@ -1339,15 +1424,21 @@ function setupSearch(): void {
     const streamItems: SearchItem[] = allStreams
       .filter((s) => s.name.toLowerCase().includes(needle))
       .map((s) => ({ kind: "stream", stream: s }));
+    let folderItems: SearchItem[] = [];
     let fileItems: SearchItem[] = [];
     try {
-      const tracks = await invoke<SearchTrack[]>("search_tracks", { query });
+      const [folders, tracks] = await Promise.all([
+        invoke<SearchFolder[]>("search_folders", { query }),
+        invoke<SearchTrack[]>("search_tracks", { query }),
+      ]);
+      folderItems = folders.map((f) => ({ kind: "folder", folder: f }));
       fileItems = tracks.map((t) => ({ kind: "file", track: t }));
     } catch (e) {
-      console.error("search_tracks failed", e);
+      console.error("search failed", e);
     }
     if (token !== queryToken) return;
-    items = [...streamItems, ...fileItems];
+    // Folders first: matching a folder name usually means "play that album".
+    items = [...folderItems, ...streamItems, ...fileItems];
     activeIndex = items.length > 0 ? 0 : -1;
     render();
   }, 150);
