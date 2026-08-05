@@ -1573,6 +1573,15 @@ function setupSearch(): void {
     }
   });
 
+  // Cmd/Ctrl+F focuses the search field (matches Apple Music / iTunes).
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "f" || e.key === "F")) {
+      e.preventDefault();
+      searchInput.focus();
+      searchInput.select();
+    }
+  });
+
   // Swallow mousedown inside the widget so it never reaches the document-level
   // drag-region handler (which would otherwise start a window drag) or the
   // outside-click closer below.

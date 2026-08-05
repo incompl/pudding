@@ -55,6 +55,7 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `Space` - play / pause
 - `↑` / `↓` - volume up / down (10%)
 - `←` / `→` - seek back / forward 10s (files only)
+- `⌘F` / `Ctrl+F` - focus search
 
 ## Tech stack
 
