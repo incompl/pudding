@@ -1,5 +1,6 @@
 mod audio;
 mod icy;
+mod now_playing;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -820,6 +821,33 @@ fn audio_set_volume(volume: f32, engine: State<audio::AudioEngine>) {
     engine.set_volume(volume);
 }
 
+// === System Now Playing (macOS Control Center / media keys) ===
+// The frontend drives these because it alone resolves title/artist/album/art
+// across files, external files, and radio. Position/state come from the engine
+// events the frontend already receives. Off macOS these are no-ops.
+
+#[tauri::command]
+fn now_playing_set_metadata(
+    app: AppHandle,
+    title: String,
+    artist: Option<String>,
+    album: Option<String>,
+    art: Option<String>,
+    duration: f64,
+) {
+    now_playing::set_metadata(&app, title, artist, album, art, duration);
+}
+
+#[tauri::command]
+fn now_playing_set_playback(app: AppHandle, playing: bool, elapsed: f64) {
+    now_playing::set_playback(&app, playing, elapsed);
+}
+
+#[tauri::command]
+fn now_playing_clear(app: AppHandle) {
+    now_playing::clear(&app);
+}
+
 // Escapes LIKE wildcards in user input so a typed '%' or '_' matches literally
 // (used with `ESCAPE '\'`). Also doubles backslashes so a literal '\' matches.
 fn escape_like(s: &str) -> String {
@@ -1034,6 +1062,11 @@ pub fn run() {
             })?;
             app.manage(engine);
 
+            // Register system Now Playing / media-key handlers (macOS). Must run
+            // after the audio engine is managed: the remote-command handlers look
+            // it up to drive play/pause/seek.
+            now_playing::install(&app.handle());
+
             // Cold-start file open on Windows/Linux arrives as a CLI arg. On macOS
             // it arrives later via RunEvent::Opened (handled below).
             let argv: Vec<String> = std::env::args().collect();
@@ -1111,6 +1144,9 @@ pub fn run() {
             audio_seek,
             audio_clear_upcoming,
             audio_set_volume,
+            now_playing_set_metadata,
+            now_playing_set_playback,
+            now_playing_clear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

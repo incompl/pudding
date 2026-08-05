@@ -38,6 +38,7 @@ Local file playback and internet radio. High polish, high completeness, fast, no
 - Compact mini player mode (double click now playing)
 - Window size and position remembered separately for mini and normal modes
 - Keyboard shortcuts for playback, volume, and seeking (see below)
+- macOS system integration: Now Playing in Control Center and the lock screen (with album art), plus hardware media keys for play/pause and next/previous
 
 ## Install
 

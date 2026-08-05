@@ -273,7 +273,7 @@ const engine = new GaplessEngine({
     setNowPlaying(node.title ?? node.name, node.artist, node.album);
     void loadArt(node.path);
   },
-  onTime: (t) => { currentTime.value = t; },
+  onTime: (t) => { currentTime.value = t; nowPlayingPositionTick(t); },
   onDuration: (d) => { duration.value = d; },
   onPlayingChange: (p) => { isPlaying.value = p; },
   onError: (path, message) => {
@@ -303,6 +303,72 @@ const engine = new GaplessEngine({
       npStreamMeta.value = null;
     }
   },
+});
+
+// --- System Now Playing (macOS Control Center / lock screen / media keys) ---
+//
+// The OS integration lives in Rust (now_playing.rs); this half feeds it the
+// resolved metadata + playback state that only the frontend knows. We push
+// metadata whenever it changes and playback state on play/pause, plus a ~1 Hz
+// refresh so the OS scrubber tracks seeks (position events themselves aren't
+// forwarded — the OS extrapolates elapsed time from the last rate we sent).
+
+function pushNowPlayingMeta(): void {
+  if (!hasTrack.value) return;
+  let title = npTitle.value;
+  let artist = npArtist.value;
+  // Radio: surface the current song/artist when the station sends ICY metadata,
+  // falling back to the station name on the title line.
+  if (isStream.value && npStreamMeta.value) {
+    title = npStreamMeta.value.song;
+    artist = npStreamMeta.value.artist ?? npTitle.value;
+  }
+  void invoke("now_playing_set_metadata", {
+    title,
+    artist,
+    album: npAlbum.value,
+    art: npArt.value,
+    // Streams have no timeline; a 0 duration tells the OS to show it as live.
+    duration: isStream.value ? 0 : duration.value,
+  });
+}
+
+let lastPlaybackPush = 0;
+function pushPlayback(elapsed: number): void {
+  if (!hasTrack.value) return;
+  void invoke("now_playing_set_playback", {
+    playing: isPlaying.value,
+    elapsed,
+  });
+  lastPlaybackPush = performance.now();
+}
+
+// Throttled position refresh, called from the engine's position callback so the
+// OS elapsed time re-syncs (e.g. after a seek) without one IPC call per tick.
+function nowPlayingPositionTick(t: number): void {
+  if (!isPlaying.value) return;
+  if (performance.now() - lastPlaybackPush > 1000) pushPlayback(t);
+}
+
+// Metadata card: fires on any change to the fields that make it up.
+effect(() => {
+  // Subscribe to every field the card is built from.
+  npTitle.value;
+  npArtist.value;
+  npAlbum.value;
+  npArt.value;
+  duration.value;
+  npStreamMeta.value;
+  isStream.value;
+  hasTrack.value;
+  pushNowPlayingMeta();
+});
+
+// Play/pause: push immediately so the widget's button state flips at once.
+effect(() => {
+  isPlaying.value;
+  hasTrack.value;
+  pushPlayback(currentTime.peek());
 });
 
 let nowPlayingTitleEl: HTMLElement;
@@ -767,6 +833,58 @@ function handleEnded(): void {
     return;
   }
   queueEnded = true;
+}
+
+// User-initiated skip, driven by the OS Now Playing widget / media keys (there
+// is no in-app skip button). Reuses the same pool / shuffle-bag advancement as
+// handleEnded, but a manual next overrides repeat-one (skip, don't re-loop).
+function skipNext(): void {
+  if (isStream.value) return;
+  const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
+
+  if (shuffleMode.value) {
+    if (shuffleBag.length === 0) refillShuffleBag(current);
+    const next = shuffleBag.shift();
+    if (next) playSingle(next);
+    return;
+  }
+
+  const pool = poolPaths();
+  const nextIdx = pool.indexOf(current ?? "") + 1;
+  if (nextIdx > 0 && nextIdx < pool.length) {
+    queueEnded = false;
+    lastQueue = pool;
+    lastIndex = nextIdx;
+    void engine.play(pool, nextIdx);
+  } else if (repeatMode.value === "all" && pool.length > 0) {
+    // Wrap to the album start; without repeat-all a next past the end is a no-op.
+    queueEnded = false;
+    lastQueue = pool;
+    lastIndex = 0;
+    void engine.play(pool, 0);
+  }
+}
+
+// Previous: within the first few seconds of a track it steps back a track,
+// otherwise it restarts the current one — the near-universal transport
+// convention. Shuffle keeps no back-history, so it just restarts.
+function skipPrev(): void {
+  if (isStream.value) return;
+  if (currentTime.value > 3 || shuffleMode.value) {
+    void engine.seekTo(0);
+    return;
+  }
+  const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
+  const pool = poolPaths();
+  const prevIdx = pool.indexOf(current ?? "") - 1;
+  if (prevIdx >= 0) {
+    queueEnded = false;
+    lastQueue = pool;
+    lastIndex = prevIdx;
+    void engine.play(pool, prevIdx);
+  } else {
+    void engine.seekTo(0);
+  }
 }
 
 function playFile(node: TreeNode, parent: TreeNode): void {
@@ -2020,6 +2138,11 @@ async function init(): Promise<void> {
   await listen<string>("open-file", (event) => {
     void openExternalFile(event.payload);
   });
+
+  // Next / previous from the OS Now Playing widget or hardware media keys. The
+  // app has no in-app skip control; these are the only path to skipNext/Prev.
+  await listen("remote-next", () => skipNext());
+  await listen("remote-prev", () => skipPrev());
 
   // Drain any file passed at launch (cold start). Must happen after the
   // open-file listener is registered so the ready-flag race is closed.

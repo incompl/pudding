@@ -40,3 +40,23 @@ crossbeam-channel = "0.5"
 ureq = "2"
 url = "2"
 
+# macOS system Now Playing + media keys (MediaPlayer.framework). Direct objc2
+# bindings rather than a cross-platform crate: this integration is macOS-only
+# and wants exact control over artwork / elapsed-time semantics.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSDictionary", "NSValue", "NSObject", "NSData"] }
+objc2-app-kit = { version = "0.3", features = ["NSImage"] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+objc2-media-player = { version = "0.3", features = [
+    "MPNowPlayingInfoCenter",
+    "MPRemoteCommandCenter",
+    "MPRemoteCommand",
+    "MPRemoteCommandEvent",
+    "MPMediaItem",
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+] }
+block2 = "0.6"
+
