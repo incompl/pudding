@@ -8,8 +8,14 @@
   --surface-hover: #3f3f3f;
   --text: #f1f1f1;
   --text-muted: #aaa;
+  --text-dim: #888;
   --accent: #b5d17a;
+  --accent-dim: #7e9152;
   --danger: #f87171;
+  /* Line-art folder used as a mask in the search dropdown. Same 24x24 /
+     stroke-width-2 recipe as the search-input magnifier; color comes from the
+     element's background-color, so the stroke color here is arbitrary. */
+  --folder-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E");
 }
 
 html,
@@ -251,7 +257,9 @@ body.platform-mac #tabs {
   width: 320px;
   max-height: 60vh;
   overflow-y: auto;
-  background: var(--surface);
+  /* A touch darker than the resting surface reads as a lifted, focused
+     element, without going all the way to the near-black sidebar panel. */
+  background: #1a1a1a;
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   z-index: 20;
@@ -261,7 +269,7 @@ body.platform-mac #tabs {
 .search-result {
   display: flex;
   align-items: baseline;
-  padding: 0.4em 0.8em;
+  padding: 0.25em 0.8em;
   cursor: pointer;
 }
 
@@ -274,12 +282,22 @@ body.platform-mac #tabs {
   flex: none;
   align-self: center;
   margin-right: 0.5em;
-  font-size: 0.9em;
-  line-height: 1;
+  width: 1em;
+  height: 1em;
+  /* A stroked-folder SVG painted via mask, so background-color is the ink:
+     the icon inherits the row's muted/accent color like the rest of the UI. */
+  background-color: var(--text-muted);
+  -webkit-mask: var(--folder-icon) no-repeat center / contain;
+  mask: var(--folder-icon) no-repeat center / contain;
   /* align-self centers it on the row's geometric middle; the taller title line
      makes that read a hair high, so nudge it down to sit between the two lines. */
   position: relative;
   top: 2px;
+}
+
+.search-result:hover .search-icon,
+.search-result.active .search-icon {
+  background-color: var(--accent);
 }
 
 .search-result .text {
@@ -294,12 +312,24 @@ body.platform-mac #tabs {
   text-overflow: ellipsis;
 }
 
+.search-result:hover .primary,
+.search-result.active .primary {
+  color: var(--accent);
+}
+
 .search-result .secondary {
   font-size: 0.8em;
-  color: var(--text-muted);
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* On the highlighted row the metadata line takes a dimmed accent green, tying
+   it to the accent title above without competing with it. */
+.search-result:hover .secondary,
+.search-result.active .secondary {
+  color: var(--accent-dim);
 }
 
 .search-empty {

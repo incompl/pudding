@@ -1375,10 +1375,10 @@ function setupSearch(): void {
       secondary.className = "secondary";
       if (item.kind === "folder") {
         // A folder icon distinguishes "play this whole folder" rows from the
-        // single-track and stream rows around them.
+        // single-track and stream rows around them. The glyph is a masked SVG
+        // in .search-icon so it takes the row's color instead of the OS emoji.
         const icon = document.createElement("span");
         icon.className = "search-icon";
-        icon.textContent = "📁";
         row.appendChild(icon);
         primary.textContent = item.folder.name;
         // The containing folder's path (relative to the library root) gives
