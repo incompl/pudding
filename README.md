@@ -23,6 +23,7 @@ Local file playback and internet radio. High polish, high completeness, fast, no
 - Fast SQLite metadata cache, scanned in the background
 - Live library watching: add or edit files on disk and the app updates itself
 - Search across title, artist, album, and filename — or match a folder and play it as an album
+- Artist and album search results, or a track's right-click menu, open a queue of every matching track in the right pane
 - Embedded album art, and disc/track-number-aware sorting
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
 

@@ -44,6 +44,11 @@ struct FileEntry {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    // Raw ALBUMARTIST tag (None when untagged). The frontend forms the album
+    // grouping key as albumArtist ?? artist — see album_tracks below — so a
+    // track row carries what "go to album" needs without a DB round trip.
+    #[serde(rename = "albumArtist")]
+    album_artist: Option<String>,
     disc: Option<u32>,
     track: Option<u32>,
 }
@@ -105,6 +110,21 @@ struct FolderResult {
     name: String,
 }
 
+#[derive(Serialize)]
+struct ArtistResult {
+    name: String,
+}
+
+// An album is identified by its name plus its album artist — the standard
+// grouping key mainstream players use. `artist` here is the *album* artist:
+// the ALBUMARTIST tag when present, else the (single) track artist. This keeps
+// a properly-tagged Various-Artists compilation as one album.
+#[derive(Serialize)]
+struct AlbumResult {
+    album: String,
+    artist: String,
+}
+
 fn join_path(parent: &str, child: &str) -> String {
     if parent.ends_with('/') {
         format!("{}{}", parent, child)
@@ -117,13 +137,14 @@ struct Tags {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    album_artist: Option<String>,
     disc: Option<u32>,
     track: Option<u32>,
 }
 
 // The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
 // and the next startup will drop and recreate it.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 // WAL lets the scan's write transaction run without blocking concurrent reads
 // (list_dir, get_metadata) on the main connection.
@@ -147,6 +168,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             title TEXT,
             artist TEXT,
             album TEXT,
+            album_artist TEXT,
             disc INTEGER,
             track INTEGER
         );",
@@ -162,6 +184,7 @@ fn read_tags(path: &std::path::Path) -> Tags {
         title: None,
         artist: None,
         album: None,
+        album_artist: None,
         disc: None,
         track: None,
     };
@@ -178,6 +201,12 @@ fn read_tags(path: &std::path::Path) -> Tags {
         title: norm(tag.title()),
         artist: norm(tag.artist()),
         album: norm(tag.album()),
+        // No Accessor shortcut for album artist; pull it by key. Cow-wrapped so
+        // it flows through the same norm() (trim + drop-if-empty) as the rest.
+        album_artist: norm(
+            tag.get_string(&lofty::tag::ItemKey::AlbumArtist)
+                .map(std::borrow::Cow::Borrowed),
+        ),
         disc: tag.disk(),
         track: tag.track(),
     }
@@ -261,14 +290,15 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
 
         let tags = read_tags(file);
         let _ = tx.execute(
-            "INSERT INTO tracks (path, mtime, size, title, artist, album, disc, track)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO tracks (path, mtime, size, title, artist, album, album_artist, disc, track)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(path) DO UPDATE SET
                  mtime = excluded.mtime,
                  size = excluded.size,
                  title = excluded.title,
                  artist = excluded.artist,
                  album = excluded.album,
+                 album_artist = excluded.album_artist,
                  disc = excluded.disc,
                  track = excluded.track",
             params![
@@ -278,6 +308,7 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
                 tags.title,
                 tags.artist,
                 tags.album,
+                tags.album_artist,
                 tags.disc,
                 tags.track
             ],
@@ -373,6 +404,7 @@ type MetaRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
     Option<u32>,
     Option<u32>,
 );
@@ -386,7 +418,7 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
     for chunk in paths.chunks(900) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT path, title, artist, album, disc, track FROM tracks WHERE path IN ({})",
+            "SELECT path, title, artist, album, album_artist, disc, track FROM tracks WHERE path IN ({})",
             placeholders
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -400,6 +432,7 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ),
                 ))
             })
@@ -446,15 +479,16 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
     };
     let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
     for (name, full) in file_names.into_iter().zip(fulls.into_iter()) {
-        let (title, artist, album, disc, track) = meta_map
+        let (title, artist, album, album_artist, disc, track) = meta_map
             .get(&full)
             .cloned()
-            .unwrap_or((None, None, None, None, None));
+            .unwrap_or((None, None, None, None, None, None));
         files.push(FileEntry {
             name,
             title,
             artist,
             album,
+            album_artist,
             disc,
             track,
         });
@@ -996,6 +1030,142 @@ fn folder_tracks(path: String, db: State<DbHandle>) -> Result<Vec<SearchResult>,
     Ok(out)
 }
 
+// The album grouping key, matching how mainstream players identify an album:
+// the ALBUMARTIST tag when present, else the track artist. An empty string
+// stands in for "no artist at all" so the value is never NULL and equality
+// comparisons (and the frontend's albumArtist ?? artist) stay total.
+const ALBUM_ARTIST_EXPR: &str = "COALESCE(NULLIF(album_artist, ''), artist, '')";
+
+// Distinct artists whose name contains the query. Backs the "artist" rows in
+// search; choosing one opens an immutable queue of every track by that artist.
+#[tauri::command]
+fn search_artists(query: String, db: State<DbHandle>) -> Result<Vec<ArtistResult>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let like = format!("%{}%", escape_like(q));
+
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT artist FROM tracks
+             WHERE artist IS NOT NULL AND artist <> '' AND artist LIKE ?1 ESCAPE '\\'
+             ORDER BY artist COLLATE NOCASE
+             LIMIT 50",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&like], |row| Ok(ArtistResult { name: row.get(0)? }))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// Distinct (album, album-artist) pairs whose album name contains the query.
+// Choosing one opens an immutable queue of the album's tracks in disc/track
+// order.
+#[tauri::command]
+fn search_albums(query: String, db: State<DbHandle>) -> Result<Vec<AlbumResult>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let like = format!("%{}%", escape_like(q));
+
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let sql = format!(
+        "SELECT album, {expr} AS album_artist FROM tracks
+         WHERE album IS NOT NULL AND album <> '' AND album LIKE ?1 ESCAPE '\\'
+         GROUP BY album, album_artist
+         ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE
+         LIMIT 50",
+        expr = ALBUM_ARTIST_EXPR
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&like], |row| {
+            Ok(AlbumResult {
+                album: row.get(0)?,
+                artist: row.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// Every track by an artist, ordered album by album (then disc/track) for
+// playback. Backs the artist queue page.
+#[tauri::command]
+fn artist_tracks(artist: String, db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, title, artist, album FROM tracks
+             WHERE artist = ?1
+             ORDER BY album IS NULL, album COLLATE NOCASE,
+                      disc, track, path COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&artist], |row| {
+            Ok(SearchResult {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// Every track on an album (identified by name + album artist), in disc/track
+// order. `album_artist` is the grouping key the frontend already holds —
+// albumArtist ?? artist for a track row, or the value from a search album row.
+// Backs the album queue page.
+#[tauri::command]
+fn album_tracks(
+    album: String,
+    album_artist: String,
+    db: State<DbHandle>,
+) -> Result<Vec<SearchResult>, String> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let sql = format!(
+        "SELECT path, title, artist, album FROM tracks
+         WHERE album = ?1 AND {expr} = ?2
+         ORDER BY disc, track, path COLLATE NOCASE",
+        expr = ALBUM_ARTIST_EXPR
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![album, album_artist], |row| {
+            Ok(SearchResult {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1134,6 +1304,10 @@ pub fn run() {
             search_tracks,
             search_folders,
             folder_tracks,
+            search_artists,
+            search_albums,
+            artist_tracks,
+            album_tracks,
             get_art,
             get_stream_image,
             frontend_ready,

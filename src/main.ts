@@ -33,6 +33,9 @@ interface FileEntry {
   title: string | null;
   artist: string | null;
   album: string | null;
+  // Raw ALBUMARTIST tag; combined as albumArtist ?? artist to form the album
+  // grouping key for "go to album". See the backend's album_tracks.
+  albumArtist: string | null;
   disc: number | null;
   track: number | null;
 }
@@ -54,6 +57,7 @@ interface TreeNode {
   title: string | null;
   artist: string | null;
   album: string | null;
+  albumArtist: string | null;
   disc: number | null;
   track: number | null;
   isFolder: boolean;
@@ -81,13 +85,43 @@ interface SearchFolder {
   name: string;
 }
 
-// Discriminated rows shown in the search dropdown: library folders and files
-// (from the SQLite metadata cache) and manifest streams (filtered
-// client-side).
+interface SearchArtist {
+  name: string;
+}
+
+// An album is (name, album artist) — the grouping key from the backend, where
+// `artist` is the album artist (ALBUMARTIST tag, else the track artist).
+interface SearchAlbum {
+  album: string;
+  artist: string;
+}
+
+// Discriminated rows shown in the search dropdown: artists and albums, library
+// folders and files (all from the SQLite metadata cache), and manifest streams
+// (filtered client-side).
 type SearchItem =
+  | { kind: "artist"; artist: SearchArtist }
+  | { kind: "album"; album: SearchAlbum }
   | { kind: "folder"; folder: SearchFolder }
   | { kind: "file"; track: SearchTrack }
   | { kind: "stream"; stream: Stream };
+
+// --- Queue ---
+//
+// An immutable, ordered list of tracks that playback advances through, shown as
+// a list in the right pane (replacing the now-playing card). Today the only
+// sources are artist and album pages; the `kind` discriminant and the standalone
+// Queue shape leave room for a future mutable "playlist" kind without reworking
+// the view or the advancement logic — which already treats poolPaths() (the
+// current synthetic parent's children) as "the queue".
+type QueueKind = "artist" | "album"; // future: "playlist"
+
+interface Queue {
+  kind: QueueKind;
+  title: string; // header line: the artist or album name
+  subtitle: string | null; // e.g. the album artist, or a track count
+  tracks: SearchTrack[];
+}
 
 interface ScanResult {
   ok: boolean;
@@ -121,6 +155,11 @@ const currentStreamUrl = signal<string | null>(null);
 
 const settingsOpen = signal(false);
 const activeTab = signal<"files" | "streams">("files");
+
+// The queue currently open in the right pane, or null when showing the normal
+// now-playing card. Set by openArtistQueue/openAlbumQueue; cleared when any
+// non-queue playback starts (a tree album, a stream, a search track/folder).
+const activeQueue = signal<Queue | null>(null);
 
 // Playback-mode controls (files view only): Shuffle (on/off) and Repeat, a
 // three-state cycle matching every mainstream player — off (play through and
@@ -410,6 +449,9 @@ let searchResultsEl: HTMLElement;
 let nowPlayingPanel: HTMLElement;
 let settingsPanel: HTMLElement;
 let splitterEl: HTMLElement;
+let queueTitleEl: HTMLElement;
+let queueSubtitleEl: HTMLElement;
+let queueListEl: HTMLElement;
 
 // --- Tree ---
 
@@ -432,6 +474,7 @@ function nodesFromListing(
           title: null,
           artist: null,
           album: null,
+          albumArtist: null,
           disc: null,
           track: null,
           isFolder: true,
@@ -446,6 +489,7 @@ function nodesFromListing(
       title: f.title,
       artist: f.artist,
       album: f.album,
+      albumArtist: f.albumArtist,
       disc: f.disc,
       track: f.track,
       isFolder: false,
@@ -577,6 +621,20 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
         },
       ]);
     });
+  } else {
+    // Right-click a track to jump to its artist or album as a queue page. Each
+    // item is only offered when that tag exists (an untagged track has neither,
+    // so no menu opens at all).
+    label.addEventListener("contextmenu", (e) => {
+      const items = trackContextItems({
+        artist: node.artist,
+        album: node.album,
+        albumArtist: node.albumArtist,
+      });
+      if (items.length === 0) return;
+      e.preventDefault();
+      showContextMenu(e.clientX, e.clientY, items);
+    });
   }
   li.appendChild(label);
 
@@ -603,6 +661,8 @@ async function onNodeClick(node: TreeNode, parent: TreeNode, li: HTMLLIElement):
     node.expanded = !node.expanded;
     li.replaceWith(renderNode(node, parent));
   } else {
+    // A plain tree track is a normal album, not a queue page: leave queue mode.
+    activeQueue.value = null;
     playFile(node, parent);
   }
 }
@@ -680,6 +740,54 @@ function renderStreams(streams: Stream[]): void {
     ul.appendChild(li);
   }
   streamsContainer.appendChild(ul);
+}
+
+// Renders the queue view's track list. Rebuilt whenever the queue or the
+// playing track changes (both cheap: a queue is at most a few hundred rows).
+// The current track's row is highlighted and scrolled into view; clicking any
+// row plays it within the queue.
+function renderQueue(queue: Queue | null): void {
+  if (!queue) {
+    queueListEl.innerHTML = "";
+    return;
+  }
+  queueTitleEl.textContent = queue.title;
+  queueSubtitleEl.textContent = queue.subtitle ?? "";
+  queueSubtitleEl.classList.toggle("hidden", !queue.subtitle);
+
+  const playing = currentNodePath.value;
+  queueListEl.innerHTML = "";
+  let activeRow: HTMLElement | null = null;
+  queue.tracks.forEach((t, i) => {
+    const li = document.createElement("li");
+    li.className = "queue-row";
+    if (t.path === playing) {
+      li.classList.add("playing");
+      activeRow = li;
+    }
+    const num = document.createElement("span");
+    num.className = "queue-num";
+    // The playing row shows a ♪ in place of its index (like the tree's rows).
+    num.textContent = t.path === playing ? "♪" : String(i + 1);
+    const text = document.createElement("span");
+    text.className = "queue-text";
+    const primary = document.createElement("span");
+    primary.className = "queue-primary";
+    primary.textContent = t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path);
+    const secondary = document.createElement("span");
+    secondary.className = "queue-secondary";
+    // An album queue is one artist/album context, so per-row artist/album is
+    // noise; an artist queue spans albums, so the album is the useful subtitle.
+    secondary.textContent =
+      queue.kind === "artist" ? (t.album ?? "") : (t.artist ?? "");
+    text.appendChild(primary);
+    if (secondary.textContent) text.appendChild(secondary);
+    li.appendChild(num);
+    li.appendChild(text);
+    li.addEventListener("click", () => playQueueTrack(t.path));
+    queueListEl.appendChild(li);
+  });
+  if (activeRow) (activeRow as HTMLElement).scrollIntoView({ block: "nearest" });
 }
 
 // --- Playback ---
@@ -924,6 +1032,7 @@ function playFile(node: TreeNode, parent: TreeNode): void {
 }
 
 function playStream(stream: Stream): void {
+  activeQueue.value = null;
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = stream.url;
@@ -955,6 +1064,7 @@ function playStream(stream: Stream): void {
 // setting currentNodePath still lights up the row if that folder is expanded in
 // the tree. The native engine opens the file directly — no prepare step needed.
 function playSearchTrack(t: SearchTrack): void {
+  activeQueue.value = null;
   currentParent = null;
   currentNodePath.value = t.path;
   currentStreamUrl.value = null;
@@ -979,21 +1089,24 @@ function playSearchTrack(t: SearchTrack): void {
 // node isn't part of the real tree; a later library rescan re-binds currentParent
 // to the matching tree folder by path if one is loaded. Shuffle starts on a
 // random track (playFile shuffles the rest); straight play starts on the first.
-async function playFolder(folder: SearchFolder): Promise<void> {
-  let tracks: SearchTrack[];
-  try {
-    tracks = await invoke<SearchTrack[]>("folder_tracks", { path: folder.path });
-  } catch (e) {
-    console.error("folder_tracks failed", folder.path, e);
-    return;
-  }
-  if (tracks.length === 0) return;
-  const parent: TreeNode = {
-    path: folder.path,
-    name: folder.name,
+// A stand-in tree folder wrapping an ad-hoc track list (a searched folder, or
+// an artist/album queue), so all the album machinery works unchanged: gapless
+// straight-through play, now-playing on auto-advance (onAdvance → siblingByPath
+// finds the child in currentParent), and shuffle/repeat. `path` is synthetic for
+// artist/album queues (see openArtistQueue/openAlbumQueue), which is why the
+// rescan re-bind is suppressed while a queue is active.
+function syntheticParent(
+  path: string,
+  name: string,
+  tracks: SearchTrack[],
+): TreeNode {
+  return {
+    path,
+    name,
     title: null,
     artist: null,
     album: null,
+    albumArtist: null,
     disc: null,
     track: null,
     isFolder: true,
@@ -1005,6 +1118,7 @@ async function playFolder(folder: SearchFolder): Promise<void> {
       title: t.title,
       artist: t.artist,
       album: t.album,
+      albumArtist: null,
       disc: null,
       track: null,
       isFolder: false,
@@ -1013,10 +1127,113 @@ async function playFolder(folder: SearchFolder): Promise<void> {
       children: [],
     })),
   };
+}
+
+async function playFolder(folder: SearchFolder): Promise<void> {
+  let tracks: SearchTrack[];
+  try {
+    tracks = await invoke<SearchTrack[]>("folder_tracks", { path: folder.path });
+  } catch (e) {
+    console.error("folder_tracks failed", folder.path, e);
+    return;
+  }
+  if (tracks.length === 0) return;
+  // A folder is a plain album, not a queue page: leave queue mode.
+  activeQueue.value = null;
+  const parent = syntheticParent(folder.path, folder.name, tracks);
   const start = shuffleMode.value
     ? parent.children[Math.floor(Math.random() * parent.children.length)]
     : parent.children[0];
   playFile(start, parent);
+}
+
+// Opens a queue in the right pane and starts it. Playback reuses the album path
+// via a synthetic parent (so shuffle/repeat/gapless all work); the queue view is
+// what makes it visible. Always starts on the first track — the page's natural
+// order — even under shuffle, which still governs what plays next. The synthetic
+// path is unique per queue and never a real tree path, so the rescan re-bind
+// (suppressed while activeQueue is set) can't repoint currentParent at a folder.
+function playQueue(queue: Queue, syntheticPath: string): void {
+  if (queue.tracks.length === 0) return;
+  const parent = syntheticParent(syntheticPath, queue.title, queue.tracks);
+  playFile(parent.children[0], parent);
+  activeQueue.value = queue;
+}
+
+async function openArtistQueue(name: string): Promise<void> {
+  let tracks: SearchTrack[];
+  try {
+    tracks = await invoke<SearchTrack[]>("artist_tracks", { artist: name });
+  } catch (e) {
+    console.error("artist_tracks failed", name, e);
+    return;
+  }
+  if (tracks.length === 0) return;
+  const n = tracks.length;
+  playQueue(
+    {
+      kind: "artist",
+      title: name,
+      subtitle: `${n} track${n === 1 ? "" : "s"}`,
+      tracks,
+    },
+    `queue:artist:${name}`,
+  );
+}
+
+async function openAlbumQueue(album: string, albumArtist: string): Promise<void> {
+  let tracks: SearchTrack[];
+  try {
+    tracks = await invoke<SearchTrack[]>("album_tracks", { album, albumArtist });
+  } catch (e) {
+    console.error("album_tracks failed", album, albumArtist, e);
+    return;
+  }
+  if (tracks.length === 0) return;
+  playQueue(
+    {
+      kind: "album",
+      title: album,
+      subtitle: albumArtist || null,
+      tracks,
+    },
+    // NUL joins the two keys so a "/" in either can't forge a collision.
+    `queue:album:${albumArtist}\0${album}`,
+  );
+}
+
+// "Go to artist" / "Go to album" rows for a track's context menu, each present
+// only when its tag exists. The album's grouping key is albumArtist ?? artist,
+// matching the backend's album_tracks — so a compilation track (album artist
+// "Various Artists", track artist something else) resolves the whole album.
+function trackContextItems(track: {
+  artist: string | null;
+  album: string | null;
+  albumArtist: string | null;
+}): { label: string; action: () => void }[] {
+  const items: { label: string; action: () => void }[] = [];
+  if (track.artist) {
+    const artist = track.artist;
+    items.push({ label: "Play artist", action: () => void openArtistQueue(artist) });
+  }
+  if (track.album) {
+    const album = track.album;
+    const albumArtist = track.albumArtist ?? track.artist ?? "";
+    items.push({
+      label: "Play album",
+      action: () => void openAlbumQueue(album, albumArtist),
+    });
+  }
+  return items;
+}
+
+// Plays a track picked from the queue view. Stays in the same queue (currentParent
+// is the queue's synthetic parent while the view is open), so activeQueue is left
+// untouched — the row highlight follows from playFile setting currentNodePath.
+function playQueueTrack(path: string): void {
+  if (!currentParent) return;
+  const node = currentParent.children.find((c) => c.path === path);
+  if (node) playFile(node, currentParent);
 }
 
 // Plays a file from outside the library (passed in via OS file association).
@@ -1033,6 +1250,7 @@ async function openExternalFile(path: string): Promise<void> {
   }
   // Leaves currentParent null so the tree is untouched, no row is highlighted,
   // and album-advance is a no-op (single-track queue).
+  activeQueue.value = null;
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = null;
@@ -1123,6 +1341,7 @@ async function refreshTree(libraryRoot: string): Promise<void> {
     title: null,
     artist: null,
     album: null,
+    albumArtist: null,
     disc: null,
     track: null,
     isFolder: true,
@@ -1202,8 +1421,13 @@ async function refreshLibrary(): Promise<void> {
       // playing-row highlight and album auto-advance keep working. If the
       // playing file was deleted, leave the stale reference — playback
       // continues and the next selection replaces it.
+      //
+      // Suppressed while a queue is active: an artist/album queue's parent is a
+      // synthetic node whose children are the whole queue, and its currentNodePath
+      // may well live in a real tree folder — re-binding would silently shrink the
+      // pool from "the queue" to "that one album folder".
       const path = currentNodePath.value;
-      if (path) {
+      if (path && !activeQueue.value) {
         const found = findNode(rootNode, path);
         if (found) {
           currentParent = found.parent;
@@ -1527,7 +1751,11 @@ function setupSearch(): void {
   }
 
   function choose(item: SearchItem): void {
-    if (item.kind === "folder") {
+    if (item.kind === "artist") {
+      void openArtistQueue(item.artist.name);
+    } else if (item.kind === "album") {
+      void openAlbumQueue(item.album.album, item.album.artist);
+    } else if (item.kind === "folder") {
       activeTab.value = "files";
       void playFolder(item.folder);
       void revealInTree(item.folder.path);
@@ -1569,7 +1797,23 @@ function setupSearch(): void {
       primary.className = "primary";
       const secondary = document.createElement("div");
       secondary.className = "secondary";
-      if (item.kind === "folder") {
+      if (item.kind === "artist") {
+        // Distinct masked-SVG icons (like the folder row's) mark artist and
+        // album rows so the four library row types read apart at a glance.
+        const icon = document.createElement("span");
+        icon.className = "search-icon icon-artist";
+        row.appendChild(icon);
+        primary.textContent = item.artist.name;
+        secondary.textContent = "Artist";
+      } else if (item.kind === "album") {
+        const icon = document.createElement("span");
+        icon.className = "search-icon icon-album";
+        row.appendChild(icon);
+        primary.textContent = item.album.album;
+        secondary.textContent = item.album.artist
+          ? `Album · ${item.album.artist}`
+          : "Album";
+      } else if (item.kind === "folder") {
         // A folder icon distinguishes "play this whole folder" rows from the
         // single-track and stream rows around them. The glyph is a masked SVG
         // in .search-icon so it takes the row's color instead of the OS emoji.
@@ -1620,21 +1864,34 @@ function setupSearch(): void {
     const streamItems: SearchItem[] = allStreams
       .filter((s) => s.name.toLowerCase().includes(needle))
       .map((s) => ({ kind: "stream", stream: s }));
+    let artistItems: SearchItem[] = [];
+    let albumItems: SearchItem[] = [];
     let folderItems: SearchItem[] = [];
     let fileItems: SearchItem[] = [];
     try {
-      const [folders, tracks] = await Promise.all([
+      const [artists, albums, folders, tracks] = await Promise.all([
+        invoke<SearchArtist[]>("search_artists", { query }),
+        invoke<SearchAlbum[]>("search_albums", { query }),
         invoke<SearchFolder[]>("search_folders", { query }),
         invoke<SearchTrack[]>("search_tracks", { query }),
       ]);
+      artistItems = artists.map((a) => ({ kind: "artist", artist: a }));
+      albumItems = albums.map((a) => ({ kind: "album", album: a }));
       folderItems = folders.map((f) => ({ kind: "folder", folder: f }));
       fileItems = tracks.map((t) => ({ kind: "file", track: t }));
     } catch (e) {
       console.error("search failed", e);
     }
     if (token !== queryToken) return;
-    // Folders first: matching a folder name usually means "play that album".
-    items = [...folderItems, ...streamItems, ...fileItems];
+    // Artists and albums first (a metadata-name match usually means "open that
+    // page"), then folders, streams, and finally individual tracks.
+    items = [
+      ...artistItems,
+      ...albumItems,
+      ...folderItems,
+      ...streamItems,
+      ...fileItems,
+    ];
     activeIndex = items.length > 0 ? 0 : -1;
     render();
   }, 150);
@@ -1976,6 +2233,16 @@ function setupEffects(): void {
     document.getElementById("tab-streams")?.classList.toggle("hidden", tab !== "streams");
   });
 
+  // Queue mode swaps the now-playing card for the queue list (the controls row
+  // below stays). Reads currentNodePath too so the highlighted/scrolled row
+  // tracks auto-advance. The mini layout forces the card back via CSS.
+  effect(() => {
+    const queue = activeQueue.value;
+    currentNodePath.value;
+    nowPlayingPanel.classList.toggle("queue-mode", queue !== null);
+    renderQueue(queue);
+  });
+
   effect(() => {
     const open = settingsOpen.value;
     settingsPanel.classList.toggle("hidden", !open);
@@ -2091,6 +2358,9 @@ async function init(): Promise<void> {
   nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
   settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
   splitterEl = document.querySelector("#splitter") as HTMLElement;
+  queueTitleEl = document.querySelector("#queue-title") as HTMLElement;
+  queueSubtitleEl = document.querySelector("#queue-subtitle") as HTMLElement;
+  queueListEl = document.querySelector("#queue-list") as HTMLElement;
 
   store = await load(STORE_FILE, { defaults: {}, autoSave: false });
 

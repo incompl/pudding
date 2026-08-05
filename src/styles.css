@@ -16,6 +16,10 @@
      stroke-width-2 recipe as the search-input magnifier; color comes from the
      element's background-color, so the stroke color here is arbitrary. */
   --folder-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E");
+  /* Same stroked recipe as the folder icon (color from background-color): a
+     person for artist rows, a disc for album rows in the search dropdown. */
+  --artist-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E");
+  --album-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Ccircle cx='12' cy='12' r='2.5'/%3E%3C/svg%3E");
 }
 
 html,
@@ -308,6 +312,16 @@ body.platform-mac #tabs {
   background-color: var(--accent);
 }
 
+.search-result .search-icon.icon-artist {
+  -webkit-mask-image: var(--artist-icon);
+  mask-image: var(--artist-icon);
+}
+
+.search-result .search-icon.icon-album {
+  -webkit-mask-image: var(--album-icon);
+  mask-image: var(--album-icon);
+}
+
 .search-result .text {
   min-width: 0;
   flex: 1;
@@ -510,6 +524,115 @@ body.platform-mac #tabs {
 #now-playing-stream-meta.visible {
   opacity: 1;
   transition: opacity 600ms ease;
+}
+
+/* Queue view: swaps in for the now-playing card while an artist/album page is
+   open. The controls row below stays put, so this only replaces #now-playing-main.
+   Driven by the .queue-mode class on the panel (not the .hidden toggle) so the
+   mini media query can force the card back with plain specificity. */
+#queue-view {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.queue-mode #now-playing-main {
+  display: none;
+}
+
+.queue-mode #queue-view {
+  display: flex;
+}
+
+/* In the centered card view the controls float with room above; in queue mode
+   the list runs right up to them. Match #right's bottom padding so the bar has
+   equal breathing room top and bottom. */
+.queue-mode #now-playing-controls {
+  margin-top: 0.6em;
+}
+
+#queue-header {
+  flex: none;
+  padding: 0 0.25em 0.6em;
+  border-bottom: 1px solid var(--surface-hover);
+  margin-bottom: 0.4em;
+}
+
+#queue-title {
+  font-size: 1.25em;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+
+#queue-subtitle {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  margin-top: 0.1em;
+}
+
+#queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  /* Left padding matches #queue-header so the number column lines up flush with
+     the queue title, with the track text as a second column to its right. */
+  padding: 0.28em 0.4em 0.28em 0.25em;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.queue-row:hover {
+  background: var(--surface-hover);
+}
+
+/* Left-aligned so the numbers form a column flush with the queue title; the
+   fixed width keeps the track text aligned in the second column. */
+.queue-num {
+  flex: none;
+  width: 1.5em;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  font-size: 0.9em;
+}
+
+.queue-text {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.queue-primary {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queue-secondary {
+  font-size: 0.8em;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The playing row picks up the accent, matching the tree's .playing highlight. */
+.queue-row.playing .queue-primary,
+.queue-row.playing .queue-num {
+  color: var(--accent);
 }
 
 @property --live-color {
@@ -822,6 +945,23 @@ body.platform-mac #tabs {
     /* Small gap between the art/text and the controls row. Kept tighter than
        the top gap so the content sits closer to the controls it drives. */
     gap: 0.7em;
+  }
+
+  /* The queue list is unusable in the thin mini bar; fall back to the now-playing
+     card. The queue stays active (still drives playback) — only the view reverts,
+     and expanding the window shows the list again. */
+  .queue-mode #queue-view {
+    display: none;
+  }
+  .queue-mode #now-playing-main {
+    display: flex;
+  }
+  /* The queue's controls gap only makes sense above the list; with the card
+     forced back the margin would eat into #now-playing-main's centering region,
+     so a queue file card would sit ~0.3em higher than a non-queue one. Zero it
+     so the mini card centers identically however it was launched. */
+  .queue-mode #now-playing-controls {
+    margin-top: 0;
   }
 
   /* Top padding lifts the art/text off the thin topbar (traffic lights + expand
