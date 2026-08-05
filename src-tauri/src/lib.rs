@@ -13,7 +13,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
+use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_log::{Target, TargetKind};
 
@@ -895,6 +895,11 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "open-settings" {
+                let _ = app.emit("open-settings", ());
+            }
+        })
         .setup(|app| {
             log::info!(
                 "app.boot version={} pid={}",
@@ -942,8 +947,17 @@ pub fn run() {
                 .website_label(Some("incompl.com"))
                 .build();
 
+            // App settings live under the standard macOS Preferences slot
+            // (Pudding → Settings…, ⌘,). Selecting it emits "open-settings",
+            // which the frontend uses to reveal the settings panel.
+            let settings_item = MenuItemBuilder::with_id("open-settings", "Settings…")
+                .accelerator("CmdOrCtrl+,")
+                .build(app)?;
+
             let app_menu = SubmenuBuilder::new(app, "Pudding")
                 .about(Some(about))
+                .separator()
+                .item(&settings_item)
                 .separator()
                 .services()
                 .separator()

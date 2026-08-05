@@ -70,7 +70,7 @@ body.platform-mac #tabs {
   min-width: 200px;
 }
 
-#settings-btn,
+#miniplayer-btn,
 #settings-back-btn {
   background: none;
   border: none;
@@ -84,10 +84,10 @@ body.platform-mac #tabs {
   transition: background 200ms ease;
 }
 
-#settings-btn {
-  /* 27px = 12px icon + 7.5px each side, matching .mode-btn's side padding (30px
-     box, 15px icon) so the whitespace beside the gear equals the whitespace
-     around the shuffle/repeat glyphs. */
+#miniplayer-btn {
+  /* 27px box matching .mode-btn's side padding (30px box, 15px icon) so the
+     whitespace beside the mini-player glyph equals the whitespace around the
+     shuffle/repeat glyphs. */
   width: 27px;
   height: 27px;
   padding: 0;
@@ -95,16 +95,18 @@ body.platform-mac #tabs {
   align-items: center;
   justify-content: center;
   align-self: center;
-  /* Pull the gear in toward the repeat toggle: #topbar-actions spaces its
+  /* Pull the button in toward the repeat toggle: #topbar-actions spaces its
      children 0.25em apart, but the shuffle/repeat pair inside #playback-modes
-     sit 0.1em apart. Without this the repeat→settings gap reads ~2.4px wider
+     sit 0.1em apart. Without this the repeat→mini-player gap reads ~2.4px wider
      than shuffle→repeat. */
   margin-left: -0.15em;
 }
 
-#settings-btn svg {
-  width: 12px;
-  height: 12px;
+#miniplayer-btn svg {
+  /* Matches the mini player's expand button (14px arrows) — this is its
+     mirror image, collapsing full view back down to the mini bar. */
+  width: 14px;
+  height: 14px;
   display: block;
 }
 
@@ -140,7 +142,7 @@ body.platform-mac #tabs {
   display: block;
 }
 
-#settings-btn:hover,
+#miniplayer-btn:hover,
 #settings-back-btn:hover {
   background: var(--surface);
 }
@@ -704,7 +706,7 @@ body.platform-mac #tabs {
 @media (max-height: 480px) {
   #tabs,
   #search,
-  #settings-btn,
+  #miniplayer-btn,
   #settings-back-btn,
   #left,
   #splitter,

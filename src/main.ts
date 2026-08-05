@@ -326,7 +326,7 @@ let libraryRootInput: HTMLInputElement;
 let libraryRootBrowseBtn: HTMLButtonElement;
 let manifestPathInput: HTMLInputElement;
 let manifestPathBrowseBtn: HTMLButtonElement;
-let settingsBtn: HTMLButtonElement;
+let miniplayerBtn: HTMLButtonElement;
 let settingsBackBtn: HTMLButtonElement;
 let playbackModesEl: HTMLElement;
 let modeShuffleBtn: HTMLButtonElement;
@@ -1219,7 +1219,10 @@ async function setupWindowSize(
 }
 
 function setupSettings(): void {
-  settingsBtn.addEventListener("click", () => { settingsOpen.value = true; });
+  // Settings opens from the native application menu (Pudding → Settings…, ⌘,),
+  // which emits "open-settings"; the topbar's old gear is now the mini-player
+  // toggle. The Back button in the panel returns to now-playing.
+  void listen("open-settings", () => { settingsOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => { settingsOpen.value = false; });
 
   // External links must go to the OS browser, not navigate the webview.
@@ -1681,7 +1684,7 @@ function setupEffects(): void {
     const open = settingsOpen.value;
     settingsPanel.classList.toggle("hidden", !open);
     nowPlayingPanel.classList.toggle("hidden", open);
-    settingsBtn.classList.toggle("hidden", open);
+    miniplayerBtn.classList.toggle("hidden", open);
     settingsBackBtn.classList.toggle("hidden", !open);
     // Search targets the library/streams, not settings — hide it here too so the
     // whole action cluster (search + mode toggles) clears out together rather
@@ -1689,11 +1692,12 @@ function setupEffects(): void {
     searchEl.classList.toggle("hidden", open);
   });
 
-  // The playback-mode toggles belong to the files domain: hidden in streams
-  // view (streams have no queue) and while settings is open.
+  // The playback-mode toggles only act on the files queue, but we keep them
+  // visible in the streams view too: they take little space, do no harm there,
+  // and leaving them put avoids shuffling the search box as tabs switch. Only
+  // settings hides them.
   effect(() => {
-    const show = activeTab.value === "files" && !settingsOpen.value;
-    playbackModesEl.classList.toggle("hidden", !show);
+    playbackModesEl.classList.toggle("hidden", settingsOpen.value);
   });
 
   effect(() => {
@@ -1746,7 +1750,8 @@ async function init(): Promise<void> {
   // Recompute the title/artist marquees on every resize (width change or a
   // mode switch across the breakpoint both change whether the lines overflow).
   window.addEventListener("resize", updateMarquees);
-  // Mini-only expand button (shown where the settings icon sits in full view).
+  // Mini-only expand button (shown where the mini-player toggle sits in full
+  // view); its arrows are the mirror of that toggle's collapse glyph.
   const expandBtn = document.querySelector("#expand-btn") as HTMLButtonElement;
   expandBtn.addEventListener("click", () => void toggleMiniPlayer());
 
@@ -1778,7 +1783,8 @@ async function init(): Promise<void> {
   libraryRootBrowseBtn = document.querySelector("#library-root-browse") as HTMLButtonElement;
   manifestPathInput = document.querySelector("#manifest-path") as HTMLInputElement;
   manifestPathBrowseBtn = document.querySelector("#manifest-path-browse") as HTMLButtonElement;
-  settingsBtn = document.querySelector("#settings-btn") as HTMLButtonElement;
+  miniplayerBtn = document.querySelector("#miniplayer-btn") as HTMLButtonElement;
+  miniplayerBtn.addEventListener("click", () => void toggleMiniPlayer());
   settingsBackBtn = document.querySelector("#settings-back-btn") as HTMLButtonElement;
   playbackModesEl = document.querySelector("#playback-modes") as HTMLElement;
   modeShuffleBtn = document.querySelector("#mode-shuffle") as HTMLButtonElement;
