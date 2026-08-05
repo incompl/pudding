@@ -26,6 +26,27 @@
           />
           <div id="search-results" class="hidden" role="listbox"></div>
         </div>
+        <div id="playback-modes" role="group" aria-label="Playback mode">
+          <button id="mode-shuffle" class="mode-btn" type="button" aria-label="Shuffle" title="Shuffle" aria-pressed="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22" />
+              <path d="m18 2 4 4-4 4" />
+              <path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2" />
+              <path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8" />
+              <path d="m18 14 4 4-4 4" />
+            </svg>
+          </button>
+          <button id="mode-repeat" class="mode-btn" type="button" aria-label="Repeat off" title="Repeat off">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m17 2 4 4-4 4" />
+              <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+              <path d="m7 22-4-4 4-4" />
+              <path d="M12 18H3" />
+              <path class="repeat-loop-br" d="M21 13v1a4 4 0 0 1-4 4H12" />
+              <path class="repeat-one-mark" d="M18 14 16 15.5m2-1.5v7m-2.5 0h5" />
+            </svg>
+          </button>
+        </div>
         <button id="settings-btn" type="button" aria-label="Settings" title="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="3" />

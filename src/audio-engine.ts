@@ -141,6 +141,15 @@ export class GaplessEngine {
     await invoke("audio_toggle_pause");
   }
 
+  // Drop the queued tracks after the current one, so the currently playing
+  // track runs to its natural end and then reports queue-ended — at which point
+  // the frontend picks the next track. Used when shuffle / repeat-one turns on
+  // mid-album: the change takes effect immediately (the ordered tail is gone)
+  // without restarting or glitching what's playing.
+  async clearUpcoming(): Promise<void> {
+    await invoke("audio_clear_upcoming");
+  }
+
   async seekBy(seconds: number): Promise<void> {
     if (this.currentPath === null) return;
     const target = Math.max(

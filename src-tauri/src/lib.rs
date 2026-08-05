@@ -802,6 +802,13 @@ fn audio_seek(seconds: f64, engine: State<audio::AudioEngine>) {
     engine.send(audio::Command::Seek(seconds));
 }
 
+// Drop the queued tracks after the current one so the frontend can pick the
+// next track itself (shuffle / repeat-one) without restarting what's playing.
+#[tauri::command]
+fn audio_clear_upcoming(engine: State<audio::AudioEngine>) {
+    engine.send(audio::Command::ClearUpcoming);
+}
+
 #[tauri::command]
 fn audio_set_volume(volume: f32, engine: State<audio::AudioEngine>) {
     engine.set_volume(volume);
@@ -980,6 +987,7 @@ pub fn run() {
             audio_play_stream,
             audio_toggle_pause,
             audio_seek,
+            audio_clear_upcoming,
             audio_set_volume,
         ])
         .build(tauri::generate_context!())

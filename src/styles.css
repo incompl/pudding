@@ -85,13 +85,21 @@ body.platform-mac #tabs {
 }
 
 #settings-btn {
-  width: 32px;
-  height: 32px;
+  /* 27px = 12px icon + 7.5px each side, matching .mode-btn's side padding (30px
+     box, 15px icon) so the whitespace beside the gear equals the whitespace
+     around the shuffle/repeat glyphs. */
+  width: 27px;
+  height: 27px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   align-self: center;
+  /* Pull the gear in toward the repeat toggle: #topbar-actions spaces its
+     children 0.25em apart, but the shuffle/repeat pair inside #playback-modes
+     sit 0.1em apart. Without this the repeat→settings gap reads ~2.4px wider
+     than shuffle→repeat. */
+  margin-left: -0.15em;
 }
 
 #settings-btn svg {
@@ -135,6 +143,63 @@ body.platform-mac #tabs {
 #settings-btn:hover,
 #settings-back-btn:hover {
   background: var(--surface);
+}
+
+/* Files-only playback-mode toggles: Folder, Shuffle, Repeat. Each is an
+   independent on/off. "Off" is dimmed (muted stroke); "on" is the accent
+   colour with a subtle filled pill. Hidden entirely in streams/settings view. */
+#playback-modes {
+  display: flex;
+  align-items: center;
+  gap: 0.1em;
+}
+
+.mode-btn {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: background 200ms ease, color 200ms ease, opacity 200ms ease;
+}
+
+.mode-btn svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+.mode-btn:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.mode-btn.active {
+  color: var(--accent);
+}
+
+/* The "1" that turns the repeat glyph into repeat-one; only drawn in that
+   third state. */
+.repeat-one-mark {
+  display: none;
+}
+
+#mode-repeat.repeat-one .repeat-one-mark {
+  display: block;
+}
+
+/* In repeat-one the bottom arrow is truncated to its left half, freeing the
+   lower-right quarter for the "1". Only the right half of the bottom bar is
+   hidden; the left half and its arrowhead stay put. */
+#mode-repeat.repeat-one .repeat-loop-br {
+  display: none;
 }
 
 #search {
@@ -642,14 +707,16 @@ body.platform-mac #tabs {
   #settings-btn,
   #settings-back-btn,
   #left,
-  #splitter {
+  #splitter,
+  #playback-modes {
     display: none;
   }
 
   /* The expand button is the one topbar action left in mini. Pin it to the top
-     with the same 6px gap the settings icon has in full view (32px icon
+     with roughly the same top gap the settings icon has in full view (~27px icon
      centered in the 44px topbar), rather than centering it in the shorter
-     26px mini topbar. */
+     26px mini topbar. Shuffle/repeat are set-once mode toggles that belong to
+     the full view, so mini leaves only expand here — a calmer drag strip. */
   #expand-btn {
     display: inline-flex;
     align-self: flex-start;

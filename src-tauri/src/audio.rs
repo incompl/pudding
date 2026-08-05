@@ -93,6 +93,11 @@ pub enum Command {
     },
     TogglePause,
     Seek(f64),
+    // Drop everything queued after the currently playing track, leaving it to
+    // play to its natural end and then report queue-ended. Lets the frontend
+    // re-decide the next track (shuffle / repeat-one) without disturbing — or
+    // restarting — the audible track.
+    ClearUpcoming,
 }
 
 // === Shared atomics ===
@@ -578,6 +583,24 @@ fn decode_loop(
                                 }
                             }
                             emit_state(&app, !now, true);
+                        }
+                    }
+                    Command::ClearUpcoming => {
+                        // Keep the current track (queue_idx) and its in-flight
+                        // decode; discard the rest. When the current track ends,
+                        // advance_to_next_playable finds nothing and queue-ended
+                        // fires. No flush, so audible playback is untouched.
+                        //
+                        // Edge: within the last ~RING_BUFFER_SECONDS of a track,
+                        // decode has already finished pushing it and advanced
+                        // queue_idx to the next track (whose leading frames are
+                        // now buffered in the ring). Truncating here keeps that
+                        // next track, so it plays once before the per-track mode
+                        // engages. Accepted: the only way to suppress it is to
+                        // flush the buffered frames, reintroducing the glitch
+                        // this command exists to avoid.
+                        if queue_idx < queue.len() {
+                            queue.truncate(queue_idx + 1);
                         }
                     }
                     Command::Seek(secs) => {
@@ -1443,7 +1466,13 @@ fn position_emit_loop(
                 // caught up to total_produced.
                 if shared.queue_exhausted.load(Ordering::Relaxed) && !queue_ended_sent {
                     let produced = shared.total_produced.load(Ordering::Relaxed);
-                    if frames_played >= produced {
+                    // Every produced frame is eventually either played or
+                    // discarded by a flush (seek), so the queue has fully drained
+                    // when played + drained == produced. Omitting total_drained
+                    // means a track whose end is reached after a seek never
+                    // satisfies the check, so queue-ended never fires.
+                    let drained = shared.total_drained.load(Ordering::Relaxed);
+                    if frames_played + drained >= produced {
                         let _ = app.emit("audio:queue-ended", ());
                         let _ = app.emit(
                             "audio:state",

@@ -15,6 +15,7 @@ Local file playback and internet radio. High polish, high completeness, fast, no
 - Custom Rust audio engine (symphonia + cpal) with gapless playback: tracks are joined sample-to-sample in a single continuous output stream
 - Plays MP3, FLAC, WAV, AAC/M4A, Ogg/Opus, and AIFF
 - High-quality sinc resampling to match your output device
+- Shuffle and repeat (off / all / one), applied live without interrupting the current track
 
 ### Library
 

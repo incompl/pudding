@@ -114,6 +114,22 @@ const currentStreamUrl = signal<string | null>(null);
 
 const settingsOpen = signal(false);
 const activeTab = signal<"files" | "streams">("files");
+
+// Playback-mode controls (files view only): Shuffle (on/off) and Repeat, a
+// three-state cycle matching every mainstream player — off (play through and
+// stop), all (loop the album), one (loop the current track).
+//
+// The native engine plays a queue straight through and reports when it drains
+// (onQueueEnded); shuffle and repeat live entirely here. Straight play hands the
+// whole album to the engine for gapless auto-advance; shuffle and repeat-one
+// hand one track at a time and pick the next at each queue-ended — which is also
+// why shuffle gets an ordinary track gap (no gapless), desirable since
+// crossfading random tracks is worse, not better. Turning a per-track mode on
+// mid-album drops the engine's queued tail (audio_clear_upcoming) so it engages
+// at the current track's end without restarting what's playing.
+type RepeatMode = "off" | "all" | "one";
+const shuffleMode = signal(false);
+const repeatMode = signal<RepeatMode>("off");
 const libraryRootValid = signal(true);
 const manifestPathValid = signal(true);
 
@@ -191,6 +207,13 @@ let lastIndex = 0;
 // the next Play (file selection, seek, or restart-from-end via play button).
 let queueEnded = false;
 
+// Upcoming tracks for shuffle playback: a shuffled permutation of the album
+// pool, consumed one entry per queue-ended. Draining it to empty means the
+// shuffle cycle is done (stop when repeat is off, reshuffle when repeat all).
+// Filled when shuffle turns on or a shuffled album starts; cleared for straight
+// play so a stale order can't leak into the next album.
+let shuffleBag: string[] = [];
+
 // Some stations relay scraped playlists and broadcast titles that were never
 // cleaned for ICY: HTML entities still encoded ("&#23665;" for 山) and the
 // whole string wrapped in the source's quoting ("'Artist - Song'"). Decoded
@@ -250,7 +273,7 @@ const engine = new GaplessEngine({
     console.error("audio: track failed", path, message);
   },
   onQueueEnded: () => {
-    queueEnded = true;
+    handleEnded();
   },
   // ICY now-playing for radio. The station name stays on the title line no
   // matter what so the layout never shifts when metadata arrives; the ICY
@@ -305,6 +328,10 @@ let manifestPathInput: HTMLInputElement;
 let manifestPathBrowseBtn: HTMLButtonElement;
 let settingsBtn: HTMLButtonElement;
 let settingsBackBtn: HTMLButtonElement;
+let playbackModesEl: HTMLElement;
+let modeShuffleBtn: HTMLButtonElement;
+let modeRepeatBtn: HTMLButtonElement;
+let searchEl: HTMLElement;
 let searchInput: HTMLInputElement;
 let searchResultsEl: HTMLElement;
 let nowPlayingPanel: HTMLElement;
@@ -552,6 +579,103 @@ function seekTo(seconds: number): void {
   void engine.seekTo(seconds);
 }
 
+// The tracks eligible for shuffle/repeat advancement. Inside an album that's
+// the folder's tracks in listing order; a search hit or external file has no
+// album context, so the pool is just that single track.
+function poolPaths(): string[] {
+  if (currentParent) {
+    return currentParent.children.filter((c) => !c.isFolder).map((c) => c.path);
+  }
+  if (currentNodePath.value) return [currentNodePath.value];
+  // Search hit or external file: no album context, so the queue itself is the
+  // pool (a single track). Lets repeat still loop it.
+  return lastQueue;
+}
+
+function shuffled<T>(items: T[]): T[] {
+  const a = items.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// (Re)fill the shuffle bag with the pool minus the current track, so the next
+// pick is never an immediate repeat. A single-track pool has nothing else to
+// pick, so it falls back to looping that track.
+function refillShuffleBag(current: string | null): void {
+  const pool = poolPaths();
+  const rest = pool.filter((p) => p !== current);
+  shuffleBag = shuffled(rest.length ? rest : pool);
+}
+
+// Hand the engine a single track and remember it as the queue, so play-after-end
+// and the play button restart the right thing. UI (row highlight, now-playing,
+// art) follows from the engine's track-changed → onAdvance for album tracks;
+// for a lone search/external track it's already correct (same track).
+function playSingle(path: string): void {
+  queueEnded = false;
+  lastQueue = [path];
+  lastIndex = 0;
+  currentTime.value = 0;
+  void engine.play([path], 0);
+}
+
+// Decide what to play when the engine drains its queue. This is the sole
+// advancement point: straight play only reaches it at album end (the engine
+// auto-advances the rest gaplessly), while shuffle and repeat-one reach it after
+// every track because they're queued one at a time.
+function handleEnded(): void {
+  const mode = repeatMode.value;
+  // currentNodePath is null for an external file; fall back to the queue so
+  // repeat still identifies the track to loop.
+  const current = currentNodePath.value ?? lastQueue[0] ?? null;
+
+  // Repeat-one loops the finished track regardless of shuffle.
+  if (mode === "one" && current) {
+    playSingle(current);
+    return;
+  }
+
+  if (shuffleMode.value) {
+    if (shuffleBag.length === 0) {
+      // Cycle exhausted: reshuffle and keep going when repeating, else stop.
+      if (mode !== "all") {
+        queueEnded = true;
+        return;
+      }
+      refillShuffleBag(current);
+    }
+    const next = shuffleBag.shift();
+    if (next) playSingle(next);
+    else queueEnded = true;
+    return;
+  }
+
+  // Straight play. Continue in listing order from the finished track; this
+  // matters when shuffle was turned off mid-album (single-track queue) — resume
+  // the album in order rather than stopping.
+  const pool = poolPaths();
+  const nextIdx = pool.indexOf(current ?? "") + 1;
+  if (nextIdx > 0 && nextIdx < pool.length) {
+    queueEnded = false;
+    lastQueue = pool;
+    lastIndex = nextIdx;
+    void engine.play(pool, nextIdx);
+    return;
+  }
+  // End of the album.
+  if (mode === "all" && pool.length > 0) {
+    queueEnded = false;
+    lastQueue = pool;
+    lastIndex = 0;
+    void engine.play(pool, 0);
+    return;
+  }
+  queueEnded = true;
+}
+
 function playFile(node: TreeNode, parent: TreeNode): void {
   currentParent = parent;
   currentNodePath.value = node.path;
@@ -562,18 +686,30 @@ function playFile(node: TreeNode, parent: TreeNode): void {
   queueEnded = false;
   setNowPlaying(node.title ?? node.name, node.artist, node.album);
   void loadArt(node.path);
-  // Queue the rest of the album so the engine auto-advances gaplessly. The
-  // engine treats this list as the complete queue; clicking another file later
-  // replaces it.
   const siblings = parent.children.filter((c) => !c.isFolder);
-  const idx = Math.max(
-    0,
-    siblings.findIndex((c) => c.path === node.path),
-  );
   const tracks = siblings.map((c) => c.path);
-  lastQueue = tracks;
-  lastIndex = idx;
-  void engine.play(tracks, idx);
+  if (repeatMode.value === "one") {
+    // Loop this track; the album never enters the queue.
+    shuffleBag = [];
+    playSingle(node.path);
+  } else if (shuffleMode.value) {
+    // One track at a time, next picked at each queue-ended. Seed the bag with
+    // the rest of the album so a repeat-off cycle plays every track once.
+    refillShuffleBag(node.path);
+    playSingle(node.path);
+  } else {
+    // Queue the rest of the album so the engine auto-advances gaplessly. The
+    // engine treats this list as the complete queue; clicking another file
+    // later replaces it.
+    shuffleBag = [];
+    const idx = Math.max(
+      0,
+      siblings.findIndex((c) => c.path === node.path),
+    );
+    lastQueue = tracks;
+    lastIndex = idx;
+    void engine.play(tracks, idx);
+  }
 }
 
 function playStream(stream: Stream): void {
@@ -586,6 +722,7 @@ function playStream(stream: Stream): void {
   duration.value = 0;
   queueEnded = false;
   lastQueue = [];
+  shuffleBag = [];
   // Station name until the first ICY title arrives (or forever, for stations
   // that don't send titles).
   setNowPlaying(stream.name, null, null);
@@ -616,6 +753,7 @@ function playSearchTrack(t: SearchTrack): void {
   queueEnded = false;
   lastQueue = [t.path];
   lastIndex = 0;
+  shuffleBag = [];
   const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
   setNowPlaying(t.title ?? fallbackName, t.artist, t.album);
   void loadArt(t.path);
@@ -645,6 +783,7 @@ async function openExternalFile(path: string): Promise<void> {
   queueEnded = false;
   lastQueue = [path];
   lastIndex = 0;
+  shuffleBag = [];
   const fallback = path.split(/[\\/]/).pop() ?? path;
   setNowPlaying(meta.title ?? fallback, meta.artist, meta.album);
   void loadArt(path);
@@ -895,6 +1034,42 @@ function setupTabs(): void {
       activeTab.value = btn.dataset.tab as "files" | "streams";
     });
   }
+}
+
+// A per-track mode (shuffle on, or repeat-one) needs the frontend to choose the
+// next track, but straight play hands the whole album to the engine for gapless
+// auto-advance. When such a mode turns on mid-album, drop that queued tail so
+// the change takes effect at the current track's end — the engine keeps playing
+// the current track untouched, then reports queue-ended and handleEnded picks
+// the next track. lastQueue.length <= 1 means the engine already holds only the
+// current track (single-track mode, search hit, external file), so there's
+// nothing to drop.
+function applyModeChange(): void {
+  const perTrack = shuffleMode.value || repeatMode.value === "one";
+  if (perTrack && !isStream.value && lastQueue.length > 1) {
+    void engine.clearUpcoming();
+    if (currentNodePath.value) {
+      lastQueue = [currentNodePath.value];
+      lastIndex = 0;
+    }
+  }
+}
+
+function setupPlaybackModes(): void {
+  modeShuffleBtn.addEventListener("click", () => {
+    shuffleMode.value = !shuffleMode.value;
+    // Seed the bag so a shuffle turned on mid-album has a full cycle ready;
+    // clear it when turning shuffle off.
+    if (shuffleMode.value) refillShuffleBag(currentNodePath.value);
+    else shuffleBag = [];
+    applyModeChange();
+  });
+  modeRepeatBtn.addEventListener("click", () => {
+    // Cycle off → all → one → off.
+    repeatMode.value =
+      repeatMode.value === "off" ? "all" : repeatMode.value === "all" ? "one" : "off";
+    applyModeChange();
+  });
 }
 
 function setupSplitter(initialWidth: string | null): void {
@@ -1508,6 +1683,31 @@ function setupEffects(): void {
     nowPlayingPanel.classList.toggle("hidden", open);
     settingsBtn.classList.toggle("hidden", open);
     settingsBackBtn.classList.toggle("hidden", !open);
+    // Search targets the library/streams, not settings — hide it here too so the
+    // whole action cluster (search + mode toggles) clears out together rather
+    // than leaving a lone search box beside the Back button.
+    searchEl.classList.toggle("hidden", open);
+  });
+
+  // The playback-mode toggles belong to the files domain: hidden in streams
+  // view (streams have no queue) and while settings is open.
+  effect(() => {
+    const show = activeTab.value === "files" && !settingsOpen.value;
+    playbackModesEl.classList.toggle("hidden", !show);
+  });
+
+  effect(() => {
+    modeShuffleBtn.classList.toggle("active", shuffleMode.value);
+    modeShuffleBtn.setAttribute("aria-pressed", String(shuffleMode.value));
+  });
+
+  effect(() => {
+    const mode = repeatMode.value;
+    modeRepeatBtn.classList.toggle("active", mode !== "off");
+    modeRepeatBtn.classList.toggle("repeat-one", mode === "one");
+    const label = mode === "all" ? "Repeat all" : mode === "one" ? "Repeat one" : "Repeat off";
+    modeRepeatBtn.setAttribute("aria-label", label);
+    modeRepeatBtn.title = label;
   });
 
   effect(() => {
@@ -1580,6 +1780,10 @@ async function init(): Promise<void> {
   manifestPathBrowseBtn = document.querySelector("#manifest-path-browse") as HTMLButtonElement;
   settingsBtn = document.querySelector("#settings-btn") as HTMLButtonElement;
   settingsBackBtn = document.querySelector("#settings-back-btn") as HTMLButtonElement;
+  playbackModesEl = document.querySelector("#playback-modes") as HTMLElement;
+  modeShuffleBtn = document.querySelector("#mode-shuffle") as HTMLButtonElement;
+  modeRepeatBtn = document.querySelector("#mode-repeat") as HTMLButtonElement;
+  searchEl = document.querySelector("#search") as HTMLElement;
   searchInput = document.querySelector("#search-input") as HTMLInputElement;
   searchResultsEl = document.querySelector("#search-results") as HTMLElement;
   nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
@@ -1596,6 +1800,7 @@ async function init(): Promise<void> {
   if (volume.value > 0) lastNonZeroVolume = volume.value;
 
   setupTabs();
+  setupPlaybackModes();
   await setupWindowSize(appWindow);
   setupSplitter(splitterWidth);
   setupSettings();
