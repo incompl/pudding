@@ -2317,6 +2317,13 @@ async function init(): Promise<void> {
   // double-click-to-maximize.
   const nowPlayingMainEl = document.querySelector("#now-playing-main") as HTMLElement;
   nowPlayingMainEl.addEventListener("dblclick", () => void toggleMiniPlayer());
+  // Same gesture in the queue view, but only in the empty space around the
+  // rows — double-clicking a row is reserved for playing it.
+  const queueViewEl = document.querySelector("#queue-view") as HTMLElement;
+  queueViewEl.addEventListener("dblclick", (e) => {
+    if ((e.target as HTMLElement).closest(".queue-row")) return;
+    void toggleMiniPlayer();
+  });
   // Recompute the title/artist marquees on every resize (width change or a
   // mode switch across the breakpoint both change whether the lines overflow).
   window.addEventListener("resize", updateMarquees);
