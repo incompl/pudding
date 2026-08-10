@@ -21,6 +21,10 @@ const KEY_VOLUME = "volume";
 const KEY_WINDOW_SIZE_NORMAL = "windowSizeNormal";
 const KEY_WINDOW_SIZE_MINI = "windowSizeMini";
 const KEY_WINDOW_POSITION = "windowPosition";
+// Autoadvance preferences, one per playback context (file-tree play vs. explicit
+// playlists/queues). Both live in the OS Playback menu, not the app UI.
+const KEY_AUTOADVANCE_FILES = "autoadvanceFiles";
+const KEY_AUTOADVANCE_PLAYLISTS = "autoadvancePlaylists";
 
 // Below this logical (CSS-px) height the layout collapses to the mini player.
 // Mirrors the `max-height` breakpoint in styles.css — keep the two in sync.
@@ -114,14 +118,21 @@ type SearchItem =
 // Queue shape leave room for a future mutable "playlist" kind without reworking
 // the view or the advancement logic — which already treats poolPaths() (the
 // current synthetic parent's children) as "the queue".
-type QueueKind = "artist" | "album"; // future: "playlist"
+type QueueKind = "artist" | "album" | "folder" | "playlist";
 
 interface Queue {
   kind: QueueKind;
-  title: string; // header line: the artist or album name
-  subtitle: string | null; // e.g. the album artist, or a track count
+  title: string; // header line: the queue/playlist name (artist, album, folder…)
+  subtitle: string | null; // always a track count
   tracks: SearchTrack[];
 }
+
+// Header for a queue the user builds by hand (Add to queue), as opposed to one
+// opened from a fixed source (Play artist/album/folder). Deliberately NOT named
+// after any track: the contents change as more are added, so a track-derived
+// title would drift. Placeholder framing ("Untitled") anticipates saving it as a
+// named playlist later.
+const UNTITLED_PLAYLIST_TITLE = "Untitled";
 
 interface ScanResult {
   ok: boolean;
@@ -156,10 +167,47 @@ const currentStreamUrl = signal<string | null>(null);
 const settingsOpen = signal(false);
 const activeTab = signal<"files" | "streams">("files");
 
-// The queue currently open in the right pane, or null when showing the normal
-// now-playing card. Set by openArtistQueue/openAlbumQueue; cleared when any
-// non-queue playback starts (a tree album, a stream, a search track/folder).
+// The queue backing the right pane, or null when a lone track is playing. Set
+// whenever queue intent is expressed — Play folder/album/artist, or Add to
+// queue — and cleared when a lone track plays (a tree track click, a stream, a
+// search track).
+//
+// The right pane is one vertical stack, not two toggled faces: the now-playing
+// hero sits on top and, when a queue exists, the queue list fills the space
+// below it (scrolling the list collapses the hero to a compact strip — see
+// syncHeroCollapsed). So `activeQueue` alone decides whether the queue section
+// is present; there is no separate card/list mode.
 const activeQueue = signal<Queue | null>(null);
+
+// Named for intent at the call sites; both just set `activeQueue` now that the
+// hero and queue coexist (no face to pick).
+function openActiveQueue(queue: Queue): void {
+  activeQueue.value = queue;
+}
+function clearActiveQueue(): void {
+  activeQueue.value = null;
+}
+
+// The queue row currently playing, or null when playback is outside the queue
+// (folder autoplay, a lone search/external track, or a stream). Not a boolean
+// "am I in the queue" flag: a queue can hold the same track at several rows, so
+// only an index can say which instance is live — driving the single-row
+// highlight (and, at rest after the queue drains, the absence of one). The
+// queue and folder autoplay are fully independent: normal playback never flows
+// into the queue on its own; the only way to play the queue is to play from it
+// (a queue row, or Play folder/album/artist). Whether the queue is the *audible
+// pool* — for Close's teardown and the play-restart — is read from
+// `queueIsActivePool()` (the synthetic `queue:` parent), not from this index,
+// which goes null while the drained queue rests.
+const queuePlayingIndex = signal<number | null>(null);
+
+// A queue is the engine's active pool iff currentParent is one of the synthetic
+// `queue:` parents (real folders are filesystem paths). Distinguishes "the queue
+// is playing / rests at its end" from "a queue is merely stashed while a folder,
+// stream, or lone track plays".
+function queueIsActivePool(): boolean {
+  return currentParent?.path.startsWith("queue:") ?? false;
+}
 
 // Playback-mode controls (files view only): Shuffle (on/off) and Repeat, a
 // three-state cycle matching every mainstream player — off (play through and
@@ -176,8 +224,29 @@ const activeQueue = signal<Queue | null>(null);
 type RepeatMode = "off" | "all" | "one";
 const shuffleMode = signal(false);
 const repeatMode = signal<RepeatMode>("off");
+
+// Autoadvance: when a track ends, does playback flow on to the next one? A
+// persistent, set-once preference (not a per-play choice), split by context —
+// file-tree play vs. explicit playlists/queues — and set from the OS Playback
+// menu, never the app UI. Both default on, matching what a media player is
+// expected to do. When off for the active context, the engine is only ever
+// handed the current track (never its tail), so gapless prep has nothing to
+// advance into and handleEnded stops at each track's end. See applyAutoadvance.
+const autoadvanceFiles = signal(true);
+const autoadvancePlaylists = signal(true);
+
+// The autoadvance setting governing what's currently playing: playlists/queues
+// when the active pool is a synthetic queue, else the file tree. Read at each
+// advancement point and each engine hand-off.
+function autoadvanceEnabled(): boolean {
+  return queueIsActivePool() ? autoadvancePlaylists.value : autoadvanceFiles.value;
+}
 const libraryRootValid = signal(true);
 const manifestPathValid = signal(true);
+// Whether the file tree has at least one top-level entry to start from. Drives
+// the idle play button: with content, an idle play "starts the library" (plays
+// the first entry) instead of sitting disabled, so the button reads ready-to-go.
+const libraryHasContent = signal(false);
 
 // --- Helpers ---
 
@@ -249,6 +318,12 @@ let artRequestId = 0;
 // after the album finishes → resume from the last track).
 let lastQueue: string[] = [];
 let lastIndex = 0;
+// The queue-row index the *next* engine play should land on, consumed by the
+// following onAdvance to set queuePlayingIndex. Set right before every play that
+// starts or jumps within the queue pool; left null for gapless auto-advance,
+// which onAdvance treats as "the next row down" (so duplicate rows are tracked
+// positionally, matching the engine's sequential advance).
+let pendingQueueIndex: number | null = null;
 // True once the engine has played through the queue's last track. Cleared on
 // the next Play (file selection, seek, or restart-from-end via play button).
 let queueEnded = false;
@@ -309,6 +384,16 @@ const engine = new GaplessEngine({
     if (!node) return;
     currentNodePath.value = node.path;
     currentStreamUrl.value = null;
+    // Track which queue row is live. A play/jump sets pendingQueueIndex to its
+    // target; a gapless auto-advance leaves it null, so we step to the next row
+    // down (positional, so duplicate rows resolve to the right instance).
+    if (queueIsActivePool()) {
+      queuePlayingIndex.value =
+        pendingQueueIndex ?? (queuePlayingIndex.value ?? -1) + 1;
+    } else {
+      queuePlayingIndex.value = null;
+    }
+    pendingQueueIndex = null;
     setNowPlaying(node.title ?? node.name, node.artist, node.album);
     void loadArt(node.path);
   },
@@ -416,6 +501,9 @@ let nowPlayingArtistEl: HTMLElement;
 let nowPlayingArtistInner: HTMLElement;
 let nowPlayingAlbumEl: HTMLElement;
 let nowPlayingAlbumInner: HTMLElement;
+let npStripTitleEl: HTMLElement;
+let npStripArtistEl: HTMLElement;
+let npStripArtistWrapEl: HTMLElement;
 let nowPlayingStreamMetaEl: HTMLElement;
 let streamMetaSongEl: HTMLElement;
 let streamMetaSongInner: HTMLElement;
@@ -425,6 +513,8 @@ let liveIndicatorEl: HTMLElement;
 let nowPlayingArtEl: HTMLImageElement;
 let nowPlayingEmptyEl: HTMLElement;
 let playPauseBtn: HTMLButtonElement;
+let prevBtn: HTMLButtonElement;
+let nextBtn: HTMLButtonElement;
 let seekBar: HTMLInputElement;
 let timeCurrentEl: HTMLElement;
 let timeRemainingEl: HTMLElement;
@@ -451,8 +541,9 @@ let settingsPanel: HTMLElement;
 let splitterEl: HTMLElement;
 let queueTitleEl: HTMLElement;
 let queueSubtitleEl: HTMLElement;
-let queueArtEl: HTMLImageElement;
 let queueListEl: HTMLElement;
+let queueCloseBtn: HTMLButtonElement;
+let toastEl: HTMLElement;
 
 // --- Tree ---
 
@@ -511,18 +602,6 @@ async function fetchChildren(node: TreeNode): Promise<void> {
     console.error("list_dir failed for", node.path, e);
     node.loaded = true;
     node.children = [];
-  }
-}
-
-// Recursively loads and expands a folder and every subfolder beneath it, so
-// "Play folder" leaves the whole played subtree open in the tree. Lazy folders
-// are fetched on the way down; already-expanded branches are left untouched.
-async function expandFolderTree(node: TreeNode): Promise<void> {
-  if (!node.isFolder) return;
-  if (!node.loaded) await fetchChildren(node);
-  node.expanded = true;
-  for (const child of node.children) {
-    if (child.isFolder) await expandFolderTree(child);
   }
 }
 
@@ -606,21 +685,69 @@ function showContextMenu(
   contextMenuEl.style.top = `${top}px`;
 }
 
-function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
+// Whether a track's artist is worth showing in a given folder. Suppressed only
+// when it's pure repetition: a multi-track album whose tagged tracks all share
+// one artist (the folder header already carries it). Shown when the artists vary
+// (compilations, a lone guest feature, "Various Artists") and when the folder
+// holds a single tagged track — a loose single, where there's nothing to repeat.
+function folderArtistsVary(children: TreeNode[]): boolean {
+  const artists = new Set<string>();
+  let tagged = 0;
+  for (const c of children) {
+    if (c.isFolder || !c.artist) continue;
+    tagged++;
+    artists.add(c.artist);
+    if (artists.size > 1) return true;
+  }
+  return tagged === 1;
+}
+
+function renderNode(
+  node: TreeNode,
+  parent: TreeNode,
+  showArtist = true,
+): HTMLLIElement {
   const li = document.createElement("li");
   const label = document.createElement("span");
   label.className = "node-label";
-  // Every row carries its path so revealInTree can scroll to it; only files
-  // ever match currentNodePath, so the playing highlight stays file-only.
+  // Every row carries its path so the playing-highlight effect can find it;
+  // only files ever match currentNodePath, so the highlight stays file-only.
   label.dataset.path = node.path;
   if (!node.isFolder && currentNodePath.value === node.path) {
     label.classList.add("playing");
   }
   const icon = document.createElement("span");
   icon.className = "icon";
-  icon.textContent = node.isFolder ? (node.expanded ? "▼" : "▶") : "♪";
-  label.appendChild(icon);
-  label.appendChild(document.createTextNode(" " + displayLabel(node)));
+  // Folders show an open/closed folder. A file's slot carries its tagged track
+  // number when it has one (the playing row just recolors it); an untagged file
+  // — or any loose top-level file — gets no gutter icon and sits flush.
+  if (node.isFolder) {
+    icon.classList.add(node.expanded ? "folder-open" : "folder");
+    label.appendChild(icon);
+  } else if (parent !== rootNode && node.track != null) {
+    icon.classList.add("track");
+    icon.textContent = String(node.track);
+    label.appendChild(icon);
+  }
+  const text = document.createElement("span");
+  text.className = "label-text";
+  // A tagged track reads as two lines — title over a de-emphasized artist —
+  // like a search result. Folders and untagged files keep a single plain line.
+  if (!node.isFolder && node.title) {
+    const primary = document.createElement("span");
+    primary.className = "primary";
+    primary.textContent = node.title;
+    text.appendChild(primary);
+    if (node.artist && showArtist) {
+      const secondary = document.createElement("span");
+      secondary.className = "secondary";
+      secondary.textContent = node.artist;
+      text.appendChild(secondary);
+    }
+  } else {
+    text.textContent = displayLabel(node);
+  }
+  label.appendChild(text);
   label.addEventListener("click", () => onNodeClick(node, parent, li));
   // Right-click a folder to play it as one recursive album (all tracks beneath
   // it, at any depth) — the same behavior as choosing a folder from search.
@@ -631,11 +758,14 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
         {
           label: "Play folder",
           action: () => {
-            // Expand the played subtree, then reveal + scroll to the folder,
-            // the same way clicking through from search results does.
-            void expandFolderTree(node).then(() => revealInTree(node.path));
+            // The queue pane is the feedback for this action, so leave the tree
+            // where it is — no recursive expand or scroll-to.
             void playFolder({ path: node.path, name: node.name });
           },
+        },
+        {
+          label: "Add to queue",
+          action: () => void addFolderToQueue({ path: node.path, name: node.name }),
         },
       ]);
     });
@@ -645,18 +775,23 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
     // OST rips named purely by filename) has neither, so fall back to "Play
     // folder" on its containing folder — right-click always does something.
     label.addEventListener("contextmenu", (e) => {
-      const items = trackContextItems({
+      // The Play verbs lead — the navigation verbs (Play artist / Play album)
+      // when their tags exist, else "Play folder" on the container for an
+      // untagged track (which has neither) so right-click always does something.
+      // "Add to queue" always comes last, matching the folder menu's order.
+      const nav = trackContextItems({
         artist: node.artist,
         album: node.album,
         albumArtist: node.albumArtist,
       });
-      if (items.length === 0 && parent.isFolder) {
+      const items: { label: string; action: () => void }[] = [...nav];
+      if (nav.length === 0 && parent.isFolder) {
         items.push({
           label: "Play folder",
           action: () => void playFolder({ path: parent.path, name: parent.name }),
         });
       }
-      if (items.length === 0) return;
+      items.push({ label: "Add to queue", action: () => addToQueue([nodeToTrack(node)]) });
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, items);
     });
@@ -671,8 +806,9 @@ function renderNode(node: TreeNode, parent: TreeNode): HTMLLIElement {
       emptyLi.textContent = "(empty)";
       childUl.appendChild(emptyLi);
     } else {
+      const showArtist = folderArtistsVary(node.children);
       for (const child of node.children) {
-        childUl.appendChild(renderNode(child, node));
+        childUl.appendChild(renderNode(child, node, showArtist));
       }
     }
     li.appendChild(childUl);
@@ -686,8 +822,12 @@ async function onNodeClick(node: TreeNode, parent: TreeNode, li: HTMLLIElement):
     node.expanded = !node.expanded;
     li.replaceWith(renderNode(node, parent));
   } else {
-    // A plain tree track is a normal album, not a queue page: leave queue mode.
-    activeQueue.value = null;
+    // A plain tree track plays with its album auto-continuing under the hood. It
+    // does NOT clear any explicit queue — that stays stashed and visible so the
+    // user can return to it (the only way back in is to play from the queue).
+    // Drop the queue highlight now (the folder becomes the pool) rather than
+    // waiting a frame for onAdvance.
+    queuePlayingIndex.value = null;
     playFile(node, parent);
   }
 }
@@ -706,40 +846,6 @@ function renderTree(): void {
   treeContainer.appendChild(ul);
 }
 
-// Reveals a library file or folder in the tree: walks root → target, lazily
-// loading and expanding each ancestor folder, re-renders, then scrolls it into
-// view. Bails quietly if the path can't be located (e.g. removed, or path
-// scheme doesn't match the tree).
-async function revealInTree(path: string): Promise<void> {
-  if (!rootNode) return;
-  let node: TreeNode = rootNode;
-  while (node.path !== path) {
-    if (!node.loaded) await fetchChildren(node);
-    const child = node.children.find(
-      (c) => c.path === path || (c.isFolder && path.startsWith(c.path + "/")),
-    );
-    if (!child) return;
-    if (child.isFolder) child.expanded = true;
-    node = child;
-  }
-  // A folder target is expanded above, so load its children too — otherwise the
-  // expanded row renders as "(empty)" until it's clicked.
-  if (node.isFolder && !node.loaded) await fetchChildren(node);
-  renderTree();
-  const label = treeContainer.querySelector<HTMLElement>(
-    `.node-label[data-path="${CSS.escape(path)}"]`,
-  );
-  if (node.isFolder) {
-    // Scroll the folder's own row to the top so its header and tracks show.
-    label?.closest("li")?.scrollIntoView({ block: "start" });
-  } else {
-    // The file's <li> sits inside its directory's child <ul>; scroll that
-    // directory's <li> into view so the folder header and file are both shown.
-    const dirLi = label?.closest("li")?.parentElement?.closest("li");
-    (dirLi ?? label)?.scrollIntoView({ block: "start" });
-  }
-}
-
 function renderStreams(streams: Stream[]): void {
   streamsContainer.innerHTML = "";
   if (streams.length === 0) {
@@ -756,10 +862,12 @@ function renderStreams(streams: Stream[]): void {
       label.classList.add("playing");
     }
     const icon = document.createElement("span");
-    icon.className = "icon";
-    icon.textContent = "♪";
+    icon.className = "icon radio";
     label.appendChild(icon);
-    label.appendChild(document.createTextNode(" " + stream.name));
+    const text = document.createElement("span");
+    text.className = "label-text";
+    text.textContent = stream.name;
+    label.appendChild(text);
     label.addEventListener("click", () => playStream(stream));
     li.appendChild(label);
     ul.appendChild(li);
@@ -768,65 +876,46 @@ function renderStreams(streams: Stream[]): void {
 }
 
 // Renders the queue view's track list. Rebuilt whenever the queue or the
-// playing track changes (both cheap: a queue is at most a few hundred rows).
-// The current track's row is highlighted and scrolled into view; clicking any
-// row plays it within the queue.
-// The queue whose header cover art is currently shown, tracked by identity so
-// renderQueue only re-fetches when the queue actually changes (not on every
-// in-queue track advance). Doubles as the async guard: a load result is only
-// applied if its queue is still the one on screen.
-let loadedArtQueue: Queue | null = null;
-
-async function loadQueueArt(queue: Queue): Promise<void> {
-  const first = queue.tracks[0];
-  if (!first) return;
-  let dataUrl: string | null;
-  try {
-    dataUrl = await invoke<string | null>("get_art", { path: first.path });
-  } catch (e) {
-    console.error("queue art load failed for", first.path, e);
-    return;
-  }
-  // A newer queue was opened while this fetch was in flight — drop the result.
-  if (queue !== loadedArtQueue) return;
-  queueArtEl.src = dataUrl ?? "";
-  queueArtEl.classList.toggle("hidden", !dataUrl);
-}
+// playing row changes (both cheap: a queue is at most a few hundred rows).
+// One uniform view for every queue regardless of how it was built — a queue is
+// an arbitrary, possibly mixed-source list once you can Add to it from anywhere,
+// so there's no per-kind header cover or per-kind row line. The playing row
+// (queuePlayingIndex, which distinguishes duplicate rows) is highlighted and
+// scrolled into view; clicking any row plays it within the queue.
+// One-shot: the index a just-appended track wants brought into view. renderQueue
+// consumes it so the re-render lands on the new row rather than the default
+// scroll-to-playing (which sits earlier, and would otherwise hide the addition).
+let pendingQueueScrollIndex: number | null = null;
 
 function renderQueue(queue: Queue | null): void {
   if (!queue) {
     queueListEl.innerHTML = "";
-    loadedArtQueue = null;
-    queueArtEl.classList.add("hidden");
     return;
   }
   queueTitleEl.textContent = queue.title;
   queueSubtitleEl.textContent = queue.subtitle ?? "";
   queueSubtitleEl.classList.toggle("hidden", !queue.subtitle);
-  // renderQueue re-runs on every in-queue track advance; the header cover only
-  // depends on the queue itself, so fetch it once per queue (by identity) rather
-  // than on each advance. Only album queues have a single cover — an artist
-  // queue spans albums, so it stays text-only.
-  if (queue !== loadedArtQueue) {
-    loadedArtQueue = queue;
-    queueArtEl.classList.add("hidden");
-    if (queue.kind === "album") void loadQueueArt(queue);
-  }
 
-  const playing = currentNodePath.value;
+  const playing = queuePlayingIndex.value;
+  // A pending append target wins over the playing row for this render only.
+  const scrollTo = pendingQueueScrollIndex;
+  pendingQueueScrollIndex = null;
   queueListEl.innerHTML = "";
   let activeRow: HTMLElement | null = null;
+  let scrollRow: HTMLElement | null = null;
   queue.tracks.forEach((t, i) => {
     const li = document.createElement("li");
     li.className = "queue-row";
-    if (t.path === playing) {
+    const isPlaying = i === playing;
+    if (isPlaying) {
       li.classList.add("playing");
       activeRow = li;
     }
+    if (i === scrollTo) scrollRow = li;
     const num = document.createElement("span");
     num.className = "queue-num";
     // The playing row shows a ♪ in place of its index (like the tree's rows).
-    num.textContent = t.path === playing ? "♪" : String(i + 1);
+    num.textContent = isPlaying ? "♪" : String(i + 1);
     const text = document.createElement("span");
     text.className = "queue-text";
     const primary = document.createElement("span");
@@ -834,18 +923,16 @@ function renderQueue(queue: Queue | null): void {
     primary.textContent = t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path);
     const secondary = document.createElement("span");
     secondary.className = "queue-secondary";
-    // An album queue is one artist/album context, so per-row artist/album is
-    // noise; an artist queue spans albums, so the album is the useful subtitle.
-    secondary.textContent =
-      queue.kind === "artist" ? (t.album ?? "") : (t.artist ?? "");
+    secondary.textContent = t.artist ?? t.album ?? "";
     text.appendChild(primary);
     if (secondary.textContent) text.appendChild(secondary);
     li.appendChild(num);
     li.appendChild(text);
-    li.addEventListener("click", () => playQueueTrack(t.path));
+    li.addEventListener("click", () => playQueueTrack(i));
     queueListEl.appendChild(li);
   });
-  if (activeRow) (activeRow as HTMLElement).scrollIntoView({ block: "nearest" });
+  const target = (scrollRow ?? activeRow) as HTMLElement | null;
+  if (target) target.scrollIntoView({ block: "nearest" });
 }
 
 // --- Playback ---
@@ -861,16 +948,49 @@ function setNowPlaying(
   npAlbum.value = album;
 }
 
+// Idle play, cold start: "start the library" by playing the first song. For a
+// folder that's its first track — the same as clicking that track in the tree
+// (the album auto-continues under the hood, no queue view), not the whole folder
+// as an explicit playlist. A loose top-level file plays on its own. This keeps
+// the idle play button ready-to-go rather than a dead disabled control.
+async function startLibrary(): Promise<void> {
+  const root = rootNode;
+  const first = root?.children[0];
+  if (!root || !first) return;
+  if (!first.isFolder) {
+    playFile(first, root);
+    return;
+  }
+  await fetchChildren(first);
+  const track = first.children.find((c) => !c.isFolder);
+  if (track) playFile(track, first);
+}
+
 function togglePlayPause(): void {
-  if (!hasTrack.value) return;
+  if (!hasTrack.value) {
+    void startLibrary();
+    return;
+  }
   // Streams also route through togglePause: the engine implements live-radio
   // semantics natively (pause disconnects, resume rejoins the live edge).
   if (queueEnded && lastQueue.length > 0) {
-    // Last track of the queue ran to the end; restart it from the top. Matches
-    // the prior UX where hitting play after an album finished resumed the
-    // final track.
     queueEnded = false;
-    void engine.play(lastQueue, lastIndex);
+    if (queueIsActivePool()) {
+      // The queue ran to its end and rests with no playhead, so play restarts it
+      // from the top rather than resuming any one track. (activeQueue can now be
+      // set while a folder plays with the queue merely stashed — the pool, not
+      // its mere existence, is what decides this.)
+      const pool = poolPaths();
+      lastQueue = pool;
+      lastIndex = 0;
+      pendingQueueIndex = 0;
+      currentNodePath.value = pool[0] ?? null;
+      feedEngine(pool, 0);
+    } else {
+      // Implicit folder continuation: resume the track that just finished,
+      // matching the prior UX where play after an album ended replayed it.
+      feedEngine(lastQueue, lastIndex);
+    }
     return;
   }
   void engine.togglePause();
@@ -939,12 +1059,62 @@ function refillShuffleBag(current: string | null): void {
 // and the play button restart the right thing. UI (row highlight, now-playing,
 // art) follows from the engine's track-changed → onAdvance for album tracks;
 // for a lone search/external track it's already correct (same track).
-function playSingle(path: string): void {
+function playSingle(path: string, queueIndex?: number): void {
   queueEnded = false;
   lastQueue = [path];
   lastIndex = 0;
   currentTime.value = 0;
+  // Shuffle / repeat-one hand the engine one track at a time; when that track is
+  // a queue row, mark which one so onAdvance highlights it. Callers pass the
+  // positional index when known (e.g. repeat-one looping row 3 of a duplicate-
+  // heavy queue) so the correct instance is highlighted rather than the first match.
+  if (queueIsActivePool()) {
+    if (queueIndex != null) {
+      pendingQueueIndex = queueIndex;
+    } else {
+      const found = currentParent?.children.findIndex((c) => c.path === path) ?? -1;
+      pendingQueueIndex = found >= 0 ? found : null;
+    }
+  }
   void engine.play([path], 0);
+}
+
+// Hand the engine a straight-play list positioned at `idx`. With autoadvance on
+// (the default) the whole list goes across so the engine advances gaplessly; with
+// it off, only the one track is handed over — the engine then drains after it and
+// handleEnded stops, giving "one track, then stop" without any engine change. The
+// full list still lives in lastQueue/poolPaths so a manual skip can move on.
+function feedEngine(list: string[], idx: number): void {
+  if (autoadvanceEnabled()) void engine.play(list, idx);
+  else void engine.play([list[idx]], 0);
+}
+
+// Hand the engine a pool starting at `idx` and remember it (the shared body of
+// straight-play advance, repeat-all wrap, and manual skip). When the pool is the
+// queue, `idx` is also the row to highlight next.
+function playPool(pool: string[], idx: number): void {
+  queueEnded = false;
+  lastQueue = pool;
+  lastIndex = idx;
+  if (queueIsActivePool()) pendingQueueIndex = idx;
+  feedEngine(pool, idx);
+}
+
+// Playback has run to the end with nothing left to advance to. A visible queue
+// rests with no playhead — the finished rows stay on screen, but nothing is
+// "current", so pressing play restarts it from the top (see togglePlayPause).
+// Implicit folder continuation keeps its row highlighted so play resumes the
+// track that just finished.
+function stopAtQueueEnd(): void {
+  queueEnded = true;
+  // A drained queue rests with no playhead (rows stay, none highlighted); folder
+  // autoplay instead keeps its row so play resumes the finished track. The two
+  // never hand off: playback outside the queue stops at the folder's end rather
+  // than flowing into any stashed queue.
+  if (queueIsActivePool()) {
+    currentNodePath.value = null;
+    queuePlayingIndex.value = null;
+  }
 }
 
 // Decide what to play when the engine drains its queue. This is the sole
@@ -955,11 +1125,19 @@ function handleEnded(): void {
   const mode = repeatMode.value;
   // currentNodePath is null for an external file; fall back to the queue so
   // repeat still identifies the track to loop.
-  const current = currentNodePath.value ?? lastQueue[0] ?? null;
+  const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
 
   // Repeat-one loops the finished track regardless of shuffle.
   if (mode === "one" && current) {
-    playSingle(current);
+    playSingle(current, queueIsActivePool() ? (queuePlayingIndex.value ?? undefined) : undefined);
+    return;
+  }
+
+  // Autoadvance off for this context: stop instead of moving to the next track.
+  // This overrides shuffle and repeat-all (both advance to a *different* track);
+  // repeat-one above still loops, since it never advances off the current track.
+  if (!autoadvanceEnabled()) {
+    stopAtQueueEnd();
     return;
   }
 
@@ -967,14 +1145,14 @@ function handleEnded(): void {
     if (shuffleBag.length === 0) {
       // Cycle exhausted: reshuffle and keep going when repeating, else stop.
       if (mode !== "all") {
-        queueEnded = true;
+        stopAtQueueEnd();
         return;
       }
       refillShuffleBag(current);
     }
     const next = shuffleBag.shift();
     if (next) playSingle(next);
-    else queueEnded = true;
+    else stopAtQueueEnd();
     return;
   }
 
@@ -982,23 +1160,23 @@ function handleEnded(): void {
   // matters when shuffle was turned off mid-album (single-track queue) — resume
   // the album in order rather than stopping.
   const pool = poolPaths();
-  const nextIdx = pool.indexOf(current ?? "") + 1;
-  if (nextIdx > 0 && nextIdx < pool.length) {
-    queueEnded = false;
-    lastQueue = pool;
-    lastIndex = nextIdx;
-    void engine.play(pool, nextIdx);
+  // In the queue pool, use the live row index (same as skipNext) so a duplicate
+  // track at a later row resolves to the correct instance rather than the first
+  // path match, which would cause the queue to loop from the middle instead of stop.
+  const curIdx = queueIsActivePool() && queuePlayingIndex.value != null
+    ? queuePlayingIndex.value
+    : pool.indexOf(current ?? "");
+  const nextIdx = curIdx + 1;
+  if (curIdx >= 0 && nextIdx < pool.length) {
+    playPool(pool, nextIdx);
     return;
   }
   // End of the album.
   if (mode === "all" && pool.length > 0) {
-    queueEnded = false;
-    lastQueue = pool;
-    lastIndex = 0;
-    void engine.play(pool, 0);
+    playPool(pool, 0);
     return;
   }
-  queueEnded = true;
+  stopAtQueueEnd();
 }
 
 // User-initiated skip, driven by the OS Now Playing widget / media keys (there
@@ -1016,18 +1194,18 @@ function skipNext(): void {
   }
 
   const pool = poolPaths();
-  const nextIdx = pool.indexOf(current ?? "") + 1;
-  if (nextIdx > 0 && nextIdx < pool.length) {
-    queueEnded = false;
-    lastQueue = pool;
-    lastIndex = nextIdx;
-    void engine.play(pool, nextIdx);
+  // In the queue pool, trust the live row index (positional, so a duplicated
+  // track resolves to the instance actually playing) over a path lookup, which
+  // would find the first copy. Elsewhere the path is unambiguous.
+  const curIdx = queueIsActivePool() && queuePlayingIndex.value != null
+    ? queuePlayingIndex.value
+    : pool.indexOf(current ?? "");
+  const nextIdx = curIdx + 1;
+  if (curIdx >= 0 && nextIdx < pool.length) {
+    playPool(pool, nextIdx);
   } else if (repeatMode.value === "all" && pool.length > 0) {
     // Wrap to the album start; without repeat-all a next past the end is a no-op.
-    queueEnded = false;
-    lastQueue = pool;
-    lastIndex = 0;
-    void engine.play(pool, 0);
+    playPool(pool, 0);
   }
 }
 
@@ -1042,18 +1220,45 @@ function skipPrev(): void {
   }
   const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
   const pool = poolPaths();
-  const prevIdx = pool.indexOf(current ?? "") - 1;
+  // Prefer the live row index in the queue pool so a duplicated track steps back
+  // from the instance actually playing, not the first path match (see skipNext).
+  const curIdx = queueIsActivePool() && queuePlayingIndex.value != null
+    ? queuePlayingIndex.value
+    : pool.indexOf(current ?? "");
+  const prevIdx = curIdx - 1;
   if (prevIdx >= 0) {
-    queueEnded = false;
-    lastQueue = pool;
-    lastIndex = prevIdx;
-    void engine.play(pool, prevIdx);
+    playPool(pool, prevIdx);
   } else {
     void engine.seekTo(0);
   }
 }
 
-function playFile(node: TreeNode, parent: TreeNode): void {
+// Whether a manual Next would land on another track — drives only the Next
+// button's enabled state (skipNext stays the sole mover). Mirrors skipNext's
+// branches: shuffle always has a next (the bag refills), straight play does
+// until the pool's last track unless repeat-all wraps. Streams and an idle or
+// drained player have nothing ahead. Prev needs no such check: it always
+// restarts or steps back, so it's live whenever a non-stream track is loaded.
+function hasNextTrack(): boolean {
+  if (!hasTrack.value || isStream.value) return false;
+  if (shuffleMode.value) return true;
+  const pool = poolPaths();
+  if (pool.length === 0) return false;
+  if (repeatMode.value === "all") return true;
+  const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
+  // In the queue pool, trust the live row index (positional) so a duplicated
+  // track resolves to the instance playing, matching skipNext.
+  const curIdx = queueIsActivePool() && queuePlayingIndex.value != null
+    ? queuePlayingIndex.value
+    : pool.indexOf(current ?? "");
+  return curIdx >= 0 && curIdx + 1 < pool.length;
+}
+
+// `startIndex` pins the position to start at within `parent`'s tracks; callers
+// that click a specific queue row pass it so a duplicated track resolves to the
+// clicked instance rather than the first path match. Omitted for folder/tree
+// clicks, where the node's path is unambiguous within its folder.
+function playFile(node: TreeNode, parent: TreeNode, startIndex?: number): void {
   currentParent = parent;
   currentNodePath.value = node.path;
   currentStreamUrl.value = null;
@@ -1068,29 +1273,33 @@ function playFile(node: TreeNode, parent: TreeNode): void {
   if (repeatMode.value === "one") {
     // Loop this track; the album never enters the queue.
     shuffleBag = [];
-    playSingle(node.path);
+    playSingle(node.path, startIndex);
   } else if (shuffleMode.value) {
     // One track at a time, next picked at each queue-ended. Seed the bag with
     // the rest of the album so a repeat-off cycle plays every track once.
     refillShuffleBag(node.path);
-    playSingle(node.path);
+    playSingle(node.path, startIndex);
   } else {
-    // Queue the rest of the album so the engine auto-advances gaplessly. The
-    // engine treats this list as the complete queue; clicking another file
-    // later replaces it.
+    // Straight play. With autoadvance on, queue the rest of the album so the
+    // engine auto-advances gaplessly (it treats this list as the complete queue,
+    // replaced when another file is clicked); with it off, feedEngine hands over
+    // only this track so playback stops at its end.
     shuffleBag = [];
-    const idx = Math.max(
+    const idx = startIndex ?? Math.max(
       0,
       siblings.findIndex((c) => c.path === node.path),
     );
     lastQueue = tracks;
     lastIndex = idx;
-    void engine.play(tracks, idx);
+    if (queueIsActivePool()) pendingQueueIndex = idx;
+    feedEngine(tracks, idx);
   }
 }
 
 function playStream(stream: Stream): void {
-  activeQueue.value = null;
+  // A stream plays outside any explicit queue, which stays stashed and visible;
+  // null the highlight (streams emit no track-changed, so onAdvance won't).
+  queuePlayingIndex.value = null;
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = stream.url;
@@ -1122,7 +1331,9 @@ function playStream(stream: Stream): void {
 // setting currentNodePath still lights up the row if that folder is expanded in
 // the tree. The native engine opens the file directly — no prepare step needed.
 function playSearchTrack(t: SearchTrack): void {
-  activeQueue.value = null;
+  // A lone search hit plays outside any explicit queue, which stays stashed and
+  // visible; currentParent is null so onAdvance won't touch the highlight.
+  queuePlayingIndex.value = null;
   currentParent = null;
   currentNodePath.value = t.path;
   currentStreamUrl.value = null;
@@ -1196,13 +1407,20 @@ async function playFolder(folder: SearchFolder): Promise<void> {
     return;
   }
   if (tracks.length === 0) return;
-  // A folder is a plain album, not a queue page: leave queue mode.
-  activeQueue.value = null;
-  const parent = syntheticParent(folder.path, folder.name, tracks);
-  const start = shuffleMode.value
-    ? parent.children[Math.floor(Math.random() * parent.children.length)]
-    : parent.children[0];
-  playFile(start, parent);
+  // A folder is a queue the user chose to play — show it as one (list view),
+  // instead of the old "secret queue" that played but stayed on the card. A
+  // folder can span albums (recursive flatten), so it's text-only like an
+  // artist queue, keyed on the folder path.
+  const n = tracks.length;
+  playQueue(
+    {
+      kind: "folder",
+      title: folder.name,
+      subtitle: `${n} track${n === 1 ? "" : "s"}`,
+      tracks,
+    },
+    `queue:folder:${folder.path}`,
+  );
 }
 
 // Opens a queue in the right pane and starts it. Playback reuses the album path
@@ -1220,7 +1438,7 @@ function playQueue(queue: Queue, syntheticPath: string): void {
     ? parent.children[Math.floor(Math.random() * parent.children.length)]
     : parent.children[0];
   playFile(start, parent);
-  activeQueue.value = queue;
+  openActiveQueue(queue);
 }
 
 async function openArtistQueue(name: string): Promise<void> {
@@ -1253,16 +1471,254 @@ async function openAlbumQueue(album: string, albumArtist: string): Promise<void>
     return;
   }
   if (tracks.length === 0) return;
+  const n = tracks.length;
   playQueue(
     {
       kind: "album",
       title: album,
-      subtitle: albumArtist || null,
+      subtitle: `${n} track${n === 1 ? "" : "s"}`,
       tracks,
     },
     // NUL joins the two keys so a "/" in either can't forge a collision.
     `queue:album:${albumArtist}\0${album}`,
   );
+}
+
+// --- Add to queue ---
+//
+// The queue is explicit: it exists only once the user deliberately builds one,
+// and holds only what they put in it (playing a folder track still auto-continues
+// under the hood, but that never presents as a queue). There are exactly two
+// verbs: "Play X" (folder/album/artist) replaces and plays now, while
+// "Add to queue" only ever appends — play-later, never interrupting the audible
+// track. That symmetry is why a track has no "Play" menu item of its own (a
+// left-click already plays it) and no "start queue" verb: the sole way to build
+// an explicit queue by hand is to Add to queue.
+//
+// Adding when no queue exists yet: if a track is playing (implicit folder
+// continuation), seed a queue from just that one track — the song the user can
+// already hear, so row 1 is never a surprise — and append after it, severing the
+// folder tail so only explicitly-queued tracks follow (seedQueueFromCurrent). If
+// nothing is playing, the append starts a fresh queue that plays at once.
+//
+// The visible queue and the engine's queue are kept in step: the engine plays a
+// flat path list, while the frontend resolves per-track metadata (row highlight,
+// now-playing on auto-advance) through currentParent.children — so appended
+// tracks must land in both. currentParent.children is also the shuffle/repeat
+// pool (poolPaths), so they join that too.
+
+function trackToNode(t: SearchTrack): TreeNode {
+  return {
+    path: t.path,
+    name: t.path.split(/[\\/]/).pop() ?? t.path,
+    title: t.title,
+    artist: t.artist,
+    album: t.album,
+    albumArtist: null,
+    disc: null,
+    track: null,
+    isFolder: false,
+    loaded: true,
+    expanded: false,
+    children: [],
+  };
+}
+
+function nodeToTrack(n: TreeNode): SearchTrack {
+  return { path: n.path, title: n.title, artist: n.artist, album: n.album };
+}
+
+function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
+  const q = activeQueue.value;
+  if (!q || tracks.length === 0) return;
+  const paths = tracks.map((t) => t.path);
+
+  // Sync the engine only when the queue is the pool that's actually playing. A
+  // stashed queue (a folder/stream/lone track is the pool) grows as data alone —
+  // its tracks reach the engine only when the user later plays from the queue,
+  // which rebuilds the pool from these same tracks (playQueueTrack).
+  if (queueIsActivePool()) {
+    // Grow the playback pool: onAdvance/siblingByPath and poolPaths read
+    // currentParent.children, so appended tracks live there to resolve on
+    // auto-advance and to join shuffle/repeat.
+    if (currentParent) currentParent.children.push(...tracks.map(trackToNode));
+    lastQueue = [...lastQueue, ...paths];
+
+    if (queueEnded) {
+      // The queue had run to the end; kick playback into the first appended track
+      // (feedEngine stops after it if playlist autoadvance is off).
+      queueEnded = false;
+      lastIndex = lastQueue.length - paths.length;
+      pendingQueueIndex = lastIndex;
+      feedEngine(lastQueue, lastIndex);
+    } else if (!shuffleMode.value && repeatMode.value !== "one" && autoadvanceEnabled()) {
+      // Straight play with autoadvance on: the engine holds the whole queue and
+      // auto-advances gaplessly, so append natively — the new tracks play on
+      // uninterrupted. With autoadvance off the engine holds only the current
+      // track; the appends stay pool-only (reachable by a manual skip) and never
+      // enter the engine, so playback still stops at the current track's end.
+      void engine.append(paths);
+    } else if (shuffleMode.value) {
+      // Shuffle hands the engine one track at a time (handleEnded picks the next
+      // from the bag), so route the new tracks through the pending bag.
+      shuffleBag.push(...shuffled(paths));
+    }
+    // repeat-one: nothing to enqueue now; the appended tracks joined the pool for
+    // when repeat-one is turned off.
+  }
+
+  // Bring the first appended row into view on the coming re-render (else the
+  // list would snap back to the playing row and hide the addition below the fold).
+  pendingQueueScrollIndex = q.tracks.length;
+  // Reassign to re-render the list + count.
+  const n = q.tracks.length + tracks.length;
+  openActiveQueue({
+    ...q,
+    tracks: [...q.tracks, ...tracks],
+    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+  });
+}
+
+// Promotes the track currently playing (via implicit folder continuation) into a
+// one-row explicit queue, so a following append has a coherent row 1 and playback
+// continues uninterrupted. Only the audible track is captured — never the rest of
+// the folder — and the folder tail is severed (clearUpcoming) so nothing but the
+// explicit queue follows it. Metadata comes from the playing node when we can
+// find it, else the now-playing signals.
+function seedQueueFromCurrent(): void {
+  const path = currentNodePath.value;
+  if (!path) return;
+  const cur = currentParent?.children.find((c) => c.path === path);
+  const track: SearchTrack = cur
+    ? nodeToTrack(cur)
+    : { path, title: npTitle.value || null, artist: npArtist.value, album: npAlbum.value };
+  const title = UNTITLED_PLAYLIST_TITLE;
+  currentParent = syntheticParent(`queue:current:${Date.now()}`, title, [track]);
+  lastQueue = [path];
+  lastIndex = 0;
+  // The audible track is now the queue's row 0 and keeps playing (no new engine
+  // play fires here), so highlight it directly rather than waiting on onAdvance.
+  queuePlayingIndex.value = 0;
+  shuffleBag = [];
+  // Straight play holds the whole folder in the engine for gapless auto-advance;
+  // drop that tail so the current track is the queue's last entry until the
+  // append extends it. (Per-track modes already hold only the current track.)
+  if (!shuffleMode.value && repeatMode.value !== "one") void engine.clearUpcoming();
+  openActiveQueue({
+    kind: "playlist",
+    title,
+    subtitle: "1 track",
+    tracks: [track],
+  });
+}
+
+// The single entry point behind "Add to queue". It only ever appends —
+// play-later, never interrupting the audible track. With a queue open it appends
+// to it. With none, it seeds a queue from the currently playing track first
+// (seedQueueFromCurrent) and appends after it; if nothing is playing, the append
+// starts a fresh queue that plays at once (there's nothing to play it after).
+function addToQueue(tracks: SearchTrack[]): void {
+  if (tracks.length === 0) return;
+  const n = tracks.length;
+  if (!activeQueue.value) {
+    if (hasTrack.value && currentNodePath.value && !isStream.value) {
+      seedQueueFromCurrent();
+    } else {
+      // Nothing queueable is playing (silence, or a live stream): start a fresh
+      // queue from these tracks and play it.
+      playQueue(
+        {
+          kind: "playlist",
+          title: UNTITLED_PLAYLIST_TITLE,
+          subtitle: `${n} track${n === 1 ? "" : "s"}`,
+          tracks,
+        },
+        `queue:adhoc:${Date.now()}`,
+      );
+      toast(`Added ${n} track${n === 1 ? "" : "s"}`);
+      return;
+    }
+  }
+  appendTracksToActiveQueue(tracks);
+  toast(`Added ${n} track${n === 1 ? "" : "s"}`);
+}
+
+// "Close queue": always dismisses the explicit queue, but is a list action, not a
+// transport one. If a folder, stream, or lone track is playing (the queue merely
+// stashed), Close drops the stash and leaves that playback untouched. When the
+// queue is the audible pool, closing the list does NOT stop the music: the
+// current track keeps playing, detached into a lone now-playing track (the tail
+// is severed so it doesn't flow into the now-gone rest of the queue). Only a
+// queue that has already drained — resting with no playhead — has nothing to keep
+// playing, so closing it tears down to the empty hero.
+function closeQueue(): void {
+  const queueWasPool = queueIsActivePool();
+  clearActiveQueue();
+  queuePlayingIndex.value = null;
+  if (!queueWasPool) return;
+
+  const current = currentNodePath.value;
+  if (current && !queueEnded) {
+    // Detach: the audible track becomes a lone now-playing track. No parent (so
+    // the pool is just this track), and the engine's gapless tail is dropped so
+    // playback stops at this track's end instead of the vanished queue. The
+    // now-playing card (title/artist/album/art) and playback are untouched.
+    currentParent = null;
+    lastQueue = [current];
+    lastIndex = 0;
+    pendingQueueIndex = null;
+    shuffleBag = [];
+    if (!shuffleMode.value && repeatMode.value !== "one") void engine.clearUpcoming();
+    return;
+  }
+
+  // The queue already drained (rests with no playhead): nothing to keep playing,
+  // so tear playback fully down (native Stop) and return to a clean empty hero.
+  currentParent = null;
+  currentNodePath.value = null;
+  currentStreamUrl.value = null;
+  isStream.value = false;
+  queueEnded = false;
+  lastQueue = [];
+  lastIndex = 0;
+  pendingQueueIndex = null;
+  shuffleBag = [];
+  currentTime.value = 0;
+  duration.value = 0;
+  hasTrack.value = false;
+  npTitle.value = "";
+  npArtist.value = null;
+  npAlbum.value = null;
+  clearArt();
+  void engine.stop();
+}
+
+async function addFolderToQueue(folder: SearchFolder): Promise<void> {
+  // Snapshot before the await; if queue or current track changes during the
+  // scan the user navigated away — append to the wrong destination instead of
+  // silently merging into whatever opened in the meantime.
+  const queueBefore = activeQueue.value;
+  const pathBefore = currentNodePath.value;
+  try {
+    const tracks = await invoke<SearchTrack[]>("folder_tracks", { path: folder.path });
+    if (activeQueue.value !== queueBefore) return;
+    if (!queueBefore && currentNodePath.value !== pathBefore) return;
+    addToQueue(tracks);
+  } catch (e) {
+    console.error("folder_tracks failed", folder.path, e);
+  }
+}
+
+// A brief, self-dismissing confirmation (e.g. "Added 12 tracks"). Add-to-queue
+// often lands on the list where the growth is visible anyway, but the toast
+// confirms the append even when the tracks scroll in below the fold.
+let toastTimer: number | undefined;
+function toast(message: string): void {
+  if (!toastEl) return;
+  toastEl.textContent = message;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toastEl.classList.remove("show"), 1600);
 }
 
 // "Go to artist" / "Go to album" rows for a track's context menu, each present
@@ -1290,13 +1746,21 @@ function trackContextItems(track: {
   return items;
 }
 
-// Plays a track picked from the queue view. Stays in the same queue (currentParent
-// is the queue's synthetic parent while the view is open), so activeQueue is left
-// untouched — the row highlight follows from playFile setting currentNodePath.
-function playQueueTrack(path: string): void {
-  if (!currentParent) return;
-  const node = currentParent.children.find((c) => c.path === path);
-  if (node) playFile(node, currentParent);
+// Plays a queue row by its index (not path, so a duplicated track resolves to
+// the clicked instance). This is the sole way to (re)enter the queue: it makes
+// the queue the engine's active pool. If the queue is already the pool, reuse
+// its synthetic parent; if it was merely stashed while a folder/stream/lone
+// track played, rebuild the parent from the queue tracks so playback moves into
+// it. activeQueue (the queue data) is untouched.
+function playQueueTrack(index: number): void {
+  const q = activeQueue.value;
+  if (!q) return;
+  const parent = queueIsActivePool() && currentParent
+    ? currentParent
+    : syntheticParent(`queue:active:${Date.now()}`, q.title, q.tracks);
+  const node = parent.children[index];
+  if (!node) return;
+  playFile(node, parent, index);
 }
 
 // Plays a file from outside the library (passed in via OS file association).
@@ -1312,8 +1776,9 @@ async function openExternalFile(path: string): Promise<void> {
     return;
   }
   // Leaves currentParent null so the tree is untouched, no row is highlighted,
-  // and album-advance is a no-op (single-track queue).
-  activeQueue.value = null;
+  // and album-advance is a no-op (single-track queue). Any explicit queue stays
+  // stashed and visible; null the highlight since this plays outside it.
+  queuePlayingIndex.value = null;
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = null;
@@ -1382,6 +1847,7 @@ async function applyArt(
 
 async function refreshTree(libraryRoot: string): Promise<void> {
   rootNode = null;
+  libraryHasContent.value = false;
   if (!libraryRoot) {
     libraryRootValid.value = true;
     setEmpty(treeContainer, "No library root set");
@@ -1412,6 +1878,7 @@ async function refreshTree(libraryRoot: string): Promise<void> {
     expanded: true,
     children: nodesFromListing(libraryRoot, listing),
   };
+  libraryHasContent.value = rootNode.children.length > 0;
   renderTree();
 }
 
@@ -1485,12 +1952,13 @@ async function refreshLibrary(): Promise<void> {
       // playing file was deleted, leave the stale reference — playback
       // continues and the next selection replaces it.
       //
-      // Suppressed while a queue is active: an artist/album queue's parent is a
+      // Suppressed only while the queue is the active pool: its parent is a
       // synthetic node whose children are the whole queue, and its currentNodePath
       // may well live in a real tree folder — re-binding would silently shrink the
-      // pool from "the queue" to "that one album folder".
+      // pool from "the queue" to "that one album folder". A merely stashed queue
+      // (a real folder is the pool) must still re-bind so folder playback survives.
       const path = currentNodePath.value;
-      if (path && !activeQueue.value) {
+      if (path && !queueIsActivePool()) {
         const found = findNode(rootNode, path);
         if (found) {
           currentParent = found.parent;
@@ -1600,6 +2068,58 @@ function applyModeChange(): void {
     }
   }
 }
+
+// Reconcile the engine's queued tail with an autoadvance setting that just
+// changed for the *currently playing* context. Under a per-track mode (shuffle /
+// repeat-one) the engine already holds only the current track, so there's
+// nothing to reconcile. Otherwise: turning autoadvance off drops the queued tail
+// (clearUpcoming) so the current track finishes and then stops; turning it on
+// re-extends the engine with the rest of the pool so gapless auto-advance
+// resumes from where playback sits. Callers gate on the changed context matching
+// what's playing, so autoadvanceEnabled() here reads the setting that changed.
+function applyAutoadvanceChange(): void {
+  if (isStream.value) return;
+  if (shuffleMode.value || repeatMode.value === "one") return;
+  const current = currentNodePath.value;
+  if (!current) return; // nothing playing (or a drained queue) — next play uses it
+  if (autoadvanceEnabled()) {
+    // Re-extend: hand the engine the tail after the current track for gapless.
+    const pool = poolPaths();
+    // Use the live row index in the queue pool so a duplicate track resolves to
+    // the instance actually playing, not the first path match.
+    const idx = queueIsActivePool() && queuePlayingIndex.value != null
+      ? queuePlayingIndex.value
+      : pool.indexOf(current);
+    if (idx >= 0 && idx < pool.length - 1) {
+      void engine.append(pool.slice(idx + 1));
+      lastQueue = pool;
+      lastIndex = idx;
+    }
+  } else if (lastQueue.length > 1) {
+    // Drop the tail so the current track is the last thing the engine plays.
+    void engine.clearUpcoming();
+    lastQueue = [current];
+    lastIndex = 0;
+  }
+}
+
+// Apply an autoadvance toggle from the OS Playback menu: update the signal,
+// persist it, and — if it governs what's playing right now — reconcile the engine
+// so the change takes effect at the current track's end (not the queue's).
+function setAutoadvance(which: "files" | "playlists", enabled: boolean): void {
+  const sig = which === "files" ? autoadvanceFiles : autoadvancePlaylists;
+  if (sig.value === enabled) return;
+  sig.value = enabled;
+  void persistAutoadvance();
+  const activeContext = queueIsActivePool() ? "playlists" : "files";
+  if (hasTrack.value && which === activeContext) applyAutoadvanceChange();
+}
+
+const persistAutoadvance = async (): Promise<void> => {
+  await store.set(KEY_AUTOADVANCE_FILES, autoadvanceFiles.value);
+  await store.set(KEY_AUTOADVANCE_PLAYLISTS, autoadvancePlaylists.value);
+  await store.save();
+};
 
 function setupPlaybackModes(): void {
   modeShuffleBtn.addEventListener("click", () => {
@@ -1819,13 +2339,11 @@ function setupSearch(): void {
     } else if (item.kind === "album") {
       void openAlbumQueue(item.album.album, item.album.artist);
     } else if (item.kind === "folder") {
-      activeTab.value = "files";
+      // Play into the queue without touching the left panel — no tab switch or
+      // scroll, so a search never yanks you away from where you were browsing.
       void playFolder(item.folder);
-      void revealInTree(item.folder.path);
     } else if (item.kind === "file") {
-      activeTab.value = "files";
       playSearchTrack(item.track);
-      void revealInTree(item.track.path);
     } else {
       activeTab.value = "streams";
       playStream(item.stream);
@@ -2031,6 +2549,8 @@ function setupSearch(): void {
 
 function setupPlayerControls(): void {
   playPauseBtn.addEventListener("click", togglePlayPause);
+  prevBtn.addEventListener("click", skipPrev);
+  nextBtn.addEventListener("click", skipNext);
 
   document.addEventListener("keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -2168,6 +2688,14 @@ function setupEffects(): void {
     nowPlayingAlbumEl.classList.toggle("hidden", !npAlbum.value);
     updateMarquee(nowPlayingAlbumEl);
   });
+  // The one-line queue-mode strip: "Now Playing: <artist> - <title>". The prefix
+  // and " - " separator are static (HTML/CSS); we fill title and artist and drop
+  // the "<artist> - " lead-in when the artist is unknown.
+  effect(() => {
+    npStripTitleEl.textContent = npTitle.value;
+    npStripArtistEl.textContent = npArtist.value ?? "";
+    npStripArtistWrapEl.classList.toggle("hidden", !npArtist.value);
+  });
   effect(() => {
     liveIndicatorEl.classList.toggle("hidden", !isStream.value);
     setLiveIndicatorPaused(!isPlaying.value);
@@ -2230,7 +2758,18 @@ function setupEffects(): void {
     playPauseBtn.setAttribute("aria-label", isPlaying.value ? "Pause" : "Play");
   });
   effect(() => {
-    playPauseBtn.disabled = !hasTrack.value;
+    // Idle, the play button doesn't go dead — it "starts the library" by playing
+    // the first Files entry (see togglePlayPause/startLibrary), preserving the
+    // ready-to-go energy. It's only truly disabled when there's nothing to start:
+    // no track loaded and an empty/absent library.
+    playPauseBtn.disabled = !hasTrack.value && !libraryHasContent.value;
+  });
+  effect(() => {
+    // Prev is live whenever play is (it restarts or steps back); only streams
+    // and the idle player disable it. Next disables at the genuine end of the
+    // line so a dead press reads as unavailable rather than a silent no-op.
+    prevBtn.disabled = !hasTrack.value || isStream.value;
+    nextBtn.disabled = !hasNextTrack();
   });
   effect(() => {
     // Streams swap the whole seek row for the live indicator: no timeline to
@@ -2296,13 +2835,15 @@ function setupEffects(): void {
     document.getElementById("tab-streams")?.classList.toggle("hidden", tab !== "streams");
   });
 
-  // Queue mode swaps the now-playing card for the queue list (the controls row
-  // below stays). Reads currentNodePath too so the highlighted/scrolled row
-  // tracks auto-advance. The mini layout forces the card back via CSS.
+  // With a queue, the queue list fills the pane and the now-playing hero drops to
+  // a compact strip above the controls; without one, the hero owns the whole pane
+  // and the list is hidden. `has-queue` on the panel drives both (see styles.css).
+  // Reads queuePlayingIndex too so the highlighted/scrolled row tracks advances
+  // (and clears when the queue is merely stashed while a folder/stream plays).
   effect(() => {
     const queue = activeQueue.value;
-    currentNodePath.value;
-    nowPlayingPanel.classList.toggle("queue-mode", queue !== null);
+    queuePlayingIndex.value;
+    nowPlayingPanel.classList.toggle("has-queue", queue !== null);
     renderQueue(queue);
   });
 
@@ -2394,6 +2935,12 @@ async function init(): Promise<void> {
   nowPlayingArtistInner = nowPlayingArtistEl.querySelector(".marquee-inner") as HTMLElement;
   nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
   nowPlayingAlbumInner = nowPlayingAlbumEl.querySelector(".marquee-inner") as HTMLElement;
+  npStripTitleEl = document.querySelector("#np-strip-title") as HTMLElement;
+  npStripArtistEl = document.querySelector("#np-strip-artist") as HTMLElement;
+  npStripArtistWrapEl = document.querySelector("#np-strip-artist-wrap") as HTMLElement;
+  // Same double-click-to-toggle-mini gesture as the card it replaces in queue mode.
+  const nowPlayingStripEl = document.querySelector("#now-playing-strip") as HTMLElement;
+  nowPlayingStripEl.addEventListener("dblclick", () => void toggleMiniPlayer());
   nowPlayingStreamMetaEl = document.querySelector("#now-playing-stream-meta") as HTMLElement;
   streamMetaSongEl = document.querySelector("#stream-meta-song") as HTMLElement;
   streamMetaSongInner = streamMetaSongEl.querySelector(".marquee-inner") as HTMLElement;
@@ -2403,6 +2950,8 @@ async function init(): Promise<void> {
   nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
   nowPlayingEmptyEl = document.querySelector("#now-playing-empty") as HTMLElement;
   playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
+  prevBtn = document.querySelector("#prev-btn") as HTMLButtonElement;
+  nextBtn = document.querySelector("#next-btn") as HTMLButtonElement;
   seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
   timeCurrentEl = document.querySelector("#time-current") as HTMLElement;
   timeRemainingEl = document.querySelector("#time-remaining") as HTMLElement;
@@ -2430,8 +2979,10 @@ async function init(): Promise<void> {
   splitterEl = document.querySelector("#splitter") as HTMLElement;
   queueTitleEl = document.querySelector("#queue-title") as HTMLElement;
   queueSubtitleEl = document.querySelector("#queue-subtitle") as HTMLElement;
-  queueArtEl = document.querySelector("#queue-art") as HTMLImageElement;
   queueListEl = document.querySelector("#queue-list") as HTMLElement;
+  queueCloseBtn = document.querySelector("#queue-close-btn") as HTMLButtonElement;
+  queueCloseBtn.addEventListener("click", closeQueue);
+  toastEl = document.querySelector("#toast") as HTMLElement;
 
   store = await load(STORE_FILE, { defaults: {}, autoSave: false });
 
@@ -2441,6 +2992,19 @@ async function init(): Promise<void> {
   const storedVolume = await store.get<number>(KEY_VOLUME);
   volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
   if (volume.value > 0) lastNonZeroVolume = volume.value;
+
+  // Autoadvance preferences (both default on). Sync the OS Playback-menu
+  // checkmarks to the loaded values, then listen for the menu's toggles.
+  autoadvanceFiles.value = (await store.get<boolean>(KEY_AUTOADVANCE_FILES)) ?? true;
+  autoadvancePlaylists.value = (await store.get<boolean>(KEY_AUTOADVANCE_PLAYLISTS)) ?? true;
+  void invoke("set_autoadvance_checked", {
+    files: autoadvanceFiles.value,
+    playlists: autoadvancePlaylists.value,
+  });
+  await listen<[string, boolean]>("menu:autoadvance", (event) => {
+    const [which, enabled] = event.payload;
+    setAutoadvance(which === "files" ? "files" : "playlists", enabled);
+  });
 
   setupTabs();
   setupPlaybackModes();
@@ -2480,10 +3044,26 @@ async function init(): Promise<void> {
     void openExternalFile(event.payload);
   });
 
-  // Next / previous from the OS Now Playing widget or hardware media keys. The
-  // app has no in-app skip control; these are the only path to skipNext/Prev.
+  // Next / previous from the OS Now Playing widget or hardware media keys.
   await listen("remote-next", () => skipNext());
   await listen("remote-prev", () => skipPrev());
+
+  // Transport from the Playback menu: Play/Pause, plus Previous/Next whose
+  // ⌘←/⌘→ accelerators double as the keyboard shortcut (and reveal it in the
+  // menu). Same skipNext/Prev path as the media keys above.
+  await listen<string>("menu:transport", (event) => {
+    switch (event.payload) {
+      case "playpause":
+        togglePlayPause();
+        break;
+      case "prev":
+        skipPrev();
+        break;
+      case "next":
+        skipNext();
+        break;
+    }
+  });
 
   // Drain any file passed at launch (cold start). Must happen after the
   // open-file listener is registered so the ready-flag race is closed.

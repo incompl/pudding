@@ -150,6 +150,24 @@ export class GaplessEngine {
     await invoke("audio_clear_upcoming");
   }
 
+  // Append tracks to the tail of the current queue without interrupting the
+  // playing track. During straight play the engine reaches them via gapless
+  // auto-advance; if the queue had already drained, playback resumes into them.
+  // Backs the "Add to queue" action.
+  async append(tracks: string[]): Promise<void> {
+    if (tracks.length === 0) return;
+    await invoke("audio_append", { tracks });
+  }
+
+  // Tear down playback: drop the queue and silence the device. The engine
+  // reports has_track=false, which clears the transport. Backs "Close queue".
+  async stop(): Promise<void> {
+    this.currentPath = null;
+    this.currentDuration = 0;
+    this.currentPosition = 0;
+    await invoke("audio_stop");
+  }
+
   async seekBy(seconds: number): Promise<void> {
     if (this.currentPath === null) return;
     const target = Math.max(

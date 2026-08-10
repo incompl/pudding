@@ -4,11 +4,11 @@
 
 ![Mini player screenshot](images/mini.png)
 
-Desktop media player. I made this for myself but you're welcome to use it.
+Filesystem-first desktop media player in the spirit of Winamp but with the modern niceties of Spotify / Apple Music.
 
 ## Philosophy
 
-Local file playback and internet radio. High polish, high completeness, fast, no bloat.
+High polish, high completeness, fast, no bloat.
 
 ## Features
 

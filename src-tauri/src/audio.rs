@@ -98,6 +98,16 @@ pub enum Command {
     // re-decide the next track (shuffle / repeat-one) without disturbing — or
     // restarting — the audible track.
     ClearUpcoming,
+    // Append tracks to the tail of the current queue. During ongoing straight
+    // play the running decode simply reaches them via auto-advance — no flush,
+    // no restart. If the queue had already drained (or was empty), playback
+    // resumes into the appended tracks. Used by "Add to queue".
+    Append {
+        tracks: Vec<PathBuf>,
+    },
+    // Tear everything down: drop the queue/stream, silence the device, and
+    // report no track so the transport disables. Backs "Clear queue".
+    Stop,
 }
 
 // === Shared atomics ===
@@ -136,6 +146,14 @@ pub struct SharedState {
     // the current Play (i.e. since the last frames_played reset). Used by the
     // position emit thread to detect "everything is played out" → queue-ended.
     total_produced: AtomicU64,
+    // Bumped on every new playback session (reset_for_new_playback). Stamped
+    // onto each origin so the position thread can tell a genuine (re)Play apart
+    // from a seek's re-publish of the current origin: replaying the *same* track
+    // reuses its slot index and path, so without the epoch the track-changed
+    // guard would suppress the event and the frontend would never re-learn the
+    // track's duration (seek bar stuck at max=0). A seek keeps the epoch, so it
+    // still doesn't spuriously re-fire track-changed.
+    play_epoch: AtomicU64,
 }
 
 impl SharedState {
@@ -149,6 +167,7 @@ impl SharedState {
             paused: AtomicBool::new(false),
             queue_exhausted: AtomicBool::new(true),
             total_produced: AtomicU64::new(0),
+            play_epoch: AtomicU64::new(0),
         }
     }
 }
@@ -162,7 +181,14 @@ impl SharedState {
 
 #[derive(Clone)]
 struct Origin {
+    // The playback session that produced this origin (SharedState::play_epoch).
+    // Distinguishes a genuine (re)Play from a seek's same-track re-publish.
+    epoch: u64,
     at_consumer_frame: u64,
+    // The queue slot this origin describes. Lets the consumer side name the
+    // *audible* track unambiguously (path alone is ambiguous with duplicate
+    // rows) — Seek re-seats the decode frontier onto it. See decode_loop.
+    queue_index: usize,
     path: String,
     duration_seconds: f64,
     start_offset_seconds: f64,
@@ -506,9 +532,17 @@ fn decode_loop(
     output_rate: u32,
 ) {
     let mut queue: Vec<PathBuf> = Vec::new();
-    let mut queue_idx: usize = 0;
-    let mut current: Option<TrackReader> = None;
-    // Radio session. Mutually exclusive with `current`: Play and PlayStream
+    // The *decode frontier*: the track being decoded into the ring buffer and
+    // its queue slot. This runs AHEAD of what's audible — up to a full ring
+    // buffer (RING_BUFFER_SECONDS), and across track boundaries, since gapless
+    // playback decodes the next track early. What the user actually hears is the
+    // consumer side, tracked by `origins`. Reads (position, track-changed) come
+    // from `origins`; commands that act on "the track the user hears" (Seek)
+    // must resolve against `origins` too and re-seat the frontier — acting on
+    // the frontier directly would target the wrong track near a boundary.
+    let mut frontier_idx: usize = 0;
+    let mut frontier: Option<TrackReader> = None;
+    // Radio session. Mutually exclusive with `frontier`: Play and PlayStream
     // each clear the other mode before installing their own source.
     let mut stream: Option<StreamSession> = None;
 
@@ -531,29 +565,29 @@ fn decode_loop(
                         }
                         let start = start_index.min(tracks.len().saturating_sub(1));
                         queue = tracks;
-                        queue_idx = start;
+                        frontier_idx = start;
                         stream = None;
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         emit_state(&app, true, true);
-                        current = advance_to_next_playable(
+                        frontier = advance_to_next_playable(
                             &queue,
-                            &mut queue_idx,
+                            &mut frontier_idx,
                             output_rate,
                             producer_frames,
                             &shared,
                             &origins,
                             &app,
                         );
-                        if current.is_none() {
+                        if frontier.is_none() {
                             shared.queue_exhausted.store(true, Ordering::Relaxed);
                             emit_state(&app, false, false);
                         }
                     }
                     Command::PlayStream { url } => {
                         queue.clear();
-                        queue_idx = 0;
-                        current = None;
+                        frontier_idx = 0;
+                        frontier = None;
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         emit_state(&app, true, true);
@@ -564,7 +598,7 @@ fn decode_loop(
                         // pause with nothing loaded is a no-op so the UI's
                         // "play button after queue ended" can call Play
                         // (frontend's responsibility, not ours).
-                        if current.is_some() || stream.is_some() {
+                        if frontier.is_some() || stream.is_some() {
                             let now = !shared.paused.load(Ordering::Relaxed);
                             shared.paused.store(now, Ordering::Relaxed);
                             if let Some(ref mut s) = stream {
@@ -586,25 +620,94 @@ fn decode_loop(
                         }
                     }
                     Command::ClearUpcoming => {
-                        // Keep the current track (queue_idx) and its in-flight
-                        // decode; discard the rest. When the current track ends,
-                        // advance_to_next_playable finds nothing and queue-ended
-                        // fires. No flush, so audible playback is untouched.
+                        // Keep the frontier track and its in-flight decode;
+                        // discard the rest. When it ends, advance_to_next_playable
+                        // finds nothing and queue-ended fires. No flush, so
+                        // audible playback is untouched.
                         //
                         // Edge: within the last ~RING_BUFFER_SECONDS of a track,
-                        // decode has already finished pushing it and advanced
-                        // queue_idx to the next track (whose leading frames are
-                        // now buffered in the ring). Truncating here keeps that
-                        // next track, so it plays once before the per-track mode
-                        // engages. Accepted: the only way to suppress it is to
-                        // flush the buffered frames, reintroducing the glitch
-                        // this command exists to avoid.
-                        if queue_idx < queue.len() {
-                            queue.truncate(queue_idx + 1);
+                        // the frontier has already advanced past the audible track
+                        // to the next one, whose leading frames are buffered in
+                        // the ring. Truncating at the frontier keeps that next
+                        // track, so it plays once before the per-track mode
+                        // engages. Unlike Seek, re-seating to the audible track
+                        // wouldn't help: those next-track frames are already
+                        // decoded into the ring, and the only way to drop them is
+                        // a flush — which reintroduces the very glitch this
+                        // command exists to avoid. So the tradeoff stands.
+                        if frontier_idx < queue.len() {
+                            queue.truncate(frontier_idx + 1);
                         }
                     }
+                    Command::Append { tracks } => {
+                        if tracks.is_empty() {
+                            continue;
+                        }
+                        // frontier_idx already points at the first appended track
+                        // when the queue had drained (frontier_idx == old len).
+                        queue.extend(tracks);
+                        // Nothing decoding means the queue had drained (or never
+                        // started): resume into the appended tracks. A full
+                        // reset re-bases the frame counters like a fresh Play,
+                        // which is safe because nothing is currently audible.
+                        // While a track is decoding, we do nothing here —
+                        // auto-advance reaches the new tracks with no flush.
+                        if frontier.is_none() && stream.is_none() {
+                            producer_frames = 0;
+                            reset_for_new_playback(&shared, &origins);
+                            emit_state(&app, true, true);
+                            frontier = advance_to_next_playable(
+                                &queue,
+                                &mut frontier_idx,
+                                output_rate,
+                                producer_frames,
+                                &shared,
+                                &origins,
+                                &app,
+                            );
+                            if frontier.is_none() {
+                                shared.queue_exhausted.store(true, Ordering::Relaxed);
+                                emit_state(&app, false, false);
+                            }
+                        }
+                    }
+                    Command::Stop => {
+                        // Full teardown. Mirrors a Play reset but into an empty,
+                        // exhausted state: flush the device to silence, drop the
+                        // queue, and report no track. With `frontier` cleared the
+                        // position-emit thread takes its None branch, so no
+                        // spurious queue-ended fires on the way down.
+                        queue.clear();
+                        frontier_idx = 0;
+                        frontier = None;
+                        stream = None;
+                        producer_frames = 0;
+                        reset_for_new_playback(&shared, &origins);
+                        shared.queue_exhausted.store(true, Ordering::Relaxed);
+                        emit_state(&app, false, false);
+                    }
                     Command::Seek(secs) => {
-                        if let Some(ref mut tr) = current {
+                        // Seek acts on the track the user *hears*, not the decode
+                        // frontier — which may have run past it (see the frontier
+                        // note above), even off the end of the queue while the
+                        // final track's tail drains. Resolve the audible slot from
+                        // the active origin and re-seat the frontier onto it when
+                        // they differ. A seek flushes the ring buffer regardless,
+                        // so reopening the audible track costs nothing extra.
+                        let audible_idx = {
+                            let o = origins.lock().unwrap_or_else(|e| e.into_inner());
+                            o.current.as_ref().map(|orig| orig.queue_index)
+                        };
+                        if let Some(idx) = audible_idx {
+                            if idx < queue.len() && (frontier.is_none() || idx != frontier_idx) {
+                                if let Some(reader) = open_track(&queue[idx], output_rate) {
+                                    frontier = Some(reader);
+                                    frontier_idx = idx;
+                                    shared.queue_exhausted.store(false, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        if let Some(ref mut tr) = frontier {
                             let target = secs.max(0.0).min(tr.duration_seconds);
                             // Reset resampler state — internal sinc taps from
                             // the old position would otherwise bleed a few ms
@@ -619,6 +722,15 @@ fn decode_loop(
                             // could race the producer's first post-seek push
                             // and discard those new samples too.
                             flush_and_wait(&shared);
+                            // The flush discards every buffered frame, so all
+                            // pending origins (audio not yet heard — e.g. the
+                            // next track the frontier queued near a boundary) are
+                            // now stale. Drop them; the origin published below is
+                            // the only valid one from here.
+                            {
+                                let mut o = origins.lock().unwrap_or_else(|e| e.into_inner());
+                                o.pending.clear();
+                            }
                             // Capture frames_played AFTER the drain. Any
                             // callback that fired during flush_and_wait
                             // drained (not played), so frames_played reflects
@@ -638,6 +750,7 @@ fn decode_loop(
                                 &origins,
                                 &shared,
                                 producer_frames,
+                                frontier_idx,
                                 &tr.path,
                                 tr.duration_seconds,
                                 target,
@@ -678,29 +791,29 @@ fn decode_loop(
             continue;
         }
 
-        if current.is_none() {
+        if frontier.is_none() {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
 
         // Decode + push the next chunk.
-        let tr = current.as_mut().unwrap();
+        let tr = frontier.as_mut().unwrap();
         match decode_and_push(tr, &mut rb, &shared, &mut producer_frames) {
             Ok(StepOutcome::Continue) => {}
             Ok(StepOutcome::TrackEnded) => {
-                queue_idx += 1;
-                current = advance_to_next_playable(
+                frontier_idx += 1;
+                frontier = advance_to_next_playable(
                     &queue,
-                    &mut queue_idx,
+                    &mut frontier_idx,
                     output_rate,
                     producer_frames,
                     &shared,
                     &origins,
                     &app,
                 );
-                if current.is_none() {
+                if frontier.is_none() {
                     // Queue exhausted (or every remaining track failed to
-                    // open). Leave current=None; the position-emit thread
+                    // open). Leave frontier=None; the position-emit thread
                     // will fire queue-ended once playback drains.
                     shared.queue_exhausted.store(true, Ordering::Relaxed);
                 }
@@ -709,17 +822,17 @@ fn decode_loop(
                 log::warn!("audio: decode error: {e}");
                 let path = tr.path.clone();
                 emit_error(&app, &PathBuf::from(&path), &e);
-                queue_idx += 1;
-                current = advance_to_next_playable(
+                frontier_idx += 1;
+                frontier = advance_to_next_playable(
                     &queue,
-                    &mut queue_idx,
+                    &mut frontier_idx,
                     output_rate,
                     producer_frames,
                     &shared,
                     &origins,
                     &app,
                 );
-                if current.is_none() {
+                if frontier.is_none() {
                     shared.queue_exhausted.store(true, Ordering::Relaxed);
                 }
             }
@@ -955,26 +1068,27 @@ fn emit_stream_metadata(app: &AppHandle, station: &Option<String>, title: &Optio
     );
 }
 
-// Open the next playable track at or after queue_idx, skipping (and reporting)
+// Open the next playable track at or after frontier_idx, skipping (and reporting)
 // any that fail to open. Returns None when the queue is exhausted. On success,
 // publishes the new track's origin so the position-emit thread will pick it up
 // as soon as playback reaches it.
 fn advance_to_next_playable(
     queue: &[PathBuf],
-    queue_idx: &mut usize,
+    frontier_idx: &mut usize,
     output_rate: u32,
     producer_frames: u64,
     shared: &Arc<SharedState>,
     origins: &Arc<Mutex<Origins>>,
     app: &AppHandle,
 ) -> Option<TrackReader> {
-    while *queue_idx < queue.len() {
-        match open_track(&queue[*queue_idx], output_rate) {
+    while *frontier_idx < queue.len() {
+        match open_track(&queue[*frontier_idx], output_rate) {
             Some(reader) => {
                 publish_origin(
                     origins,
                     shared,
                     producer_frames,
+                    *frontier_idx,
                     &reader.path,
                     reader.duration_seconds,
                     0.0,
@@ -982,8 +1096,8 @@ fn advance_to_next_playable(
                 return Some(reader);
             }
             None => {
-                emit_error(app, &queue[*queue_idx], "could not open");
-                *queue_idx += 1;
+                emit_error(app, &queue[*frontier_idx], "could not open");
+                *frontier_idx += 1;
             }
         }
     }
@@ -1361,6 +1475,10 @@ fn reset_for_new_playback(shared: &Arc<SharedState>, origins: &Arc<Mutex<Origins
     shared.total_produced.store(0, Ordering::Relaxed);
     shared.queue_exhausted.store(false, Ordering::Relaxed);
     shared.paused.store(false, Ordering::Relaxed);
+    // New session: bump the epoch so origins published from here on are
+    // recognized as a fresh Play even when they reuse the previous track's slot
+    // and path (replaying the same track).
+    shared.play_epoch.fetch_add(1, Ordering::Relaxed);
     let mut o = origins.lock().unwrap_or_else(|e| e.into_inner());
     o.pending.clear();
     o.current = None;
@@ -1386,15 +1504,19 @@ fn publish_origin(
     origins: &Arc<Mutex<Origins>>,
     shared: &Arc<SharedState>,
     producer_frames: u64,
+    queue_index: usize,
     path: &str,
     duration_seconds: f64,
     start_offset_seconds: f64,
 ) {
     let drained = shared.total_drained.load(Ordering::Relaxed);
     let at_consumer_frame = producer_frames.saturating_sub(drained);
+    let epoch = shared.play_epoch.load(Ordering::Relaxed);
     let mut o = origins.lock().unwrap_or_else(|e| e.into_inner());
     o.pending.push_back(Origin {
+        epoch,
         at_consumer_frame,
+        queue_index,
         path: path.to_string(),
         duration_seconds,
         start_offset_seconds,
@@ -1411,6 +1533,8 @@ fn position_emit_loop(
 ) {
     let mut last_emitted_position: f64 = -1.0;
     let mut last_emitted_path: Option<String> = None;
+    let mut last_emitted_index: Option<usize> = None;
+    let mut last_emitted_epoch: Option<u64> = None;
     let mut queue_ended_sent = false;
 
     loop {
@@ -1419,19 +1543,17 @@ fn position_emit_loop(
         let frames_played = shared.frames_played.load(Ordering::Relaxed);
 
         // Activate any origins the consumer has now passed.
-        let (active_origin, advanced_to_new_track) = {
+        let active_origin = {
             let mut o = origins.lock().unwrap_or_else(|e| e.into_inner());
-            let mut advanced = false;
             while let Some(front) = o.pending.front() {
                 if front.at_consumer_frame <= frames_played {
                     let act = o.pending.pop_front().unwrap();
                     o.current = Some(act);
-                    advanced = true;
                 } else {
                     break;
                 }
             }
-            (o.current.clone(), advanced)
+            o.current.clone()
         };
 
         match active_origin {
@@ -1441,7 +1563,21 @@ fn position_emit_loop(
                     origin.start_offset_seconds + delta_frames as f64 / output_rate as f64;
                 let position = position.min(origin.duration_seconds);
 
-                if advanced_to_new_track
+                // Fire track-changed only when the audible *slot* changes — keyed
+                // on queue_index, not just "an origin was activated." A Seek
+                // re-publishes the current track's origin (same slot) to rebase
+                // its position; treating that pop as an advance would spuriously
+                // step the frontend's queue highlight to the next row on every
+                // seek. Path is also checked so a new Play that reuses a slot
+                // index for a different track still fires. (Adjacent duplicate
+                // rows share a path but differ in index, so they still fire.)
+                //
+                // Epoch is checked too so replaying the *same* track (same slot
+                // and path) still fires: each Play bumps play_epoch, while a Seek
+                // keeps it — so the frontend re-learns the duration on replay
+                // without a seek spuriously re-firing.
+                if last_emitted_epoch != Some(origin.epoch)
+                    || last_emitted_index != Some(origin.queue_index)
                     || last_emitted_path.as_deref() != Some(origin.path.as_str())
                 {
                     let _ = app.emit(
@@ -1452,6 +1588,8 @@ fn position_emit_loop(
                         },
                     );
                     last_emitted_path = Some(origin.path.clone());
+                    last_emitted_index = Some(origin.queue_index);
+                    last_emitted_epoch = Some(origin.epoch);
                     queue_ended_sent = false;
                 }
 
@@ -1490,6 +1628,8 @@ fn position_emit_loop(
                 // subsequent track-changed re-fires.
                 last_emitted_position = -1.0;
                 last_emitted_path = None;
+                last_emitted_index = None;
+                last_emitted_epoch = None;
                 queue_ended_sent = false;
             }
         }

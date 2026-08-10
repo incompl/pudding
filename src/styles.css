@@ -20,6 +20,11 @@
      person for artist rows, a disc for album rows in the search dropdown. */
   --artist-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E");
   --album-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Ccircle cx='12' cy='12' r='2.5'/%3E%3C/svg%3E");
+  /* Open-flap variant of the folder icon, swapped in for expanded tree rows. */
+  --folder-open-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 14 1.45-2.9A2 2 0 0 1 9.24 10H21a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2'/%3E%3C/svg%3E");
+  /* Radio icon for stream rows — same stroked recipe as the folder icons,
+     tinted via the element's background-color. */
+  --radio-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.9 19.1C1 15.2 1 8.8 4.9 4.9'/%3E%3Cpath d='M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Cpath d='M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5'/%3E%3Cpath d='M19.1 4.9C23 8.8 23 15.2 19.1 19.1'/%3E%3C/svg%3E");
 }
 
 html,
@@ -412,7 +417,13 @@ body.platform-mac #tabs {
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 0.75em 1em;
+  /* Symmetric padding so the flanking play/volume buttons sit the same distance
+     from the window's side edges as from its bottom edge (they're flush to this
+     content box). The left side is trimmed by the splitter's width: that
+     transparent resize strip sits just left of this panel and would otherwise
+     push the play button in that much further than the volume button on the
+     right. */
+  padding: 0.75em 0.75em 0.75em calc(0.75em - var(--splitter-width));
   overflow: auto;
   min-width: 200px;
 }
@@ -526,30 +537,87 @@ body.platform-mac #tabs {
   transition: opacity 600ms ease;
 }
 
-/* Queue view: swaps in for the now-playing card while an artist/album page is
-   open. The controls row below stays put, so this only replaces #now-playing-main.
-   Driven by the .queue-mode class on the panel (not the .hidden toggle) so the
-   mini media query can force the card back with plain specificity. */
+/* The right pane holds the queue list (#queue-view) over the now-playing hero
+   (#now-playing-main), with the controls row pinned at the bottom.
+
+   Base state is "no queue": the hero keeps its #now-playing-main rule above
+   (flex: 1, centered) and owns the whole pane, while the list is hidden. With a
+   queue the list takes the pane and the hero drops to a compact strip just above
+   the controls — see the full-view media query below. It's scoped away from the
+   mini bar (max-height: 480px), which never shows the queue and keeps the card. */
 #queue-view {
   display: none;
-  flex: 1;
-  min-height: 0;
   flex-direction: column;
+  min-height: 0;
 }
 
-.queue-mode #now-playing-main {
+/* One-line "Now Playing: <artist> - <title>" indicator, shown above the controls
+   only while a queue is playing (revealed in the full-view media query below);
+   hidden as a lone element otherwise. A single line that ellipsizes rather than
+   wrapping, so it never steals height from the queue list. The whole line — the
+   "Now Playing:" prefix and the "Artist - Track" after it — is one muted style. */
+#now-playing-strip {
   display: none;
+  margin: 0;
+  padding: 0.55em 0.25em 0;
+  border-top: 1px solid var(--surface-hover);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.9em;
+  color: var(--text-muted);
+  /* double-click here toggles the mini player; don't select the text */
+  user-select: none;
+  -webkit-user-select: none;
+}
+#now-playing-strip::before {
+  content: "Now Playing: ";
 }
 
-.queue-mode #queue-view {
-  display: flex;
+@media (min-height: 481px) {
+  .has-queue #queue-view {
+    display: flex;
+    flex: 1;
+  }
+  /* Queue mode: the full now-playing card gives way to the queue list, and the
+     current track shows in the one-line strip above the controls instead. */
+  .has-queue #now-playing-main {
+    display: none;
+  }
+  .has-queue #now-playing-strip {
+    display: block;
+  }
+  /* The hero + queue stack fills all space above; this lifts the controls bar
+     off it. Matches #right's bottom padding for equal breathing room. Scoped to
+     queue mode so the centered now-playing card keeps its original position —
+     the base rule adds no margin. */
+  .has-queue #now-playing-controls {
+    margin-top: 0.6em;
+  }
 }
 
-/* In the centered card view the controls float with room above; in queue mode
-   the list runs right up to them. Match #right's bottom padding so the bar has
-   equal breathing room top and bottom. */
-.queue-mode #now-playing-controls {
-  margin-top: 0.6em;
+/* A brief confirmation for Add-to-queue, centered above the controls row. */
+#toast {
+  position: fixed;
+  bottom: 4.5em;
+  left: 50%;
+  transform: translateX(-50%) translateY(0.5em);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.5em 0.9em;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 200ms ease,
+    transform 200ms ease;
+  z-index: 40;
+}
+
+#toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
 }
 
 #queue-header {
@@ -557,25 +625,33 @@ body.platform-mac #tabs {
   display: flex;
   align-items: center;
   gap: 0.7em;
-  padding: 0 0.25em 0.6em;
+  padding: 0 0.25em 0.6em 0.25em;
   border-bottom: 1px solid var(--surface-hover);
   margin-bottom: 0.4em;
 }
 
-/* Album cover shown left of the title; artist queues have no single cover, so
-   it stays hidden and the header collapses back to text-only via the flex gap
-   only applying between rendered children. Sized to the title+subtitle height
-   so an album header is no taller than a text-only artist header. */
-#queue-art {
-  flex: none;
-  width: 2.75em;
-  height: 2.75em;
-  object-fit: cover;
-  border-radius: 5px;
-}
-
 #queue-header-text {
   min-width: 0;
+}
+
+/* Dismisses the explicit queue, pushed to the header's right edge. Muted until
+   hovered so it reads as a secondary action next to the queue title. */
+#queue-close-btn {
+  flex: none;
+  margin-left: auto;
+  padding: 0.25em 0.6em;
+  border: 1px solid var(--surface-hover);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+#queue-close-btn:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
+  background: var(--surface-hover);
 }
 
 #queue-title {
@@ -721,8 +797,53 @@ body.platform-mac #tabs {
 }
 
 #play-pause-btn:disabled {
-  opacity: 0.4;
+  color: var(--text-dim);
   cursor: default;
+}
+
+/* Prev/Next transport buttons flanking the whole control strip. */
+.skip-btn {
+  background: transparent;
+  color: var(--accent);
+  border: none;
+  border-radius: 50%;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  margin: 0 -0.35em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+/* The time labels reserve a fixed width and hug the seek bar, leaving dead
+   space on the side facing the skip button. Pulling the button tighter to that
+   inner (label) side than to the outer round button makes it read as centered
+   between the two. */
+#prev-btn {
+  margin-right: -0.5em;
+}
+
+#next-btn {
+  margin-left: -0.5em;
+}
+
+.skip-btn:hover:not(:disabled) {
+  background: var(--surface);
+}
+
+.skip-btn:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.skip-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 #now-playing-controls .time {
@@ -751,6 +872,12 @@ body.platform-mac #tabs {
   height: 0.85em;
   margin: 0;
   padding: 0;
+  /* WebKit paints the range's runnable track with a ~1px top bias, so the bar
+     reads as sitting above the flanking buttons even though its box is
+     center-aligned like everything else in the row. Nudge it back onto the
+     buttons' center line. */
+  position: relative;
+  top: 0.5px;
 }
 
 #seek-bar::-webkit-slider-runnable-track {
@@ -966,22 +1093,13 @@ body.platform-mac #tabs {
     gap: 0.7em;
   }
 
-  /* The queue list is unusable in the thin mini bar; fall back to the now-playing
-     card. The queue stays active (still drives playback) — only the view reverts,
-     and expanding the window shows the list again. */
-  .queue-mode #queue-view {
-    display: none;
-  }
-  .queue-mode #now-playing-main {
-    display: flex;
-  }
-  /* The queue's controls gap only makes sense above the list; with the card
-     forced back the margin would eat into #now-playing-main's centering region,
-     so a queue file card would sit ~0.3em higher than a non-queue one. Zero it
-     so the mini card centers identically however it was launched. */
-  .queue-mode #now-playing-controls {
-    margin-top: 0;
-  }
+  /* The queue list is unusable in the thin mini bar, so it never shows here: the
+     has-queue rules that reveal the list and shrink the hero to a strip are
+     scoped to the full-view (min-height: 481px) media query, leaving the base
+     `#queue-view { display: none }` and `#now-playing-main { flex: 1 }` to govern
+     — the full now-playing card. The queue stays active (still drives playback);
+     expanding the window brings the list back. The queue's controls margin is
+     scoped to the full-view query, so it never reaches the mini card here. */
 
   /* Top padding lifts the art/text off the thin topbar (traffic lights + expand
      button) so it doesn't butt against them; bottom padding keeps the controls
@@ -1188,14 +1306,27 @@ body.dragging * {
 
 ul {
   list-style: none;
-  padding-left: 1.25em;
+  /* Indent a folder's children so their icon column lands under the parent
+     folder's name (label pad 0.65em + folder icon 1.1em + gap 0.65em = 2.4em
+     from the row edge, minus the child label's own 0.65em pad = 1.75em). This
+     indent applies to every child — subfolders and files alike — so the two
+     line up at the same depth. The top-level lists override this to 0. */
+  padding-left: 1.75em;
   margin: 0;
 }
 
 #folder-tree .node-label,
 #streams-list .node-label {
-  display: block;
-  padding: 0.15em 1em;
+  display: flex;
+  /* Center vertically so the icon and hover action sit on the row's middle when
+     a long name wraps to two lines, rather than pinned to the first line. */
+  align-items: center;
+  /* Icon sits in the gutter between the panel edge and the name. Keeping the
+     left inset equal to this gap centers the icon in that gutter (edge → icon →
+     name); 0.65em on each side lands the name at the same 2.4em as an 0.8em
+     inset + 0.5em gap would, so only the icon shifts, not the text. */
+  gap: 0.65em;
+  padding: 0.2em 0.8em 0.2em 0.65em;
   cursor: pointer;
   transition: background 120ms ease;
 }
@@ -1210,11 +1341,93 @@ ul {
   color: var(--accent);
 }
 
+/* Text flexes and wraps; wrapped lines hang under the label, not the icon. */
+#folder-tree .label-text,
+#streams-list .label-text {
+  flex: 1;
+  min-width: 0;
+  /* Slightly tighter than body leading so a wrapped title's two lines read as
+     one entry, but not so tight that they crowd. */
+  line-height: 1.35;
+}
+
+/* A tagged track shows the title with the artist on a second line beneath it,
+   de-emphasized (dimmer, a hair smaller). Only shown when the folder's artists
+   vary (see folderArtistsVary); a single-artist album omits it. */
+#folder-tree .secondary {
+  display: block;
+  font-size: 0.92em;
+  color: var(--text-dim);
+}
+
+#folder-tree .node-label.playing .secondary {
+  color: var(--accent-dim);
+}
+
+/* Masked line-art icon, tinted by background-color like the search dropdown.
+   The ID-scoped base rule only carries layout + mask geometry (never
+   background-color or mask-image), so the modifier classes below decide the ink
+   and glyph without losing a specificity fight to this rule. A .track slot
+   carries a subtle track number instead of a mask (see .icon.track). */
 #folder-tree .icon,
 #streams-list .icon {
-  color: var(--accent);
-  display: inline-block;
+  flex: none;
   width: 1.1em;
+  height: 1.5em;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 1.05em;
+  mask-size: 1.05em;
+}
+
+/* A tagged file's slot shows its track number as a quiet gray glyph — just
+   enough to tell rows apart and read the running order, without competing with
+   the title (untagged files carry no glyph). It occupies the
+   same icon column as a sibling folder (the child-ul
+   indent, not an extra per-row margin) so files and folders at the same tree
+   level line up. The number is left-aligned so it sits directly under the parent
+   folder's name; the box keeps the folder icon's 1.1em width even though the
+   digit is shrunk — 1.1em / 0.8 = 1.375em in this smaller box — so the title
+   column stays aligned with sibling folder names. */
+.icon.track {
+  display: grid;
+  place-items: center start;
+  width: 1.375em;
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+  color: #666;
+}
+
+.icon.folder {
+  background-color: var(--text-muted);
+  -webkit-mask-image: var(--folder-icon);
+  mask-image: var(--folder-icon);
+}
+
+.icon.folder-open {
+  background-color: var(--text-muted);
+  -webkit-mask-image: var(--folder-open-icon);
+  mask-image: var(--folder-open-icon);
+}
+
+.icon.radio {
+  background-color: var(--text-muted);
+  -webkit-mask-image: var(--radio-icon);
+  mask-image: var(--radio-icon);
+}
+
+/* Folder/stream icons pick up the accent on row hover. */
+.node-label:hover .icon.folder,
+.node-label:hover .icon.folder-open,
+.node-label:hover .icon.radio {
+  background-color: var(--accent);
+}
+
+/* The playing track's number takes the accent, matching the row highlight. */
+.node-label.playing .icon.track {
+  color: var(--accent);
 }
 
 #folder-tree > ul,

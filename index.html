@@ -78,6 +78,18 @@
       <div id="splitter" role="separator" aria-orientation="vertical"></div>
       <section id="right">
         <div id="now-playing-panel">
+          <div id="queue-view">
+            <div id="queue-header">
+              <div id="queue-header-text">
+                <div id="queue-title"></div>
+                <div id="queue-subtitle"></div>
+              </div>
+              <button id="queue-close-btn" type="button" title="Close queue" aria-label="Close queue">Close</button>
+            </div>
+            <ul id="queue-list"></ul>
+          </div>
+          <!-- The now-playing hero: a full-pane card when no queue is active, and
+               a compact strip above the controls when one is (see styles.css). -->
           <div id="now-playing-main">
             <p id="now-playing-empty" class="empty-state">Pudding time.</p>
             <img id="now-playing-art" class="hidden" alt="" />
@@ -91,22 +103,21 @@
               </div>
             </div>
           </div>
-          <div id="queue-view">
-            <div id="queue-header">
-              <img id="queue-art" class="hidden" alt="" />
-              <div id="queue-header-text">
-                <div id="queue-title"></div>
-                <div id="queue-subtitle"></div>
-              </div>
-            </div>
-            <ul id="queue-list"></ul>
-          </div>
+          <!-- One-line current-track indicator shown above the controls while a
+               queue is playing (the card is hidden then; see styles.css). -->
+          <p id="now-playing-strip"><span id="np-strip-artist-wrap" class="hidden"><span id="np-strip-artist"></span> - </span><span id="np-strip-title"></span></p>
           <div id="now-playing-controls">
             <button id="play-pause-btn" type="button" aria-label="Play" disabled>▶</button>
+            <button id="prev-btn" class="skip-btn" type="button" aria-label="Previous" disabled>
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5v14h2V5H6zm3 7l10 7V5l-10 7z" /></svg>
+            </button>
             <span id="time-current" class="time">0:00</span>
             <input type="range" id="seek-bar" min="0" max="0" value="0" step="0.1" disabled />
             <span id="live-indicator" class="hidden">Live Broadcast</span>
             <span id="time-remaining" class="time">-0:00</span>
+            <button id="next-btn" class="skip-btn" type="button" aria-label="Next" disabled>
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18 5v14h-2V5h2zm-3 7L5 19V5l10 7z" /></svg>
+            </button>
             <div id="volume-control">
               <button id="volume-btn" type="button" aria-label="Volume">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -141,5 +152,6 @@
         </div>
       </section>
     </main>
+    <div id="toast" aria-live="polite"></div>
   </body>
 </html>

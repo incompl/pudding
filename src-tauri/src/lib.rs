@@ -14,8 +14,11 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::menu::{
+    AboutMetadataBuilder, CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder,
+    SubmenuBuilder,
+};
+use tauri::{AppHandle, Emitter, Manager, State, Wry};
 use tauri_plugin_log::{Target, TargetKind};
 
 const DB_FILE: &str = "metadata.db";
@@ -36,6 +39,16 @@ struct DbHandle {
 // None when no library root is set.
 struct WatcherState {
     inner: Mutex<Option<Debouncer<RecommendedWatcher, FileIdMap>>>,
+}
+
+// Handles to the two "Autoadvance" checkboxes in the Playback menu. The frontend
+// owns the authoritative setting (persisted in its store and used to drive
+// playback); these handles let it sync the checkmarks to the persisted values at
+// startup (set_autoadvance_checked). The checkboxes auto-toggle on click, and the
+// on_menu_event handler emits the new state back to the frontend.
+struct PlaybackMenu {
+    files: CheckMenuItem<Wry>,
+    playlists: CheckMenuItem<Wry>,
 }
 
 #[derive(Serialize)]
@@ -850,6 +863,30 @@ fn audio_clear_upcoming(engine: State<audio::AudioEngine>) {
     engine.send(audio::Command::ClearUpcoming);
 }
 
+// Sync the Playback-menu checkmarks to the frontend's persisted settings. Called
+// once at startup after the store is read, so a preference the user turned off in
+// a prior session shows correctly in the menu.
+#[tauri::command]
+fn set_autoadvance_checked(menu: State<PlaybackMenu>, files: bool, playlists: bool) {
+    let _ = menu.files.set_checked(files);
+    let _ = menu.playlists.set_checked(playlists);
+}
+
+// Append tracks to the tail of the current queue without disturbing the
+// playing track (see Command::Append). Backs the "Add to queue" action.
+#[tauri::command]
+fn audio_append(tracks: Vec<String>, engine: State<audio::AudioEngine>) {
+    let paths: Vec<PathBuf> = tracks.into_iter().map(PathBuf::from).collect();
+    engine.send(audio::Command::Append { tracks: paths });
+}
+
+// Tear down playback entirely (see Command::Stop). Backs the "Clear queue"
+// action, which drops the queue and stops the music.
+#[tauri::command]
+fn audio_stop(engine: State<audio::AudioEngine>) {
+    engine.send(audio::Command::Stop);
+}
+
 #[tauri::command]
 fn audio_set_volume(volume: f32, engine: State<audio::AudioEngine>) {
     engine.set_volume(volume);
@@ -1200,8 +1237,43 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "open-settings" {
-                let _ = app.emit("open-settings", ());
+            match event.id().as_ref() {
+                "open-settings" => {
+                    let _ = app.emit("open-settings", ());
+                }
+                // Transport items. The frontend owns playback, so these just
+                // relay the intent; Previous/Next carry ⌘←/⌘→ accelerators, which
+                // also serve to surface the shortcuts in the menu.
+                "transport-playpause" => {
+                    let _ = app.emit("menu:transport", "playpause");
+                }
+                "transport-prev" => {
+                    let _ = app.emit("menu:transport", "prev");
+                }
+                "transport-next" => {
+                    let _ = app.emit("menu:transport", "next");
+                }
+                // The checkbox auto-toggled its own state before this fires, so
+                // is_checked() reads the new value; relay it to the frontend,
+                // which owns the setting and persists it.
+                "autoadvance-files" | "autoadvance-playlists" => {
+                    if let Some(menu) = app.try_state::<PlaybackMenu>() {
+                        let which = event.id().as_ref();
+                        let item = if which == "autoadvance-files" {
+                            &menu.files
+                        } else {
+                            &menu.playlists
+                        };
+                        let enabled = item.is_checked().unwrap_or(true);
+                        let context = if which == "autoadvance-files" {
+                            "files"
+                        } else {
+                            "playlists"
+                        };
+                        let _ = app.emit("menu:autoadvance", (context, enabled));
+                    }
+                }
+                _ => {}
             }
         })
         .setup(|app| {
@@ -1289,8 +1361,52 @@ pub fn run() {
                 .select_all()
                 .build()?;
 
+            // Playback menu, top to bottom: transport (Play/Pause, Previous,
+            // Next) then two "Autoadvance" checkboxes, one per context (the file
+            // tree vs. explicit playlists/queues). Transport items relay to the
+            // frontend (menu:transport); Previous/Next carry ⌘←/⌘→ accelerators
+            // that both drive the shortcut and reveal it here. (Play/Pause, seek,
+            // and volume have bare-key shortcuts that can't be menu accelerators
+            // without hijacking typing, so only Play/Pause appears, unlabelled.)
+            // The autoadvance checkboxes both default on; the frontend corrects
+            // them to the persisted values at startup (set_autoadvance_checked).
+            // Those modes live only here, not in the app UI: they're set-once
+            // preferences, not per-play controls.
+            let play_pause = MenuItemBuilder::with_id("transport-playpause", "Play / Pause")
+                .build(app)?;
+            let previous = MenuItemBuilder::with_id("transport-prev", "Previous")
+                .accelerator("CmdOrCtrl+Left")
+                .build(app)?;
+            let next = MenuItemBuilder::with_id("transport-next", "Next")
+                .accelerator("CmdOrCtrl+Right")
+                .build(app)?;
+            let autoadvance_files = CheckMenuItemBuilder::with_id(
+                "autoadvance-files",
+                "Autoadvance in Files",
+            )
+            .checked(true)
+            .build(app)?;
+            let autoadvance_playlists = CheckMenuItemBuilder::with_id(
+                "autoadvance-playlists",
+                "Autoadvance in Playlists",
+            )
+            .checked(true)
+            .build(app)?;
+            let playback_menu = SubmenuBuilder::new(app, "Playback")
+                .item(&play_pause)
+                .item(&previous)
+                .item(&next)
+                .separator()
+                .item(&autoadvance_files)
+                .item(&autoadvance_playlists)
+                .build()?;
+            app.manage(PlaybackMenu {
+                files: autoadvance_files,
+                playlists: autoadvance_playlists,
+            });
+
             let menu = MenuBuilder::new(app)
-                .items(&[&app_menu, &edit_menu])
+                .items(&[&app_menu, &edit_menu, &playback_menu])
                 .build()?;
             app.set_menu(menu)?;
 
@@ -1317,6 +1433,9 @@ pub fn run() {
             audio_toggle_pause,
             audio_seek,
             audio_clear_upcoming,
+            set_autoadvance_checked,
+            audio_append,
+            audio_stop,
             audio_set_volume,
             now_playing_set_metadata,
             now_playing_set_playback,
