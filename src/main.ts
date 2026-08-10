@@ -2765,10 +2765,13 @@ function setupEffects(): void {
     playPauseBtn.disabled = !hasTrack.value && !libraryHasContent.value;
   });
   effect(() => {
-    // Prev is live whenever play is (it restarts or steps back); only streams
-    // and the idle player disable it. Next disables at the genuine end of the
-    // line so a dead press reads as unavailable rather than a silent no-op.
-    prevBtn.disabled = !hasTrack.value || isStream.value;
+    // Streams have no track to step between, so hide prev/next entirely (like
+    // the seek row) rather than leave dead chrome. Otherwise prev is live
+    // whenever play is (it restarts or steps back), and next disables at the
+    // genuine end of the line so a dead press reads as unavailable.
+    prevBtn.classList.toggle("hidden", isStream.value);
+    nextBtn.classList.toggle("hidden", isStream.value);
+    prevBtn.disabled = !hasTrack.value;
     nextBtn.disabled = !hasNextTrack();
   });
   effect(() => {
