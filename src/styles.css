@@ -25,6 +25,10 @@
   /* Radio icon for stream rows — same stroked recipe as the folder icons,
      tinted via the element's background-color. */
   --radio-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.9 19.1C1 15.2 1 8.8 4.9 4.9'/%3E%3Cpath d='M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Cpath d='M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5'/%3E%3Cpath d='M19.1 4.9C23 8.8 23 15.2 19.1 19.1'/%3E%3C/svg%3E");
+  /* Playlist icon (Lucide list-video): three rows plus a play triangle,
+     distinguishing a playlist from folders and tracks. Same stroked/tinted
+     recipe. */
+  --playlist-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 12H3'/%3E%3Cpath d='M16 6H3'/%3E%3Cpath d='M12 18H3'/%3E%3Cpath d='m16 12 5 3-5 3v-6Z'/%3E%3C/svg%3E");
 }
 
 html,
@@ -327,6 +331,11 @@ body.platform-mac #tabs {
   mask-image: var(--album-icon);
 }
 
+.search-result .search-icon.icon-playlist {
+  -webkit-mask-image: var(--playlist-icon);
+  mask-image: var(--playlist-icon);
+}
+
 .search-result .text {
   min-width: 0;
   flex: 1;
@@ -365,9 +374,10 @@ body.platform-mac #tabs {
   font-style: italic;
 }
 
-/* Cursor-positioned row context menu. Same lifted dark surface as the search
-   dropdown; fixed so it can be placed at the click point regardless of scroll. */
-#context-menu {
+/* Cursor-positioned row context menu (and its "Add to playlist ▸" flyouts). Same
+   lifted dark surface as the search dropdown; fixed so it can be placed at the
+   click point regardless of scroll. Each level is its own positioned element. */
+.context-menu {
   position: fixed;
   min-width: 140px;
   background: #1a1a1a;
@@ -375,6 +385,9 @@ body.platform-mac #tabs {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   z-index: 30;
   padding: 0.25em 0;
+  /* A long playlist list scrolls rather than running off-screen. */
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 .context-menu-item {
@@ -386,6 +399,24 @@ body.platform-mac #tabs {
 
 .context-menu-item:hover {
   background: var(--surface-hover);
+  color: var(--accent);
+}
+
+/* Submenu parent ("Add to playlist ▸") carries a trailing chevron and reserves
+   room for it so the label never collides with the mark. */
+.context-menu-item.has-submenu {
+  position: relative;
+  padding-right: 1.6em;
+}
+
+.context-menu-item.has-submenu::after {
+  content: "›";
+  position: absolute;
+  right: 0.7em;
+  color: var(--text-muted);
+}
+
+.context-menu-item.has-submenu:hover::after {
   color: var(--accent);
 }
 
@@ -537,73 +568,95 @@ body.platform-mac #tabs {
   transition: opacity 600ms ease;
 }
 
-/* The right pane holds the queue list (#queue-view) over the now-playing hero
-   (#now-playing-main), with the controls row pinned at the bottom.
+/* The right pane has two faces — the now-playing hero (#now-playing-main) and a
+   list (#queue-view: the queue or an open playlist) — with the nav bar (#nav-bar)
+   and the controls row pinned at the bottom.
 
-   Base state is "no queue": the hero keeps its #now-playing-main rule above
-   (flex: 1, centered) and owns the whole pane, while the list is hidden. With a
-   queue the list takes the pane and the hero drops to a compact strip just above
-   the controls — see the full-view media query below. It's scoped away from the
-   mini bar (max-height: 480px), which never shows the queue and keeps the card. */
+   Base state is the hero: #now-playing-main (flex: 1, centered) owns the whole
+   pane; the list and nav bar are hidden. `.show-list` swaps the list in for the
+   hero; `.has-nav` reveals the nav bar (a list exists, either face). Both are
+   scoped to the full view below — the mini bar (max-height: 480px) never shows
+   the list or nav bar and always keeps the card. */
 #queue-view {
   display: none;
   flex-direction: column;
   min-height: 0;
 }
 
-/* One-line "Now Playing: <artist> - <title>" indicator, shown above the controls
-   only while a queue is playing (revealed in the full-view media query below);
-   hidden as a lone element otherwise. A single line that ellipsizes rather than
-   wrapping, so it never steals height from the queue list. The whole line — the
-   "Now Playing:" prefix and the "Artist - Track" after it — is one muted style. */
-#now-playing-strip {
+/* The nav bar: one muted line pinned above the transport, a face-swap button at
+   its right. Revealed by .has-nav in the full-view query below; hidden otherwise
+   (including the mini bar). */
+#nav-bar {
   display: none;
+  align-items: center;
+  gap: 0.7em;
   margin: 0;
   padding: 0.55em 0.25em 0;
   border-top: 1px solid var(--surface-hover);
+  font-size: 0.9em;
+  color: var(--text-muted);
+}
+
+#nav-bar-text {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 0.9em;
-  color: var(--text-muted);
   /* double-click here toggles the mini player; don't select the text */
   user-select: none;
   -webkit-user-select: none;
 }
-#now-playing-strip::before {
-  content: "Now Playing: ";
+
+#nav-bar-btn,
+#nav-bar-alt-btn {
+  flex: none;
+  padding: 0.25em 0.6em;
+  border: 1px solid var(--surface-hover);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.9em;
+  cursor: pointer;
+}
+
+#nav-bar-btn:hover,
+#nav-bar-alt-btn:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
+  background: var(--surface-hover);
 }
 
 @media (min-height: 481px) {
-  .has-queue #queue-view {
+  /* List face: the list takes the pane in place of the hero card. */
+  .show-list #queue-view {
     display: flex;
     flex: 1;
   }
-  /* Queue mode: the full now-playing card gives way to the queue list, and the
-     current track shows in the one-line strip above the controls instead. */
-  .has-queue #now-playing-main {
+  .show-list #now-playing-main {
     display: none;
   }
-  .has-queue #now-playing-strip {
-    display: block;
+  /* The nav bar shows on either face whenever a list exists to navigate. */
+  .has-nav #nav-bar {
+    display: flex;
   }
-  /* The hero + queue stack fills all space above; this lifts the controls bar
-     off it. Matches #right's bottom padding for equal breathing room. Scoped to
-     queue mode so the centered now-playing card keeps its original position —
-     the base rule adds no margin. */
-  .has-queue #now-playing-controls {
+  /* The content above fills all space; lift the controls off it. Matches #right's
+     bottom padding for equal breathing room. Scoped to the nav-bar state so the
+     bare centered hero keeps its original position. */
+  .has-nav #now-playing-controls {
     margin-top: 0.6em;
   }
 }
 
-/* A brief confirmation for Add-to-queue, centered above the controls row. */
+/* A brief confirmation for playlist actions, pinned to the bottom-center of the
+   whole app in the app's accent green. */
 #toast {
   position: fixed;
-  bottom: 4.5em;
+  bottom: 1.5em;
   left: 50%;
   transform: translateX(-50%) translateY(0.5em);
-  background: var(--surface);
-  color: var(--text);
+  background: var(--accent);
+  color: var(--bg);
   padding: 0.5em 0.9em;
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
@@ -634,8 +687,9 @@ body.platform-mac #tabs {
   min-width: 0;
 }
 
-/* Dismisses the explicit queue, pushed to the header's right edge. Muted until
-   hovered so it reads as a secondary action next to the queue title. */
+/* Clear: tears down the ephemeral queue, pushed to the header's right edge.
+   Muted until hovered so it reads as a secondary action next to the title;
+   hidden entirely for a playlist (no header teardown). */
 #queue-close-btn {
   flex: none;
   margin-left: auto;
@@ -655,10 +709,21 @@ body.platform-mac #tabs {
 }
 
 #queue-title {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
   font-size: 1.25em;
   font-weight: 600;
   color: var(--text);
   word-break: break-word;
+}
+
+/* A playlist header reads as clickable — click the name (or the hover pencil) to
+   rename in place. The cursor sits on the whole title so the flex gap between the
+   name and the pencil is clickable-looking too, not just the two glyphs. The
+   ephemeral queue's title carries no such affordance. */
+#queue-title.renamable {
+  cursor: pointer;
 }
 
 #queue-subtitle {
@@ -680,6 +745,8 @@ body.platform-mac #tabs {
   display: flex;
   align-items: center;
   gap: 0.6em;
+  /* Positioning context for the drop-target line (::after). */
+  position: relative;
   /* Left padding matches #queue-header so the number column lines up flush with
      the queue title, with the track text as a second column to its right. */
   padding: 0.28em 0.4em 0.28em 0.25em;
@@ -728,6 +795,150 @@ body.platform-mac #tabs {
 .queue-row.playing .queue-primary,
 .queue-row.playing .queue-num {
   color: var(--accent);
+}
+
+/* Multi-select background, matching the tree's .selected row. The .playing accent
+   text still shows through on top. */
+.queue-row.selected {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 0;
+}
+
+.queue-row.selected:hover {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* A missing playlist row: dimmed and non-interactive (no click handler, so no
+   hover affordance either) to read as unavailable while still occupying its
+   place in the list. */
+.queue-row.missing {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.queue-row.missing:hover {
+  background: none;
+}
+
+/* Row remove (curation): a muted ✕ at the row's right edge, revealed on row
+   hover so it doesn't clutter the list at rest. */
+.queue-remove {
+  flex: none;
+  margin-left: auto;
+  /* Clear the scroll list's scrollbar gutter so the ✕ isn't obscured when the
+     list is long enough to scroll. */
+  margin-right: 0.5em;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.85em;
+  line-height: 1;
+  padding: 0.2em 0.3em;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.queue-row:hover .queue-remove {
+  opacity: 1;
+}
+
+.queue-remove:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+/* Drag-to-reorder: the grabbed row fades; a drop target shows a line on the edge
+   the drop would insert at. The line is a pseudo-element rather than an inset
+   box-shadow so it stays straight — an inset shadow follows the row's rounded
+   corners and bends at the ends. */
+.queue-row.dragging {
+  opacity: 0.4;
+}
+
+.queue-row.drop-before::after,
+.queue-row.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* Straddle the row boundary (offset by half the 2px height) so "after row N" and
+   "before row N+1" — the same insertion gap — render at the exact same position,
+   with no jump as the pointer crosses between the two rows' halves. */
+.queue-row.drop-before::after {
+  top: -1px;
+}
+
+.queue-row.drop-after::after {
+  bottom: -1px;
+}
+
+/* The bubble carried under the pointer during a track drag (see createDragGhost).
+   Fixed-positioned at the pointer and offset down-right so it trails the cursor;
+   pointer-events:none keeps it out of elementFromPoint hit-tests for the drop. */
+.drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  transform: translate(12px, 12px);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* Rename pencil (playlist header only): a borderless glyph that simply appears
+   when the title is hovered — i.e. exactly when a click there would edit — rather
+   than a standing button. Clicking it (or the name) opens the inline editor. No
+   hover recoloring: it's either present (clickable) or absent. */
+#queue-rename-btn {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.75em;
+  margin-left: 0.1em;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+
+#queue-title:hover #queue-rename-btn {
+  opacity: 1;
+}
+
+/* Inline rename field (playlist header + tree rows): sits in the slot the label
+   text vacated, inheriting its font so the name barely shifts as it becomes
+   editable. */
+.inline-edit {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: var(--bg);
+  /* The input's padding + border would make it taller than the text label it
+     replaces, growing the header and shoving the rest of the panel down while
+     editing. Pull that extra height back out with a matching negative vertical
+     margin so the input's margin-box is exactly as tall as the label was. */
+  box-sizing: border-box;
+  margin-block: calc(-0.05em - 1px);
+}
+
+.inline-edit:focus {
+  outline: none;
 }
 
 @property --live-color {
@@ -1093,13 +1304,14 @@ body.platform-mac #tabs {
     gap: 0.7em;
   }
 
-  /* The queue list is unusable in the thin mini bar, so it never shows here: the
-     has-queue rules that reveal the list and shrink the hero to a strip are
-     scoped to the full-view (min-height: 481px) media query, leaving the base
-     `#queue-view { display: none }` and `#now-playing-main { flex: 1 }` to govern
-     — the full now-playing card. The queue stays active (still drives playback);
-     expanding the window brings the list back. The queue's controls margin is
-     scoped to the full-view query, so it never reaches the mini card here. */
+  /* The list and nav bar are unusable in the thin mini bar, so they never show
+     here: the .show-list / .has-nav rules that reveal them are scoped to the
+     full-view (min-height: 481px) media query, leaving the base
+     `#queue-view { display: none }`, `#nav-bar { display: none }`, and
+     `#now-playing-main { flex: 1 }` to govern — the full now-playing card. The
+     queue stays active (still drives playback); expanding the window brings the
+     list back. The controls margin is scoped to the full-view query too, so it
+     never reaches the mini card here. */
 
   /* Top padding lifts the art/text off the thin topbar (traffic lights + expand
      button) so it doesn't butt against them; bottom padding keeps the controls
@@ -1258,6 +1470,22 @@ body.dragging * {
   user-select: none;
 }
 
+/* Curation drag (list reorder / tree-track insert): a grabbing cursor while a row
+   is actually being dragged. Distinct from #splitter's col-resize drag. */
+body.reordering,
+body.reordering * {
+  cursor: grabbing !important;
+}
+
+/* Suppress text selection for the whole curation gesture, applied the instant the
+   drag is armed (before the threshold) so a pointer sweep never highlights row
+   titles. Separate from .reordering so a plain click doesn't flash the cursor. */
+body.dragging-noselect,
+body.dragging-noselect * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .tab {
   flex: 1;
   background: none;
@@ -1295,6 +1523,43 @@ body.dragging * {
   overflow: auto;
   padding: 0.75em 0;
   min-height: 0;
+}
+
+/* A create-playlist affordance that flows below the tree at the bottom of the
+   files panel. Styled to match the tree rows (same inset, gap, text color, and
+   hover) so it reads as a first-class library entry, not a disabled footer. */
+#create-playlist-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.65em;
+  width: 100%;
+  padding: 0.2em 0.8em 0.2em 0.65em;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+#create-playlist-btn:hover {
+  background: var(--surface);
+}
+
+/* The plus icon matches the tree icons: muted gray by default, accent on row
+   hover. It's an inline stroke="currentColor" SVG, so color it directly rather
+   than inheriting the label's text color. */
+#create-playlist-btn svg {
+  flex: none;
+  width: 1.1em;
+  height: 1.5em;
+  color: var(--text-muted);
+  transition: color 120ms ease;
+}
+
+#create-playlist-btn:hover svg {
+  color: var(--accent);
 }
 
 .empty-state,
@@ -1339,6 +1604,40 @@ ul {
 #folder-tree .node-label.playing,
 #streams-list .node-label.playing {
   color: var(--accent);
+}
+
+/* The open (browsed-for-viewing) playlist keeps a persistent selection
+   background so the tree shows which playlist is open — distinct from the
+   accent-tinted .playing row, which means it's the one currently playing. */
+#folder-tree .node-label.open {
+  background: var(--surface);
+}
+
+/* Multi-select rows carry an accent-tinted background so a built-up selection
+   reads at a glance, distinct from the neutral .open playlist background. The
+   accent text of a .playing row still shows through on top. */
+#folder-tree .node-label.selected {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+#folder-tree .node-label.selected:hover {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* A one-shot accent wash that fades out, applied after a rename to draw the eye to
+   the row's new sorted position (see revealTreeRow). Purely transient — the class
+   is removed on animationend. */
+#folder-tree .node-label.flash {
+  animation: row-flash 900ms ease-out;
+}
+
+@keyframes row-flash {
+  from {
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  to {
+    background: transparent;
+  }
 }
 
 /* Text flexes and wraps; wrapped lines hang under the label, not the icon. */
@@ -1418,16 +1717,29 @@ ul {
   mask-image: var(--radio-icon);
 }
 
-/* Folder/stream icons pick up the accent on row hover. */
+.icon.playlist {
+  background-color: var(--text-muted);
+  -webkit-mask-image: var(--playlist-icon);
+  mask-image: var(--playlist-icon);
+}
+
+/* Folder/stream/playlist icons pick up the accent on row hover. */
 .node-label:hover .icon.folder,
 .node-label:hover .icon.folder-open,
-.node-label:hover .icon.radio {
+.node-label:hover .icon.radio,
+.node-label:hover .icon.playlist {
   background-color: var(--accent);
 }
 
 /* The playing track's number takes the accent, matching the row highlight. */
 .node-label.playing .icon.track {
   color: var(--accent);
+}
+
+/* A playlist playing from the tree tints its glyph to match, the way the track
+   number does — the masked icon takes the accent via background-color. */
+.node-label.playing .icon.playlist {
+  background-color: var(--accent);
 }
 
 #folder-tree > ul,

@@ -510,6 +510,10 @@ struct TrackReader {
     track_id: u32,
     input_rate: u32,
     input_channels: usize,
+    // Output rate this track resamples to. Kept so we can rebuild the resampler
+    // when the first decoded packet reveals a different input rate/channel count
+    // than the container metadata claimed (see spec_resolved).
+    output_rate: u32,
     duration_seconds: f64,
     path: String,
     // Resampler kept across decode calls so internal state (sinc taps) carries
@@ -521,6 +525,12 @@ struct TrackReader {
     pending_in: Vec<Vec<f32>>,
     // Whether we've sent the resampler its last partial chunk.
     flushed: bool,
+    // Whether we've reconciled channel count / sample rate against the first
+    // decoded packet. Container codec_params can be absent or wrong — notably
+    // M4A/AAC/ALAC leave channels = None until a packet is decoded, so our
+    // open-time guess defaults to stereo. The decoded buffer's spec is ground
+    // truth; we fix up the resampler and buffers once, on the first packet.
+    spec_resolved: bool,
 }
 
 fn decode_loop(
@@ -646,28 +656,60 @@ fn decode_loop(
                         // frontier_idx already points at the first appended track
                         // when the queue had drained (frontier_idx == old len).
                         queue.extend(tracks);
-                        // Nothing decoding means the queue had drained (or never
-                        // started): resume into the appended tracks. A full
-                        // reset re-bases the frame counters like a fresh Play,
-                        // which is safe because nothing is currently audible.
                         // While a track is decoding, we do nothing here —
                         // auto-advance reaches the new tracks with no flush.
                         if frontier.is_none() && stream.is_none() {
-                            producer_frames = 0;
-                            reset_for_new_playback(&shared, &origins);
-                            emit_state(&app, true, true);
-                            frontier = advance_to_next_playable(
-                                &queue,
-                                &mut frontier_idx,
-                                output_rate,
-                                producer_frames,
-                                &shared,
-                                &origins,
-                                &app,
-                            );
-                            if frontier.is_none() {
-                                shared.queue_exhausted.store(true, Ordering::Relaxed);
-                                emit_state(&app, false, false);
+                            // The frontier drained (or never started). Whether we
+                            // can flush hinges on whether anything is still
+                            // *audible*: the frontier runs up to a full ring buffer
+                            // (RING_BUFFER_SECONDS) ahead, so it goes None the
+                            // instant the last track finishes DECODING — while that
+                            // much of its audio is still playing out the speakers.
+                            let produced = shared.total_produced.load(Ordering::Relaxed);
+                            let played = shared.frames_played.load(Ordering::Relaxed);
+                            let drained = shared.total_drained.load(Ordering::Relaxed);
+                            if produced > played + drained {
+                                // A tail is still sounding. Resume the frontier into
+                                // the appended tracks WITHOUT a flush/reset: their
+                                // origin is published at producer_frames, so it
+                                // activates exactly when the tail's last frame plays
+                                // out — gapless, and the audible tail is untouched.
+                                // (A reset here would flush_and_wait the ring and
+                                // chop that tail.)
+                                shared.queue_exhausted.store(false, Ordering::Relaxed);
+                                frontier = advance_to_next_playable(
+                                    &queue,
+                                    &mut frontier_idx,
+                                    output_rate,
+                                    producer_frames,
+                                    &shared,
+                                    &origins,
+                                    &app,
+                                );
+                                if frontier.is_none() {
+                                    shared.queue_exhausted.store(true, Ordering::Relaxed);
+                                }
+                            } else {
+                                // Nothing is audible (never started, or the tail has
+                                // fully drained): a full reset re-bases the frame
+                                // counters like a fresh Play, which is safe because
+                                // the flush has nothing to chop.
+                                producer_frames = 0;
+                                reset_for_new_playback(&shared, &origins);
+                                emit_state(&app, true, true);
+                                frontier = advance_to_next_playable(
+                                    &queue,
+                                    &mut frontier_idx,
+                                    output_rate,
+                                    producer_frames,
+                                    &shared,
+                                    &origins,
+                                    &app,
+                                );
+                                if frontier.is_none() {
+                                    shared.queue_exhausted.store(true, Ordering::Relaxed);
+                                    emit_state(&app, false, false);
+                                }
                             }
                         }
                     }
@@ -1047,11 +1089,13 @@ fn open_stream(
             track_id,
             input_rate,
             input_channels,
+            output_rate,
             duration_seconds: 0.0,
             path: url.to_string(),
             resampler,
             pending_in: vec![Vec::new(); input_channels],
             flushed: false,
+            spec_resolved: false,
         },
         title,
         station,
@@ -1147,6 +1191,35 @@ fn decode_and_push(
         }
         Err(e) => return Err(format!("decode: {e}")),
     };
+
+    // Reconcile against the decoded buffer's spec on the first packet. The
+    // container's codec_params may omit or misreport the channel count / rate
+    // (M4A/AAC/ALAC report channels = None until decoded, so our open-time guess
+    // defaults to stereo). If we kept trusting that, a mono source would leave
+    // pending_in[1] permanently empty and the `drain(..CHUNK)` below would panic
+    // ("range end index 1024 out of range for slice of length 0") — which, on
+    // the decode thread, silently kills playback (decodes, duration known, but
+    // the playhead never advances).
+    if !tr.spec_resolved {
+        let spec = decoded.spec();
+        let actual_channels = spec.channels.count().max(1);
+        let actual_rate = spec.rate;
+        if actual_channels != tr.input_channels || actual_rate != tr.input_rate {
+            log::info!(
+                "audio: reconciling spec for {}: channels {}->{}, rate {}->{}",
+                tr.path,
+                tr.input_channels,
+                actual_channels,
+                tr.input_rate,
+                actual_rate
+            );
+            tr.input_channels = actual_channels;
+            tr.input_rate = actual_rate;
+            tr.resampler = make_resampler(actual_rate, tr.output_rate, actual_channels);
+            tr.pending_in = vec![Vec::new(); actual_channels];
+        }
+        tr.spec_resolved = true;
+    }
 
     append_planar(&decoded, &mut tr.pending_in, tr.input_channels);
 
@@ -1274,11 +1347,13 @@ fn open_track(path: &std::path::Path, output_rate: u32) -> Option<TrackReader> {
         track_id,
         input_rate,
         input_channels,
+        output_rate,
         duration_seconds,
         path: path.to_string_lossy().to_string(),
         resampler,
         pending_in: vec![Vec::new(); input_channels],
         flushed: false,
+        spec_resolved: false,
     })
 }
 
@@ -1648,4 +1723,92 @@ fn emit_error(app: &AppHandle, path: &std::path::Path, message: &str) {
             message: message.to_string(),
         },
     );
+}
+
+#[cfg(test)]
+mod spec_reconcile_tests {
+    //! Regression guard for the mono/low-rate stall+panic: symphonia leaves
+    //! codec_params.channels (and sometimes sample_rate) unset for M4A/AAC/ALAC
+    //! until the first packet is decoded, so open_track's guess defaulted to
+    //! stereo. A mono source then left pending_in[1] empty and the resampler
+    //! feed panicked on `drain(..CHUNK)` — killing the decode thread, which
+    //! surfaces as playback that decodes and knows its duration but never
+    //! advances. We now reconcile against the decoded buffer's spec.
+    use super::*;
+
+    // Drive the real open_track + decode_and_push pipeline over a fixture and
+    // return the number of stereo output frames produced. Panics propagate.
+    fn produced_frames(fixture: &str, output_rate: u32) -> u64 {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests-fixtures")
+            .join(fixture);
+        let mut tr = open_track(&path, output_rate).expect("open_track");
+        eprintln!(
+            "fixture={fixture} input_rate={} input_channels={} duration={:.3}",
+            tr.input_rate, tr.input_channels, tr.duration_seconds
+        );
+        let shared = Arc::new(SharedState::new());
+        let (mut prod, mut cons) = RingBuffer::<f32>::new(1 << 20);
+        let mut producer_frames: u64 = 0;
+        // Drain consumer in a thread so push_blocking never wedges on a full ring.
+        let done = Arc::new(AtomicBool::new(false));
+        let d2 = done.clone();
+        let drainer = std::thread::spawn(move || {
+            while !d2.load(Ordering::Relaxed) {
+                while let Ok(chunk) = cons.read_chunk(cons.slots()) {
+                    let n = chunk.len();
+                    chunk.commit_all();
+                    if n == 0 {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        loop {
+            match decode_and_push(&mut tr, &mut prod, &shared, &mut producer_frames) {
+                Ok(StepOutcome::TrackEnded) => break,
+                Ok(_) => {}
+                Err(e) => panic!("decode error: {e}"),
+            }
+        }
+        done.store(true, Ordering::Relaxed);
+        drainer.join().unwrap();
+        producer_frames
+    }
+
+    #[test]
+    fn mono_aac_22050() {
+        let f = produced_frames("mono22_aac.m4a", 44100);
+        eprintln!("mono22_aac produced_frames={f}");
+        assert!(f > 0, "no audio produced (stall) for mono 22050 AAC");
+    }
+
+    #[test]
+    fn mono_aac_44100() {
+        let f = produced_frames("mono44_aac.m4a", 44100);
+        eprintln!("mono44_aac produced_frames={f}");
+        assert!(f > 0);
+    }
+
+    #[test]
+    fn mono_alac_22050() {
+        let f = produced_frames("mono22_alac.m4a", 44100);
+        eprintln!("mono22_alac produced_frames={f}");
+        assert!(f > 0);
+    }
+
+    #[test]
+    fn mono_alac_44100() {
+        let f = produced_frames("mono44_alac.m4a", 44100);
+        eprintln!("mono44_alac produced_frames={f}");
+        assert!(f > 0);
+    }
+
+    #[test]
+    fn stereo_alac_22050() {
+        let f = produced_frames("stereo22_alac.m4a", 44100);
+        eprintln!("stereo22_alac produced_frames={f}");
+        assert!(f > 0);
+    }
 }

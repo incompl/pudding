@@ -21,4 +21,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-.claude/*
+
+# Claude Code: share skills + project settings, keep personal overrides out
+.claude/settings.local.json

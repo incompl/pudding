@@ -1,6 +1,7 @@
 mod audio;
 mod icy;
 mod now_playing;
+mod playlist;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -15,8 +16,8 @@ use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileI
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{
-    AboutMetadataBuilder, CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder,
-    SubmenuBuilder,
+    AboutMetadataBuilder, CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem,
+    MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder,
 };
 use tauri::{AppHandle, Emitter, Manager, State, Wry};
 use tauri_plugin_log::{Target, TargetKind};
@@ -49,6 +50,41 @@ struct WatcherState {
 struct PlaybackMenu {
     files: CheckMenuItem<Wry>,
     playlists: CheckMenuItem<Wry>,
+    // Shuffle, the three Repeat modes (radio-style: only one checked), and Mute
+    // are checkmarks the frontend keeps in sync as its own state changes (from the
+    // toolbar or the menu).
+    shuffle: CheckMenuItem<Wry>,
+    repeat_off: CheckMenuItem<Wry>,
+    repeat_all: CheckMenuItem<Wry>,
+    repeat_one: CheckMenuItem<Wry>,
+    mute: CheckMenuItem<Wry>,
+}
+
+// The Window menu's "Mini Player" checkbox. The frontend derives mini mode from
+// the viewport height, so it keeps this checkmark in sync (set_miniplayer_checked)
+// on startup and on every resize.
+struct WindowMenu {
+    miniplayer: CheckMenuItem<Wry>,
+}
+
+// Handles into the Playlist menu that the frontend keeps in sync: the "Save as
+// Playlist" item is enabled only while an ephemeral queue is the active pool
+// (set_save_playlist_enabled), "Move Playlist File…" is enabled only while a
+// playlist is open — browsed or playing (set_move_playlist_enabled) — and the
+// "Open Recent" submenu is rebuilt from the frontend's persisted recents list
+// (set_recent_playlists).
+struct PlaylistMenu {
+    save_as: MenuItem<Wry>,
+    move_file: MenuItem<Wry>,
+    recent: Submenu<Wry>,
+}
+
+// One entry the frontend hands set_recent_playlists to rebuild the Open Recent
+// submenu (most-recent first).
+#[derive(Deserialize)]
+struct RecentPlaylist {
+    path: String,
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -91,6 +127,16 @@ struct PendingOpen {
 struct DirListing {
     folders: Vec<String>,
     files: Vec<FileEntry>,
+    // Playlists in this folder, sorted after all tracks (see list_dir). `file`
+    // is the basename (the frontend joins it to the parent path); `name` is the
+    // display name (#PLAYLIST: directive or filename stem).
+    playlists: Vec<PlaylistListing>,
+}
+
+#[derive(Serialize)]
+struct PlaylistListing {
+    file: String,
+    name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -464,6 +510,7 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
 
     let mut folders: Vec<String> = Vec::new();
     let mut file_names: Vec<String> = Vec::new();
+    let mut playlists: Vec<PlaylistListing> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let entry_path = entry.path();
@@ -477,9 +524,18 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
             folders.push(name);
         } else if meta.is_file() && is_audio_path(&name) {
             file_names.push(name);
+        } else if meta.is_file() && playlist::is_playlist_path(&name) {
+            // Playlists stay out of the audio-tag path (no tag scan, own icon
+            // and click action); the display name comes from the file.
+            playlists.push(PlaylistListing {
+                name: playlist::display_name(&entry_path),
+                file: name,
+            });
         }
     }
     folders.sort_by_key(|s| s.to_lowercase());
+    // Playlists sort after all tracks, alphabetically by display name.
+    playlists.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     let fulls: Vec<String> = file_names.iter().map(|n| join_path(&path, n)).collect();
     let meta_map = {
@@ -521,7 +577,11 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
-    Ok(DirListing { folders, files })
+    Ok(DirListing {
+        folders,
+        files,
+        playlists,
+    })
 }
 
 // The manifest is canonically a JSON array of {name, url}, but any .m3u the
@@ -763,18 +823,25 @@ fn is_audio_path(s: &str) -> bool {
         .unwrap_or(false)
 }
 
-// Picks the first arg that looks like an audio file path. We can't assume
+// A path the app knows how to open via an OS file association: an audio file
+// (played) or a playlist (opened for browsing). The frontend re-checks the
+// extension to route audio vs. playlist.
+fn is_openable_path(s: &str) -> bool {
+    is_audio_path(s) || playlist::is_playlist_path(s)
+}
+
+// Picks the first arg that looks like an openable file path. We can't assume
 // position because launchers / OS shells pass argv differently (macOS adds
 // -psn flags, some Windows shells quote oddly).
-fn find_audio_in_argv(argv: &[String]) -> Option<String> {
+fn find_openable_in_argv(argv: &[String]) -> Option<String> {
     argv.iter()
         .skip(1)
-        .find(|a| is_audio_path(a) && Path::new(a).exists())
+        .find(|a| is_openable_path(a) && Path::new(a).exists())
         .cloned()
 }
 
 fn deliver_open_file(app: &AppHandle, path: String) {
-    if !is_audio_path(&path) {
+    if !is_openable_path(&path) {
         return;
     }
     // try_state, not state(): on a macOS cold-start file open the Opened Apple
@@ -806,6 +873,17 @@ fn frontend_ready(state: State<PendingOpen>) -> Option<String> {
     let mut guard = state.inner.lock().ok()?;
     guard.ready = true;
     guard.path.take()
+}
+
+// Dev/e2e only: the WebSocket port the test harness is listening on, passed via
+// PUDDING_E2E_PORT. Returns None in normal runs, so the frontend test bridge
+// stays completely inert unless a harness launched us. Deliberately env-gated
+// rather than a build feature so a single release binary can be driven by tests.
+#[tauri::command]
+fn e2e_port() -> Option<u16> {
+    std::env::var("PUDDING_E2E_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
 }
 
 // Tags for an externally-opened file, read directly from the file (it may not
@@ -870,6 +948,87 @@ fn audio_clear_upcoming(engine: State<audio::AudioEngine>) {
 fn set_autoadvance_checked(menu: State<PlaybackMenu>, files: bool, playlists: bool) {
     let _ = menu.files.set_checked(files);
     let _ = menu.playlists.set_checked(playlists);
+}
+
+// Sync the Shuffle checkmark. Called whenever shuffle toggles (toolbar or menu)
+// and once at startup, so the menu always mirrors the frontend's state.
+#[tauri::command]
+fn set_shuffle_checked(menu: State<PlaybackMenu>, shuffle: bool) {
+    let _ = menu.shuffle.set_checked(shuffle);
+}
+
+// Sync the three Repeat items radio-style: exactly one is checked ("off"/"all"/
+// "one"). Called whenever the repeat mode changes and once at startup.
+#[tauri::command]
+fn set_repeat_checked(menu: State<PlaybackMenu>, mode: String) {
+    let _ = menu.repeat_off.set_checked(mode == "off");
+    let _ = menu.repeat_all.set_checked(mode == "all");
+    let _ = menu.repeat_one.set_checked(mode == "one");
+}
+
+// Sync the Mute checkmark (checked when the volume is zeroed).
+#[tauri::command]
+fn set_mute_checked(menu: State<PlaybackMenu>, muted: bool) {
+    let _ = menu.mute.set_checked(muted);
+}
+
+// Sync the "Mini Player" checkmark to the current mode (the frontend derives it
+// from the viewport height, on startup and on every resize).
+#[tauri::command]
+fn set_miniplayer_checked(menu: State<WindowMenu>, mini: bool) {
+    let _ = menu.miniplayer.set_checked(mini);
+}
+
+// Enable/disable "Save Queue as Playlist" (⌘S). The frontend calls this as playback
+// state changes: only an ephemeral queue that's the active pool can be
+// converted (a saved playlist already autosaves, nothing else is convertible).
+#[tauri::command]
+fn set_save_playlist_enabled(menu: State<PlaylistMenu>, enabled: bool) {
+    let _ = menu.save_as.set_enabled(enabled);
+}
+
+// Toggle "Move Playlist File…" as the open playlist (browsed or playing) comes
+// and goes: there's no file to relocate when no playlist is open.
+#[tauri::command]
+fn set_move_playlist_enabled(menu: State<PlaylistMenu>, enabled: bool) {
+    let _ = menu.move_file.set_enabled(enabled);
+}
+
+// Rebuild the Open Recent submenu from the frontend's persisted recents
+// (most-recent first). Each row's id carries its path (playlist-recent:<path>)
+// so the click handler can relay it; an empty list shows a disabled placeholder.
+#[tauri::command]
+fn set_recent_playlists(
+    app: AppHandle,
+    menu: State<PlaylistMenu>,
+    items: Vec<RecentPlaylist>,
+) -> Result<(), String> {
+    let sub = &menu.recent;
+    let count = sub.items().map_err(|e| e.to_string())?.len();
+    for _ in 0..count {
+        sub.remove_at(0).map_err(|e| e.to_string())?;
+    }
+    if items.is_empty() {
+        let empty = MenuItemBuilder::with_id("playlist-recent-empty", "No Recent Playlists")
+            .enabled(false)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        sub.append(&empty).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    for it in &items {
+        let item = MenuItemBuilder::with_id(format!("playlist-recent:{}", it.path), &it.name)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        sub.append(&item).map_err(|e| e.to_string())?;
+    }
+    let sep = PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
+    sub.append(&sep).map_err(|e| e.to_string())?;
+    let clear = MenuItemBuilder::with_id("playlist-recent-clear", "Clear Recent")
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    sub.append(&clear).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // Append tracks to the tail of the current queue without disturbing the
@@ -1219,7 +1378,7 @@ pub fn run() {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_focus();
             }
-            if let Some(path) = find_audio_in_argv(&argv) {
+            if let Some(path) = find_openable_in_argv(&argv) {
                 deliver_open_file(app, path);
             }
         }))
@@ -1253,6 +1412,38 @@ pub fn run() {
                 "transport-next" => {
                     let _ = app.emit("menu:transport", "next");
                 }
+                // Volume: nudge up/down (the frontend owns the level and clamps).
+                "playback-volume-up" => {
+                    let _ = app.emit("menu:volume", "up");
+                }
+                "playback-volume-down" => {
+                    let _ = app.emit("menu:volume", "down");
+                }
+                // Shuffle and Mute are checkboxes that auto-toggled before this
+                // fires; the frontend owns the state, so just relay the intent
+                // (it flips its own state and re-syncs the checkmark).
+                "playback-shuffle" => {
+                    let _ = app.emit("menu:shuffle", ());
+                }
+                "playback-mute" => {
+                    let _ = app.emit("menu:mute", ());
+                }
+                // Repeat is three radio-style items; each selects its mode.
+                "repeat-off" => {
+                    let _ = app.emit("menu:repeat", "off");
+                }
+                "repeat-all" => {
+                    let _ = app.emit("menu:repeat", "all");
+                }
+                "repeat-one" => {
+                    let _ = app.emit("menu:repeat", "one");
+                }
+                // Mini Player checkbox auto-toggled before this fires; the frontend
+                // owns the mode (it resizes across the breakpoint) and re-syncs the
+                // checkmark from the resulting viewport height.
+                "window-miniplayer" => {
+                    let _ = app.emit("menu:miniplayer", ());
+                }
                 // The checkbox auto-toggled its own state before this fires, so
                 // is_checked() reads the new value; relay it to the frontend,
                 // which owns the setting and persists it.
@@ -1272,6 +1463,28 @@ pub fn run() {
                         };
                         let _ = app.emit("menu:autoadvance", (context, enabled));
                     }
+                }
+                // Playlist menu — the frontend owns the dialogs, writes, and
+                // recents, so these relay the intent. Recent items carry their
+                // path in the id (playlist-recent:<path>).
+                "playlist-new" => {
+                    let _ = app.emit("menu:playlist", "new");
+                }
+                "playlist-open" => {
+                    let _ = app.emit("menu:playlist", "open");
+                }
+                "playlist-save" => {
+                    let _ = app.emit("menu:playlist", "save");
+                }
+                "playlist-move" => {
+                    let _ = app.emit("menu:playlist", "move");
+                }
+                "playlist-recent-clear" => {
+                    let _ = app.emit("menu:playlist", "recent-clear");
+                }
+                other if other.starts_with("playlist-recent:") => {
+                    let path = other.trim_start_matches("playlist-recent:");
+                    let _ = app.emit("menu:playlist-open-path", path.to_string());
                 }
                 _ => {}
             }
@@ -1312,7 +1525,7 @@ pub fn run() {
             // Cold-start file open on Windows/Linux arrives as a CLI arg. On macOS
             // it arrives later via RunEvent::Opened (handled below).
             let argv: Vec<String> = std::env::args().collect();
-            if let Some(path) = find_audio_in_argv(&argv) {
+            if let Some(path) = find_openable_in_argv(&argv) {
                 deliver_open_file(&app.handle(), path);
             }
 
@@ -1362,16 +1575,20 @@ pub fn run() {
                 .build()?;
 
             // Playback menu, top to bottom: transport (Play/Pause, Previous,
-            // Next) then two "Autoadvance" checkboxes, one per context (the file
-            // tree vs. explicit playlists/queues). Transport items relay to the
+            // Next); Shuffle + a Repeat submenu; Volume Up/Down + Mute; and two
+            // "Autoadvance" checkboxes, one per context (the file tree vs. explicit
+            // playlists/queues). Queue teardown ("Clear") lives on the queue pane
+            // itself, not here — a queue verb has no home in a global menu.
+            // Transport items relay to the
             // frontend (menu:transport); Previous/Next carry ⌘←/⌘→ accelerators
             // that both drive the shortcut and reveal it here. (Play/Pause, seek,
             // and volume have bare-key shortcuts that can't be menu accelerators
-            // without hijacking typing, so only Play/Pause appears, unlabelled.)
-            // The autoadvance checkboxes both default on; the frontend corrects
-            // them to the persisted values at startup (set_autoadvance_checked).
-            // Those modes live only here, not in the app UI: they're set-once
-            // preferences, not per-play controls.
+            // without hijacking typing, so those appear without accelerators.)
+            // Shuffle/Repeat/Mute mirror the toolbar controls and Autoadvance both
+            // default on; the frontend corrects every checkmark to its persisted
+            // value at startup and after each change (set_*_checked). Autoadvance
+            // lives only here (a set-once preference); the rest also have toolbar
+            // controls.
             let play_pause = MenuItemBuilder::with_id("transport-playpause", "Play / Pause")
                 .build(app)?;
             let previous = MenuItemBuilder::with_id("transport-prev", "Previous")
@@ -1392,10 +1609,41 @@ pub fn run() {
             )
             .checked(true)
             .build(app)?;
+            // Shuffle / Repeat / Volume / Mute mirror the toolbar controls; the
+            // frontend owns the state and re-syncs these checkmarks after any
+            // change (set_shuffle_checked / set_repeat_checked / set_mute_checked).
+            // Repeat is three radio-style items (only one checked); Volume nudges
+            // and Mute have bare-key toolbar equivalents, so no accelerators here.
+            let shuffle = CheckMenuItemBuilder::with_id("playback-shuffle", "Shuffle")
+                .build(app)?;
+            let repeat_off = CheckMenuItemBuilder::with_id("repeat-off", "Off")
+                .checked(true)
+                .build(app)?;
+            let repeat_all =
+                CheckMenuItemBuilder::with_id("repeat-all", "Repeat All").build(app)?;
+            let repeat_one =
+                CheckMenuItemBuilder::with_id("repeat-one", "Repeat One").build(app)?;
+            let repeat_menu = SubmenuBuilder::new(app, "Repeat")
+                .item(&repeat_off)
+                .item(&repeat_all)
+                .item(&repeat_one)
+                .build()?;
+            let volume_up =
+                MenuItemBuilder::with_id("playback-volume-up", "Volume Up").build(app)?;
+            let volume_down =
+                MenuItemBuilder::with_id("playback-volume-down", "Volume Down").build(app)?;
+            let mute = CheckMenuItemBuilder::with_id("playback-mute", "Mute").build(app)?;
             let playback_menu = SubmenuBuilder::new(app, "Playback")
                 .item(&play_pause)
                 .item(&previous)
                 .item(&next)
+                .separator()
+                .item(&shuffle)
+                .item(&repeat_menu)
+                .separator()
+                .item(&volume_up)
+                .item(&volume_down)
+                .item(&mute)
                 .separator()
                 .item(&autoadvance_files)
                 .item(&autoadvance_playlists)
@@ -1403,10 +1651,78 @@ pub fn run() {
             app.manage(PlaybackMenu {
                 files: autoadvance_files,
                 playlists: autoadvance_playlists,
+                shuffle,
+                repeat_off,
+                repeat_all,
+                repeat_one,
+                mute,
             });
 
+            // Playlist menu: New / Open… / Open Recent ▸ then Save Queue as Playlist
+            // (⌘S) and Move Playlist File…. Every item relays to the frontend
+            // (menu:playlist / menu:playlist-open-path), which owns the dialogs,
+            // file writes, and recents list. "Save Queue as Playlist" starts disabled
+            // (only an ephemeral queue can be converted) and Open Recent starts
+            // with a placeholder; the frontend syncs both after load.
+            let new_playlist =
+                MenuItemBuilder::with_id("playlist-new", "New Playlist…").build(app)?;
+            let open_playlist = MenuItemBuilder::with_id("playlist-open", "Open…").build(app)?;
+            let recent_submenu = SubmenuBuilder::new(app, "Open Recent").build()?;
+            let recent_placeholder =
+                MenuItemBuilder::with_id("playlist-recent-empty", "No Recent Playlists")
+                    .enabled(false)
+                    .build(app)?;
+            recent_submenu.append(&recent_placeholder)?;
+            let save_as = MenuItemBuilder::with_id("playlist-save", "Save Queue as Playlist…")
+                .accelerator("CmdOrCtrl+S")
+                .enabled(false)
+                .build(app)?;
+            let move_file = MenuItemBuilder::with_id("playlist-move", "Move Playlist File…")
+                .enabled(false)
+                .build(app)?;
+            let playlist_menu = SubmenuBuilder::new(app, "Playlist")
+                .item(&new_playlist)
+                .item(&open_playlist)
+                .item(&recent_submenu)
+                .separator()
+                .item(&save_as)
+                .item(&move_file)
+                .build()?;
+            app.manage(PlaylistMenu {
+                save_as,
+                move_file,
+                recent: recent_submenu,
+            });
+
+            // Standard macOS Window menu. Minimize/Zoom/Close are predefined items
+            // that carry their own behavior and ⌘M/⌘W accelerators. "Mini Player"
+            // is ours: a checkbox that toggles the app's compact mode (⌘⇧M),
+            // matching where Apple Music surfaces it. The frontend owns the mode
+            // and re-syncs the checkmark (set_miniplayer_checked).
+            let miniplayer = CheckMenuItemBuilder::with_id("window-miniplayer", "Mini Player")
+                .accelerator("CmdOrCtrl+Shift+M")
+                .build(app)?;
+            let window_menu = SubmenuBuilder::new(app, "Window")
+                .item(&miniplayer)
+                .separator()
+                .minimize()
+                .maximize()
+                .separator()
+                .close_window()
+                .build()?;
+            app.manage(WindowMenu { miniplayer });
+
+            // Order follows macOS convention: the app menu, then the "File"-slot
+            // menu (Playlist owns New/Open/Save, so it sits where File would),
+            // Edit, our Playback menu, and Window last.
             let menu = MenuBuilder::new(app)
-                .items(&[&app_menu, &edit_menu, &playback_menu])
+                .items(&[
+                    &app_menu,
+                    &playlist_menu,
+                    &edit_menu,
+                    &playback_menu,
+                    &window_menu,
+                ])
                 .build()?;
             app.set_menu(menu)?;
 
@@ -1427,6 +1743,7 @@ pub fn run() {
             get_art,
             get_stream_image,
             frontend_ready,
+            e2e_port,
             prepare_external_file,
             audio_play,
             audio_play_stream,
@@ -1434,12 +1751,25 @@ pub fn run() {
             audio_seek,
             audio_clear_upcoming,
             set_autoadvance_checked,
+            set_shuffle_checked,
+            set_repeat_checked,
+            set_mute_checked,
+            set_miniplayer_checked,
+            set_save_playlist_enabled,
+            set_move_playlist_enabled,
+            set_recent_playlists,
             audio_append,
             audio_stop,
             audio_set_volume,
             now_playing_set_metadata,
             now_playing_set_playback,
             now_playing_clear,
+            playlist::read_playlist,
+            playlist::write_playlist,
+            playlist::move_playlist,
+            playlist::rename_playlist,
+            playlist::delete_playlist,
+            playlist::list_all_playlists,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -70,6 +70,13 @@
       <section id="left">
         <div class="tab-panel" id="tab-files">
           <div id="folder-tree"></div>
+          <button id="create-playlist-btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            <span>Create playlist</span>
+          </button>
         </div>
         <div class="tab-panel hidden" id="tab-streams">
           <div id="streams-list"></div>
@@ -78,18 +85,23 @@
       <div id="splitter" role="separator" aria-orientation="vertical"></div>
       <section id="right">
         <div id="now-playing-panel">
+          <!-- The list face: the ephemeral queue, or an open playlist. Which one
+               (and its title/Clear affordance) is decided in renderQueue. -->
           <div id="queue-view">
             <div id="queue-header">
               <div id="queue-header-text">
-                <div id="queue-title"></div>
+                <div id="queue-title">
+                  <span id="queue-title-text"></span>
+                  <button id="queue-rename-btn" class="hidden" type="button" title="Rename playlist" aria-label="Rename playlist">✎</button>
+                </div>
                 <div id="queue-subtitle"></div>
               </div>
-              <button id="queue-close-btn" type="button" title="Close queue" aria-label="Close queue">Close</button>
+              <button id="queue-close-btn" type="button" title="Clear queue" aria-label="Clear queue">Clear</button>
             </div>
             <ul id="queue-list"></ul>
           </div>
-          <!-- The now-playing hero: a full-pane card when no queue is active, and
-               a compact strip above the controls when one is (see styles.css). -->
+          <!-- The now-playing hero face: the full-pane card, shown whenever the
+               list face isn't up (see styles.css). -->
           <div id="now-playing-main">
             <p id="now-playing-empty" class="empty-state">Pudding time.</p>
             <img id="now-playing-art" class="hidden" alt="" />
@@ -103,9 +115,14 @@
               </div>
             </div>
           </div>
-          <!-- One-line current-track indicator shown above the controls while a
-               queue is playing (the card is hidden then; see styles.css). -->
-          <p id="now-playing-strip"><span id="np-strip-artist-wrap" class="hidden"><span id="np-strip-artist"></span> - </span><span id="np-strip-title"></span></p>
+          <!-- The nav bar: one line pinned above the transport whenever a list
+               exists, carrying the source context and the button that swaps the
+               two faces (see renderNavBar / .has-nav in styles.css). -->
+          <div id="nav-bar">
+            <span id="nav-bar-text"></span>
+            <button id="nav-bar-alt-btn" class="hidden" type="button"></button>
+            <button id="nav-bar-btn" type="button"></button>
+          </div>
           <div id="now-playing-controls">
             <button id="play-pause-btn" type="button" aria-label="Play" disabled>▶</button>
             <button id="prev-btn" class="skip-btn" type="button" aria-label="Previous" disabled>

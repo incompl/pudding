@@ -18,6 +18,7 @@ High polish, high completeness, fast, no bloat.
 - Plays MP3, FLAC, WAV, AAC/M4A, Ogg/Opus, and AIFF
 - High-quality sinc resampling to match your output device
 - Shuffle and repeat (off / all / one), applied live without interrupting the current track
+- Autoadvance toggles in the Playback menu, set separately for the file browser and for playlists/queues — turn it off and playback stops at the end of each track instead of rolling on
 
 ### Library
 
@@ -28,6 +29,20 @@ High polish, high completeness, fast, no bloat.
 - Artist and album search results, or a track's right-click menu, open a queue of every matching track in the right pane
 - Embedded album art, and disc/track-number-aware sorting
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
+
+### Playback queue
+
+- Two verbs everywhere — "Play" replaces what's playing, "Add to queue" appends. Right-click any track, album, artist, or folder to add it
+- Queues are freely mixed: build one by hand from tracks across your whole library
+- Prev / next skip through the queue; the current row stays highlighted
+
+### Playlists
+
+- Playlists are plain `.m3u8` files on disk — no database lock-in, hand-editable and readable by any other player, and they autosave on every change
+- Start one from the Playlist menu (New Playlist…), or turn the current queue into a saved playlist with Save Queue as Playlist… (⌘S)
+- Right-click any track and use "Add to playlist ▸" to file it into an existing list or a new one
+- Single-click a playlist in the tree to browse it, double-click to play; rename, move, or delete it from the tree or the Playlist menu
+- Recent playlists live under Playlist ▸ Open Recent, and every `.m3u` / `.m3u8` under your library is searchable
 
 ### Internet radio
 
@@ -60,6 +75,7 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `↑` / `↓` - volume up / down (10%)
 - `←` / `→` - seek back / forward 10s (files only)
 - `⌘F` / `Ctrl+F` - focus search
+- `⌘S` - save the current queue as a playlist
 
 ## Tech stack
 

@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Tauri auto-discovers this file (src-tauri/Info.plist) and merges it into the
+  generated Info.plist. The merge is a top-level, whole-key REPLACE applied AFTER
+  Tauri expands bundle.fileAssociations, so the CFBundleDocumentTypes array below
+  overrides Tauri's generated one in its entirety.
+
+  We override it to fix two things Tauri's fileAssociations can't express on macOS:
+
+    1. LSHandlerRank = Alternate on every type. Tauri hardcodes "Default", which
+       makes a freshly-registered bundle seize the system default (mp3 from Music,
+       etc.). Pudding is a good citizen: appear in "Open With", never seize the
+       default. The user opts in via Get Info > "Change All...".
+
+    2. The .m3u/.m3u8 UTI. Tauri maps our audio/x-mpegurl mimeType to
+       LSItemContentTypes = public.audio, but macOS classifies playlists as
+       public.m3u-playlist (confirmed via `mdls`). With the wrong UTI, Launch
+       Services doesn't believe Pudding can open a playlist at all - it's greyed
+       out even under "Open With > Other". Correcting it makes the type selectable.
+
+  IMPORTANT: because the merge replaces the whole array, this list must stay in
+  sync with bundle.fileAssociations in tauri.conf.json. Any type added there must
+  be added here too, or it will be dropped from the macOS build.
+-->
+<dict>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>mp3</string></array>
+      <key>CFBundleTypeName</key><string>MP3 Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.mp3</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>wav</string></array>
+      <key>CFBundleTypeName</key><string>WAV Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>com.microsoft.waveform-audio</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>flac</string></array>
+      <key>CFBundleTypeName</key><string>FLAC Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.audio</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>m4a</string></array>
+      <key>CFBundleTypeName</key><string>M4A Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.mpeg-4-audio</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>aac</string></array>
+      <key>CFBundleTypeName</key><string>AAC Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.aac-audio</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>ogg</string><string>oga</string></array>
+      <key>CFBundleTypeName</key><string>Ogg Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.audio</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>opus</string></array>
+      <key>CFBundleTypeName</key><string>Opus Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.audio</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>aiff</string><string>aif</string></array>
+      <key>CFBundleTypeName</key><string>AIFF Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.audio</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array><string>m3u</string><string>m3u8</string></array>
+      <key>CFBundleTypeName</key><string>M3U Playlist</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.m3u-playlist</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>

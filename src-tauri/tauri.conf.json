@@ -90,6 +90,13 @@
         "description": "AIFF audio file",
         "role": "Viewer",
         "mimeType": "audio/aiff"
+      },
+      {
+        "ext": ["m3u", "m3u8"],
+        "name": "M3U Playlist",
+        "description": "M3U playlist file",
+        "role": "Editor",
+        "mimeType": "audio/x-mpegurl"
       }
     ]
   }

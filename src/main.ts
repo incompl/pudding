@@ -6,10 +6,11 @@ import {
   PhysicalPosition,
 } from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { signal, effect } from "@preact/signals-core";
+import { signal, computed, effect } from "@preact/signals-core";
 import { GaplessEngine } from "./audio-engine";
+import { maybeStartE2eBridge } from "./e2e-bridge";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOT = "libraryRoot";
@@ -25,6 +26,14 @@ const KEY_WINDOW_POSITION = "windowPosition";
 // playlists/queues). Both live in the OS Playback menu, not the app UI.
 const KEY_AUTOADVANCE_FILES = "autoadvanceFiles";
 const KEY_AUTOADVANCE_PLAYLISTS = "autoadvancePlaylists";
+// Playback modes remembered across launches, like every mainstream player.
+const KEY_SHUFFLE = "shuffleMode";
+const KEY_REPEAT = "repeatMode";
+
+// Recently opened playlists for the OS "Open Recent ▸" submenu (most-recent
+// first, capped). Persisted so the list survives restarts.
+const KEY_RECENT_PLAYLISTS = "recentPlaylists";
+const RECENT_PLAYLISTS_MAX = 10;
 
 // Below this logical (CSS-px) height the layout collapses to the mini player.
 // Mirrors the `max-height` breakpoint in styles.css — keep the two in sync.
@@ -53,6 +62,14 @@ interface TrackMeta {
 interface DirListing {
   folders: string[];
   files: FileEntry[];
+  playlists: PlaylistListing[];
+}
+
+// A .m3u/.m3u8 in a folder: `file` is the basename (joined to the parent path),
+// `name` the display name (#PLAYLIST: directive or filename stem).
+interface PlaylistListing {
+  file: string;
+  name: string;
 }
 
 interface TreeNode {
@@ -65,6 +82,11 @@ interface TreeNode {
   disc: number | null;
   track: number | null;
   isFolder: boolean;
+  // True for a .m3u/.m3u8 row. A playlist is a *source* like a folder, not a
+  // track: its own icon and click action (single-click browses, double-click
+  // plays), and it never enters the audio-tag/album-sort path. Optional so the
+  // many track/folder node literals don't each have to set it.
+  isPlaylist?: boolean;
   loaded: boolean;
   expanded: boolean;
   children: TreeNode[];
@@ -82,6 +104,9 @@ interface SearchTrack {
   title: string | null;
   artist: string | null;
   album: string | null;
+  // Set only for playlist browse rows whose file is absent on disk: shown in the
+  // view (marked, per the plan's "keep the row") but never handed to the engine.
+  missing?: boolean;
 }
 
 interface SearchFolder {
@@ -108,6 +133,7 @@ type SearchItem =
   | { kind: "album"; album: SearchAlbum }
   | { kind: "folder"; folder: SearchFolder }
   | { kind: "file"; track: SearchTrack }
+  | { kind: "playlist"; playlist: PlaylistRef }
   | { kind: "stream"; stream: Stream };
 
 // --- Queue ---
@@ -125,6 +151,10 @@ interface Queue {
   title: string; // header line: the queue/playlist name (artist, album, folder…)
   subtitle: string | null; // always a track count
   tracks: SearchTrack[];
+  // For a playlist source (kind === "playlist"): the `.m3u8` file path. Lets the
+  // OS menu act on the open playlist (Move Playlist File…). Absent for ephemeral
+  // queues and other sources.
+  sourcePath?: string;
 }
 
 // Header for a queue the user builds by hand (Add to queue), as opposed to one
@@ -167,25 +197,86 @@ const currentStreamUrl = signal<string | null>(null);
 const settingsOpen = signal(false);
 const activeTab = signal<"files" | "streams">("files");
 
-// The queue backing the right pane, or null when a lone track is playing. Set
-// whenever queue intent is expressed — Play folder/album/artist, or Add to
-// queue — and cleared when a lone track plays (a tree track click, a stream, a
-// search track).
-//
-// The right pane is one vertical stack, not two toggled faces: the now-playing
-// hero sits on top and, when a queue exists, the queue list fills the space
-// below it (scrolling the list collapses the hero to a compact strip — see
-// syncHeroCollapsed). So `activeQueue` alone decides whether the queue section
-// is present; there is no separate card/list mode.
+// The playing *source* as a navigable list: an ephemeral queue (Play
+// folder/album/artist, Add to queue) or a *played* playlist (kind "playlist"
+// with a sourcePath). Null when a lone track / stream plays with no queue. This
+// is what's playing (or stashed while something else plays); it is distinct from
+// `browsedPlaylist` below — a playlist you're merely *looking at* changes no
+// playback. Together they feed the two-face right pane (see paneView).
 const activeQueue = signal<Queue | null>(null);
 
-// Named for intent at the call sites; both just set `activeQueue` now that the
-// hero and queue coexist (no face to pick).
+// Named for intent at the call sites; both just set `activeQueue`.
 function openActiveQueue(queue: Queue): void {
   activeQueue.value = queue;
 }
 function clearActiveQueue(): void {
   activeQueue.value = null;
+}
+
+// A playlist opened for *browsing* only — single-click in the tree, OS Open… /
+// Open Recent, or New Playlist. Viewing/curating it never changes playback: a
+// queue can keep playing (as `activeQueue`) while you look at a playlist here.
+// Playing *from* it (double-click, or clicking a row) is the commit that makes
+// it the source — moving it into `activeQueue` and clearing this.
+const browsedPlaylist = signal<Queue | null>(null);
+
+// Which face fills the right pane: true = the list face (the queue or the open
+// playlist), false = the now-playing hero. Only meaningful when a list exists
+// (see paneView); the CSS falls back to the hero otherwise.
+const listFaceOpen = signal(false);
+
+// A Queue is a *real playlist* (a backing .m3u8 file) iff it carries a
+// sourcePath. The `kind` field is overloaded — ephemeral queues seeded by hand
+// also use kind "playlist" — so path presence, not kind, is the true test.
+function isPlaylistSource(q: Queue | null | undefined): boolean {
+  return q?.sourcePath != null;
+}
+
+// The list the list-face shows — a browsed playlist wins over the playing source
+// (you can browse a playlist while a queue plays underneath) — is derived, along
+// with everything else the right pane renders, by `paneView`.
+
+// The open playlist file the OS menu acts on (Move Playlist File…): the one
+// being browsed, else the one playing.
+function openPlaylistPath(): string | undefined {
+  if (isPlaylistSource(browsedPlaylist.value)) return browsedPlaylist.value!.sourcePath;
+  if (isPlaylistSource(activeQueue.value)) return activeQueue.value!.sourcePath;
+  return undefined;
+}
+
+// Swap to the list face (reveals the queue / open playlist).
+function showListFace(): void {
+  listFaceOpen.value = true;
+}
+
+// Swap to the now-playing hero. Leaving the list abandons any *browsed*
+// playlist: the back button is source-anchored — you re-reach a merely-browsed
+// playlist from the tree, never from the hero (which returns to what's playing).
+// The queue stays put (still playing / stashed), so the hero's nav bar still
+// offers to show it.
+function showHeroFace(): void {
+  listFaceOpen.value = false;
+  browsedPlaylist.value = null;
+}
+
+// Leave a browsed playlist for the playing source's own list, staying on the
+// list face (unlike showHeroFace, which flips to the hero). Lets you jump
+// straight from a playlist you're eyeing to the queue/playlist that's playing.
+function showSourceList(): void {
+  browsedPlaylist.value = null;
+  listFaceOpen.value = true;
+}
+
+// A lone playback — a tree track, stream, search hit, external file, or idle
+// play — is bare continuation: the track (its album under the hood) becomes the
+// whole story. It dismisses any open queue/playlist entirely, so the pane is the
+// hero alone with no nav bar. Distinct from showHeroFace (the nav bar's flip),
+// which keeps the queue. Callers repoint the engine themselves (playFile /
+// playStream / …), so dropping the queue here is state-only.
+function resetToLonePlayback(): void {
+  clearActiveQueue();
+  browsedPlaylist.value = null;
+  listFaceOpen.value = false;
 }
 
 // The queue row currently playing, or null when playback is outside the queue
@@ -300,6 +391,158 @@ function setEmpty(container: HTMLElement, message: string, kind: "empty" | "load
 
 let store: Store;
 let rootNode: TreeNode | null = null;
+
+// --- File-tree multi-select ---
+//
+// A set of selected *track* paths (files only — folders and playlists are
+// sources, not selectable rows). Cmd/Ctrl-click toggles a track; Shift-click
+// extends a contiguous range from the anchor over the visible track order; a
+// plain click plays and drops the selection down to a bare (unhighlighted)
+// anchor. So the highlight only ever shows a *deliberate* selection: a size-1
+// set exists solely as the anchor and does nothing the click itself didn't, so
+// it isn't drawn. The track context-menu verbs (Add to queue / Add to playlist)
+// act on the whole selection when non-empty. Reactive so a `.selected` row
+// highlight tracks it (see the selection effect and renderNode).
+const treeSelection = signal<Set<string>>(new Set());
+// The pivot a Shift-click ranges from — the last track any click touched
+// (including a plain play-click, so click A then Shift-click B selects A..B).
+let selectionAnchor: string | null = null;
+
+// Track nodes in render order. `visibleOnly` descends into expanded folders alone
+// (matching what renderNode paints) for Shift-range selection; false walks every
+// loaded folder so a selection survives a folder collapse. Folders and playlists
+// are skipped — only files are selectable.
+function collectTrackNodes(visibleOnly: boolean): TreeNode[] {
+  const out: TreeNode[] = [];
+  const walk = (node: TreeNode): void => {
+    for (const child of node.children) {
+      if (child.isFolder) {
+        if (child.loaded && (child.expanded || !visibleOnly)) walk(child);
+      } else if (!child.isPlaylist) {
+        out.push(child);
+      }
+    }
+  };
+  if (rootNode) walk(rootNode);
+  return out;
+}
+
+// The current selection resolved to tracks, in tree order (hidden-but-selected
+// rows under a collapsed folder included). What the context-menu verbs act on.
+function selectedTracks(): SearchTrack[] {
+  const sel = treeSelection.value;
+  if (sel.size === 0) return [];
+  return collectTrackNodes(false)
+    .filter((n) => sel.has(n.path))
+    .map(nodeToTrack);
+}
+
+function clearTreeSelection(): void {
+  selectionAnchor = null;
+  if (treeSelection.peek().size === 0) return;
+  treeSelection.value = new Set();
+}
+
+// A plain play-click makes the clicked track the range anchor without selecting
+// it: the row shows no highlight (a lone play-selection is incidental, and does
+// nothing the click itself didn't), but a following Shift-click ranges from
+// here. Any prior multi-select is dropped.
+function anchorTreeSelection(path: string): void {
+  selectionAnchor = path;
+  if (treeSelection.peek().size === 0) return;
+  treeSelection.value = new Set();
+}
+
+// Cmd/Ctrl-click: add or remove one track, and re-anchor the range here.
+function toggleTreeSelection(path: string): void {
+  const next = new Set(treeSelection.peek());
+  if (next.has(path)) next.delete(path);
+  else next.add(path);
+  treeSelection.value = next;
+  selectionAnchor = path;
+}
+
+// Shift-click: replace the selection with the contiguous range from the anchor to
+// `path` over the visible track order. With no live anchor, this click becomes it.
+function selectTreeRangeTo(path: string): void {
+  const order = collectTrackNodes(true).map((n) => n.path);
+  const to = order.indexOf(path);
+  if (to === -1) return;
+  const anchor =
+    selectionAnchor && order.includes(selectionAnchor) ? selectionAnchor : path;
+  selectionAnchor = anchor;
+  const from = order.indexOf(anchor);
+  const [lo, hi] = from <= to ? [from, to] : [to, from];
+  treeSelection.value = new Set(order.slice(lo, hi + 1));
+}
+
+// --- List-pane multi-select (queue / browsed playlist) ---
+//
+// Selected rows in the right-pane list, keyed by SearchTrack *object identity*
+// (not index or path) — the same basis playingTrackObj uses — so a selection
+// follows its exact rows across reorders, survives duplicate paths, and drops a
+// row automatically when it's removed or the list is rebuilt from new data. A
+// separate model from the tree's (which keys by path): a list row is a positional
+// instance, a tree row is a file. Cmd/Ctrl-click toggles a row; Shift-click ranges
+// over the view; a plain click plays/commits and drops the selection to a bare
+// (unhighlighted) anchor for a following Shift-click. The row context-menu verbs
+// act on the whole selection when non-empty.
+const listSelection = signal<Set<SearchTrack>>(new Set());
+let listSelectionAnchor: SearchTrack | null = null;
+
+function openListTracks(): SearchTrack[] {
+  return (browsedPlaylist.value ?? activeQueue.value)?.tracks ?? [];
+}
+
+// The selection resolved to rows still in the open list, in view order; missing
+// rows (no real file) are dropped so the add verbs stay valid.
+function selectedListTracks(): SearchTrack[] {
+  const sel = listSelection.value;
+  if (sel.size === 0) return [];
+  return openListTracks().filter((t) => sel.has(t) && !t.missing);
+}
+
+function clearListSelection(): void {
+  listSelectionAnchor = null;
+  if (listSelection.peek().size === 0) return;
+  listSelection.value = new Set();
+}
+
+// List-pane counterpart to anchorTreeSelection: a plain play-click anchors the
+// clicked row for a following Shift-click without highlighting it.
+function anchorListSelection(t: SearchTrack): void {
+  listSelectionAnchor = t;
+  if (listSelection.peek().size === 0) return;
+  listSelection.value = new Set();
+}
+
+// Cmd/Ctrl-click: add or remove one row, and re-anchor the range here.
+function toggleListSelection(t: SearchTrack): void {
+  const next = new Set(listSelection.peek());
+  if (next.has(t)) next.delete(t);
+  else next.add(t);
+  listSelection.value = next;
+  listSelectionAnchor = t;
+}
+
+// Shift-click: replace the selection with the contiguous range from the anchor to
+// `t` over the view order, skipping missing rows. With no live anchor, `t` becomes
+// it.
+function selectListRangeTo(t: SearchTrack): void {
+  const tracks = openListTracks();
+  const to = tracks.indexOf(t);
+  if (to === -1) return;
+  const anchor =
+    listSelectionAnchor && tracks.includes(listSelectionAnchor)
+      ? listSelectionAnchor
+      : t;
+  listSelectionAnchor = anchor;
+  const from = tracks.indexOf(anchor);
+  const [lo, hi] = from <= to ? [from, to] : [to, from];
+  const next = new Set<SearchTrack>();
+  for (let i = lo; i <= hi; i++) if (!tracks[i].missing) next.add(tracks[i]);
+  listSelection.value = next;
+}
 // Last manifest streams loaded by refreshStreams, kept so search can filter
 // them without re-reading the manifest on every keystroke.
 let allStreams: Stream[] = [];
@@ -501,9 +744,9 @@ let nowPlayingArtistEl: HTMLElement;
 let nowPlayingArtistInner: HTMLElement;
 let nowPlayingAlbumEl: HTMLElement;
 let nowPlayingAlbumInner: HTMLElement;
-let npStripTitleEl: HTMLElement;
-let npStripArtistEl: HTMLElement;
-let npStripArtistWrapEl: HTMLElement;
+let navBarTextEl: HTMLElement;
+let navBarBtnEl: HTMLButtonElement;
+let navBarAltBtnEl: HTMLButtonElement;
 let nowPlayingStreamMetaEl: HTMLElement;
 let streamMetaSongEl: HTMLElement;
 let streamMetaSongInner: HTMLElement;
@@ -543,6 +786,7 @@ let queueTitleEl: HTMLElement;
 let queueSubtitleEl: HTMLElement;
 let queueListEl: HTMLElement;
 let queueCloseBtn: HTMLButtonElement;
+let queueRenameBtn: HTMLButtonElement;
 let toastEl: HTMLElement;
 
 // --- Tree ---
@@ -589,6 +833,23 @@ function nodesFromListing(
       expanded: false,
       children: [],
     })),
+    // Playlists sort after all tracks (the backend already orders them
+    // alphabetically). `name` is the display name; `path` the file.
+    ...listing.playlists.map<TreeNode>((p) => ({
+      path: joinPath(parentPath, p.file),
+      name: p.name,
+      title: null,
+      artist: null,
+      album: null,
+      albumArtist: null,
+      disc: null,
+      track: null,
+      isFolder: false,
+      isPlaylist: true,
+      loaded: true,
+      expanded: false,
+      children: [],
+    })),
   ];
 }
 
@@ -620,69 +881,113 @@ async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
   }
 }
 
-// Lightweight cursor-positioned context menu for tree rows. A single reusable
-// element, repopulated and repositioned per open, styled like the search
-// dropdown (dark lifted surface). Dismisses on any outside press, another
-// right-click, Escape, scroll, or resize.
-let contextMenuEl: HTMLElement | null = null;
+// Lightweight cursor-positioned context menu for tree rows. Styled like the
+// search dropdown (dark lifted surface). A leaf item runs an action; a `submenu`
+// item opens a flyout to the right on hover (used by "Add to playlist ▸").
+// Dismisses on any outside press, Escape, scroll, or resize.
+type ContextMenuItem =
+  | { label: string; action: () => void }
+  | { label: string; submenu: ContextMenuItem[] };
+
+// The open menu stack: index 0 is the root, deeper entries are flyouts. Kept so
+// dismissal removes every level and a hover can close menus below a given depth.
+let contextMenus: HTMLElement[] = [];
+let contextMenuListenersInstalled = false;
 
 function hideContextMenu(): void {
-  contextMenuEl?.classList.add("hidden");
+  for (const m of contextMenus) m.remove();
+  contextMenus = [];
 }
 
-function showContextMenu(
-  x: number,
-  y: number,
-  items: { label: string; action: () => void }[],
-): void {
-  if (!contextMenuEl) {
-    contextMenuEl = document.createElement("div");
-    contextMenuEl.id = "context-menu";
-    contextMenuEl.className = "hidden";
-    document.body.appendChild(contextMenuEl);
-    // A press anywhere outside the menu dismisses it; the menu's own items run
-    // on click, which fires after this mousedown leaves the menu open. Capture
-    // phase so it fires even if a descendant (e.g. the search input's native
-    // shadow DOM) swallows the bubbling event.
-    document.addEventListener(
-      "mousedown",
-      (e) => {
-        if (contextMenuEl && !contextMenuEl.contains(e.target as Node)) hideContextMenu();
-      },
-      true,
-    );
-    // Focus moving out of the menu also dismisses it — covers focusing the
-    // search box (or any control) by click or keyboard, where the mousedown
-    // outside-press alone doesn't reliably reach us.
-    document.addEventListener("focusin", (e) => {
-      if (contextMenuEl && !contextMenuEl.contains(e.target as Node)) hideContextMenu();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") hideContextMenu();
-    });
-    window.addEventListener("resize", hideContextMenu);
-    // Capture so a scroll in any container (e.g. the tree) closes the menu,
-    // since its fixed position would otherwise detach from the row.
-    window.addEventListener("scroll", hideContextMenu, true);
+function contextMenusContain(target: Node): boolean {
+  return contextMenus.some((m) => m.contains(target));
+}
+
+// Close every flyout deeper than `depth`, leaving that menu and its ancestors up.
+function closeSubmenusBelow(depth: number): void {
+  while (contextMenus.length > depth + 1) {
+    contextMenus.pop()?.remove();
   }
-  contextMenuEl.innerHTML = "";
+}
+
+function ensureContextMenuListeners(): void {
+  if (contextMenuListenersInstalled) return;
+  contextMenuListenersInstalled = true;
+  // A press anywhere outside the menu(s) dismisses; items run on click, which
+  // fires after this mousedown. Capture phase so it fires even if a descendant
+  // (e.g. the search input's native shadow DOM) swallows the bubbling event.
+  document.addEventListener(
+    "mousedown",
+    (e) => {
+      if (!contextMenusContain(e.target as Node)) hideContextMenu();
+    },
+    true,
+  );
+  // Focus moving out of the menu also dismisses it — covers focusing the search
+  // box (or any control) by click or keyboard.
+  document.addEventListener("focusin", (e) => {
+    if (!contextMenusContain(e.target as Node)) hideContextMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideContextMenu();
+  });
+  window.addEventListener("resize", hideContextMenu);
+  // Capture so a scroll in any container (e.g. the tree) closes the menu, since
+  // its fixed position would otherwise detach from the row.
+  window.addEventListener("scroll", hideContextMenu, true);
+}
+
+// Clamp a menu to the viewport so an edge row doesn't push it offscreen.
+function positionContextMenu(menu: HTMLElement, x: number, y: number): void {
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
+  const top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+// Build one menu level (root or flyout) at `depth`. Hovering any row closes
+// deeper flyouts; a `submenu` row then opens its own flyout beside itself.
+function buildContextMenu(items: ContextMenuItem[], depth: number): HTMLElement {
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
   for (const item of items) {
     const row = document.createElement("div");
     row.className = "context-menu-item";
     row.textContent = item.label;
-    row.addEventListener("click", () => {
-      hideContextMenu();
-      item.action();
-    });
-    contextMenuEl.appendChild(row);
+    if ("submenu" in item) {
+      row.classList.add("has-submenu");
+      const submenu = item.submenu;
+      row.addEventListener("mouseenter", () => {
+        closeSubmenusBelow(depth);
+        const child = buildContextMenu(submenu, depth + 1);
+        document.body.appendChild(child);
+        contextMenus.push(child);
+        // Open to the row's right, aligned to its top; positionContextMenu flips
+        // it left if it would overflow.
+        const r = row.getBoundingClientRect();
+        positionContextMenu(child, r.right - 2, r.top);
+      });
+    } else {
+      const action = item.action;
+      row.addEventListener("mouseenter", () => closeSubmenusBelow(depth));
+      row.addEventListener("click", () => {
+        hideContextMenu();
+        action();
+      });
+    }
+    menu.appendChild(row);
   }
-  contextMenuEl.classList.remove("hidden");
-  // Clamp to the viewport so a row near an edge doesn't push the menu offscreen.
-  const rect = contextMenuEl.getBoundingClientRect();
-  const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
-  const top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4));
-  contextMenuEl.style.left = `${left}px`;
-  contextMenuEl.style.top = `${top}px`;
+  return menu;
+}
+
+function showContextMenu(x: number, y: number, items: ContextMenuItem[]): void {
+  ensureContextMenuListeners();
+  hideContextMenu();
+  const menu = buildContextMenu(items, 0);
+  document.body.appendChild(menu);
+  contextMenus.push(menu);
+  positionContextMenu(menu, x, y);
 }
 
 // Whether a track's artist is worth showing in a given folder. Suppressed only
@@ -710,18 +1015,46 @@ function renderNode(
   const li = document.createElement("li");
   const label = document.createElement("span");
   label.className = "node-label";
-  // Every row carries its path so the playing-highlight effect can find it;
-  // only files ever match currentNodePath, so the highlight stays file-only.
+  // Every row carries its path so the playing-highlight effect can find it.
+  // The tree row skips the accent while a queue/playlist owns the playhead — the
+  // now-playing highlight belongs to the context playing the track, not to every
+  // copy of the same file (see the highlight effect and queueIsActivePool).
   label.dataset.path = node.path;
-  if (!node.isFolder && currentNodePath.value === node.path) {
+  // Mirror the highlight effect's basis: a live queue row means a queue owns the
+  // playhead, so the tree's copy of its track stays plain and the playlist's own
+  // row carries the accent instead. Keeps a mid-playback re-render in agreement.
+  const queueOwnsPlayhead = queuePlayingIndex.peek() !== null;
+  if (!node.isFolder && currentNodePath.value === node.path && !queueOwnsPlayhead) {
     label.classList.add("playing");
+  }
+  if (node.isPlaylist && queueOwnsPlayhead) {
+    const q = activeQueue.peek();
+    if (q?.kind === "playlist" && q.sourcePath === node.path) {
+      label.classList.add("playing");
+    }
+  }
+  // The open (browsed) playlist carries a persistent selection background so a
+  // re-render keeps showing which playlist is open (the highlight effect below
+  // reapplies it reactively; this keeps a mid-browse re-render in agreement).
+  if (node.isPlaylist && browsedPlaylist.peek()?.sourcePath === node.path) {
+    label.classList.add("open");
+  }
+  // Multi-select background, reapplied on re-render like the highlight classes
+  // above (the selection effect keeps it live). Only tracks are selectable.
+  if (!node.isFolder && !node.isPlaylist && treeSelection.peek().has(node.path)) {
+    label.classList.add("selected");
   }
   const icon = document.createElement("span");
   icon.className = "icon";
   // Folders show an open/closed folder. A file's slot carries its tagged track
   // number when it has one (the playing row just recolors it); an untagged file
   // — or any loose top-level file — gets no gutter icon and sits flush.
-  if (node.isFolder) {
+  if (node.isPlaylist) {
+    // A playlist gets its own "stack of rows" glyph, distinct from folders and
+    // tracks, and always occupies the gutter.
+    icon.classList.add("playlist");
+    label.appendChild(icon);
+  } else if (node.isFolder) {
     icon.classList.add(node.expanded ? "folder-open" : "folder");
     label.appendChild(icon);
   } else if (parent !== rootNode && node.track != null) {
@@ -748,10 +1081,29 @@ function renderNode(
     text.textContent = displayLabel(node);
   }
   label.appendChild(text);
-  label.addEventListener("click", () => onNodeClick(node, parent, li));
-  // Right-click a folder to play it as one recursive album (all tracks beneath
-  // it, at any depth) — the same behavior as choosing a folder from search.
-  if (node.isFolder) {
+  if (node.isPlaylist) {
+    attachPlaylistClicks(label, node);
+  } else {
+    label.addEventListener("click", (e) => onNodeClick(node, parent, li, e));
+  }
+  // Right-click a playlist to play it, add its tracks to the queue, or curate it
+  // (Rename rewrites the #PLAYLIST: directive; Delete removes the file).
+  if (node.isPlaylist) {
+    label.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showContextMenu(e.clientX, e.clientY, [
+        { label: "Play", action: () => void playPlaylist(node) },
+        { label: "Add to queue", action: () => void addPlaylistToQueue(node) },
+        addToPlaylistItem(async () =>
+          playlistPlayableTracks(
+            await invoke<PlaylistData>("read_playlist", { path: node.path }),
+          ),
+        ),
+        { label: "Rename", action: () => startTreePlaylistRename(node, label) },
+        { label: "Delete", action: () => void deletePlaylistNode(node) },
+      ]);
+    });
+  } else if (node.isFolder) {
     label.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, [
@@ -767,6 +1119,9 @@ function renderNode(
           label: "Add to queue",
           action: () => void addFolderToQueue({ path: node.path, name: node.name }),
         },
+        addToPlaylistItem(() =>
+          invoke<SearchTrack[]>("folder_tracks", { path: node.path }),
+        ),
       ]);
     });
   } else {
@@ -775,25 +1130,56 @@ function renderNode(
     // OST rips named purely by filename) has neither, so fall back to "Play
     // folder" on its containing folder — right-click always does something.
     label.addEventListener("contextmenu", (e) => {
-      // The Play verbs lead — the navigation verbs (Play artist / Play album)
-      // when their tags exist, else "Play folder" on the container for an
-      // untagged track (which has neither) so right-click always does something.
-      // "Add to queue" always comes last, matching the folder menu's order.
-      const nav = trackContextItems({
-        artist: node.artist,
-        album: node.album,
-        albumArtist: node.albumArtist,
-      });
-      const items: { label: string; action: () => void }[] = [...nav];
-      if (nav.length === 0 && parent.isFolder) {
-        items.push({
-          label: "Play folder",
-          action: () => void playFolder({ path: parent.path, name: parent.name }),
-        });
-      }
-      items.push({ label: "Add to queue", action: () => addToQueue([nodeToTrack(node)]) });
       e.preventDefault();
+      // Finder-style: right-clicking a row outside the current selection makes it
+      // the selection; right-clicking inside a multi-selection keeps it. The verbs
+      // then act on the whole selection (see selectedTracks).
+      if (!treeSelection.peek().has(node.path)) {
+        treeSelection.value = new Set([node.path]);
+        selectionAnchor = node.path;
+      }
+      const sel = selectedTracks();
+      const items: ContextMenuItem[] = [];
+      if (sel.length > 1) {
+        // Multi-select: the per-track navigation verbs (Play artist/album) don't
+        // apply to a heterogeneous set, so offer only the list-building verbs,
+        // acting on every selected track. Count in the label confirms the scope.
+        items.push({ label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) });
+        items.push(addToPlaylistItem(() => sel));
+      } else {
+        // The Play verbs lead — the navigation verbs (Play artist / Play album)
+        // when their tags exist, else "Play folder" on the container for an
+        // untagged track (which has neither) so right-click always does something.
+        // "Add to queue" always comes last, matching the folder menu's order.
+        const nav = trackContextItems({
+          artist: node.artist,
+          album: node.album,
+          albumArtist: node.albumArtist,
+        });
+        items.push(...nav);
+        if (nav.length === 0 && parent.isFolder) {
+          items.push({
+            label: "Play folder",
+            action: () => void playFolder({ path: parent.path, name: parent.name }),
+          });
+        }
+        items.push({ label: "Add to queue", action: () => addToQueue([nodeToTrack(node)]) });
+        items.push(addToPlaylistItem(() => [nodeToTrack(node)]));
+      }
       showContextMenu(e.clientX, e.clientY, items);
+    });
+    // A track can be dragged out of the tree into an open playlist/queue list to
+    // add it at a position (the tree itself accepts no drops). The payload is the
+    // track as a SearchTrack; the list's drop resolves an insert and autosaves.
+    // Pointer-based (not HTML5 DnD) so it coexists with Tauri's native OS
+    // file-drop handler — see beginPointerDrag.
+    label.addEventListener("pointerdown", (e) => {
+      // Dragging a selected row carries the whole selection into the drop target;
+      // dragging an unselected one carries just that track.
+      const sel = treeSelection.peek();
+      const tracks =
+        sel.has(node.path) && sel.size > 1 ? selectedTracks() : [nodeToTrack(node)];
+      startTrackDrag(e, tracks);
     });
   }
   li.appendChild(label);
@@ -816,18 +1202,36 @@ function renderNode(
   return li;
 }
 
-async function onNodeClick(node: TreeNode, parent: TreeNode, li: HTMLLIElement): Promise<void> {
+async function onNodeClick(
+  node: TreeNode,
+  parent: TreeNode,
+  li: HTMLLIElement,
+  e?: MouseEvent,
+): Promise<void> {
   if (node.isFolder) {
     if (!node.loaded) await loadChildren(node, li);
     node.expanded = !node.expanded;
     li.replaceWith(renderNode(node, parent));
+  } else if (e && (e.metaKey || e.ctrlKey)) {
+    // Cmd/Ctrl-click builds a discontiguous selection without playing anything.
+    toggleTreeSelection(node.path);
+  } else if (e && e.shiftKey) {
+    // Shift-click extends a contiguous range from the anchor, also without playing.
+    selectTreeRangeTo(node.path);
   } else {
+    // A plain click plays. It drops any multi-select but keeps the clicked track
+    // as the range anchor (unhighlighted), so a following Shift-click ranges from
+    // here — click A, Shift-click B selects A..B.
+    anchorTreeSelection(node.path);
     // A plain tree track plays with its album auto-continuing under the hood. It
     // does NOT clear any explicit queue — that stays stashed and visible so the
     // user can return to it (the only way back in is to play from the queue).
     // Drop the queue highlight now (the folder becomes the pool) rather than
     // waiting a frame for onAdvance.
     queuePlayingIndex.value = null;
+    // A lone track is bare continuation (hero only, no list appears); dismiss
+    // any open queue/playlist so no nav bar lingers over it.
+    resetToLonePlayback();
     playFile(node, parent);
   }
 }
@@ -887,35 +1291,65 @@ function renderStreams(streams: Stream[]): void {
 // scroll-to-playing (which sits earlier, and would otherwise hide the addition).
 let pendingQueueScrollIndex: number | null = null;
 
-function renderQueue(queue: Queue | null): void {
+// Renders the list face. `isSource` is true when the list is the playing
+// source (the queue, or a played playlist) and false when it's a playlist being
+// browsed while something else plays — a browse carries no playing-row highlight
+// and its rows *commit* (play the playlist) rather than jumping the pool.
+function renderQueue(queue: Queue | null, isSource: boolean): void {
   if (!queue) {
     queueListEl.innerHTML = "";
     return;
   }
-  queueTitleEl.textContent = queue.title;
+  const isPlaylist = isPlaylistSource(queue);
+  // A real playlist is titled by its #PLAYLIST: name; every ephemeral queue is
+  // simply "Queue" (the source name lives on the hero, not this list header).
+  queueTitleEl.textContent = isPlaylist ? queue.title : "Queue";
   queueSubtitleEl.textContent = queue.subtitle ?? "";
   queueSubtitleEl.classList.toggle("hidden", !queue.subtitle);
+  // Only the ephemeral queue offers teardown (Clear). A playlist has no
+  // header teardown — deleting one is a tree action. A playlist instead offers an
+  // inline rename: the title reads as clickable and reveals a pencil on hover; the
+  // queue has no name to edit.
+  queueCloseBtn.classList.toggle("hidden", isPlaylist);
+  queueRenameBtn.classList.toggle("hidden", !isPlaylist);
+  queueTitleEl.parentElement?.classList.toggle("renamable", isPlaylist);
 
-  const playing = queuePlayingIndex.value;
-  // A pending append target wins over the playing row for this render only.
-  const scrollTo = pendingQueueScrollIndex;
+  // A browsed playlist isn't the pool, so nothing in it is "playing".
+  const playing = isSource ? queuePlayingIndex.value : null;
+  // A pending append target wins over the playing row for this render only, and
+  // only when we're actually showing the queue it was appended to (a browsed
+  // playlist has its own, unrelated rows).
+  const scrollTo = isSource ? pendingQueueScrollIndex : null;
   pendingQueueScrollIndex = null;
   queueListEl.innerHTML = "";
   let activeRow: HTMLElement | null = null;
   let scrollRow: HTMLElement | null = null;
+  // `playing` (queuePlayingIndex) indexes the *playable* pool, which excludes
+  // missing rows; the view keeps them (marked, unplayable). Walk a parallel pool
+  // index so the right row highlights and a click maps back to its pool position.
+  let poolIdx = 0;
   queue.tracks.forEach((t, i) => {
     const li = document.createElement("li");
     li.className = "queue-row";
-    const isPlaying = i === playing;
+    // The view index, so the reactive selection effect can map its object-keyed
+    // set back to rows without a unique path (duplicates share one).
+    li.dataset.rowIndex = String(i);
+    const rowPoolIdx = t.missing ? -1 : poolIdx;
+    if (!t.missing) poolIdx++;
+    const isPlaying = rowPoolIdx === playing;
     if (isPlaying) {
       li.classList.add("playing");
       activeRow = li;
     }
+    // Multi-select background, reapplied on rebuild like .playing (the list
+    // selection effect keeps it live between rebuilds).
+    if (!t.missing && listSelection.peek().has(t)) li.classList.add("selected");
     if (i === scrollTo) scrollRow = li;
     const num = document.createElement("span");
     num.className = "queue-num";
-    // The playing row shows a ♪ in place of its index (like the tree's rows).
-    num.textContent = isPlaying ? "♪" : String(i + 1);
+    // The playing row keeps its index and just recolors to the accent (like the
+    // tree's track rows), rather than swapping in a glyph.
+    num.textContent = String(i + 1);
     const text = document.createElement("span");
     text.className = "queue-text";
     const primary = document.createElement("span");
@@ -923,16 +1357,430 @@ function renderQueue(queue: Queue | null): void {
     primary.textContent = t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path);
     const secondary = document.createElement("span");
     secondary.className = "queue-secondary";
-    secondary.textContent = t.artist ?? t.album ?? "";
+    // A missing playlist row is shown but can't be played: dim it, label it, and
+    // skip the click handler so it reads as unavailable rather than dropped.
+    secondary.textContent = t.missing ? "Missing file" : (t.artist ?? t.album ?? "");
     text.appendChild(primary);
     if (secondary.textContent) text.appendChild(secondary);
     li.appendChild(num);
     li.appendChild(text);
-    li.addEventListener("click", () => playQueueTrack(i));
+    // Row remove (curation): strips this row from the list (and file, if a
+    // playlist). Stops propagation so it never counts as a play/commit click.
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "queue-remove";
+    remove.textContent = "✕";
+    remove.title = "Remove from list";
+    remove.setAttribute("aria-label", "Remove from list");
+    remove.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeCuratedRow(i);
+    });
+    li.appendChild(remove);
+    if (t.missing) {
+      li.classList.add("missing");
+    } else {
+      li.addEventListener("click", (e) => {
+        // Cmd/Ctrl- and Shift-click build a selection instead of playing; a plain
+        // click plays/commits, keeping the row as an unhighlighted range anchor so
+        // a following Shift-click ranges from here.
+        if (e.metaKey || e.ctrlKey) {
+          toggleListSelection(t);
+          return;
+        }
+        if (e.shiftKey) {
+          selectListRangeTo(t);
+          return;
+        }
+        anchorListSelection(t);
+        // Source list: jump the pool to this row. Browsed playlist: commit it —
+        // play the playlist from that track, making it the source.
+        if (isSource) playQueueTrack(rowPoolIdx);
+        else commitBrowsedPlaylist(rowPoolIdx);
+      });
+    }
+    // Right-click a playable row to queue it, add it to a playlist, or (multi)
+    // remove it (a missing row has no real file to copy, so it's skipped).
+    // "Add to queue" leads, matching the tree track/folder menus.
+    if (!t.missing) {
+      li.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        // Finder-style: right-clicking a row outside the selection makes it the
+        // selection; inside a multi-selection it's kept. The verbs act on it.
+        if (!listSelection.peek().has(t)) {
+          listSelection.value = new Set([t]);
+          listSelectionAnchor = t;
+        }
+        const sel = selectedListTracks();
+        if (sel.length > 1) {
+          showContextMenu(e.clientX, e.clientY, [
+            { label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) },
+            addToPlaylistItem(() => sel),
+            {
+              label: `Remove ${sel.length} from list`,
+              action: () => removeCuratedTracks(sel),
+            },
+          ]);
+        } else {
+          showContextMenu(e.clientX, e.clientY, [
+            { label: "Add to queue", action: () => addToQueue([t]) },
+            addToPlaylistItem(() => [t]),
+          ]);
+        }
+      });
+    }
+    attachRowReorder(li, t);
     queueListEl.appendChild(li);
   });
   const target = (scrollRow ?? activeRow) as HTMLElement | null;
   if (target) target.scrollIntoView({ block: "nearest" });
+}
+
+// Pointer-based drag for curation: reorder a list row, or insert track(s)
+// dragged in from the tree. Built on pointer events rather than HTML5
+// drag-and-drop so it coexists with Tauri's native OS file-drop handler (the
+// window keeps the default dragDropEnabled: true): that handler swallows HTML5
+// dragstart/drop inside the webview but leaves pointer events untouched. Pointer
+// events also sidestep WKWebView's unreliable dataTransfer — the payload simply
+// lives in this closure.
+type DragPayload =
+  | { kind: "reorder"; tracks: SearchTrack[] }
+  | { kind: "tracks"; tracks: SearchTrack[] };
+
+// A drag only *starts* once the pointer travels this many px from where it went
+// down, so a plain click on a row still plays/commits it (no accidental reorder)
+// and a click on a tree track still plays it.
+const DRAG_THRESHOLD_PX = 5;
+
+interface ActiveDrag {
+  payload: DragPayload;
+  // The reordered row, greyed while dragging; null for a tree-track insert (a copy).
+  sourceEl: HTMLElement | null;
+  startX: number;
+  startY: number;
+  started: boolean;
+  // View index the drop would land at (insert-before), or null when the pointer
+  // is off the list (a drop there cancels).
+  dropAt: number | null;
+}
+let activeDrag: ActiveDrag | null = null;
+
+// Begin a tree-track drag (called from the tree on pointerdown). Carries the
+// track(s) to insert; the drag only engages past the movement threshold.
+function startTrackDrag(e: PointerEvent, tracks: SearchTrack[]): void {
+  beginPointerDrag(e, { kind: "tracks", tracks }, null);
+}
+
+// Arm a drag from a pointerdown on a drag source (a list row, or a tree track).
+function beginPointerDrag(
+  e: PointerEvent,
+  payload: DragPayload,
+  sourceEl: HTMLElement | null,
+): void {
+  if (e.button !== 0) return; // left button only
+  activeDrag = {
+    payload,
+    sourceEl,
+    startX: e.clientX,
+    startY: e.clientY,
+    started: false,
+    dropAt: null,
+  };
+  // Kill text selection for the whole gesture from the outset — a pointer sweep
+  // across rows would otherwise rubber-band-select their titles before the drag
+  // threshold is even crossed. WKWebView doesn't reliably honor user-select:none
+  // mid-gesture, so also cancel selectstart outright. Harmless on a plain click.
+  document.body.classList.add("dragging-noselect");
+  document.addEventListener("selectstart", preventSelectStart);
+  window.addEventListener("pointermove", onDragPointerMove);
+  window.addEventListener("pointerup", onDragPointerUp);
+  window.addEventListener("pointercancel", onDragPointerCancel);
+}
+
+function onDragPointerMove(e: PointerEvent): void {
+  const d = activeDrag;
+  if (!d) return;
+  if (!d.started) {
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
+    d.started = true;
+    if (d.payload.kind === "reorder" && d.sourceEl) d.sourceEl.classList.add("dragging");
+    document.body.classList.add("reordering");
+    // Drop any selection that slipped in before user-select:none took hold.
+    window.getSelection()?.removeAllRanges();
+    createDragGhost(d.payload);
+  }
+  moveDragGhost(e.clientX, e.clientY);
+  d.dropAt = updateDropTarget(e.clientX, e.clientY);
+}
+
+function onDragPointerUp(): void {
+  const d = activeDrag;
+  endPointerDrag();
+  if (!d || !d.started) return; // a click, not a drag — let the click handler run
+  suppressNextClick();
+  if (d.dropAt != null) applyDrop(d.payload, d.dropAt);
+}
+
+function onDragPointerCancel(): void {
+  endPointerDrag();
+}
+
+// Block the browser from starting a text selection mid-drag (WKWebView ignores
+// user-select:none once a selection is underway).
+function preventSelectStart(e: Event): void {
+  e.preventDefault();
+}
+
+// Tear down an in-progress drag: drop the window listeners, markers, and styling.
+function endPointerDrag(): void {
+  window.removeEventListener("pointermove", onDragPointerMove);
+  window.removeEventListener("pointerup", onDragPointerUp);
+  window.removeEventListener("pointercancel", onDragPointerCancel);
+  document.removeEventListener("selectstart", preventSelectStart);
+  if (activeDrag?.sourceEl) activeDrag.sourceEl.classList.remove("dragging");
+  document.body.classList.remove("reordering", "dragging-noselect");
+  clearDropMarkers();
+  removeDragGhost();
+  activeDrag = null;
+}
+
+// A floating badge that follows the pointer during a drag, showing how many
+// tracks are in flight ("N tracks"). Purely cosmetic — the payload lives in the
+// activeDrag closure, not the DOM — so it gives the gesture a visible object to
+// carry rather than only the drop marker at the destination.
+let dragGhostEl: HTMLElement | null = null;
+
+function createDragGhost(p: DragPayload): void {
+  const n = p.tracks.length;
+  const el = document.createElement("div");
+  el.className = "drag-ghost";
+  el.textContent = `${n} track${n === 1 ? "" : "s"}`;
+  document.body.appendChild(el);
+  dragGhostEl = el;
+}
+
+// Position the badge just below-right of the pointer so it doesn't sit under the
+// cursor or eat elementFromPoint hit-tests (it's also pointer-events:none).
+function moveDragGhost(x: number, y: number): void {
+  if (!dragGhostEl) return;
+  dragGhostEl.style.left = `${x}px`;
+  dragGhostEl.style.top = `${y}px`;
+}
+
+function removeDragGhost(): void {
+  dragGhostEl?.remove();
+  dragGhostEl = null;
+}
+
+// A real drag ends with a click (pointerup over the row); swallow that one click
+// so the drag doesn't also play/commit the row. Cleared shortly after in case no
+// click fires (e.g. the pointer released off the row).
+function suppressNextClick(): void {
+  const stop = (ev: Event) => ev.stopPropagation();
+  window.addEventListener("click", stop, { capture: true, once: true });
+  setTimeout(() => window.removeEventListener("click", stop, true), 300);
+}
+
+// Hit-test the pointer against the open list and paint the drop marker. Returns
+// the view index an insert would land at: before the row under the pointer (top
+// half) or after it (bottom half); the end of the list when the pointer is over
+// the list's empty area past the last row (or an empty list); null when the
+// pointer is off the list entirely, which cancels the drop.
+function updateDropTarget(x: number, y: number): number | null {
+  clearDropMarkers();
+  const rows = Array.from(queueListEl.querySelectorAll<HTMLElement>("li.queue-row"));
+  const el = document.elementFromPoint(x, y) as HTMLElement | null;
+  const row = el?.closest("li.queue-row") as HTMLElement | null;
+  if (row && queueListEl.contains(row)) {
+    const rect = row.getBoundingClientRect();
+    const before = y < rect.top + rect.height / 2;
+    row.classList.add(before ? "drop-before" : "drop-after");
+    return rows.indexOf(row) + (before ? 0 : 1);
+  }
+  // Off the rows: an insert at the end while still within the list box, else cancel.
+  const box = queueListEl.getBoundingClientRect();
+  const inside = x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+  return inside ? rows.length : null;
+}
+
+function clearDropMarkers(): void {
+  queueListEl
+    .querySelectorAll(".drop-before, .drop-after")
+    .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+}
+
+// Resolve a drop at view index `at`: an internal reorder, or an insert of
+// track(s) dragged in from the tree.
+function applyDrop(p: DragPayload, at: number): void {
+  if (p.kind === "reorder") reorderCuratedTracks(p.tracks, at);
+  else insertCuratedTracks(p.tracks, at);
+}
+
+// Make a list row a drag source for reorder. A pointerdown on the row's remove
+// button is ignored so the ✕ stays a plain click. The row is also a drop target
+// for tree-track inserts, resolved by pointer hit-testing in updateDropTarget.
+function attachRowReorder(li: HTMLElement, track: SearchTrack): void {
+  li.addEventListener("pointerdown", (e) => {
+    if ((e.target as HTMLElement).closest(".queue-remove")) return;
+    // Dragging a selected row carries the whole selection (in view order); a row
+    // outside the selection carries just itself. Mirrors the tree drag so a
+    // multi-selection reorders as one block instead of only the grabbed row.
+    const sel = listSelection.peek();
+    const tracks = sel.has(track) && sel.size > 1 ? selectedListTracks() : [track];
+    beginPointerDrag(e, { kind: "reorder", tracks }, li);
+  });
+}
+
+// "<artist> – <title>" for the current track (title alone when the artist is
+// unknown), used as the nav bar's playing context.
+function nowPlayingLabel(): string {
+  const t = npTitle.value;
+  const a = npArtist.value;
+  return a ? `${a} – ${t}` : t;
+}
+
+// The next track in straight-play order as "<artist> – <title>", or null when
+// it can't be named (shuffle is nondeterministic; repeat-one loops in place —
+// both handled by the caller). Under repeat-all the last track wraps to the
+// first. Best-effort — it feeds the hero-face "Up Next" hint, not playback.
+function upNextLabel(): string | null {
+  if (shuffleMode.value || repeatMode.value === "one") return null;
+  const pool = poolPaths();
+  const curIdx = queueIsActivePool() && queuePlayingIndex.value != null
+    ? queuePlayingIndex.value
+    : pool.indexOf(currentNodePath.value ?? "");
+  let nextIdx = curIdx + 1;
+  if (nextIdx >= pool.length) {
+    if (repeatMode.value !== "all") return null; // genuine end
+    nextIdx = 0; // wrap
+  }
+  const nextPath = pool[nextIdx];
+  if (curIdx < 0 || !nextPath) return null;
+  const t = (activeQueue.value?.tracks ?? []).find((x) => x.path === nextPath)
+    ?? currentParent?.children.find((c) => c.path === nextPath);
+  if (!t) return null;
+  const title = t.title ?? (nextPath.split(/[\\/]/).pop() ?? nextPath);
+  return t.artist ? `${t.artist} – ${title}` : title;
+}
+
+// The nav bar above the transport, present whenever a list exists. It swaps the
+// two faces and names the source: on the list face the button returns to the
+// hero ("Now Playing"), on the hero face it reveals the list ("Show Queue" /
+// "Show Playlist"). A null button is hidden — an idle browse (a playlist open,
+// nothing playing) has no source to return to, so it reads "Nothing playing"
+// with no button.
+interface NavState {
+  text: string;
+  // The face-swap button's label, or null when the button is hidden.
+  button: string | null;
+  // A secondary button shown only while browsing a playlist with a different
+  // source playing underneath: it leaves the browse for the playing source's
+  // own list ("Show Queue", or "Show Playlist" when the source is a playlist).
+  // Null in every other state.
+  altButton: string | null;
+}
+
+// A single derived description of the right pane. Every pane render — whether the
+// nav bar exists at all, its text and button, which face is up, and the list the
+// list-face shows — is a pure function of the playback signals, collected here so
+// no render path hand-reconciles them (see architecture-notes Suggestion 1: derive
+// the view, don't store it). Rendering effects read this one value instead of
+// reaching into `browsedPlaylist`, `activeQueue`, `listFaceOpen`, `hasTrack`, the
+// mode signals, and the queue-drained tell individually and risking disagreement.
+interface PaneView {
+  // The list the list-face shows (queue or open playlist), or null when only the
+  // hero exists. Null hides the nav bar (.has-nav) entirely.
+  list: Queue | null;
+  // The list is the playing source (row highlight; clicking a row jumps the pool)
+  // vs. a playlist merely browsed while something else plays (no highlight; a row
+  // click commits it). Mirrors `browsedPlaylist === null`.
+  isSource: boolean;
+  // The list face is up (else the hero fills the pane). Only meaningful with a list.
+  showList: boolean;
+  // The nav bar's content, or null when there's no list to describe.
+  nav: NavState | null;
+}
+
+const paneView = computed<PaneView>(() => {
+  const browsed = browsedPlaylist.value;
+  const list = browsed ?? activeQueue.value;
+  const isSource = browsed === null;
+  const showList = listFaceOpen.value;
+  if (!list) return { list: null, isSource, showList: false, nav: null };
+
+  let nav: NavState;
+  if (showList) {
+    if (hasTrack.value) {
+      // A queue that ran to its end rests as the pool with no playing row — that's
+      // "End of queue" (no track to name). (queuePlayingIndex is the reactive tell:
+      // set while a row plays/pauses, null once the queue drains.)
+      const drained = queueIsActivePool() && queuePlayingIndex.value === null;
+      // Browsing a playlist while a *different* source plays: offer a jump
+      // straight to that source's list alongside the hero flip. Suppressed when
+      // the browsed playlist is itself the playing source (same file) — that
+      // button would just point back at the list you're already viewing.
+      const active = activeQueue.value;
+      const source =
+        browsed !== null && active && active.sourcePath !== browsed.sourcePath
+          ? active
+          : null;
+      nav = {
+        // Keep naming the current track even while paused — the transport
+        // controls already show the paused state, so the useful thing to show
+        // is *what* is paused. Only a drained queue has no track to name.
+        text: drained ? "End of queue" : nowPlayingLabel(),
+        button: "Now Playing",
+        altButton: source
+          ? isPlaylistSource(source)
+            ? "Show Playlist"
+            : "Show Queue"
+          : null,
+      };
+    } else {
+      nav = { text: "Nothing playing", button: null, altButton: null };
+    }
+  } else {
+    const sourceName = isPlaylistSource(list) ? list.title : "Queue";
+    const button = isPlaylistSource(list) ? "Show Playlist" : "Show Queue";
+    // Describe what's coming. Shuffle and repeat-one have no single "next track"
+    // to name — say what mode is running over the source instead. Otherwise name
+    // the next track (repeat-all wraps), and only a genuine end reads "End of
+    // queue".
+    let text: string;
+    if (!hasTrack.value || (!hasNextTrack() && repeatMode.value !== "one")) {
+      text = "End of queue";
+    } else if (shuffleMode.value) {
+      text = `Shuffling ${sourceName}`;
+    } else if (repeatMode.value === "one") {
+      text = "Repeating this track";
+    } else {
+      const next = upNextLabel();
+      text = next ? `Up Next: ${next}` : "Up Next";
+    }
+    nav = { text, button, altButton: null };
+  }
+  return { list, isSource, showList, nav };
+});
+
+// Paint the nav bar from the derived view. Nothing to reconcile: text and button
+// are already resolved in paneView.
+function renderNavBar(): void {
+  const nav = paneView.value.nav;
+  if (!nav) return; // no list → nav hidden via .has-nav
+  navBarTextEl.textContent = nav.text;
+  navBarBtnEl.textContent = nav.button ?? "";
+  navBarBtnEl.classList.toggle("hidden", nav.button === null);
+  navBarAltBtnEl.textContent = nav.altButton ?? "";
+  navBarAltBtnEl.classList.toggle("hidden", nav.altButton === null);
+}
+
+// The nav bar's face-swap button: to the hero from the list, to the list from
+// the hero.
+function toggleNavFace(): void {
+  if (listFaceOpen.value) showHeroFace();
+  else showListFace();
 }
 
 // --- Playback ---
@@ -957,6 +1805,8 @@ async function startLibrary(): Promise<void> {
   const root = rootNode;
   const first = root?.children[0];
   if (!root || !first) return;
+  // Idle play starts a lone track (album continuation) — the hero, no list.
+  resetToLonePlayback();
   if (!first.isFolder) {
     playFile(first, root);
     return;
@@ -967,19 +1817,17 @@ async function startLibrary(): Promise<void> {
 }
 
 function togglePlayPause(): void {
-  if (!hasTrack.value) {
-    void startLibrary();
-    return;
-  }
-  // Streams also route through togglePause: the engine implements live-radio
-  // semantics natively (pause disconnects, resume rejoins the live edge).
+  // A queue resting with no playhead — drained at its end, or armed from silence
+  // by "Add to queue" without auto-playing — starts from the top. This is checked
+  // before the idle-play fallback so an armed queue (hasTrack still false, nothing
+  // ever played) starts itself rather than the whole library.
   if (queueEnded && lastQueue.length > 0) {
     queueEnded = false;
     if (queueIsActivePool()) {
-      // The queue ran to its end and rests with no playhead, so play restarts it
-      // from the top rather than resuming any one track. (activeQueue can now be
-      // set while a folder plays with the queue merely stashed — the pool, not
-      // its mere existence, is what decides this.)
+      // The queue rests with no playhead, so play restarts it from the top rather
+      // than resuming any one track. (activeQueue can now be set while a folder
+      // plays with the queue merely stashed — the pool, not its mere existence,
+      // is what decides this.)
       const pool = poolPaths();
       lastQueue = pool;
       lastIndex = 0;
@@ -993,6 +1841,12 @@ function togglePlayPause(): void {
     }
     return;
   }
+  if (!hasTrack.value) {
+    void startLibrary();
+    return;
+  }
+  // Streams also route through togglePause: the engine implements live-radio
+  // semantics natively (pause disconnects, resume rejoins the live edge).
   void engine.togglePause();
 }
 
@@ -1263,6 +2117,13 @@ function playFile(node: TreeNode, parent: TreeNode, startIndex?: number): void {
   currentNodePath.value = node.path;
   currentStreamUrl.value = null;
   isStream.value = false;
+  // Playing a folder track leaves any built queue stashed; drop the live-row
+  // highlight so it doesn't linger (as playStream does). A queue-row click sets
+  // currentParent to the synthetic queue, where the index is restored via
+  // pendingQueueIndex below and onTrackChange — so only clear off-queue. Without
+  // this, replaying the same file the queue was on wouldn't change any reactive
+  // dep, so the highlight effect wouldn't re-run and would keep the stale accent.
+  if (!queueIsActivePool()) queuePlayingIndex.value = null;
   currentTime.value = 0;
   duration.value = 0;
   queueEnded = false;
@@ -1297,8 +2158,10 @@ function playFile(node: TreeNode, parent: TreeNode, startIndex?: number): void {
 }
 
 function playStream(stream: Stream): void {
-  // A stream plays outside any explicit queue, which stays stashed and visible;
-  // null the highlight (streams emit no track-changed, so onAdvance won't).
+  // A stream is lone playback: dismiss any open queue/playlist and land on the
+  // hero (its own face, no nav bar). Null the highlight (streams emit no
+  // track-changed, so onAdvance won't).
+  resetToLonePlayback();
   queuePlayingIndex.value = null;
   currentParent = null;
   currentNodePath.value = null;
@@ -1331,8 +2194,9 @@ function playStream(stream: Stream): void {
 // setting currentNodePath still lights up the row if that folder is expanded in
 // the tree. The native engine opens the file directly — no prepare step needed.
 function playSearchTrack(t: SearchTrack): void {
-  // A lone search hit plays outside any explicit queue, which stays stashed and
-  // visible; currentParent is null so onAdvance won't touch the highlight.
+  // A lone search hit is lone playback: dismiss any open queue/playlist and land
+  // on the hero. currentParent is null so onAdvance won't touch the highlight.
+  resetToLonePlayback();
   queuePlayingIndex.value = null;
   currentParent = null;
   currentNodePath.value = t.path;
@@ -1423,6 +2287,349 @@ async function playFolder(folder: SearchFolder): Promise<void> {
   );
 }
 
+// One resolved row from read_playlist. `missing` rows are kept for round-trip
+// but filtered out of what's handed to the engine (so gapless never stalls).
+interface PlaylistTrack {
+  path: string;
+  name: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  albumArtist: string | null;
+  disc: number | null;
+  track: number | null;
+  inLibrary: boolean;
+  missing: boolean;
+}
+
+interface PlaylistData {
+  name: string;
+  path: string;
+  tracks: PlaylistTrack[];
+}
+
+// The playable rows of a playlist as SearchTracks (dropping missing files),
+// ready for the queue/engine machinery.
+function playlistPlayableTracks(data: PlaylistData): SearchTrack[] {
+  return data.tracks
+    .filter((t) => !t.missing)
+    .map((t) => ({ path: t.path, title: t.title, artist: t.artist, album: t.album }));
+}
+
+// Every row of a playlist as SearchTracks — including missing files, carried
+// through with their `missing` flag so the browse view can show them (marked,
+// unplayable) rather than silently dropping them. Playback paths use
+// playlistPlayableTracks instead, keeping the engine's pool free of dangling
+// files. See playlist-plan.md "Missing / dangling tracks".
+function playlistViewTracks(data: PlaylistData): SearchTrack[] {
+  return data.tracks.map((t) => ({
+    path: t.path,
+    title: t.title,
+    artist: t.artist,
+    album: t.album,
+    missing: t.missing,
+  }));
+}
+
+// Playlist rows use single-click = browse, double-click = play. A short timer
+// disambiguates so the browse fires only when no second click follows.
+// A playlist is a container, like a folder: single-click opens it (browse), just
+// as clicking a folder shows its contents rather than playing them. We act on the
+// first click immediately — no click/double-click disambiguation timer — because
+// browsing is non-destructive, so there's nothing to lose by opening the pane
+// right away. A double-click then upgrades to Play (its opening browse is
+// harmless and idempotent; the play follows). This keeps the frequent action
+// (open) instant and free of the latency a timer would impose.
+function attachPlaylistClicks(label: HTMLElement, node: TreeNode): void {
+  label.addEventListener("click", () => void browsePlaylist(node));
+  label.addEventListener("dblclick", () => void playPlaylist(node));
+}
+
+// Double-click / "Play": play the playlist from its first track. A playlist
+// plays like a folder — autoadvance/shuffle/repeat-all apply — via the queue
+// machinery under a `queue:playlist:` synthetic path (so it reads the Playlists
+// autoadvance context). It becomes the playing source (playQueue shows the list
+// face titled by its name, distinct from an ephemeral "Queue").
+async function playPlaylist(node: TreeNode): Promise<void> {
+  await playPlaylistPath(node.path);
+}
+
+// Play a playlist by file path (tree double-click / "Play", or a search hit).
+// Shows it as the playing source (its own list face titled by its name, distinct
+// from an ephemeral "Queue").
+async function playPlaylistPath(path: string): Promise<void> {
+  let data: PlaylistData;
+  try {
+    data = await invoke<PlaylistData>("read_playlist", { path });
+  } catch (e) {
+    // The file is gone (moved/deleted outside the app). Self-heal: tell the
+    // user and drop it from the recents so the dead entry stops reappearing.
+    console.error("read_playlist failed", path, e);
+    removeRecentPlaylist(path);
+    toast("Playlist no longer available");
+    return;
+  }
+  // Show every row (missing included, marked/unplayable) while playing the
+  // playable ones — playQueue filters missing out of the engine pool. Bail only
+  // when nothing is playable, so an all-dangling playlist doesn't open a dead queue.
+  const tracks = playlistViewTracks(data);
+  if (tracks.every((t) => t.missing)) return;
+  const n = tracks.length;
+  playQueue(
+    {
+      kind: "playlist",
+      title: data.name,
+      subtitle: `${n} track${n === 1 ? "" : "s"}`,
+      tracks,
+      sourcePath: data.path,
+    },
+    `queue:playlist:${path}`,
+  );
+  addRecentPlaylist(data.path, data.name);
+}
+
+// Single-click: browse the playlist (view its tracks) without changing what's
+// playing. It becomes the open playlist on the list face; whatever was playing
+// keeps playing underneath (see browsedPlaylist / paneView).
+async function browsePlaylist(node: TreeNode): Promise<void> {
+  await browsePlaylistPath(node.path);
+}
+
+// Browse a playlist by file path (tree single-click, OS Open…, Open Recent).
+// Reads and shows it as the open playlist without changing playback, and
+// records it as recent.
+async function browsePlaylistPath(path: string): Promise<void> {
+  let data: PlaylistData;
+  try {
+    data = await invoke<PlaylistData>("read_playlist", { path });
+  } catch (e) {
+    // The file is gone (moved/deleted outside the app). Self-heal: tell the
+    // user and drop it from the recents so the dead entry stops reappearing.
+    console.error("read_playlist failed", path, e);
+    removeRecentPlaylist(path);
+    toast("Playlist no longer available");
+    return;
+  }
+  // Browse shows every row, missing files included (marked, unplayable) — so a
+  // playlist whose files can't be resolved doesn't collapse to near-nothing.
+  // Playback (playPlaylist / Add to queue) still filters missing.
+  const tracks = playlistViewTracks(data);
+  const n = tracks.length;
+  browsedPlaylist.value = {
+    kind: "playlist",
+    title: data.name,
+    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+    tracks,
+    sourcePath: data.path,
+  };
+  listFaceOpen.value = true;
+  addRecentPlaylist(data.path, data.name);
+}
+
+async function addPlaylistToQueue(node: TreeNode): Promise<void> {
+  const queueBefore = activeQueue.value;
+  const pathBefore = currentNodePath.value;
+  try {
+    const data = await invoke<PlaylistData>("read_playlist", { path: node.path });
+    if (activeQueue.value !== queueBefore) return;
+    if (!queueBefore && currentNodePath.value !== pathBefore) return;
+    addToQueue(playlistPlayableTracks(data));
+  } catch (e) {
+    console.error("read_playlist failed", node.path, e);
+    toast("Playlist no longer available");
+  }
+}
+
+// --- OS Playlist menu ---
+// The Playlist menu (New / Open… / Open Recent ▸ / Save Queue as Playlist / Move) is
+// built in Rust and relays intents here; the frontend owns the dialogs, file
+// writes, and the recents list (persisted in the settings store, mirrored into
+// the native Open Recent submenu via set_recent_playlists).
+
+interface RecentPlaylist {
+  path: string;
+  name: string;
+}
+
+let recentPlaylists: RecentPlaylist[] = [];
+
+// --- Playlist index (phase 4) ---
+// Every `.m3u/.m3u8` under the library root — path + display name — backing the
+// "Add to playlist ▸" submenu and searchable playlists. Built from Rust's
+// `list_all_playlists` and kept fresh by the filesystem watcher (refreshLibrary
+// runs on every library change, our own writes included). Read synchronously
+// when a context menu is built, so the submenu reflects the current library.
+interface PlaylistRef {
+  path: string;
+  name: string;
+}
+
+let playlistIndex: PlaylistRef[] = [];
+
+async function refreshPlaylistIndex(): Promise<void> {
+  const root = rootNode?.path;
+  if (!root) {
+    playlistIndex = [];
+    return;
+  }
+  try {
+    playlistIndex = await invoke<PlaylistRef[]>("list_all_playlists", { root });
+  } catch (e) {
+    console.error("list_all_playlists failed", e);
+  }
+}
+
+// The filename stem (no extension) — the display name for a freshly saved file
+// before it carries a #PLAYLIST: directive of its own.
+function playlistNameFromPath(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  const dot = base.lastIndexOf(".");
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  return stem || "Untitled";
+}
+
+// Default directory for a save dialog: the library root when set, else let the
+// OS pick. Used so New / Save-as land in the library by default.
+function defaultPlaylistDir(): string | null {
+  return rootNode?.path ?? null;
+}
+
+async function persistRecentPlaylists(): Promise<void> {
+  await store.set(KEY_RECENT_PLAYLISTS, recentPlaylists);
+  await store.save();
+}
+
+// Push a playlist to the front of the recents (most-recent first, deduped by
+// path, capped), persist, and rebuild the native Open Recent submenu.
+function addRecentPlaylist(path: string, name: string): void {
+  recentPlaylists = [
+    { path, name },
+    ...recentPlaylists.filter((r) => r.path !== path),
+  ].slice(0, RECENT_PLAYLISTS_MAX);
+  void persistRecentPlaylists();
+  syncRecentPlaylistsMenu();
+}
+
+function removeRecentPlaylist(path: string): void {
+  recentPlaylists = recentPlaylists.filter((r) => r.path !== path);
+  void persistRecentPlaylists();
+  syncRecentPlaylistsMenu();
+}
+
+function syncRecentPlaylistsMenu(): void {
+  void invoke("set_recent_playlists", { items: recentPlaylists });
+}
+
+// New Playlist…: save dialog → write an empty .m3u8 → open it ready to fill.
+async function menuNewPlaylist(): Promise<void> {
+  const dir = defaultPlaylistDir();
+  const path = await save({
+    title: "New Playlist",
+    defaultPath: dir ? `${dir}/Untitled.m3u8` : "Untitled.m3u8",
+    filters: [{ name: "Playlist", extensions: ["m3u8"] }],
+  });
+  if (!path) return;
+  const name = playlistNameFromPath(path);
+  try {
+    await invoke("write_playlist", { path, name, tracks: [] });
+  } catch (e) {
+    console.error("write_playlist failed", path, e);
+    return;
+  }
+  await refreshLibrary();
+  await browsePlaylistPath(path);
+}
+
+// Open…: native dialog filtered to playlists; may live outside the library.
+async function menuOpenPlaylist(): Promise<void> {
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    defaultPath: defaultPlaylistDir() ?? undefined,
+    filters: [{ name: "Playlist", extensions: ["m3u", "m3u8"] }],
+  });
+  if (typeof selected === "string") await browsePlaylistPath(selected);
+}
+
+// Save Queue as Playlist (⌘S): convert the ephemeral queue into an autosaving
+// playlist source. Guarded to an ephemeral queue that's the active pool (the menu
+// item is also disabled otherwise); the native path picker chooses the file.
+async function menuSavePlaylist(): Promise<void> {
+  if (!queueCanSaveAsPlaylist()) return;
+  const dir = defaultPlaylistDir();
+  const path = await save({
+    title: "Save Queue as Playlist",
+    defaultPath: dir ? `${dir}/Untitled.m3u8` : "Untitled.m3u8",
+    filters: [{ name: "Playlist", extensions: ["m3u8"] }],
+  });
+  if (!path) return;
+  await saveQueueAsPlaylist(path);
+}
+
+// True when the active pool is an ephemeral queue that can be promoted to a file
+// (not already a playlist source). Gates both the menu item and the save flow.
+function queueCanSaveAsPlaylist(): boolean {
+  const q = activeQueue.value;
+  return !!q && !isPlaylistSource(q) && queueIsActivePool();
+}
+
+// Write the live queue to `path`, then repoint it at that file so it becomes an
+// autosaving playlist source: from here on curations flow to disk (saveOpenPlaylist
+// keys off sourcePath). kind is already "playlist"; we adopt the saved name too.
+// Guard against a queue swap during the write. The browse at the end opens with
+// the same sourcePath, so the two are recognised as one pool rather than diverging.
+async function saveQueueAsPlaylist(path: string): Promise<void> {
+  const q = activeQueue.value;
+  if (!q || isPlaylistSource(q) || !queueIsActivePool()) return;
+  const name = playlistNameFromPath(path);
+  try {
+    await invoke("write_playlist", { path, name, tracks: q.tracks.map((t) => t.path) });
+  } catch (e) {
+    console.error("write_playlist failed", path, e);
+    return;
+  }
+  if (activeQueue.value === q) {
+    activeQueue.value = { ...q, title: name, sourcePath: path };
+  }
+  toast(`Saved playlist "${name}"`);
+  await refreshLibrary();
+  await browsePlaylistPath(path);
+}
+
+// Move Playlist File…: relocate the open playlist on disk (rewriting relative
+// paths against the new location), then re-open it there.
+async function menuMovePlaylist(): Promise<void> {
+  const src = openPlaylistPath();
+  if (!src) {
+    toast("Open a playlist to move it");
+    return;
+  }
+  const dest = await save({
+    title: "Move Playlist File",
+    defaultPath: src,
+    filters: [{ name: "Playlist", extensions: ["m3u8"] }],
+  });
+  if (!dest || dest === src) return;
+  try {
+    await invoke("move_playlist", { oldPath: src, newPath: dest });
+  } catch (e) {
+    console.error("move_playlist failed", src, dest, e);
+    toast("Couldn't move playlist");
+    return;
+  }
+  // Redirect the playing source (if it's the moved playlist) at its new path, so a
+  // later curation autosaves to the new location instead of resurrecting the old
+  // one. The browse is re-opened at dest below; this covers the playing copy, which
+  // browsePlaylistPath doesn't touch.
+  const active = activeQueue.value;
+  if (isPlaylistSource(active) && active!.sourcePath === src) {
+    activeQueue.value = { ...active!, sourcePath: dest };
+  }
+  removeRecentPlaylist(src);
+  await refreshLibrary();
+  await browsePlaylistPath(dest);
+}
+
 // Opens a queue in the right pane and starts it. Playback reuses the album path
 // via a synthetic parent (so shuffle/repeat/gapless all work); the queue view is
 // what makes it visible. Under shuffle we start on a random track (matching
@@ -1431,14 +2638,487 @@ async function playFolder(folder: SearchFolder): Promise<void> {
 // the view keeps natural order and just highlights the playing row. The synthetic
 // path is unique per queue and never a real tree path, so the rescan re-bind
 // (suppressed while activeQueue is set) can't repoint currentParent at a folder.
-function playQueue(queue: Queue, syntheticPath: string): void {
-  if (queue.tracks.length === 0) return;
-  const parent = syntheticParent(syntheticPath, queue.title, queue.tracks);
-  const start = shuffleMode.value
-    ? parent.children[Math.floor(Math.random() * parent.children.length)]
-    : parent.children[0];
-  playFile(start, parent);
+function playQueue(queue: Queue, syntheticPath: string, startIndex?: number): void {
+  // The engine pool is the playable rows only; any missing rows stay in the view
+  // (openActiveQueue keeps queue.tracks intact) but never reach the engine, so
+  // gapless never stalls on a dangling file. renderQueue bridges the two index
+  // spaces. For non-playlist queues nothing is missing, so pool === view.
+  const playable = queue.tracks.filter((t) => !t.missing);
+  if (playable.length === 0) return;
+  const parent = syntheticParent(syntheticPath, queue.title, playable);
+  // A given start row (a browsed playlist committed from a row) wins; otherwise
+  // shuffle opens on a random track and straight play on the first.
+  const startAt = startIndex != null
+    ? startIndex
+    : shuffleMode.value
+      ? Math.floor(Math.random() * parent.children.length)
+      : 0;
+  playFile(parent.children[startAt], parent, startAt);
   openActiveQueue(queue);
+  // Every explicit Play verb presents its list; committing to play also
+  // abandons any prior browse (this queue is now the source).
+  browsedPlaylist.value = null;
+  listFaceOpen.value = true;
+}
+
+// Play a browsed playlist starting at a given row — the commit that turns a
+// browse into the playing source. Reuses the same synthetic path as double-
+// click Play so it reads the Playlists autoadvance context.
+function commitBrowsedPlaylist(startIndex: number): void {
+  const q = browsedPlaylist.value;
+  if (!q?.sourcePath) return;
+  playQueue(q, `queue:playlist:${q.sourcePath}`, startIndex);
+}
+
+// --- Curation (phase 3): reorder / remove / drag-in on the open list ---
+//
+// Edits act on the list currently shown — a browsed playlist if one is open, else
+// the active queue. Three tiny operations (reorder, remove, insert) produce a new
+// view-array and funnel through applyCuration, which updates the signal, autosaves
+// the file (playlists only), and — when the edited list is the audible pool —
+// reconciles playback so the playing track is undisturbed (or skipped, if it was
+// the removed row). See playlist-plan.md "reconciling reorder/remove with live
+// playback".
+
+// The list a curation edit targets: the open browse if any, else the active queue.
+function curatedList(): Queue | null {
+  return browsedPlaylist.value ?? activeQueue.value;
+}
+
+// Map a playable-pool index (queuePlayingIndex, which excludes missing rows) back
+// to its index in the full view array. Inverse of renderQueue's poolIdx walk.
+function viewIndexOfPlayable(tracks: SearchTrack[], playableIdx: number): number {
+  let p = 0;
+  for (let i = 0; i < tracks.length; i++) {
+    if (tracks[i].missing) continue;
+    if (p === playableIdx) return i;
+    p++;
+  }
+  return -1;
+}
+
+// The playing row's SearchTrack object in `list`, or null. Tracked by object
+// identity (not path) so a reorder/remove follows the exact instance even when the
+// list holds duplicate paths.
+function playingTrackObj(list: Queue): SearchTrack | null {
+  const idx = queuePlayingIndex.value;
+  if (idx == null) return null;
+  const v = viewIndexOfPlayable(list.tracks, idx);
+  return v >= 0 ? list.tracks[v] : null;
+}
+
+// Persist the open playlist after an edit. Every row is written (missing included)
+// so the file round-trips; paths only — metadata is re-resolved from the DB on read.
+async function saveOpenPlaylist(path: string, name: string, tracks: SearchTrack[]): Promise<void> {
+  try {
+    await invoke("write_playlist", { path, name, tracks: tracks.map((t) => t.path) });
+  } catch (e) {
+    console.error("write_playlist (autosave) failed", path, e);
+    toast("Couldn't save playlist");
+  }
+}
+
+// Apply a new view-array to the open list: swap the signal, reconcile playback when
+// it's the live pool, and autosave when it's a playlist file.
+function applyCuration(newTracks: SearchTrack[]): void {
+  const browsed = browsedPlaylist.value;
+  const list = browsed ?? activeQueue.value;
+  if (!list) return;
+  // The edit touches the live engine pool when we're editing the active pool
+  // directly (no browse open), or when the browsed playlist *is* the playing
+  // pool — same source file, opened for a look while it plays. Without the
+  // second case, curating a browsed copy of the playing playlist would write the
+  // file but leave the engine order, gapless tail, and activeQueue.tracks stale.
+  const active = activeQueue.value;
+  const browsedIsActivePool =
+    browsed !== null &&
+    queueIsActivePool() &&
+    active != null &&
+    browsed.sourcePath != null &&
+    browsed.sourcePath === active.sourcePath;
+  const isPool = (browsed === null && queueIsActivePool()) || browsedIsActivePool;
+  // Capture the playing instance (by ref) from the *old* array before the swap.
+  const playingObj = isPool ? playingTrackObj(list) : null;
+
+  const n = newTracks.length;
+  const updated: Queue = {
+    ...list,
+    tracks: newTracks,
+    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+  };
+  if (browsed) browsedPlaylist.value = updated;
+  else activeQueue.value = updated;
+
+  // When the browsed view is also the live pool, keep the active queue's rows in
+  // sync (sharing the edited objects) so a later autosave/reconcile of the queue
+  // can't ship the pre-edit list.
+  if (browsedIsActivePool && active) {
+    activeQueue.value = { ...active, tracks: newTracks, subtitle: updated.subtitle };
+  }
+
+  if (isPool) reconcilePoolEdit(newTracks, playingObj);
+
+  if (isPlaylistSource(list) && list.sourcePath) {
+    void saveOpenPlaylist(list.sourcePath, list.title, newTracks);
+  }
+}
+
+// Reconcile the engine + pool state after the live pool's track list changed.
+// currentParent.children is rebuilt from the new playable rows; the playing track
+// is then either kept (playback undisturbed — indices refreshed, gapless tail
+// rebuilt to match the new order) or, if it was the removed row, skipped past.
+function reconcilePoolEdit(newTracks: SearchTrack[], playingObj: SearchTrack | null): void {
+  if (!currentParent) return;
+  const playable = newTracks.filter((t) => !t.missing);
+  // Rebuild the synthetic parent's children in place (same path, so
+  // queueIsActivePool stays true and the pane keeps rendering this pool).
+  currentParent.children = syntheticParent(
+    currentParent.path,
+    currentParent.name,
+    playable,
+  ).children;
+  const poolPathsNew = playable.map((t) => t.path);
+  lastQueue = poolPathsNew;
+
+  const oldPlayableIdx = queuePlayingIndex.value;
+  // Nothing was playing (queue drained or never started): just refresh the pool.
+  if (playingObj === null || oldPlayableIdx == null) return;
+
+  const newPlayableIdx = playable.indexOf(playingObj);
+  if (newPlayableIdx >= 0) {
+    // The playing track survived. Keep it playing; refresh the row highlight and
+    // resume index; rebuild the engine's gapless tail so the upcoming order
+    // matches. Only straight-play-with-autoadvance holds a tail to fix — per-track
+    // modes hand the engine one track at a time, so a reorder is inaudible there.
+    queuePlayingIndex.value = newPlayableIdx;
+    lastIndex = newPlayableIdx;
+    if (shuffleMode.value) {
+      // Drop any removed paths from the pending bag (dup-lossy, acceptable).
+      shuffleBag = shuffleBag.filter((p) => poolPathsNew.includes(p));
+    } else if (repeatMode.value !== "one" && autoadvanceEnabled()) {
+      // Rebuild the gapless tail: drop the stale upcoming tracks, then re-append
+      // the new order. Chained so the append can't race ahead of the clear.
+      const tail = poolPathsNew.slice(newPlayableIdx + 1);
+      void engine.clearUpcoming().then(() => engine.append(tail));
+    }
+    return;
+  }
+
+  // The playing row was removed → skip to whatever now occupies its slot (an
+  // edit, not a stop). The engine is still sounding the removed track, so this
+  // must actively start the replacement (or stop when there's nothing left).
+  advanceAfterRemovedPlaying(poolPathsNew, oldPlayableIdx);
+}
+
+// The playing row was removed from the live pool; move playback onward. Mirrors
+// skipNext's mode branches, but the target is the track that *took* the removed
+// slot (straight order), not slot+1.
+function advanceAfterRemovedPlaying(pool: string[], slot: number): void {
+  if (pool.length === 0) {
+    stopAfterRemove();
+    return;
+  }
+  if (shuffleMode.value) {
+    if (shuffleBag.length === 0) refillShuffleBag(null);
+    const next = shuffleBag.shift();
+    if (next) playSingle(next);
+    else stopAfterRemove();
+    return;
+  }
+  if (repeatMode.value === "one") {
+    // Repeat-one can't loop a removed track: adopt the one now at the slot.
+    const idx = slot < pool.length ? slot : 0;
+    playSingle(pool[idx], idx);
+    return;
+  }
+  const idx = slot < pool.length ? slot : repeatMode.value === "all" ? 0 : -1;
+  if (idx < 0) {
+    // Removed the last row while it played, no wrap: nothing follows.
+    stopAfterRemove();
+    return;
+  }
+  playPool(pool, idx);
+}
+
+// Removing the playing row left nothing to advance into: silence the engine and
+// rest with no playhead. The (now shorter) list stays on screen.
+function stopAfterRemove(): void {
+  queuePlayingIndex.value = null;
+  currentNodePath.value = null;
+  shuffleBag = [];
+  void engine.stop();
+}
+
+// Reorder the open list: move `moved` (one row, or a whole multi-selection) to
+// sit before view index `to`, keeping the moved rows in their view order. A `to`
+// past the end appends. By object identity, so duplicate paths keep their
+// distinct rows and dropping onto the moving block itself is a no-op.
+function reorderCuratedTracks(moved: SearchTrack[], to: number): void {
+  const list = curatedList();
+  if (!list || moved.length === 0) return;
+  const set = new Set(moved);
+  // Anchor on the first row at or after `to` that isn't itself moving; drop
+  // before it. With none (drop at the end, or inside the block's tail) append.
+  let anchor: SearchTrack | null = null;
+  for (let i = to; i < list.tracks.length; i++) {
+    if (!set.has(list.tracks[i])) {
+      anchor = list.tracks[i];
+      break;
+    }
+  }
+  const rest = list.tracks.filter((t) => !set.has(t));
+  const block = list.tracks.filter((t) => set.has(t)); // in view order
+  const insertAt = anchor ? rest.indexOf(anchor) : rest.length;
+  const next = rest.slice();
+  next.splice(insertAt, 0, ...block);
+  if (next.every((t, i) => t === list.tracks[i])) return; // no-op drop
+  applyCuration(next);
+}
+
+// Remove row `i` from the open list.
+function removeCuratedRow(i: number): void {
+  const list = curatedList();
+  if (!list || i < 0 || i >= list.tracks.length) return;
+  const tracks = list.tracks.slice();
+  tracks.splice(i, 1);
+  applyCuration(tracks);
+}
+
+// Remove every selected row (by object identity, so duplicates and reorders
+// resolve exactly) from the open list in a single curation edit.
+function removeCuratedTracks(objs: SearchTrack[]): void {
+  const list = curatedList();
+  if (!list || objs.length === 0) return;
+  const drop = new Set(objs);
+  const tracks = list.tracks.filter((t) => !drop.has(t));
+  if (tracks.length === list.tracks.length) return;
+  clearListSelection();
+  applyCuration(tracks);
+}
+
+// Insert tracks into the open list at `at` (drag-from-tree). Clamped to the list.
+function insertCuratedTracks(tracks: SearchTrack[], at: number): void {
+  const list = curatedList();
+  if (!list || tracks.length === 0) return;
+  const next = list.tracks.slice();
+  next.splice(Math.max(0, Math.min(at, next.length)), 0, ...tracks);
+  applyCuration(next);
+}
+
+// Append tracks to the active pool when it's the target but *not* the visible
+// list (a different playlist is browsed, so applyCuration would edit the wrong
+// one). Mirrors applyCuration's pool path — update the signal, reconcile the
+// engine when it's live, autosave the file — but aimed at the active pool
+// regardless of what's browsed. The playing instance is captured from the old
+// array and survives into `next` by reference, so reconcilePoolEdit re-finds it.
+function appendToActivePool(active: Queue, tracks: SearchTrack[]): void {
+  const isPool = queueIsActivePool();
+  const playingObj = isPool ? playingTrackObj(active) : null;
+  const next = [...active.tracks, ...tracks];
+  const n = next.length;
+  activeQueue.value = {
+    ...active,
+    tracks: next,
+    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+  };
+  if (isPool) reconcilePoolEdit(next, playingObj);
+  if (active.sourcePath) void saveOpenPlaylist(active.sourcePath, active.title, next);
+}
+
+// --- Rename / delete (phase 3) ---
+
+// Rename the open playlist from the header pencil. The `#PLAYLIST:` directive is
+// the only thing that changes — the file never moves — so this rewrites the
+// directive + rows in place and refreshes the tree label. Guards an empty name to
+// the placeholder (never a nameless playlist).
+async function renameOpenPlaylist(input: string): Promise<void> {
+  const list = curatedList();
+  if (!list?.sourcePath) return;
+  const path = list.sourcePath;
+  const name = input.trim() || UNTITLED_PLAYLIST_TITLE;
+  if (name === list.title) return;
+  // Update whichever open copies point at this file so the header/tree agree
+  // without a re-read.
+  const retitle = (q: Queue | null): Queue | null =>
+    q && q.sourcePath === path ? { ...q, title: name } : q;
+  browsedPlaylist.value = retitle(browsedPlaylist.value);
+  activeQueue.value = retitle(activeQueue.value);
+  try {
+    await invoke("write_playlist", { path, name, tracks: list.tracks.map((t) => t.path) });
+  } catch (e) {
+    console.error("write_playlist (rename) failed", path, e);
+    toast("Couldn't rename playlist");
+    return;
+  }
+  addRecentPlaylist(path, name);
+  await refreshLibrary();
+}
+
+// Rename a playlist from its tree row (context menu → Rename). Runs after the edit
+// input has already closed (see editInline.finish), so a renderTree here is safe —
+// no live input to tear out. It optimistically retitles the row in place to avoid
+// a flash of the old name, writes the directive, then refreshes so the row re-sorts
+// to its new alphabetical slot; refreshLibrary follows it there (pendingReveal).
+async function renameTreePlaylist(node: TreeNode, label: HTMLElement, raw: string): Promise<void> {
+  const name = raw.trim() || UNTITLED_PLAYLIST_TITLE;
+  if (name === node.name) return;
+  const path = node.path;
+  // Optimistic in-place update: the node model and the row's own text, so the new
+  // name shows immediately in the row's current position until the refresh re-sorts.
+  node.name = name;
+  const textEl = label.querySelector(".label-text");
+  if (textEl) textEl.textContent = name;
+  // Keep any open copies (browsed / active queue) titled in agreement without a re-read.
+  const retitle = (q: Queue | null): Queue | null =>
+    q && q.sourcePath === path ? { ...q, title: name } : q;
+  browsedPlaylist.value = retitle(browsedPlaylist.value);
+  activeQueue.value = retitle(activeQueue.value);
+  try {
+    await invoke("rename_playlist", { path, name });
+  } catch (e) {
+    console.error("rename_playlist failed", path, e);
+    toast("Couldn't rename playlist");
+    return;
+  }
+  addRecentPlaylist(path, name);
+  // Re-sort the tree now (deterministic, not waiting on the watcher's debounce) and
+  // scroll the renamed row into view at its new position.
+  pendingRevealPlaylistPath = path;
+  await refreshLibrary();
+}
+
+// Start an inline rename on a playlist's tree row. The whole label (icon + text)
+// is swapped for the edit field; commit writes the file, cancel restores as-is.
+function startTreePlaylistRename(node: TreeNode, label: HTMLElement): void {
+  editInline(label, node.name, (value) => void renameTreePlaylist(node, label, value));
+}
+
+// Delete a playlist file from the tree. Confirms first (the file is removed from
+// disk), drops it from recents, closes the browse if it was open, and refreshes.
+// If the deleted playlist is the *audible* source, playback stops (tear down to
+// the empty hero) — leaving it playing would autosave, and thus resurrect, the
+// just-deleted file on the next curation. A merely *stashed* copy (a folder/stream
+// plays over it) is dropped without disturbing that unrelated playback.
+async function deletePlaylistNode(node: TreeNode): Promise<void> {
+  const name = displayLabel(node);
+  const filename = node.path.split(/[\\/]/).pop() ?? node.path;
+  const ok = await confirm(`This will delete ${filename}`, {
+    title: `Delete ${name}?`,
+    kind: "warning",
+  });
+  if (!ok) return;
+  try {
+    await invoke("delete_playlist", { path: node.path });
+  } catch (e) {
+    console.error("delete_playlist failed", node.path, e);
+    toast("Couldn't delete playlist");
+    return;
+  }
+  removeRecentPlaylist(node.path);
+  const active = activeQueue.value;
+  const activeIsDeleted = isPlaylistSource(active) && active!.sourcePath === node.path;
+  if (activeIsDeleted && queueIsActivePool()) {
+    // The deleted playlist is the audible pool: stop and clear playback entirely.
+    teardownPlaybackToEmpty();
+  } else if (activeIsDeleted) {
+    // A merely stashed copy (a folder/stream plays over it): drop it so a later
+    // curation can't rewrite (resurrect) the file; that playback continues.
+    clearActiveQueue();
+    queuePlayingIndex.value = null;
+  }
+  // If we were browsing the deleted file, close the browse. (An unrelated browse
+  // of a different playlist is left open.)
+  if (browsedPlaylist.value?.sourcePath === node.path) {
+    browsedPlaylist.value = null;
+    if (!activeQueue.value) listFaceOpen.value = false;
+  }
+  await refreshLibrary();
+}
+
+// --- Inline rename editing ---
+// Turns a label in place into a text input: the label's current content is hidden
+// and an input takes its slot. Commits on Enter or blur, cancels on Escape. This
+// replaces the old modal prompt so renaming the open playlist stays on its header
+// title rather than interrupting with a dialog.
+function editInline(
+  host: HTMLElement,
+  initial: string,
+  onCommit: (value: string) => void,
+): void {
+  // Guard against a second click (on the host, the pencil, or the input itself)
+  // reopening an edit that's already in progress.
+  if (host.querySelector(":scope > .inline-edit")) return;
+  inlineEditing = true;
+  // Lock the row to its current height for the duration of the edit. The input's
+  // line box can be a hair shorter than the label it replaces (their line-heights
+  // differ across contexts); if the row shrinks while the panel is scrolled to its
+  // bottom, the browser clamps scrollTop down and the list appears to creep up.
+  // Pinning the height keeps swapping in the input from changing content height.
+  const prevMinHeight = host.style.minHeight;
+  const prevBoxSizing = host.style.boxSizing;
+  const lockHeight = host.getBoundingClientRect().height;
+  host.style.boxSizing = "border-box";
+  host.style.minHeight = `${lockHeight}px`;
+  const hidden = Array.from(host.children) as HTMLElement[];
+  for (const el of hidden) el.style.display = "none";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "inline-edit";
+  input.value = initial;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  host.appendChild(input);
+  // preventScroll: focusing an element otherwise scrolls it into view. Harmless on
+  // the header (already visible, outside any scroller), but in a long, scrolled
+  // tree it yanks the panel to the row — one of the two causes of the old
+  // "scroll on edit" bug (the other being a full renderTree; see renameTreePlaylist).
+  input.focus({ preventScroll: true });
+  input.select();
+  let done = false;
+  const finish = (commit: boolean): void => {
+    if (done) return;
+    done = true;
+    inlineEditing = false;
+    const value = input.value;
+    input.remove();
+    host.style.minHeight = prevMinHeight;
+    host.style.boxSizing = prevBoxSizing;
+    for (const el of hidden) el.style.display = "";
+    if (commit) onCommit(value);
+    // Flush any watcher refresh that arrived while the edit was open (e.g. the
+    // scan from a prior rename's write). Runs after onCommit so this rename's own
+    // write is included in the single rebuild.
+    if (refreshDeferredWhileEditing) {
+      refreshDeferredWhileEditing = false;
+      void refreshLibrary();
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    // Keep Enter/Escape (and any typing) from reaching the tree/global handlers.
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+  // The input sits inside a row/label whose click plays; swallow those so
+  // interacting with the field never triggers playback or a re-edit.
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("mousedown", (e) => e.stopPropagation());
+}
+
+// Start renaming the open playlist from its header — clicking the title text or
+// the pencil both land here. A no-op unless a real playlist is open.
+function startTitleEdit(): void {
+  const list = curatedList();
+  if (!list?.sourcePath) return;
+  const host = queueTitleEl.parentElement;
+  if (!host) return;
+  editInline(host, list.title, (value) => void renameOpenPlaylist(value));
 }
 
 async function openArtistQueue(name: string): Promise<void> {
@@ -1545,12 +3225,10 @@ function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
     lastQueue = [...lastQueue, ...paths];
 
     if (queueEnded) {
-      // The queue had run to the end; kick playback into the first appended track
-      // (feedEngine stops after it if playlist autoadvance is off).
-      queueEnded = false;
-      lastIndex = lastQueue.length - paths.length;
-      pendingQueueIndex = lastIndex;
-      feedEngine(lastQueue, lastIndex);
+      // The queue rests with no playhead — drained at its end, or armed from
+      // silence by "Add to queue" without auto-playing. Appends grow the pool
+      // (done above) but never start playback: "Add to queue" is play-later, so
+      // the queue stays at rest and the play button starts it from the top.
     } else if (!shuffleMode.value && repeatMode.value !== "one" && autoadvanceEnabled()) {
       // Straight play with autoadvance on: the engine holds the whole queue and
       // auto-advances gaplessly, so append natively — the new tracks play on
@@ -1612,20 +3290,61 @@ function seedQueueFromCurrent(): void {
   });
 }
 
+// Build a queue from `tracks` as the active pool but at rest — no playhead, the
+// engine untouched — so "Add to queue" from silence keeps its play-later promise
+// instead of startling the user with playback. The queue rests exactly as a
+// drained one does (queueEnded set, currentNodePath/queuePlayingIndex null), so
+// the play button starts it from the top (see togglePlayPause).
+function armQueueAtRest(tracks: SearchTrack[]): void {
+  const playable = tracks.filter((t) => !t.missing);
+  if (playable.length === 0) return;
+  const n = tracks.length;
+  currentParent = syntheticParent(
+    `queue:adhoc:${Date.now()}`,
+    UNTITLED_PLAYLIST_TITLE,
+    playable,
+  );
+  lastQueue = playable.map((t) => t.path);
+  lastIndex = 0;
+  queueEnded = true;
+  queuePlayingIndex.value = null;
+  currentNodePath.value = null;
+  shuffleBag = [];
+  browsedPlaylist.value = null;
+  openActiveQueue({
+    kind: "playlist",
+    title: UNTITLED_PLAYLIST_TITLE,
+    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+    tracks,
+  });
+  listFaceOpen.value = true;
+}
+
 // The single entry point behind "Add to queue". It only ever appends —
 // play-later, never interrupting the audible track. With a queue open it appends
 // to it. With none, it seeds a queue from the currently playing track first
-// (seedQueueFromCurrent) and appends after it; if nothing is playing, the append
-// starts a fresh queue that plays at once (there's nothing to play it after).
+// (seedQueueFromCurrent) and appends after it; from silence it arms a fresh queue
+// at rest (armQueueAtRest) without playing, so the play button — not the add —
+// starts it. A live stream is the one exception: nothing can follow it, so the
+// add starts the queue now.
+//
+// Feedback is the queue itself: every add reveals the list face (showSourceList)
+// so the appended rows are visible, rather than flashing a toast.
 function addToQueue(tracks: SearchTrack[]): void {
   if (tracks.length === 0) return;
   const n = tracks.length;
   if (!activeQueue.value) {
     if (hasTrack.value && currentNodePath.value && !isStream.value) {
       seedQueueFromCurrent();
+    } else if (!hasTrack.value) {
+      // True silence: honor "Add to queue" as play-later by arming the queue at
+      // rest rather than playing it now. It becomes the active pool with no
+      // playhead (like a drained queue); the play button starts it from the top.
+      armQueueAtRest(tracks);
+      return;
     } else {
-      // Nothing queueable is playing (silence, or a live stream): start a fresh
-      // queue from these tracks and play it.
+      // A live stream (or a lone track with no queueable context) is playing:
+      // there's nothing for the queue to follow, so this add starts it now.
       playQueue(
         {
           kind: "playlist",
@@ -1635,12 +3354,35 @@ function addToQueue(tracks: SearchTrack[]): void {
         },
         `queue:adhoc:${Date.now()}`,
       );
-      toast(`Added ${n} track${n === 1 ? "" : "s"}`);
       return;
     }
   }
+  // "Add to queue" is a queue verb, never a playlist edit: if the active pool is a
+  // playing playlist, adding to the queue detaches the pool from its .m3u8 first —
+  // this append and every later curation then stay in memory and the file on disk
+  // is left as it was. The queue and a playlist are never the same thing.
+  detachActivePoolFromPlaylist();
   appendTracksToActiveQueue(tracks);
-  toast(`Added ${n} track${n === 1 ? "" : "s"}`);
+  showSourceList();
+}
+
+// Sever the active pool from its backing playlist file so queue operations can't
+// modify it: it becomes a plain, ephemeral "Queue" (no sourcePath) holding the
+// same tracks. isPlaylistSource keys off sourcePath alone, so dropping it turns
+// off autosave, drops the tree's playing-playlist highlight, and retitles the
+// list/hero to "Queue" — all reactively. The engine, playing index, currentParent,
+// and the track objects are untouched (same synthetic pool, same rows), so
+// playback continues uninterrupted. A no-op unless the pool is a playlist source.
+function detachActivePoolFromPlaylist(): void {
+  const q = activeQueue.value;
+  if (!isPlaylistSource(q)) return;
+  activeQueue.value = {
+    kind: q!.kind,
+    title: "Queue",
+    subtitle: q!.subtitle,
+    tracks: q!.tracks,
+    // sourcePath deliberately omitted — a queue is never a playlist file.
+  };
 }
 
 // "Close queue": always dismisses the explicit queue, but is a list action, not a
@@ -1652,37 +3394,73 @@ function addToQueue(tracks: SearchTrack[]): void {
 // queue that has already drained — resting with no playhead — has nothing to keep
 // playing, so closing it tears down to the empty hero.
 function closeQueue(): void {
-  const queueWasPool = queueIsActivePool();
-  clearActiveQueue();
-  queuePlayingIndex.value = null;
-  if (!queueWasPool) return;
+  if (!queueIsActivePool()) {
+    // A stashed queue that isn't the audible pool: closing just drops the list,
+    // leaving whatever's playing untouched.
+    clearActiveQueue();
+    queuePlayingIndex.value = null;
+    listFaceOpen.value = false;
+    return;
+  }
 
   const current = currentNodePath.value;
   if (current && !queueEnded) {
-    // Detach: the audible track becomes a lone now-playing track. No parent (so
-    // the pool is just this track), and the engine's gapless tail is dropped so
-    // playback stops at this track's end instead of the vanished queue. The
-    // now-playing card (title/artist/album/art) and playback are untouched.
-    currentParent = null;
-    lastQueue = [current];
-    lastIndex = 0;
+    // The queue is gone but its current track keeps playing — hand it back to
+    // the file browser as its context. Drop the engine's gapless tail so the
+    // vanished queue's rows don't play on; straight-play autoadvance resumes at
+    // this track's end via handleEnded. The now-playing card and playback are
+    // untouched.
     pendingQueueIndex = null;
     shuffleBag = [];
     if (!shuffleMode.value && repeatMode.value !== "one") void engine.clearUpcoming();
+    // If the track's home folder is loaded in the tree, rebind playback to it
+    // so Next/Prev walk the album (its siblings) and autoadvance flows on — the
+    // "final panel becomes the context" behavior. Otherwise (a search/external
+    // track, or an unloaded folder) there's no context to return to, so it
+    // detaches as a lone track: the pool is just this track and Next is a no-op.
+    // This rebinds currentParent (non-reactive) *before* the reactive list-state
+    // writes below, so the transport effect they fire recomputes Next/Prev's
+    // enabled state against the rebound folder — poolPaths reads currentParent,
+    // which no signal tracks, so the effect only sees it if it runs afterward.
+    const home = rootNode ? findNode(rootNode, current) : null;
+    if (home) {
+      currentParent = home.parent;
+      const pool = poolPaths();
+      lastQueue = pool;
+      lastIndex = Math.max(0, pool.indexOf(current));
+    } else {
+      currentParent = null;
+      lastQueue = [current];
+      lastIndex = 0;
+    }
+    clearActiveQueue();
+    queuePlayingIndex.value = null;
+    listFaceOpen.value = false;
     return;
   }
 
   // The queue already drained (rests with no playhead): nothing to keep playing,
   // so tear playback fully down (native Stop) and return to a clean empty hero.
+  teardownPlaybackToEmpty();
+}
+
+// Full playback teardown (native Stop): silence the engine, drop the queue, and
+// return to a clean empty hero with no playhead. Non-reactive playback vars go
+// first so the reactive writes below fire their effects against a fully cleared
+// context. Used by Close on a drained queue and by deleting the playing playlist.
+function teardownPlaybackToEmpty(): void {
   currentParent = null;
-  currentNodePath.value = null;
-  currentStreamUrl.value = null;
-  isStream.value = false;
   queueEnded = false;
   lastQueue = [];
   lastIndex = 0;
   pendingQueueIndex = null;
   shuffleBag = [];
+  clearActiveQueue();
+  queuePlayingIndex.value = null;
+  listFaceOpen.value = false;
+  currentNodePath.value = null;
+  currentStreamUrl.value = null;
+  isStream.value = false;
   currentTime.value = 0;
   duration.value = 0;
   hasTrack.value = false;
@@ -1725,12 +3503,137 @@ function toast(message: string): void {
 // only when its tag exists. The album's grouping key is albumArtist ?? artist,
 // matching the backend's album_tracks — so a compilation track (album artist
 // "Various Artists", track artist something else) resolves the whole album.
+// --- Add to playlist ▸ (phase 4) ---
+//
+// A universal submenu on any track-bearing node (tree tracks/folders/playlists,
+// queue rows, search hits): a leading New Playlist… plus every indexed library
+// playlist. New Playlist… seeds a fresh file with the clicked tracks; an
+// existing target appends. When the target is the open list (browsed or
+// playing), the append goes through the in-memory list + autosave (applyCuration
+// reconciles playback and writes the file) so we never double-write; otherwise
+// it's written straight to the file. Track resolution is lazy — a folder / album
+// / artist only queries when its entry is chosen, not when the menu is built.
+
+type TrackProvider = () => SearchTrack[] | Promise<SearchTrack[]>;
+
+// The "Add to playlist ▸" menu item, built from the current index (the menu is
+// rebuilt per right-click, so it always reflects the freshest index). Every
+// playlist is offered, including the one a row already belongs to — matching
+// how mainstream players handle it (a self-add just duplicates the row, which
+// this app's positional model allows).
+function addToPlaylistItem(getTracks: TrackProvider): ContextMenuItem {
+  const submenu: ContextMenuItem[] = [
+    { label: "New Playlist…", action: () => void newPlaylistWithTracks(getTracks) },
+  ];
+  // Duplicate #PLAYLIST: names may yield two identically-labelled entries
+  // (accepted limitation); they still target distinct files by path.
+  for (const pl of playlistIndex) {
+    submenu.push({
+      label: pl.name,
+      action: () => void addTracksToPlaylist(pl.path, getTracks),
+    });
+  }
+  return { label: "Add to playlist", submenu };
+}
+
+// New Playlist… from a menu: save dialog → write an .m3u8 seeded with the
+// clicked tracks → browse it (playback untouched) as confirmation.
+async function newPlaylistWithTracks(getTracks: TrackProvider): Promise<void> {
+  const tracks = await getTracks();
+  const dir = defaultPlaylistDir();
+  const path = await save({
+    title: "New Playlist",
+    defaultPath: dir ? `${dir}/Untitled.m3u8` : "Untitled.m3u8",
+    filters: [{ name: "Playlist", extensions: ["m3u8"] }],
+  });
+  if (!path) return;
+  const name = playlistNameFromPath(path);
+  try {
+    await invoke("write_playlist", { path, name, tracks: tracks.map((t) => t.path) });
+  } catch (e) {
+    console.error("write_playlist (new) failed", path, e);
+    toast("Couldn't create playlist");
+    return;
+  }
+  await refreshLibrary();
+  await browsePlaylistPath(path);
+}
+
+// Append tracks to an existing playlist. If it's the open list (browsed or the
+// playing source), route through the in-memory list + autosave; otherwise read
+// the file, append the new paths, and write it back.
+async function addTracksToPlaylist(path: string, getTracks: TrackProvider): Promise<void> {
+  const tracks = await getTracks();
+  if (tracks.length === 0) return;
+  const open = curatedList();
+  if (open?.sourcePath === path) {
+    // The open list is the target: append in memory (applyCuration autosaves and
+    // reconciles playback when it's the live pool) — never a second file write.
+    insertCuratedTracks(tracks, open.tracks.length);
+    toast(`Added to "${open.title}"`);
+    return;
+  }
+  // The target isn't the *visible* list, but it may still be the live playing
+  // pool — you can browse one playlist while a different one plays. curatedList()
+  // is browsed-first, so it misses that case; append to the active pool directly
+  // so the in-memory pool, the engine, and the file all stay in sync. Skipping
+  // this lets a later curation autosave the stale pool back over the add (#3).
+  const active = activeQueue.value;
+  if (isPlaylistSource(active) && active!.sourcePath === path) {
+    appendToActivePool(active!, tracks);
+    toast(`Added to "${active!.title}"`);
+    return;
+  }
+  // Closed file: read the current rows (missing included, to round-trip), append
+  // the new paths, and rewrite.
+  let data: PlaylistData;
+  try {
+    data = await invoke<PlaylistData>("read_playlist", { path });
+  } catch (e) {
+    console.error("read_playlist failed", path, e);
+    toast("Couldn't open playlist");
+    return;
+  }
+  const combined = [...data.tracks.map((t) => t.path), ...tracks.map((t) => t.path)];
+  try {
+    await invoke("write_playlist", { path, name: data.name, tracks: combined });
+  } catch (e) {
+    console.error("write_playlist (append) failed", path, e);
+    toast("Couldn't save playlist");
+    return;
+  }
+  await refreshLibrary();
+  toast(`Added to "${data.name}"`);
+}
+
+// Tracks behind a search hit, for its Add-to-playlist submenu. Resolves lazily
+// (artist/album/folder query only when chosen). Null for kinds with no tracks to
+// add (streams, and playlist hits themselves).
+function searchItemTrackProvider(item: SearchItem): TrackProvider | null {
+  switch (item.kind) {
+    case "file":
+      return () => [item.track];
+    case "folder":
+      return () => invoke<SearchTrack[]>("folder_tracks", { path: item.folder.path });
+    case "artist":
+      return () => invoke<SearchTrack[]>("artist_tracks", { artist: item.artist.name });
+    case "album":
+      return () =>
+        invoke<SearchTrack[]>("album_tracks", {
+          album: item.album.album,
+          albumArtist: item.album.artist,
+        });
+    default:
+      return null;
+  }
+}
+
 function trackContextItems(track: {
   artist: string | null;
   album: string | null;
   albumArtist: string | null;
-}): { label: string; action: () => void }[] {
-  const items: { label: string; action: () => void }[] = [];
+}): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [];
   if (track.artist) {
     const artist = track.artist;
     items.push({ label: "Play artist", action: () => void openArtistQueue(artist) });
@@ -1752,21 +3655,41 @@ function trackContextItems(track: {
 // its synthetic parent; if it was merely stashed while a folder/stream/lone
 // track played, rebuild the parent from the queue tracks so playback moves into
 // it. activeQueue (the queue data) is untouched.
-function playQueueTrack(index: number): void {
+// `poolIndex` addresses the *playable* pool (renderQueue skips missing rows when
+// it computes the index), never the view. A browsed playlist keeps its missing
+// rows on screen; the pool is built from just the playable ones, so playing from
+// it doesn't collapse the view. When the queue is already the active pool,
+// currentParent.children *is* that playable pool.
+function playQueueTrack(poolIndex: number): void {
   const q = activeQueue.value;
   if (!q) return;
   const parent = queueIsActivePool() && currentParent
     ? currentParent
-    : syntheticParent(`queue:active:${Date.now()}`, q.title, q.tracks);
-  const node = parent.children[index];
+    : syntheticParent(
+        `queue:active:${Date.now()}`,
+        q.title,
+        q.tracks.filter((t) => !t.missing),
+      );
+  const node = parent.children[poolIndex];
   if (!node) return;
-  playFile(node, parent, index);
+  playFile(node, parent, poolIndex);
 }
 
 // Plays a file from outside the library (passed in via OS file association).
 // Intentionally leaves currentNode/currentParent null so the tree is not
 // touched, no row is highlighted, and album-advance on end is a no-op. The
 // next library or stream selection replaces this state entirely.
+// Routes a file delivered by an OS file association (Finder double-click, "open
+// with", cold-start arg). A playlist opens for browsing (view + curate) like a
+// tree single-click; any other file is an audio track and plays.
+function openAssociatedFile(path: string): void {
+  if (/\.m3u8?$/i.test(path)) {
+    void browsePlaylistPath(path);
+  } else {
+    void openExternalFile(path);
+  }
+}
+
 async function openExternalFile(path: string): Promise<void> {
   let meta: TrackMeta;
   try {
@@ -1776,8 +3699,9 @@ async function openExternalFile(path: string): Promise<void> {
     return;
   }
   // Leaves currentParent null so the tree is untouched, no row is highlighted,
-  // and album-advance is a no-op (single-track queue). Any explicit queue stays
-  // stashed and visible; null the highlight since this plays outside it.
+  // and album-advance is a no-op (single-track queue). Lone playback: dismiss
+  // any open queue/playlist; null the highlight since this plays outside it.
+  resetToLonePlayback();
   queuePlayingIndex.value = null;
   currentParent = null;
   currentNodePath.value = null;
@@ -1930,12 +3854,49 @@ function findNode(
 
 let libraryRefreshing = false;
 let libraryRefreshPending = false;
+// True while an inline edit (tree rename) is open. The filesystem watcher fires
+// `library-scanned` a beat after any write — including our own rename's — and that
+// lands a renderTree() that would tear out the live edit input (and disturb
+// scroll). While an edit is open we defer the refresh and flush it on finish.
+let inlineEditing = false;
+let refreshDeferredWhileEditing = false;
+// Set by a tree rename to the renamed playlist's path; the next renderTree scrolls
+// that row into view and flashes it, so following it to its new sorted slot reads
+// as deliberate. Cleared once consumed.
+let pendingRevealPlaylistPath: string | null = null;
+
+// Scroll a tree row (by file path) into view and briefly flash it. Used to follow
+// a renamed playlist to its re-sorted position. No-op if the row isn't present.
+function revealTreeRow(path: string): void {
+  const label = treeContainer.querySelector<HTMLElement>(
+    `.node-label[data-path="${CSS.escape(path)}"]`,
+  );
+  if (!label) return;
+  label.scrollIntoView({ block: "nearest" });
+  label.classList.remove("flash");
+  // Reflow so re-adding the class restarts the animation even on a back-to-back reveal.
+  void label.offsetWidth;
+  label.classList.add("flash");
+  label.addEventListener("animationend", () => label.classList.remove("flash"), {
+    once: true,
+  });
+}
 
 // Serialized + coalesced: scans can emit "library-scanned" repeatedly, and two
 // overlapping reconciles would both mutate node.children and both renderTree
 // (tearing the visible tree). Mirrors the backend's request_scan — at most one
 // reconcile runs; events arriving during it collapse into a single follow-up.
 async function refreshLibrary(): Promise<void> {
+  // The playlist index tracks every library change (the watcher and our own
+  // writes both land here), so the Add-to-playlist submenu and searchable
+  // playlists stay current without a separate refresh at each write site.
+  void refreshPlaylistIndex();
+  // Hold off rebuilding the tree while an inline edit is open — a renderTree()
+  // here would destroy the edit input mid-type. finish() re-runs this once closed.
+  if (inlineEditing) {
+    refreshDeferredWhileEditing = true;
+    return;
+  }
   if (libraryRefreshing) {
     libraryRefreshPending = true;
     return;
@@ -1964,10 +3925,24 @@ async function refreshLibrary(): Promise<void> {
           currentParent = found.parent;
         }
       }
+      // An edit may have opened while we were mid-reconcile (the entry guard only
+      // catches edits that predate the refresh). Rendering now would tear out its
+      // input and shift scroll — the "scrolls after the 2nd edit" case. Defer the
+      // paint; finish() re-runs refreshLibrary once the edit closes.
+      if (inlineEditing) {
+        refreshDeferredWhileEditing = true;
+        break;
+      }
       const filesTab = document.getElementById("tab-files");
       const scrollTop = filesTab?.scrollTop ?? 0;
       renderTree();
       if (filesTab) filesTab.scrollTop = scrollTop;
+      // Follow a just-renamed playlist to its new alphabetical slot so the re-sort
+      // reads as intentional rather than the row vanishing. Consumed once here.
+      if (pendingRevealPlaylistPath) {
+        revealTreeRow(pendingRevealPlaylistPath);
+        pendingRevealPlaylistPath = null;
+      }
     } while (libraryRefreshPending);
   } finally {
     libraryRefreshing = false;
@@ -2121,20 +4096,37 @@ const persistAutoadvance = async (): Promise<void> => {
   await store.save();
 };
 
+const persistPlaybackModes = async (): Promise<void> => {
+  await store.set(KEY_SHUFFLE, shuffleMode.value);
+  await store.set(KEY_REPEAT, repeatMode.value);
+  await store.save();
+};
+
+// Shared by the toolbar button and the Playback menu so both take the same path.
+function toggleShuffle(): void {
+  shuffleMode.value = !shuffleMode.value;
+  // Seed the bag so a shuffle turned on mid-album has a full cycle ready;
+  // clear it when turning shuffle off.
+  if (shuffleMode.value) refillShuffleBag(currentNodePath.value);
+  else shuffleBag = [];
+  applyModeChange();
+  void persistPlaybackModes();
+}
+
+function setRepeatMode(mode: RepeatMode): void {
+  if (repeatMode.value === mode) return;
+  repeatMode.value = mode;
+  applyModeChange();
+  void persistPlaybackModes();
+}
+
 function setupPlaybackModes(): void {
-  modeShuffleBtn.addEventListener("click", () => {
-    shuffleMode.value = !shuffleMode.value;
-    // Seed the bag so a shuffle turned on mid-album has a full cycle ready;
-    // clear it when turning shuffle off.
-    if (shuffleMode.value) refillShuffleBag(currentNodePath.value);
-    else shuffleBag = [];
-    applyModeChange();
-  });
+  modeShuffleBtn.addEventListener("click", toggleShuffle);
   modeRepeatBtn.addEventListener("click", () => {
     // Cycle off → all → one → off.
-    repeatMode.value =
-      repeatMode.value === "off" ? "all" : repeatMode.value === "all" ? "one" : "off";
-    applyModeChange();
+    setRepeatMode(
+      repeatMode.value === "off" ? "all" : repeatMode.value === "all" ? "one" : "off",
+    );
   });
 }
 
@@ -2252,6 +4244,11 @@ async function setupWindowSize(
   // window.inner* (rather than the resize event's physical payload) keeps
   // storage in logical px, so restored sizes stay stable across scale factors.
   const persistSize = debounce(async () => {
+    // Skip while zoomed (macOS green-button "Zoom"): AppKit owns the un-zoom
+    // restore, so recording the transient zoomed size would clobber the mode's
+    // real remembered size. Without this, zooming out of mini then expanding
+    // lands on the zoomed size instead of the last true normal size.
+    if (await appWindow.isMaximized()) return;
     const width = window.innerWidth;
     const height = window.innerHeight;
     if (width <= 0 || height <= 0) return;
@@ -2265,7 +4262,18 @@ async function setupWindowSize(
     await store.save();
   }, 400);
 
-  window.addEventListener("resize", () => persistSize());
+  // Keep the Window menu's "Mini Player" checkmark mirroring the current mode.
+  // Mode is derived from viewport height, so sync on every resize (manual drags
+  // across the breakpoint included) and once now for the initial normal-mode start.
+  const syncMiniplayerChecked = () => {
+    void invoke("set_miniplayer_checked", { mini: isMiniViewport() });
+  };
+  syncMiniplayerChecked();
+
+  window.addEventListener("resize", () => {
+    persistSize();
+    syncMiniplayerChecked();
+  });
 
   const storedPos = await store.get<{ x: number; y: number }>(
     KEY_WINDOW_POSITION,
@@ -2344,6 +4352,12 @@ function setupSearch(): void {
       void playFolder(item.folder);
     } else if (item.kind === "file") {
       playSearchTrack(item.track);
+    } else if (item.kind === "playlist") {
+      // Choosing a playlist plays it, consistent with every other search hit
+      // (there's no single/double-click split in search, so a choice is a play,
+      // not the tree's browse). It opens as the playing source and starts from
+      // the first track; preview-only browsing lives in the tree.
+      void playPlaylistPath(item.playlist.path);
     } else {
       activeTab.value = "streams";
       playStream(item.stream);
@@ -2416,6 +4430,14 @@ function setupSearch(): void {
         const l = searchLabel(item.track);
         primary.textContent = l.primary;
         secondary.textContent = l.secondary;
+      } else if (item.kind === "playlist") {
+        // The playlist glyph (matching the tree row) marks a hit that opens a
+        // playlist rather than plays a track.
+        const icon = document.createElement("span");
+        icon.className = "search-icon icon-playlist";
+        row.appendChild(icon);
+        primary.textContent = item.playlist.name;
+        secondary.textContent = "Playlist";
       } else {
         primary.textContent = item.stream.name;
       }
@@ -2424,10 +4446,20 @@ function setupSearch(): void {
       row.appendChild(text);
       // mousedown, not click: clicking a row blurs the input first, and a blur
       // handler that closed the dropdown would remove the row before click.
+      // preventDefault keeps the input focused (so the dropdown survives a
+      // right-click); only a left-click chooses the row.
       row.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        choose(item);
+        if (e.button === 0) choose(item);
       });
+      // Right-click a track-bearing hit to add it to a playlist.
+      const provider = searchItemTrackProvider(item);
+      if (provider) {
+        row.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          showContextMenu(e.clientX, e.clientY, [addToPlaylistItem(provider)]);
+        });
+      }
       searchResultsEl.appendChild(row);
     });
     searchResultsEl.classList.remove("hidden");
@@ -2445,6 +4477,11 @@ function setupSearch(): void {
     const streamItems: SearchItem[] = allStreams
       .filter((s) => s.name.toLowerCase().includes(needle))
       .map((s) => ({ kind: "stream", stream: s }));
+    // Playlists are indexed client-side (kept fresh by the watcher), so they
+    // filter here alongside streams rather than through a backend query.
+    const playlistItems: SearchItem[] = playlistIndex
+      .filter((p) => p.name.toLowerCase().includes(needle))
+      .map((p) => ({ kind: "playlist", playlist: p }));
     let artistItems: SearchItem[] = [];
     let albumItems: SearchItem[] = [];
     let folderItems: SearchItem[] = [];
@@ -2465,11 +4502,13 @@ function setupSearch(): void {
     }
     if (token !== queryToken) return;
     // Artists and albums first (a metadata-name match usually means "open that
-    // page"), then folders, streams, and finally individual tracks.
+    // page"), then folders and playlists (both "open this collection" hits),
+    // streams, and finally individual tracks.
     items = [
       ...artistItems,
       ...albumItems,
       ...folderItems,
+      ...playlistItems,
       ...streamItems,
       ...fileItems,
     ];
@@ -2556,6 +4595,14 @@ function setupPlayerControls(): void {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (isTextInputTarget(e.target)) return;
 
+    if (e.key === "Delete" || e.key === "Backspace") {
+      const sel = selectedListTracks();
+      if (sel.length === 0) return;
+      e.preventDefault();
+      removeCuratedTracks(sel);
+      return;
+    }
+
     if (e.key === " " || e.code === "Space") {
       if (e.repeat) return;
       e.preventDefault();
@@ -2595,10 +4642,13 @@ function setupPlayerControls(): void {
   });
 }
 
+// Shared by the volume button and the Playback menu's Mute item.
+function toggleMute(): void {
+  setVolume(volume.value > 0 ? 0 : lastNonZeroVolume);
+}
+
 function setupVolumeControl(): void {
-  volumeBtn.addEventListener("click", () => {
-    setVolume(volume.value > 0 ? 0 : lastNonZeroVolume);
-  });
+  volumeBtn.addEventListener("click", toggleMute);
 
   volumeControlEl.addEventListener("mouseenter", () => {
     volumePopoverOpen.value = true;
@@ -2688,14 +4738,10 @@ function setupEffects(): void {
     nowPlayingAlbumEl.classList.toggle("hidden", !npAlbum.value);
     updateMarquee(nowPlayingAlbumEl);
   });
-  // The one-line queue-mode strip: "Now Playing: <artist> - <title>". The prefix
-  // and " - " separator are static (HTML/CSS); we fill title and artist and drop
-  // the "<artist> - " lead-in when the artist is unknown.
-  effect(() => {
-    npStripTitleEl.textContent = npTitle.value;
-    npStripArtistEl.textContent = npArtist.value ?? "";
-    npStripArtistWrapEl.classList.toggle("hidden", !npArtist.value);
-  });
+  // The nav bar: the single line above the transport that carries the source
+  // context and the button swapping between the two faces (hero / list). See
+  // renderNavBar for the state table.
+  effect(renderNavBar);
   effect(() => {
     liveIndicatorEl.classList.toggle("hidden", !isStream.value);
     setLiveIndicatorPaused(!isPlaying.value);
@@ -2814,18 +4860,62 @@ function setupEffects(): void {
   effect(() => {
     const path = currentNodePath.value;
     const url = currentStreamUrl.value;
+    const queue = activeQueue.value;
+    // A live queue row is the reactive signal for "a queue owns the playhead":
+    // non-null only while a queue is the audible pool, null for folder play (and
+    // when a queue rests drained). Drives this effect where queueIsActivePool()
+    // — which reads non-reactive currentParent — cannot, so the highlight moves
+    // even when the file path is unchanged (same track replayed from the tree).
+    const queueOwnsPlayhead = queuePlayingIndex.value !== null;
+    // A browsed playlist marks its tree row as "open" (a selection background),
+    // independent of what's playing — so the panel shows which playlist is open
+    // even when a different source owns the playhead.
+    const browsed = browsedPlaylist.value;
     document
-      .querySelectorAll("#folder-tree .node-label.playing, #streams-list .node-label.playing")
-      .forEach((el) => el.classList.remove("playing"));
-    if (path) {
+      .querySelectorAll(
+        "#folder-tree .node-label.playing, #folder-tree .node-label.open, #streams-list .node-label.playing",
+      )
+      .forEach((el) => el.classList.remove("playing", "open"));
+    // The now-playing accent marks the context that owns the playhead, not every
+    // occurrence of the same file. When a playlist/queue is the active pool it
+    // carries the highlight in the right pane, so the tree's copy of the same
+    // track stays plain.
+    if (path && !queueOwnsPlayhead) {
       document
         .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(path)}"]`)
+        ?.classList.add("playing");
+    }
+    // A playlist playing from the tree lights up its own row (the .m3u8 node,
+    // keyed by sourcePath) instead of its member track — the tree's stand-in for
+    // "playing from here".
+    if (queueOwnsPlayhead && queue?.kind === "playlist" && queue.sourcePath) {
+      document
+        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(queue.sourcePath)}"]`)
         ?.classList.add("playing");
     }
     if (url) {
       document
         .querySelector(`#streams-list .node-label[data-stream-url="${CSS.escape(url)}"]`)
         ?.classList.add("playing");
+    }
+    if (browsed?.sourcePath) {
+      document
+        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(browsed.sourcePath)}"]`)
+        ?.classList.add("open");
+    }
+  });
+
+  // Paint the multi-select background reactively, so cmd/shift-click updates the
+  // tree without a full re-render (renderNode reapplies it on any rebuild).
+  effect(() => {
+    const sel = treeSelection.value;
+    document
+      .querySelectorAll("#folder-tree .node-label.selected")
+      .forEach((el) => el.classList.remove("selected"));
+    for (const path of sel) {
+      document
+        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(path)}"]`)
+        ?.classList.add("selected");
     }
   });
 
@@ -2838,16 +4928,32 @@ function setupEffects(): void {
     document.getElementById("tab-streams")?.classList.toggle("hidden", tab !== "streams");
   });
 
-  // With a queue, the queue list fills the pane and the now-playing hero drops to
-  // a compact strip above the controls; without one, the hero owns the whole pane
-  // and the list is hidden. `has-queue` on the panel drives both (see styles.css).
-  // Reads queuePlayingIndex too so the highlighted/scrolled row tracks advances
-  // (and clears when the queue is merely stashed while a folder/stream plays).
+  // The two-face right pane, painted from the derived paneView. `has-nav` reveals
+  // the nav bar whenever a list exists; `show-list` puts the list face up (else
+  // the hero owns the pane). Reads queuePlayingIndex too so the highlighted/
+  // scrolled row tracks advances (and clears when the queue is merely stashed),
+  // even when paneView's own fields are unchanged.
   effect(() => {
-    const queue = activeQueue.value;
+    const { list, isSource, showList } = paneView.value;
     queuePlayingIndex.value;
-    nowPlayingPanel.classList.toggle("has-queue", queue !== null);
-    renderQueue(queue);
+    const hasList = list !== null;
+    nowPlayingPanel.classList.toggle("has-nav", hasList);
+    nowPlayingPanel.classList.toggle("show-list", hasList && showList);
+    renderQueue(list, isSource);
+  });
+
+  // Paint the list-pane multi-select background reactively, so cmd/shift-click
+  // updates it without a renderQueue rebuild (which would scroll to the playing
+  // row on every click). Runs after the render effect above — both read the open
+  // list — so it repaints on rebuilds too. Maps the object-keyed set back to rows
+  // through each row's view index (paths aren't unique across duplicates).
+  effect(() => {
+    const sel = listSelection.value;
+    const tracks = openListTracks();
+    queueListEl.querySelectorAll<HTMLElement>("li.queue-row").forEach((li) => {
+      const t = tracks[Number(li.dataset.rowIndex)];
+      li.classList.toggle("selected", !!t && sel.has(t));
+    });
   });
 
   effect(() => {
@@ -2938,12 +5044,14 @@ async function init(): Promise<void> {
   nowPlayingArtistInner = nowPlayingArtistEl.querySelector(".marquee-inner") as HTMLElement;
   nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
   nowPlayingAlbumInner = nowPlayingAlbumEl.querySelector(".marquee-inner") as HTMLElement;
-  npStripTitleEl = document.querySelector("#np-strip-title") as HTMLElement;
-  npStripArtistEl = document.querySelector("#np-strip-artist") as HTMLElement;
-  npStripArtistWrapEl = document.querySelector("#np-strip-artist-wrap") as HTMLElement;
-  // Same double-click-to-toggle-mini gesture as the card it replaces in queue mode.
-  const nowPlayingStripEl = document.querySelector("#now-playing-strip") as HTMLElement;
-  nowPlayingStripEl.addEventListener("dblclick", () => void toggleMiniPlayer());
+  navBarTextEl = document.querySelector("#nav-bar-text") as HTMLElement;
+  navBarBtnEl = document.querySelector("#nav-bar-btn") as HTMLButtonElement;
+  navBarBtnEl.addEventListener("click", toggleNavFace);
+  navBarAltBtnEl = document.querySelector("#nav-bar-alt-btn") as HTMLButtonElement;
+  navBarAltBtnEl.addEventListener("click", showSourceList);
+  // Double-click the bar's text (not the button) toggles the mini player, like
+  // the hero card it sits beneath.
+  navBarTextEl.addEventListener("dblclick", () => void toggleMiniPlayer());
   nowPlayingStreamMetaEl = document.querySelector("#now-playing-stream-meta") as HTMLElement;
   streamMetaSongEl = document.querySelector("#stream-meta-song") as HTMLElement;
   streamMetaSongInner = streamMetaSongEl.querySelector(".marquee-inner") as HTMLElement;
@@ -2963,6 +5071,17 @@ async function init(): Promise<void> {
   volumePopover = document.querySelector("#volume-popover") as HTMLElement;
   volumeBar = document.querySelector("#volume-bar") as HTMLInputElement;
   treeContainer = document.querySelector("#folder-tree") as HTMLElement;
+  // The two panes never hold a selection at once: any click in the tree — on a
+  // row or its empty space — drops a list selection. A click off any row also
+  // drops the tree's own multi-select (the file-manager click-off convention).
+  treeContainer.addEventListener("click", (e) => {
+    clearListSelection();
+    if (!(e.target as HTMLElement).closest(".node-label")) clearTreeSelection();
+  });
+  (document.querySelector("#create-playlist-btn") as HTMLButtonElement).addEventListener(
+    "click",
+    () => void menuNewPlaylist(),
+  );
   streamsContainer = document.querySelector("#streams-list") as HTMLElement;
   libraryRootInput = document.querySelector("#library-root") as HTMLInputElement;
   libraryRootBrowseBtn = document.querySelector("#library-root-browse") as HTMLButtonElement;
@@ -2980,11 +5099,25 @@ async function init(): Promise<void> {
   nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
   settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
   splitterEl = document.querySelector("#splitter") as HTMLElement;
-  queueTitleEl = document.querySelector("#queue-title") as HTMLElement;
+  queueTitleEl = document.querySelector("#queue-title-text") as HTMLElement;
   queueSubtitleEl = document.querySelector("#queue-subtitle") as HTMLElement;
   queueListEl = document.querySelector("#queue-list") as HTMLElement;
+  // Mirror of the tree handler: any click in the list — on a row or its empty
+  // space — drops a tree selection, and a click off any row drops the list's own
+  // multi-select.
+  queueListEl.addEventListener("click", (e) => {
+    clearTreeSelection();
+    if (!(e.target as HTMLElement).closest(".queue-row")) clearListSelection();
+  });
   queueCloseBtn = document.querySelector("#queue-close-btn") as HTMLButtonElement;
   queueCloseBtn.addEventListener("click", closeQueue);
+  queueRenameBtn = document.querySelector("#queue-rename-btn") as HTMLButtonElement;
+  // Clicking anywhere on the title — the text or the hover pencil — starts an
+  // inline rename; startTitleEdit no-ops when the header isn't a playlist.
+  (document.querySelector("#queue-title") as HTMLElement).addEventListener("click", startTitleEdit);
+  // Dropping onto the list's empty area (below the last row, or an empty playlist)
+  // targets the end of the list — that case is resolved by updateDropTarget's
+  // hit-test against the list box, so no container drop listener is needed.
   toastEl = document.querySelector("#toast") as HTMLElement;
 
   store = await load(STORE_FILE, { defaults: {}, autoSave: false });
@@ -3007,6 +5140,77 @@ async function init(): Promise<void> {
   await listen<[string, boolean]>("menu:autoadvance", (event) => {
     const [which, enabled] = event.payload;
     setAutoadvance(which === "files" ? "files" : "playlists", enabled);
+  });
+
+  // Playback modes (both default off). The button effects read these signals, so
+  // setting them here syncs the toolbar; the shuffle bag is refilled lazily at
+  // the next play, so no need to seed it now.
+  shuffleMode.value = (await store.get<boolean>(KEY_SHUFFLE)) ?? false;
+  const storedRepeat = await store.get<RepeatMode>(KEY_REPEAT);
+  repeatMode.value =
+    storedRepeat === "all" || storedRepeat === "one" ? storedRepeat : "off";
+
+  // Keep the Playback-menu checkmarks in sync with the frontend's own state —
+  // these effects fire on load (syncing the persisted values) and after any
+  // toolbar or menu change. Mute reflects a zeroed volume.
+  effect(() => {
+    void invoke("set_shuffle_checked", { shuffle: shuffleMode.value });
+  });
+  effect(() => {
+    void invoke("set_repeat_checked", { mode: repeatMode.value });
+  });
+  effect(() => {
+    void invoke("set_mute_checked", { muted: volume.value === 0 });
+  });
+
+  // Recent playlists → the OS "Open Recent ▸" submenu. Load the persisted list
+  // and push it into the native menu.
+  recentPlaylists = (await store.get<RecentPlaylist[]>(KEY_RECENT_PLAYLISTS)) ?? [];
+  syncRecentPlaylistsMenu();
+
+  // Keep "Save Queue as Playlist" enabled only while an ephemeral queue is the active
+  // pool (a saved playlist autosaves; nothing else is convertible). currentNodePath
+  // is a signal, so this re-runs whenever playback moves in or out of the queue.
+  effect(() => {
+    void currentNodePath.value;
+    void activeQueue.value;
+    void invoke("set_save_playlist_enabled", { enabled: queueCanSaveAsPlaylist() });
+  });
+
+  // Keep "Move Playlist File…" enabled only while a playlist is open — browsed,
+  // else playing (openPlaylistPath). There's no file to relocate otherwise, and
+  // enabling it mirrors exactly what menuMovePlaylist would act on.
+  effect(() => {
+    void browsedPlaylist.value;
+    void activeQueue.value;
+    void invoke("set_move_playlist_enabled", { enabled: openPlaylistPath() != null });
+  });
+
+  // Playlist menu intents (New / Open… / Save / Move / Clear Recent), plus a
+  // recent item carrying its own path.
+  await listen<string>("menu:playlist", (event) => {
+    switch (event.payload) {
+      case "new":
+        void menuNewPlaylist();
+        break;
+      case "open":
+        void menuOpenPlaylist();
+        break;
+      case "save":
+        void menuSavePlaylist();
+        break;
+      case "move":
+        void menuMovePlaylist();
+        break;
+      case "recent-clear":
+        recentPlaylists = [];
+        void persistRecentPlaylists();
+        syncRecentPlaylistsMenu();
+        break;
+    }
+  });
+  await listen<string>("menu:playlist-open-path", (event) => {
+    void browsePlaylistPath(event.payload);
   });
 
   setupTabs();
@@ -3044,7 +5248,7 @@ async function init(): Promise<void> {
   });
 
   await listen<string>("open-file", (event) => {
-    void openExternalFile(event.payload);
+    openAssociatedFile(event.payload);
   });
 
   // Next / previous from the OS Now Playing widget or hardware media keys.
@@ -3068,14 +5272,32 @@ async function init(): Promise<void> {
     }
   });
 
+  // Playback-menu Shuffle / Repeat / Volume / Mute / Clear Queue. Each routes to
+  // the same handler the toolbar uses, so state and persistence stay identical;
+  // the sync effects above then re-check the menu items.
+  await listen("menu:shuffle", () => toggleShuffle());
+  await listen<string>("menu:repeat", (event) => {
+    setRepeatMode(event.payload as RepeatMode);
+    // The clicked item auto-toggled its checkmark natively. If it was already the
+    // active mode, setRepeatMode is a no-op (no signal change, so the sync effect
+    // won't fire), which would leave it wrongly unchecked — re-sync explicitly.
+    void invoke("set_repeat_checked", { mode: repeatMode.value });
+  });
+  await listen<string>("menu:volume", (event) => {
+    setVolume(volume.value + (event.payload === "up" ? 0.1 : -0.1));
+  });
+  await listen("menu:mute", () => toggleMute());
+  await listen("menu:miniplayer", () => void toggleMiniPlayer());
+
   // Drain any file passed at launch (cold start). Must happen after the
   // open-file listener is registered so the ready-flag race is closed.
   const pendingOpen = await invoke<string | null>("frontend_ready");
   if (pendingOpen) {
-    void openExternalFile(pendingOpen);
+    openAssociatedFile(pendingOpen);
   }
 
   await refreshTree(libraryRoot);
+  void refreshPlaylistIndex();
   await refreshStreams(manifestPath);
 
   if (libraryRoot) {
@@ -3084,6 +5306,182 @@ async function init(): Promise<void> {
       console.error("watch_library failed", e),
     );
   }
+
+  // Dev/e2e only: connect to the test harness if one launched us. The probe
+  // reports the live playback signals so tests can assert engine/UI agreement.
+  void maybeStartE2eBridge(
+    () => ({
+      isPlaying: isPlaying.value,
+      hasTrack: hasTrack.value,
+      isStream: isStream.value,
+      currentTime: currentTime.value,
+      duration: duration.value,
+      title: npTitle.value,
+      currentNodePath: currentNodePath.value,
+      queuePlayingIndex: queuePlayingIndex.value,
+      shuffle: shuffleMode.value,
+      repeat: repeatMode.value,
+      autoadvanceFiles: autoadvanceFiles.value,
+      autoadvancePlaylists: autoadvancePlaylists.value,
+      queueIsActivePool: queueIsActivePool(),
+      // True while the active pool is a real playlist file (autosaves on curation).
+      // "Add to queue" detaches the pool from its file, flipping this to false.
+      activePoolIsPlaylist: isPlaylistSource(activeQueue.value),
+      queueLength: activeQueue.value?.tracks.length ?? 0,
+      treeSelectionSize: treeSelection.value.size,
+      listSelectionSize: listSelection.value.size,
+    }),
+    {
+      playFile: (p) => openExternalFile(String(p)),
+      // Click a tree row through the real handler, optionally with Cmd/Shift so
+      // tests can drive multi-select (the bridge's plain `click` carries no
+      // modifiers). Dispatches a genuine MouseEvent so onNodeClick runs its true
+      // branch (toggle / range / play).
+      treeClick: (arg) => {
+        const a = arg as { selector: string; meta?: boolean; shift?: boolean };
+        const el = document.querySelector<HTMLElement>(a.selector);
+        if (!el) throw new Error(`no tree row for selector: ${a.selector}`);
+        el.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            metaKey: !!a.meta,
+            shiftKey: !!a.shift,
+          }),
+        );
+      },
+      // Add the current file-tree selection to the queue via the same call the
+      // multi-select context-menu verb makes, so tests assert the selection
+      // resolves to the right tracks.
+      addSelectionToQueue: () => addToQueue(selectedTracks()),
+      // Click a list row (queue / browsed playlist) through the real handler,
+      // optionally with Cmd/Shift, so tests drive the list's multi-select the same
+      // way treeClick drives the tree's. Targets the Nth `li.queue-row` in view
+      // order and dispatches a genuine modifier-carrying MouseEvent.
+      listClick: (arg) => {
+        const a = arg as { index: number; meta?: boolean; shift?: boolean };
+        const rows = queueListEl.querySelectorAll<HTMLElement>("li.queue-row");
+        const el = rows[a.index];
+        if (!el) throw new Error(`no queue row at index: ${a.index}`);
+        el.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            metaKey: !!a.meta,
+            shiftKey: !!a.shift,
+          }),
+        );
+      },
+      // The list-pane (queue / browsed playlist) equivalents of the verbs above,
+      // acting on the object-keyed list selection.
+      addListSelectionToQueue: () => addToQueue(selectedListTracks()),
+      removeListSelection: () => removeCuratedTracks(selectedListTracks()),
+      // Set an autoadvance context toggle through the real setAutoadvance path
+      // (the same one the OS Playback menu drives), so a toggle mid-play also
+      // reconciles the engine via applyAutoadvanceChange.
+      setAutoadvance: (arg) => {
+        const a = arg as { which: "files" | "playlists"; enabled: boolean };
+        setAutoadvance(a.which, a.enabled);
+      },
+      // Add paths to the queue via the real "Add to queue" entry point: appends
+      // to an open queue, or starts a fresh one when nothing is queued.
+      addToQueue: (arg) => {
+        const a = arg as { paths: string[] };
+        addToQueue(
+          a.paths.map((path) => ({ path, title: null, artist: null, album: null })),
+        );
+      },
+      // Play a saved playlist file from disk through the real read+play path, so
+      // it becomes the active pool under the Playlists autoadvance context.
+      playPlaylist: (arg) => playPlaylistPath(String((arg as { path: string }).path)),
+      // Open a saved playlist in the browse pane (single-click path) without
+      // changing playback, so curation tests can edit a browsed copy.
+      browsePlaylist: (arg) => browsePlaylistPath(String((arg as { path: string }).path)),
+      // Save Queue as Playlist to an explicit path, bypassing the native file
+      // picker (undrivable in e2e). Runs the real post-dialog logic so tests can
+      // assert the ephemeral queue becomes an autosaving playlist source.
+      savePlaylistAs: (arg) =>
+        saveQueueAsPlaylist(String((arg as { path: string }).path)),
+      // Add explicit paths to a specific playlist file via the real
+      // "Add to playlist ▸" entry point (addTracksToPlaylist), so tests exercise
+      // its open-list-vs-closed-file routing — including the case where the target
+      // is the playing pool but a *different* playlist is browsed.
+      addToPlaylist: (arg) => {
+        const a = arg as { path: string; paths: string[] };
+        const tracks: SearchTrack[] = a.paths.map((path) => ({
+          path,
+          title: null,
+          artist: null,
+          album: null,
+        }));
+        return addTracksToPlaylist(a.path, () => tracks);
+      },
+      // Leave a browsed playlist for the playing source's own list (the real nav
+      // path), so a subsequent curation targets the active pool rather than the
+      // browsed copy.
+      showSourceList: () => showSourceList(),
+      // Remove a row from the open (browsed or active) list via the real curation
+      // path, so the edit reconciles engine + activeQueue when it hits the pool.
+      removeRow: (arg) => removeCuratedRow((arg as { index: number }).index),
+      // Play an explicit set of file paths as a synthetic pool via the real
+      // playQueue path, so curation tests can reorder/remove a live multi-track
+      // list. The "queue:" path makes it the active pool (queueIsActivePool).
+      playPaths: (arg) => {
+        const a = arg as { paths: string[]; startIndex?: number };
+        const tracks: SearchTrack[] = a.paths.map((path) => ({
+          path,
+          title: null,
+          artist: null,
+          album: null,
+        }));
+        playQueue(
+          {
+            kind: "folder",
+            title: "E2E Pool",
+            subtitle: `${tracks.length} tracks`,
+            tracks,
+          },
+          "queue:e2e:pool",
+          a.startIndex,
+        );
+      },
+      // Reorder a row by synthesizing the real pointer-drag: pointerdown on the
+      // row, a move past the drag threshold, a move to the target position, then
+      // pointerup. Drives the actual attachRowReorder path (threshold, hit-test,
+      // drop) rather than shortcutting to reorderCuratedTracks, so the test reflects
+      // real drag behavior. `to` matches reorderCuratedTracks's insert-before index.
+      dragRow: (arg) => {
+        const a = arg as { from: number; to: number };
+        const rows = Array.from(
+          queueListEl.querySelectorAll<HTMLElement>("li.queue-row"),
+        );
+        const src = rows[a.from];
+        if (!src) return;
+        const s = src.getBoundingClientRect();
+        const sx = s.left + s.width / 2;
+        const sy = s.top + s.height / 2;
+        let tx: number;
+        let ty: number;
+        if (a.to >= rows.length) {
+          const last = rows[rows.length - 1].getBoundingClientRect();
+          tx = last.left + last.width / 2;
+          ty = last.bottom + 4; // empty area past the last row -> insert at end
+        } else {
+          const t = rows[a.to].getBoundingClientRect();
+          tx = t.left + t.width / 2;
+          ty = t.top + t.height * 0.25; // top half -> insert before row `to`
+        }
+        const fire = (target: EventTarget, type: string, x: number, y: number) =>
+          target.dispatchEvent(
+            new PointerEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }),
+          );
+        fire(src, "pointerdown", sx, sy);
+        fire(window, "pointermove", sx + 8, sy + 8); // cross the drag threshold
+        fire(window, "pointermove", tx, ty); // hit-test the target row
+        fire(window, "pointerup", tx, ty);
+      },
+    },
+  );
 }
 
 window.addEventListener("DOMContentLoaded", init);
