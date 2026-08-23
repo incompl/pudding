@@ -7,7 +7,7 @@ import {
 } from "@tauri-apps/api/window";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect } from "@preact/signals-core";
 import { GaplessEngine } from "./audio-engine";
 import { maybeStartE2eBridge } from "./e2e-bridge";
@@ -1144,6 +1144,7 @@ function renderNode(
         ),
         { label: "Rename", action: () => startTreePlaylistRename(node, label) },
         { label: "Delete", action: () => void deletePlaylistNode(node) },
+        showInFinderItem(node.path),
       ]);
     });
   } else if (node.isFolder) {
@@ -1165,6 +1166,7 @@ function renderNode(
         addToPlaylistItem(() =>
           invoke<SearchTrack[]>("folder_tracks", { path: node.path }),
         ),
+        showInFinderItem(node.path),
       ]);
     });
   } else {
@@ -1189,6 +1191,8 @@ function renderNode(
         // acting on every selected track. Count in the label confirms the scope.
         items.push({ label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) });
         items.push(addToPlaylistItem(() => sel));
+        // revealItemInDir takes one path; reveal the first selected track.
+        items.push(showInFinderItem(sel[0].path));
       } else {
         // The Play verbs lead — the navigation verbs (Play artist / Play album)
         // when their tags exist, else "Play folder" on the container for an
@@ -1208,6 +1212,7 @@ function renderNode(
         }
         items.push({ label: "Add to queue", action: () => addToQueue([nodeToTrack(node)]) });
         items.push(addToPlaylistItem(() => [nodeToTrack(node)]));
+        items.push(showInFinderItem(node.path));
       }
       showContextMenu(e.clientX, e.clientY, items);
     });
@@ -3702,6 +3707,22 @@ type TrackProvider = () => SearchTrack[] | Promise<SearchTrack[]>;
 // playlist is offered, including the one a row already belongs to — matching
 // how mainstream players handle it (a self-add just duplicates the row, which
 // this app's positional model allows).
+// "Show in Finder" verb, shared by the track / folder / playlist menus. Opens
+// the OS file explorer with the item selected (a file is highlighted in its
+// containing folder; a folder reveals itself). One path per invocation, so a
+// multi-selection reveals its first item.
+function showInFinderItem(path: string): ContextMenuItem {
+  return {
+    label: "Show in Finder",
+    action: () => {
+      revealItemInDir(path).catch((e) => {
+        console.error("revealItemInDir failed", path, e);
+        toast("Couldn't show in Finder");
+      });
+    },
+  };
+}
+
 function addToPlaylistItem(getTracks: TrackProvider): ContextMenuItem {
   const submenu: ContextMenuItem[] = [
     { label: "New Playlist…", action: () => void newPlaylistWithTracks(getTracks) },
@@ -5267,6 +5288,17 @@ async function init(): Promise<void> {
   streamMetaSongInner = streamMetaSongEl.querySelector(".marquee-inner") as HTMLElement;
   streamMetaArtistEl = document.querySelector("#stream-meta-artist") as HTMLElement;
   streamMetaArtistInner = streamMetaArtistEl.querySelector(".marquee-inner") as HTMLElement;
+  // The metadata above is selectable text (copy "what's playing"), so a
+  // double-click on it selects a word instead of bubbling to #now-playing-main's
+  // mini-player toggle. The panel's art and empty space still toggle as before.
+  for (const el of [
+    nowPlayingTitleEl,
+    nowPlayingArtistEl,
+    nowPlayingAlbumEl,
+    nowPlayingStreamMetaEl,
+  ]) {
+    el.addEventListener("dblclick", (e) => e.stopPropagation());
+  }
   liveIndicatorEl = document.querySelector("#live-indicator") as HTMLElement;
   nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
   nowPlayingEmptyEl = document.querySelector("#now-playing-empty") as HTMLElement;

@@ -53,6 +53,25 @@ body {
   line-height: 1.5;
   background: var(--bg);
   color: var(--text);
+  /* This is a native desktop app, not a document: its chrome (rows, titles,
+     buttons, labels) is UI, not selectable prose. Default the whole app to
+     no-select so a click, double-click, or right-click never rubber-bands text,
+     then opt selection back in below for the few places that are genuinely text
+     — input fields and the now-playing metadata you'd want to copy. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The opt-ins: real text-entry controls, plus the now-playing title/artist/album
+   and stream metadata (copy "what's playing", handy for radio streams). */
+input,
+textarea,
+#now-playing-title,
+#now-playing-artist,
+#now-playing-album,
+#now-playing-stream-meta {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .hidden {
@@ -483,9 +502,6 @@ body.platform-mac #tabs {
   gap: 0.4em;
   min-height: 0;
   padding: 1em;
-  /* double-click here toggles the mini player; don't select the title text */
-  user-select: none;
-  -webkit-user-select: none;
 }
 
 #now-playing-art {
@@ -609,9 +625,6 @@ body.platform-mac #tabs {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* double-click here toggles the mini player; don't select the text */
-  user-select: none;
-  -webkit-user-select: none;
 }
 
 #nav-bar-btn,
