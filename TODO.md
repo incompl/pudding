@@ -49,3 +49,11 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
 * Option to create a default radio manifest
 
 ### Support multiple library paths
+
+### Add "Reveal in finder" to context menus
+
+### Modify radio manifest in Streams tab
+
+* Reorder with drag and drop
+* Add / delete stream (follow pattern used for playlists)
+* Edit
