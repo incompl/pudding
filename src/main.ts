@@ -5281,10 +5281,12 @@ async function init(): Promise<void> {
   volumePopover = document.querySelector("#volume-popover") as HTMLElement;
   volumeBar = document.querySelector("#volume-bar") as HTMLInputElement;
   treeContainer = document.querySelector("#folder-tree") as HTMLElement;
-  // The two panes never hold a selection at once: any click in the tree — on a
-  // row or its empty space — drops a list selection. A click off any row also
+  // The two panes never hold a selection at once: any click in the files tab — on
+  // a row or its empty space — drops a list selection. A click off any row also
   // drops the tree's own multi-select (the file-manager click-off convention).
-  treeContainer.addEventListener("click", (e) => {
+  // Bound to the whole scrolling tab-panel (not just #folder-tree, which only
+  // grows to its content) so the blank area below the last row deselects too.
+  (document.querySelector("#tab-files") as HTMLElement).addEventListener("click", (e) => {
     clearListSelection();
     if (!(e.target as HTMLElement).closest(".node-label")) clearTreeSelection();
   });
@@ -5293,6 +5295,11 @@ async function init(): Promise<void> {
     () => void menuNewPlaylist(),
   );
   streamsContainer = document.querySelector("#streams-list") as HTMLElement;
+  // Same click-off convention for the streams tab: a click below the rows (or on
+  // any empty space in the tab-panel) drops the stream highlight.
+  (document.querySelector("#tab-streams") as HTMLElement).addEventListener("click", (e) => {
+    if (!(e.target as HTMLElement).closest(".node-label")) selectedStreamUrl.value = null;
+  });
   libraryRootInput = document.querySelector("#library-root") as HTMLInputElement;
   libraryRootBrowseBtn = document.querySelector("#library-root-browse") as HTMLButtonElement;
   manifestPathInput = document.querySelector("#manifest-path") as HTMLInputElement;
