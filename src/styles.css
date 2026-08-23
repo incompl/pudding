@@ -29,6 +29,12 @@
      distinguishing a playlist from folders and tracks. Same stroked/tinted
      recipe. */
   --playlist-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 12H3'/%3E%3Cpath d='M16 6H3'/%3E%3Cpath d='M12 18H3'/%3E%3Cpath d='m16 12 5 3-5 3v-6Z'/%3E%3C/svg%3E");
+
+  /* Filled triangle for the per-row hover play button in the track gutter. The
+     viewBox is cropped to the triangle's bounds (not the usual 0 0 24 24) so the
+     glyph has no built-in left padding — left-aligned in its box it then lines
+     up with the left-aligned track numbers it replaces on hover. */
+  --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='8 5 11 14' fill='%23fff'%3E%3Cpath d='M8 5v14l11-7z'/%3E%3C/svg%3E");
 }
 
 html,
@@ -759,14 +765,71 @@ body.platform-mac #tabs {
 }
 
 /* Left-aligned so the numbers form a column flush with the queue title; the
-   fixed width keeps the track text aligned in the second column. */
+   fixed width keeps the track text aligned in the second column. Number and
+   hover play button share this one cell (grid, both at 1/1) so the button lands
+   exactly where the number was, mirroring the tree's track gutter. */
 .queue-num {
   flex: none;
   width: 1.5em;
-  text-align: left;
+  display: grid;
+  justify-items: start;
+  align-items: center;
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
   font-size: 0.9em;
+}
+
+.queue-num .queue-num-text,
+.queue-num .row-play {
+  grid-area: 1 / 1;
+}
+
+.queue-num .row-play {
+  display: none;
+  width: 1.25em;
+  height: 0.95em;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  /* Inherit the gutter color (muted at rest, accent on the playing row) so the
+     triangle picks it up via currentColor. */
+  color: inherit;
+}
+
+.queue-num .row-play::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-color: currentColor;
+  -webkit-mask-image: var(--play-icon);
+  mask-image: var(--play-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  /* Near-left (not center): the button is a wide click target but the numbers are
+     left-aligned in the gutter, so keeping the triangle to the left lands its
+     optical center over the digit column instead of a few px to its right. The
+     small inset matches the digit's left side-bearing so the two line up. */
+  -webkit-mask-position: 0.2em center;
+  mask-position: 0.2em center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+
+/* On row hover the gutter number gives way to the play button, which brightens
+   to the accent — identical to the tree's track rows. A missing row has no play
+   button (it can't be played), so it keeps its number rather than going blank. */
+.queue-row:hover:not(.missing) .queue-num .queue-num-text {
+  visibility: hidden;
+}
+
+.queue-row:hover .queue-num .row-play {
+  display: block;
+}
+
+.queue-row:hover .queue-num .row-play::before {
+  background-color: var(--accent);
 }
 
 .queue-text {
@@ -1505,7 +1568,12 @@ body.dragging-noselect * {
   font-size: 0.95em;
   letter-spacing: 0.02em;
   color: var(--text-muted);
-  transition: color 120ms ease, border-color 120ms ease;
+  /* Only the label color eases. The underline is NOT transitioned: animating
+     border-color fades the outgoing tab's accent underline through partial-alpha
+     "darker green" values over ~120ms, which reads as a stray underline lingering
+     on the tab you just left. Snapping it on/off keeps the underline strictly a
+     marker of the active tab. */
+  transition: color 120ms ease;
 }
 
 .tab:hover {
@@ -1616,11 +1684,13 @@ ul {
 /* Multi-select rows carry an accent-tinted background so a built-up selection
    reads at a glance, distinct from the neutral .open playlist background. The
    accent text of a .playing row still shows through on top. */
-#folder-tree .node-label.selected {
+#folder-tree .node-label.selected,
+#streams-list .node-label.selected {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
-#folder-tree .node-label.selected:hover {
+#folder-tree .node-label.selected:hover,
+#streams-list .node-label.selected:hover {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
@@ -1686,17 +1756,92 @@ ul {
    the title (untagged files carry no glyph). It occupies the
    same icon column as a sibling folder (the child-ul
    indent, not an extra per-row margin) so files and folders at the same tree
-   level line up. The number is left-aligned so it sits directly under the parent
-   folder's name; the box keeps the folder icon's 1.1em width even though the
-   digit is shrunk — 1.1em / 0.8 = 1.375em in this smaller box — so the title
-   column stays aligned with sibling folder names. */
+   level line up. The number (and the hover/untagged play button) is centered in
+   the cell, matching how the folder/playlist icons are centered in theirs, so
+   every gutter glyph shares one column; the box keeps the folder icon's 1.1em
+   width even though the digit is shrunk — 1.1em / 0.8 = 1.375em in this smaller
+   box — so the title column stays aligned with sibling folder names. */
 .icon.track {
   display: grid;
-  place-items: center start;
+  place-items: center;
   width: 1.375em;
   font-size: 0.8em;
   font-variant-numeric: tabular-nums;
   color: #666;
+}
+
+/* Number and hover play button share the one gutter cell so the button lands
+   exactly where the number was. */
+.icon.track .track-num,
+.icon.track .row-play,
+.icon.stream .radio,
+.icon.stream .row-play {
+  grid-area: 1 / 1;
+}
+
+.icon.track .row-play,
+.icon.stream .row-play {
+  display: none;
+  /* Wide enough to stay an easy click target; the triangle sizes to `height`
+     and is centered (both this box in the cell and the mask in this box), so it
+     lands in the same column as the centered track numbers and folder icons. */
+  width: 1.25em;
+  height: 0.95em;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  /* Inherit the gutter's color (muted gray at rest, accent on the playing row)
+     so the always-on button for untagged rows below can pick it up via
+     currentColor. Buttons don't inherit color on their own. */
+  color: inherit;
+}
+
+.icon.track .row-play::before,
+.icon.stream .row-play::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-color: var(--accent);
+  -webkit-mask-image: var(--play-icon);
+  mask-image: var(--play-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  /* Centered — the tight-cropped viewBox (see --play-icon) has no lopsided
+     padding, so a centered triangle is optically centered in the gutter column. */
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+
+/* On row hover the gutter number gives way to the play button. */
+.node-label:hover .icon.track .track-num {
+  visibility: hidden;
+}
+
+.node-label:hover .icon.track .row-play,
+.node-label:hover .icon.stream .row-play {
+  display: block;
+}
+
+/* Untagged rows have no track number, which left the gutter blank and made their
+   titles read as mis-indented against numbered siblings. Show the play button at
+   rest instead, so the gutter always has a visible anchor. currentColor renders
+   it in the same muted gray as the numbers (and the accent on the playing row,
+   which recolors .icon.track); on hover it brightens to the accent, identical to
+   a numbered row's hover state. */
+.icon.track .track-num:empty ~ .row-play {
+  display: block;
+}
+
+.icon.track .track-num:empty ~ .row-play::before {
+  background-color: currentColor;
+}
+
+.node-label:hover .icon.track .track-num:empty ~ .row-play::before {
+  background-color: var(--accent);
 }
 
 .icon.folder {
@@ -1711,10 +1856,32 @@ ul {
   mask-image: var(--folder-open-icon);
 }
 
-.icon.radio {
+/* A stream slot mirrors .icon.track: a grid cell holding the station glyph and
+   the hover play button in the same spot, so a click can select while the button
+   (or a double-click) plays. */
+.icon.stream {
+  display: grid;
+  place-items: center;
+}
+
+.icon.stream .radio {
+  width: 100%;
+  height: 100%;
   background-color: var(--text-muted);
   -webkit-mask-image: var(--radio-icon);
   mask-image: var(--radio-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 1.05em;
+  mask-size: 1.05em;
+}
+
+/* On row hover the station glyph gives way to the play button, like the track
+   number does. */
+.node-label:hover .icon.stream .radio {
+  visibility: hidden;
 }
 
 .icon.playlist {
@@ -1723,10 +1890,10 @@ ul {
   mask-image: var(--playlist-icon);
 }
 
-/* Folder/stream/playlist icons pick up the accent on row hover. */
+/* Folder/playlist icons pick up the accent on row hover. (A stream's glyph is
+   swapped for the play button on hover, so it needs no hover tint.) */
 .node-label:hover .icon.folder,
 .node-label:hover .icon.folder-open,
-.node-label:hover .icon.radio,
 .node-label:hover .icon.playlist {
   background-color: var(--accent);
 }
@@ -1739,6 +1906,11 @@ ul {
 /* A playlist playing from the tree tints its glyph to match, the way the track
    number does — the masked icon takes the accent via background-color. */
 .node-label.playing .icon.playlist {
+  background-color: var(--accent);
+}
+
+/* The playing station's glyph takes the accent, matching the row highlight. */
+.node-label.playing .icon.stream .radio {
   background-color: var(--accent);
 }
 

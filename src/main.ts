@@ -193,6 +193,11 @@ const volumePopoverOpen = signal(false);
 
 const currentNodePath = signal<string | null>(null);
 const currentStreamUrl = signal<string | null>(null);
+// The stream row highlighted by a single click — a select, not a commit. Mirrors
+// the tree's select-on-click (play is the hover button or a double-click), so a
+// click can preview which station you're about to start without interrupting
+// what's already playing.
+const selectedStreamUrl = signal<string | null>(null);
 
 const settingsOpen = signal(false);
 const activeTab = signal<"files" | "streams">("files");
@@ -443,14 +448,11 @@ function clearTreeSelection(): void {
   treeSelection.value = new Set();
 }
 
-// A plain play-click makes the clicked track the range anchor without selecting
-// it: the row shows no highlight (a lone play-selection is incidental, and does
-// nothing the click itself didn't), but a following Shift-click ranges from
-// here. Any prior multi-select is dropped.
-function anchorTreeSelection(path: string): void {
+// Plain click: select just this row and anchor a following Shift-range here.
+// Replaces any prior multi-select with the single clicked track.
+function selectTreeSingle(path: string): void {
+  treeSelection.value = new Set([path]);
   selectionAnchor = path;
-  if (treeSelection.peek().size === 0) return;
-  treeSelection.value = new Set();
 }
 
 // Cmd/Ctrl-click: add or remove one track, and re-anchor the range here.
@@ -464,7 +466,17 @@ function toggleTreeSelection(path: string): void {
 
 // Shift-click: replace the selection with the contiguous range from the anchor to
 // `path` over the visible track order. With no live anchor, this click becomes it.
+// Shift-clicking a track that's already selected deselects just it, so a range can
+// be trimmed a track at a time.
 function selectTreeRangeTo(path: string): void {
+  const sel = treeSelection.peek();
+  if (sel.has(path)) {
+    const next = new Set(sel);
+    next.delete(path);
+    treeSelection.value = next;
+    selectionAnchor = path;
+    return;
+  }
   const order = collectTrackNodes(true).map((n) => n.path);
   const to = order.indexOf(path);
   if (to === -1) return;
@@ -490,6 +502,12 @@ function selectTreeRangeTo(path: string): void {
 const listSelection = signal<Set<SearchTrack>>(new Set());
 let listSelectionAnchor: SearchTrack | null = null;
 
+// The pane whose selection a keyboard Enter should play — set by the click that
+// last touched a selection in the tree, the list, or the streams pane. Enter is a
+// commit for the same row a click now merely selects, so it needs to know which
+// of the (independently selectable) panes the user last acted in.
+let lastSelectionPane: "tree" | "list" | "stream" | null = null;
+
 function openListTracks(): SearchTrack[] {
   return (browsedPlaylist.value ?? activeQueue.value)?.tracks ?? [];
 }
@@ -508,12 +526,12 @@ function clearListSelection(): void {
   listSelection.value = new Set();
 }
 
-// List-pane counterpart to anchorTreeSelection: a plain play-click anchors the
-// clicked row for a following Shift-click without highlighting it.
-function anchorListSelection(t: SearchTrack): void {
+// Plain click: select just this row and anchor a following Shift-range here.
+// Replaces any prior multi-select with the single clicked track. List-pane
+// counterpart to the tree's selectTreeSingle.
+function selectListSingle(t: SearchTrack): void {
+  listSelection.value = new Set([t]);
   listSelectionAnchor = t;
-  if (listSelection.peek().size === 0) return;
-  listSelection.value = new Set();
 }
 
 // Cmd/Ctrl-click: add or remove one row, and re-anchor the range here.
@@ -527,8 +545,17 @@ function toggleListSelection(t: SearchTrack): void {
 
 // Shift-click: replace the selection with the contiguous range from the anchor to
 // `t` over the view order, skipping missing rows. With no live anchor, `t` becomes
-// it.
+// it. Shift-clicking a row that's already selected deselects just it, so a range
+// can be trimmed a row at a time.
 function selectListRangeTo(t: SearchTrack): void {
+  const sel = listSelection.peek();
+  if (sel.has(t)) {
+    const next = new Set(sel);
+    next.delete(t);
+    listSelection.value = next;
+    listSelectionAnchor = t;
+    return;
+  }
   const tracks = openListTracks();
   const to = tracks.indexOf(t);
   if (to === -1) return;
@@ -1046,9 +1073,12 @@ function renderNode(
   }
   const icon = document.createElement("span");
   icon.className = "icon";
-  // Folders show an open/closed folder. A file's slot carries its tagged track
-  // number when it has one (the playing row just recolors it); an untagged file
-  // — or any loose top-level file — gets no gutter icon and sits flush.
+  // Folders show an open/closed folder. A track's slot carries its tagged track
+  // number when it has one (the playing row just recolors it) and, on row hover,
+  // a play button in the same cell — clicking a row now selects rather than
+  // plays, so the hover button (or a double-click) is how you play one track.
+  // Every track keeps the gutter even when untagged/loose so the play button has
+  // a home and titles stay aligned with sibling folders.
   if (node.isPlaylist) {
     // A playlist gets its own "stack of rows" glyph, distinct from folders and
     // tracks, and always occupies the gutter.
@@ -1057,9 +1087,22 @@ function renderNode(
   } else if (node.isFolder) {
     icon.classList.add(node.expanded ? "folder-open" : "folder");
     label.appendChild(icon);
-  } else if (parent !== rootNode && node.track != null) {
+  } else {
     icon.classList.add("track");
-    icon.textContent = String(node.track);
+    const num = document.createElement("span");
+    num.className = "track-num";
+    if (parent !== rootNode && node.track != null) num.textContent = String(node.track);
+    icon.appendChild(num);
+    const playBtn = document.createElement("button");
+    playBtn.className = "row-play";
+    playBtn.setAttribute("aria-label", "Play");
+    // The button plays directly and swallows the click so the row's
+    // select-on-click doesn't also fire.
+    playBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      playTreeTrack(node, parent);
+    });
+    icon.appendChild(playBtn);
     label.appendChild(icon);
   }
   const text = document.createElement("span");
@@ -1181,6 +1224,9 @@ function renderNode(
         sel.has(node.path) && sel.size > 1 ? selectedTracks() : [nodeToTrack(node)];
       startTrackDrag(e, tracks);
     });
+    // Double-click anywhere on the row plays it — the second verb alongside the
+    // hover play button, now that a plain click only selects.
+    label.addEventListener("dblclick", () => playTreeTrack(node, parent));
   }
   li.appendChild(label);
 
@@ -1212,28 +1258,112 @@ async function onNodeClick(
     if (!node.loaded) await loadChildren(node, li);
     node.expanded = !node.expanded;
     li.replaceWith(renderNode(node, parent));
-  } else if (e && (e.metaKey || e.ctrlKey)) {
+    return;
+  }
+  lastSelectionPane = "tree";
+  if (e && (e.metaKey || e.ctrlKey)) {
     // Cmd/Ctrl-click builds a discontiguous selection without playing anything.
     toggleTreeSelection(node.path);
   } else if (e && e.shiftKey) {
     // Shift-click extends a contiguous range from the anchor, also without playing.
     selectTreeRangeTo(node.path);
   } else {
-    // A plain click plays. It drops any multi-select but keeps the clicked track
-    // as the range anchor (unhighlighted), so a following Shift-click ranges from
-    // here — click A, Shift-click B selects A..B.
-    anchorTreeSelection(node.path);
-    // A plain tree track plays with its album auto-continuing under the hood. It
-    // does NOT clear any explicit queue — that stays stashed and visible so the
-    // user can return to it (the only way back in is to play from the queue).
-    // Drop the queue highlight now (the folder becomes the pool) rather than
-    // waiting a frame for onAdvance.
-    queuePlayingIndex.value = null;
-    // A lone track is bare continuation (hero only, no list appears); dismiss
-    // any open queue/playlist so no nav bar lingers over it.
-    resetToLonePlayback();
-    playFile(node, parent);
+    // A plain click now selects the single row (and anchors a following
+    // Shift-range here) instead of playing — play is the hover play button or a
+    // double-click (see playTreeTrack). Matches playlists (single = inspect,
+    // double = commit) and lets you browse without interrupting playback.
+    selectTreeSingle(node.path);
   }
+}
+
+// Play a tree track — the hover play button or a double-click. Selects the
+// played row (dropping any multi-select) so it stays highlighted, matching Apple
+// Music, and clears the queue highlight so the folder becomes the pool. Does NOT
+// clear any explicit queue — that stays stashed and visible so the user can
+// return to it. A lone track is bare continuation (hero only), so dismiss any
+// open queue/playlist chrome first.
+function playTreeTrack(node: TreeNode, parent: TreeNode): void {
+  selectTreeSingle(node.path);
+  queuePlayingIndex.value = null;
+  resetToLonePlayback();
+  playFile(node, parent);
+}
+
+// Find a loaded track node and its parent by path, walking every loaded folder
+// (so a selection under a collapsed folder still resolves). Returns null for a
+// path that isn't a currently-loaded track — e.g. a folder collapsed away its
+// children after selection.
+function findTreeNodeAndParent(path: string): { node: TreeNode; parent: TreeNode } | null {
+  let found: { node: TreeNode; parent: TreeNode } | null = null;
+  const walk = (parent: TreeNode): void => {
+    for (const child of parent.children) {
+      if (found) return;
+      if (child.isFolder) {
+        if (child.loaded) walk(child);
+      } else if (!child.isPlaylist && child.path === path) {
+        found = { node: child, parent };
+      }
+    }
+  };
+  if (rootNode) walk(rootNode);
+  return found;
+}
+
+// Play whatever a keyboard Enter should commit: the selected row in the pane the
+// user last acted in. A commit for the same row a plain click now merely selects.
+// Returns true when it played something (so the caller can preventDefault).
+// Sidebar panes only fire when their tab is showing, so Enter never plays a row
+// hidden behind the other tab; the list pane is always visible.
+function playSelectedRow(): boolean {
+  if (lastSelectionPane === "stream" && activeTab.value === "streams") {
+    const url = selectedStreamUrl.value;
+    const stream = url ? allStreams.find((s) => s.url === url) : undefined;
+    if (stream) {
+      playStream(stream);
+      return true;
+    }
+    return false;
+  }
+  if (lastSelectionPane === "tree" && activeTab.value === "files") {
+    // The anchor is the last row a click touched — the natural "focused" row to
+    // commit when a range is selected. Fall back to a lone selected path.
+    const sel = treeSelection.value;
+    const path =
+      selectionAnchor && sel.has(selectionAnchor)
+        ? selectionAnchor
+        : sel.size === 1
+          ? [...sel][0]
+          : null;
+    const hit = path ? findTreeNodeAndParent(path) : null;
+    if (hit) {
+      playTreeTrack(hit.node, hit.parent);
+      return true;
+    }
+    return false;
+  }
+  if (lastSelectionPane === "list") {
+    const { list, isSource } = paneView.value;
+    if (!list) return false;
+    // The anchor is the focused row; fall back to a lone selection. Map it to a
+    // playable-pool index (missing rows are skipped, mirroring renderQueue).
+    const sel = listSelection.value;
+    const lone = sel.size === 1 ? [...sel][0] : null;
+    const target =
+      listSelectionAnchor && sel.has(listSelectionAnchor) ? listSelectionAnchor : lone;
+    if (!target || target.missing) return false;
+    let poolIdx = 0;
+    for (const row of list.tracks) {
+      if (row.missing) continue;
+      if (row === target) {
+        if (isSource) playQueueTrack(poolIdx);
+        else commitBrowsedPlaylist(poolIdx);
+        return true;
+      }
+      poolIdx++;
+    }
+    return false;
+  }
+  return false;
 }
 
 function renderTree(): void {
@@ -1265,14 +1395,39 @@ function renderStreams(streams: Stream[]): void {
     if (currentStreamUrl.value === stream.url) {
       label.classList.add("playing");
     }
+    if (selectedStreamUrl.value === stream.url) {
+      label.classList.add("selected");
+    }
+    // The gutter shows the station glyph at rest and a play button on hover —
+    // the same swap tree tracks do with their track number, now that a plain
+    // click selects rather than plays.
     const icon = document.createElement("span");
-    icon.className = "icon radio";
+    icon.className = "icon stream";
+    const glyph = document.createElement("span");
+    glyph.className = "radio";
+    icon.appendChild(glyph);
+    const playBtn = document.createElement("button");
+    playBtn.className = "row-play";
+    playBtn.setAttribute("aria-label", "Play");
+    // Plays directly and swallows the click so the row's select-on-click doesn't
+    // also fire.
+    playBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      playStream(stream);
+    });
+    icon.appendChild(playBtn);
     label.appendChild(icon);
     const text = document.createElement("span");
     text.className = "label-text";
     text.textContent = stream.name;
     label.appendChild(text);
-    label.addEventListener("click", () => playStream(stream));
+    // Single click selects (highlight only); the hover play button or a
+    // double-click commits — matching the file tree and playlists.
+    label.addEventListener("click", () => {
+      lastSelectionPane = "stream";
+      selectedStreamUrl.value = stream.url;
+    });
+    label.addEventListener("dblclick", () => playStream(stream));
     li.appendChild(label);
     ul.appendChild(li);
   }
@@ -1348,8 +1503,13 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
     const num = document.createElement("span");
     num.className = "queue-num";
     // The playing row keeps its index and just recolors to the accent (like the
-    // tree's track rows), rather than swapping in a glyph.
-    num.textContent = String(i + 1);
+    // tree's track rows), rather than swapping in a glyph. The number and the
+    // hover play button share this one gutter cell (see CSS), so the button
+    // lands exactly where the number was.
+    const numText = document.createElement("span");
+    numText.className = "queue-num-text";
+    numText.textContent = String(i + 1);
+    num.appendChild(numText);
     const text = document.createElement("span");
     text.className = "queue-text";
     const primary = document.createElement("span");
@@ -1380,10 +1540,31 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
     if (t.missing) {
       li.classList.add("missing");
     } else {
+      // Select-and-play, shared by the hover play button and a double-click. The
+      // played row stays selected (matching the tree and Apple Music). Source
+      // list: jump the pool to this row. Browsed playlist: commit it — play the
+      // playlist from that track, making it the source.
+      const playRow = () => {
+        selectListSingle(t);
+        if (isSource) playQueueTrack(rowPoolIdx);
+        else commitBrowsedPlaylist(rowPoolIdx);
+      };
+      // Hover play button in the gutter, mirroring the tree's track rows. Swallows
+      // the click so the row's select-on-click doesn't also fire.
+      const playBtn = document.createElement("button");
+      playBtn.type = "button";
+      playBtn.className = "row-play";
+      playBtn.setAttribute("aria-label", "Play");
+      playBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        playRow();
+      });
+      num.appendChild(playBtn);
       li.addEventListener("click", (e) => {
-        // Cmd/Ctrl- and Shift-click build a selection instead of playing; a plain
-        // click plays/commits, keeping the row as an unhighlighted range anchor so
-        // a following Shift-click ranges from here.
+        lastSelectionPane = "list";
+        // Cmd/Ctrl- and Shift-click build a selection; a plain click selects just
+        // this row (and anchors a following Shift-range here). Play is the hover
+        // button or a double-click, matching the tree.
         if (e.metaKey || e.ctrlKey) {
           toggleListSelection(t);
           return;
@@ -1392,12 +1573,9 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
           selectListRangeTo(t);
           return;
         }
-        anchorListSelection(t);
-        // Source list: jump the pool to this row. Browsed playlist: commit it —
-        // play the playlist from that track, making it the source.
-        if (isSource) playQueueTrack(rowPoolIdx);
-        else commitBrowsedPlaylist(rowPoolIdx);
+        selectListSingle(t);
       });
+      li.addEventListener("dblclick", playRow);
     }
     // Right-click a playable row to queue it, add it to a playlist, or (multi)
     // remove it (a missing row has no real file to copy, so it's skipped).
@@ -2166,6 +2344,9 @@ function playStream(stream: Stream): void {
   currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = stream.url;
+  // The played station is also the selected row, so selection follows playback
+  // (matching a played tree track) rather than leaving a stale prior highlight.
+  selectedStreamUrl.value = stream.url;
   currentStreamName = stream.name;
   isStream.value = true;
   currentTime.value = 0;
@@ -4020,7 +4201,15 @@ function setupTabs(): void {
   const tabs = document.querySelectorAll<HTMLButtonElement>(".tab");
   for (const btn of tabs) {
     btn.addEventListener("click", () => {
-      activeTab.value = btn.dataset.tab as "files" | "streams";
+      const next = btn.dataset.tab as "files" | "streams";
+      if (next === activeTab.value) return;
+      // Switching tabs drops the sidebar selection — the tree's and the stream's
+      // highlight are both per-tab, so leaving one behind the other tab would be a
+      // stale, invisible selection (and a stray Enter target).
+      clearTreeSelection();
+      selectedStreamUrl.value = null;
+      if (lastSelectionPane !== "list") lastSelectionPane = null;
+      activeTab.value = next;
     });
   }
 }
@@ -4603,6 +4792,13 @@ function setupPlayerControls(): void {
       return;
     }
 
+    if (e.key === "Enter") {
+      // Enter commits the selected row (the play a plain click no longer does),
+      // in whichever pane the user last selected in.
+      if (playSelectedRow()) e.preventDefault();
+      return;
+    }
+
     if (e.key === " " || e.code === "Space") {
       if (e.repeat) return;
       e.preventDefault();
@@ -4919,6 +5115,20 @@ function setupEffects(): void {
     }
   });
 
+  // Paint the single-selected stream row reactively, so a click highlights it
+  // without a full renderStreams rebuild (which reapplies it on any rebuild).
+  effect(() => {
+    const url = selectedStreamUrl.value;
+    document
+      .querySelectorAll("#streams-list .node-label.selected")
+      .forEach((el) => el.classList.remove("selected"));
+    if (url) {
+      document
+        .querySelector(`#streams-list .node-label[data-stream-url="${CSS.escape(url)}"]`)
+        ?.classList.add("selected");
+    }
+  });
+
   effect(() => {
     const tab = activeTab.value;
     document.querySelectorAll<HTMLButtonElement>(".tab").forEach((btn) => {
@@ -5229,9 +5439,15 @@ async function init(): Promise<void> {
   libraryRootBrowseBtn.addEventListener("click", () => void browseLibraryRoot());
   manifestPathBrowseBtn.addEventListener("click", () => void browseManifestPath());
 
-  // The manifest field also accepts a typed/pasted path or URL: Enter commits
-  // (blur fires "change"), and change re-reads the manifest via the same path
-  // as the Choose… button.
+  // Both path fields also accept a typed/pasted path: Enter commits (blur fires
+  // "change"), and change re-points the library / re-reads the manifest via the
+  // same path as the Choose… button.
+  libraryRootInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") libraryRootInput.blur();
+  });
+  libraryRootInput.addEventListener("change", () => {
+    void setLibraryRoot(libraryRootInput.value.trim());
+  });
   manifestPathInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") manifestPathInput.blur();
   });
@@ -5376,6 +5592,10 @@ async function init(): Promise<void> {
       // acting on the object-keyed list selection.
       addListSelectionToQueue: () => addToQueue(selectedListTracks()),
       removeListSelection: () => removeCuratedTracks(selectedListTracks()),
+      // Point the library at a folder through the real setLibraryRoot path
+      // (rescan + watch + refreshTree), so tree-interaction tests can populate
+      // the file browser without the native folder picker.
+      setLibraryRoot: (arg) => setLibraryRoot(String((arg as { path: string }).path)),
       // Set an autoadvance context toggle through the real setAutoadvance path
       // (the same one the OS Playback menu drives), so a toggle mid-play also
       // reconciles the engine via applyAutoadvanceChange.
