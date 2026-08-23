@@ -57,3 +57,5 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
 * Reorder with drag and drop
 * Add / delete stream (follow pattern used for playlists)
 * Edit
+
+### Edit file metadata

@@ -1819,8 +1819,15 @@ function attachRowReorder(li: HTMLElement, track: SearchTrack): void {
 // "<artist> – <title>" for the current track (title alone when the artist is
 // unknown), used as the nav bar's playing context.
 function nowPlayingLabel(): string {
-  const t = npTitle.value;
-  const a = npArtist.value;
+  let t = npTitle.value;
+  let a = npArtist.value;
+  // Radio: once the station sends ICY metadata, name the current song/artist
+  // rather than the bare station name, falling back to the station on the title
+  // line. Mirrors pushNowPlayingMeta so the nav bar and OS widget agree.
+  if (isStream.value && npStreamMeta.value) {
+    t = npStreamMeta.value.song;
+    a = npStreamMeta.value.artist ?? npTitle.value;
+  }
   return a ? `${a} – ${t}` : t;
 }
 
