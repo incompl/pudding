@@ -48,7 +48,7 @@ after(async () => {
 // (appendTracksToActiveQueue's gapless branch) rather than a per-track hand-off.
 beforeEach(async () => {
   await setModes(h.driver, { shuffle: false, repeat: "off" });
-  await setAutoadvance(h.driver, "playlists", true);
+  await setAutoadvance(h.driver, true);
 });
 
 // --- helpers -------------------------------------------------------------
@@ -68,14 +68,9 @@ async function setModes(
   }
 }
 
-async function setAutoadvance(
-  d: Driver,
-  which: "files" | "playlists",
-  enabled: boolean,
-): Promise<void> {
-  await d.action("setAutoadvance", { which, enabled });
-  const key = which === "files" ? "autoadvanceFiles" : "autoadvancePlaylists";
-  assert.equal((await d.probe())[key], enabled);
+async function setAutoadvance(d: Driver, enabled: boolean): Promise<void> {
+  await d.action("setAutoadvance", { enabled });
+  assert.equal((await d.probe()).autoadvance, enabled);
 }
 
 // --- test ----------------------------------------------------------------

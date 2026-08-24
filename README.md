@@ -8,7 +8,9 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 
 ## Philosophy
 
-High polish, high completeness, fast, no bloat.
+* Files and radio only.
+* High polish, high completeness.
+* Compact 2 column layout.
 
 ## Features
 

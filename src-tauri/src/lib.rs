@@ -42,14 +42,14 @@ struct WatcherState {
     inner: Mutex<Option<Debouncer<RecommendedWatcher, FileIdMap>>>,
 }
 
-// Handles to the two "Autoadvance" checkboxes in the Playback menu. The frontend
-// owns the authoritative setting (persisted in its store and used to drive
-// playback); these handles let it sync the checkmarks to the persisted values at
-// startup (set_autoadvance_checked). The checkboxes auto-toggle on click, and the
-// on_menu_event handler emits the new state back to the frontend.
+// Handles to the Playback menu's checkboxes. The frontend owns the authoritative
+// settings (persisted in its store and used to drive playback); these handles let
+// it sync the checkmarks to the persisted values at startup. The checkboxes
+// auto-toggle on click, and the on_menu_event handler emits the new state back to
+// the frontend.
 struct PlaybackMenu {
-    files: CheckMenuItem<Wry>,
-    playlists: CheckMenuItem<Wry>,
+    // The single global "Autoadvance" checkbox (set_autoadvance_checked).
+    autoadvance: CheckMenuItem<Wry>,
     // Shuffle, the three Repeat modes (radio-style: only one checked), and Mute
     // are checkmarks the frontend keeps in sync as its own state changes (from the
     // toolbar or the menu).
@@ -941,13 +941,12 @@ fn audio_clear_upcoming(engine: State<audio::AudioEngine>) {
     engine.send(audio::Command::ClearUpcoming);
 }
 
-// Sync the Playback-menu checkmarks to the frontend's persisted settings. Called
-// once at startup after the store is read, so a preference the user turned off in
-// a prior session shows correctly in the menu.
+// Sync the global "Autoadvance" checkmark to the frontend's persisted setting.
+// Called once at startup after the store is read, so a preference the user turned
+// off in a prior session shows correctly in the menu.
 #[tauri::command]
-fn set_autoadvance_checked(menu: State<PlaybackMenu>, files: bool, playlists: bool) {
-    let _ = menu.files.set_checked(files);
-    let _ = menu.playlists.set_checked(playlists);
+fn set_autoadvance_checked(menu: State<PlaybackMenu>, enabled: bool) {
+    let _ = menu.autoadvance.set_checked(enabled);
 }
 
 // Sync the Shuffle checkmark. Called whenever shuffle toggles (toolbar or menu)
@@ -1362,6 +1361,125 @@ fn album_tracks(
     Ok(out)
 }
 
+// The whole library as a flat track list, in the same album-by-album order the
+// search/artist queries use, so the Songs view reads consistently. Unfiltered
+// twin of search_tracks with the LIKE and LIMIT removed — it returns every
+// cached track (the view virtualizes for scale; see plan.md Phase 7). Reuses
+// SearchResult so no new frontend plumbing.
+#[tauri::command]
+fn list_all_songs(db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, title, artist, album FROM tracks
+             ORDER BY artist IS NULL, artist COLLATE NOCASE,
+                      album COLLATE NOCASE, disc, track,
+                      title COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SearchResult {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// Every distinct artist in the library, alphabetized. Unfiltered twin of
+// search_artists with the LIKE and LIMIT removed; reuses ArtistResult. Backs the
+// Artists browse list; drilling in reuses artist_tracks.
+#[tauri::command]
+fn list_all_artists(db: State<DbHandle>) -> Result<Vec<ArtistResult>, String> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT artist FROM tracks
+             WHERE artist IS NOT NULL AND artist <> ''
+             ORDER BY artist COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| Ok(ArtistResult { name: row.get(0)? }))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// Every distinct (album, album-artist) pair in the library, alphabetized.
+// Unfiltered twin of search_albums; reuses AlbumResult. Grouping on
+// ALBUM_ARTIST_EXPR (not the raw album_artist column) so the key matches what
+// album_tracks / openAlbumQueue expect — a track with an empty album_artist
+// groups under its track artist, not a blank bucket. Backs the Albums browse
+// list.
+#[tauri::command]
+fn list_all_albums(db: State<DbHandle>) -> Result<Vec<AlbumResult>, String> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let sql = format!(
+        "SELECT album, {expr} AS album_artist FROM tracks
+         WHERE album IS NOT NULL AND album <> ''
+         GROUP BY album, album_artist
+         ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE",
+        expr = ALBUM_ARTIST_EXPR
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(AlbumResult {
+                album: row.get(0)?,
+                artist: row.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+// Distinct albums that contain a track by this artist, carrying the album-artist
+// grouping key (ALBUM_ARTIST_EXPR) so a drill-in via album_tracks / openAlbumQueue
+// matches — including a compilation whose album_artist differs from the track
+// artist. Reuses AlbumResult. Backs the artist-detail (albums) view of the
+// Artists browse lens; filtering on the *track* artist mirrors artist_tracks.
+#[tauri::command]
+fn artist_albums(artist: String, db: State<DbHandle>) -> Result<Vec<AlbumResult>, String> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let sql = format!(
+        "SELECT album, {expr} AS album_artist FROM tracks
+         WHERE artist = ?1 AND album IS NOT NULL AND album <> ''
+         GROUP BY album, album_artist
+         ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE",
+        expr = ALBUM_ARTIST_EXPR
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&artist], |row| {
+            Ok(AlbumResult {
+                album: row.get(0)?,
+                artist: row.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1447,21 +1565,10 @@ pub fn run() {
                 // The checkbox auto-toggled its own state before this fires, so
                 // is_checked() reads the new value; relay it to the frontend,
                 // which owns the setting and persists it.
-                "autoadvance-files" | "autoadvance-playlists" => {
+                "autoadvance" => {
                     if let Some(menu) = app.try_state::<PlaybackMenu>() {
-                        let which = event.id().as_ref();
-                        let item = if which == "autoadvance-files" {
-                            &menu.files
-                        } else {
-                            &menu.playlists
-                        };
-                        let enabled = item.is_checked().unwrap_or(true);
-                        let context = if which == "autoadvance-files" {
-                            "files"
-                        } else {
-                            "playlists"
-                        };
-                        let _ = app.emit("menu:autoadvance", (context, enabled));
+                        let enabled = menu.autoadvance.is_checked().unwrap_or(true);
+                        let _ = app.emit("menu:autoadvance", enabled);
                     }
                 }
                 // Playlist menu — the frontend owns the dialogs, writes, and
@@ -1575,17 +1682,17 @@ pub fn run() {
                 .build()?;
 
             // Playback menu, top to bottom: transport (Play/Pause, Previous,
-            // Next); Shuffle + a Repeat submenu; Volume Up/Down + Mute; and two
-            // "Autoadvance" checkboxes, one per context (the file tree vs. explicit
-            // playlists/queues). Queue teardown ("Clear") lives on the queue pane
-            // itself, not here — a queue verb has no home in a global menu.
-            // Transport items relay to the
+            // Next); Shuffle + a Repeat submenu; Volume Up/Down + Mute; and a
+            // single global "Autoadvance" checkbox (does playback flow
+            // track-to-track, or stop after each?). Queue teardown ("Clear") lives
+            // on the queue pane itself, not here — a queue verb has no home in a
+            // global menu. Transport items relay to the
             // frontend (menu:transport); Previous/Next carry ⌘←/⌘→ accelerators
             // that both drive the shortcut and reveal it here. (Play/Pause, seek,
             // and volume have bare-key shortcuts that can't be menu accelerators
             // without hijacking typing, so those appear without accelerators.)
-            // Shuffle/Repeat/Mute mirror the toolbar controls and Autoadvance both
-            // default on; the frontend corrects every checkmark to its persisted
+            // Shuffle/Repeat/Mute mirror the toolbar controls and Autoadvance
+            // defaults on; the frontend corrects every checkmark to its persisted
             // value at startup and after each change (set_*_checked). Autoadvance
             // lives only here (a set-once preference); the rest also have toolbar
             // controls.
@@ -1597,18 +1704,10 @@ pub fn run() {
             let next = MenuItemBuilder::with_id("transport-next", "Next")
                 .accelerator("CmdOrCtrl+Right")
                 .build(app)?;
-            let autoadvance_files = CheckMenuItemBuilder::with_id(
-                "autoadvance-files",
-                "Autoadvance in Files",
-            )
-            .checked(true)
-            .build(app)?;
-            let autoadvance_playlists = CheckMenuItemBuilder::with_id(
-                "autoadvance-playlists",
-                "Autoadvance in Playlists",
-            )
-            .checked(true)
-            .build(app)?;
+            let autoadvance =
+                CheckMenuItemBuilder::with_id("autoadvance", "Autoadvance")
+                    .checked(true)
+                    .build(app)?;
             // Shuffle / Repeat / Volume / Mute mirror the toolbar controls; the
             // frontend owns the state and re-syncs these checkmarks after any
             // change (set_shuffle_checked / set_repeat_checked / set_mute_checked).
@@ -1645,12 +1744,10 @@ pub fn run() {
                 .item(&volume_down)
                 .item(&mute)
                 .separator()
-                .item(&autoadvance_files)
-                .item(&autoadvance_playlists)
+                .item(&autoadvance)
                 .build()?;
             app.manage(PlaybackMenu {
-                files: autoadvance_files,
-                playlists: autoadvance_playlists,
+                autoadvance,
                 shuffle,
                 repeat_off,
                 repeat_all,
@@ -1740,6 +1837,10 @@ pub fn run() {
             search_albums,
             artist_tracks,
             album_tracks,
+            list_all_songs,
+            list_all_artists,
+            list_all_albums,
+            artist_albums,
             get_art,
             get_stream_image,
             frontend_ready,

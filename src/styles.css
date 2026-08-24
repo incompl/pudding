@@ -777,18 +777,22 @@ body.platform-mac #tabs {
   background: var(--surface-hover);
 }
 
-/* Left-aligned so the numbers form a column flush with the queue title; the
-   fixed width keeps the track text aligned in the second column. Number and
-   hover play button share this one cell (grid, both at 1/1) so the button lands
-   exactly where the number was, mirroring the tree's track gutter. */
+/* Number centered in the gutter (matching the Songs list and browse tree), with a
+   fixed track so a 3+ digit number overflows symmetrically instead of spilling
+   right into the title. No left nudge here: unlike #left, the right pane has no
+   rounded background/outer margin, so the gutter is already flush with the panel
+   edge. Number and hover play button share this one cell (grid, both at 1/1) so
+   the button lands exactly where the number was, mirroring the tree's gutter. */
 .queue-num {
   flex: none;
   width: 1.5em;
   display: grid;
-  justify-items: start;
+  grid-template-columns: 1.5em;
+  justify-items: center;
   align-items: center;
   font-variant-numeric: tabular-nums;
-  color: var(--text-dim);
+  /* Same muted gray as the Songs list and browse tree track numbers. */
+  color: #666;
   font-size: 0.9em;
 }
 
@@ -820,12 +824,9 @@ body.platform-mac #tabs {
   mask-image: var(--play-icon);
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
-  /* Near-left (not center): the button is a wide click target but the numbers are
-     left-aligned in the gutter, so keeping the triangle to the left lands its
-     optical center over the digit column instead of a few px to its right. The
-     small inset matches the digit's left side-bearing so the two line up. */
-  -webkit-mask-position: 0.2em center;
-  mask-position: 0.2em center;
+  /* Centered to land where the now-centered number was. */
+  -webkit-mask-position: center;
+  mask-position: center;
   -webkit-mask-size: contain;
   mask-size: contain;
 }
@@ -1602,19 +1603,29 @@ body.dragging-noselect * {
 .tab-panel {
   flex: 1;
   overflow: auto;
+  /* Always reserve the scrollbar gutter so content (esp. the lens strip's
+     space-between spread) doesn't shift left/right as the scrollbar appears and
+     disappears on navigation between a short and a long list. */
+  scrollbar-gutter: stable;
   padding: 0.75em 0;
   min-height: 0;
 }
 
 /* A create-playlist affordance that flows below the tree at the bottom of the
    files panel. Styled to match the tree rows (same inset, gap, text color, and
-   hover) so it reads as a first-class library entry, not a disabled footer. */
+   hover) so it reads as a first-class library entry, not a disabled footer. As
+   Browse mode's bottom-most row it also carries the bottom-edge reach (negative
+   margin + extra padding) so its hover fill follows the lower rounded corner,
+   mirroring the first row at the top. */
 #create-playlist-btn {
   display: flex;
   align-items: center;
-  gap: 0.65em;
+  /* Match the icon gutter of a .nav-row exactly (gap 0.6em, padding-left 0.4em) so
+     the + lines up with the mode-menu icons above it — not 0.1em to their right. */
+  gap: 0.6em;
   width: 100%;
-  padding: 0.2em 0.8em 0.2em 0.65em;
+  padding: 0.2em 0.8em 0.3em 0.4em;
+  margin-bottom: -0.1em;
   border: none;
   background: none;
   color: inherit;
@@ -1633,6 +1644,10 @@ body.dragging-noselect * {
    than inheriting the label's text color. */
 #create-playlist-btn svg {
   flex: none;
+  /* 1.1em box matches a .nav-icon's gutter width, so the label lines up with the
+     rows above. The plus geometry itself is widened (viewBox 4→20) so its ink spans
+     about as much as the sibling icons' — a stock lucide plus (5→19) read small and
+     inset against them. */
   width: 1.1em;
   height: 1.5em;
   color: var(--text-muted);
@@ -1653,11 +1668,11 @@ body.dragging-noselect * {
 ul {
   list-style: none;
   /* Indent a folder's children so their icon column lands under the parent
-     folder's name (label pad 0.65em + folder icon 1.1em + gap 0.65em = 2.4em
-     from the row edge, minus the child label's own 0.65em pad = 1.75em). This
+     folder's name (label pad 0.5em + folder icon 1.1em + gap 0.5em = 2.1em
+     from the row edge, minus the child label's own 0.5em pad = 1.6em). This
      indent applies to every child — subfolders and files alike — so the two
      line up at the same depth. The top-level lists override this to 0. */
-  padding-left: 1.75em;
+  padding-left: 1.6em;
   margin: 0;
 }
 
@@ -1667,12 +1682,14 @@ ul {
   /* Center vertically so the icon and hover action sit on the row's middle when
      a long name wraps to two lines, rather than pinned to the first line. */
   align-items: center;
-  /* Icon sits in the gutter between the panel edge and the name. Keeping the
-     left inset equal to this gap centers the icon in that gutter (edge → icon →
-     name); 0.65em on each side lands the name at the same 2.4em as an 0.8em
-     inset + 0.5em gap would, so only the icon shifts, not the text. */
-  gap: 0.65em;
-  padding: 0.2em 0.8em 0.2em 0.65em;
+  /* Icon sits in the gutter between the panel edge and the name. Keeping the left
+     inset equal to this gap centers the icon in that gutter (edge → icon → name),
+     so the icon is equally close to the panel's left edge and to the text. 0.5em
+     each side — kept tight so the icon hugs the edge; the same value drives the
+     Files pane's top padding (see #tab-files) so the icon is also that close to
+     the top. */
+  gap: 0.5em;
+  padding: 0.2em 0.8em 0.2em 0.5em;
   cursor: pointer;
   transition: background 120ms ease;
 }
@@ -1680,6 +1697,27 @@ ul {
 #folder-tree .node-label:hover,
 #streams-list .node-label:hover {
   background: var(--surface);
+}
+
+/* First stream row: let its hover/selected fill reach the panel's top edge so
+   the highlight follows #left's 10px rounded corner cleanly, instead of being
+   held 0.1em below it by #tab-streams' top padding. Pull the row up over that
+   padding and add the same 0.1em back as top padding, so the glyph stays put but
+   the background extends to the corner. Mirrors the Files nav's first-row rule
+   (#library-nav > .nav-list:first-child > .nav-row:first-child); streams has no
+   sticky back bar above it, so its own first row is what meets the edge. */
+#streams-list > ul > li:first-child > .node-label {
+  margin-top: -0.1em;
+  padding-top: 0.3em;
+}
+
+/* …and the last stream row reaches the bottom edge the same way — the mirror of
+   the first-row rule above, pulling the row down over #tab-streams' 0.1em bottom
+   padding so a hovered/selected final row's fill follows the lower rounded
+   corner. */
+#streams-list > ul > li:last-child > .node-label {
+  margin-bottom: -0.1em;
+  padding-bottom: 0.3em;
 }
 
 #folder-tree .node-label.playing,
@@ -1776,11 +1814,29 @@ ul {
    box — so the title column stays aligned with sibling folder names. */
 .icon.track {
   display: grid;
+  /* Fixed track (not the default content-sized auto track) so a 3-digit number
+     overflows symmetrically when centered rather than spilling right into the
+     title — same as the Songs list's .nav-num. */
+  grid-template-columns: 1.375em;
   place-items: center;
   width: 1.375em;
   font-size: 0.8em;
   font-variant-numeric: tabular-nums;
   color: #666;
+}
+
+/* Match the Songs list's centered gutter: nudge every gutter glyph left (with an
+   equal right margin so labels don't move) so folder icons and track numbers read
+   centered against the panel's outer edge, the same correction .nav-num makes.
+   Track numbers take a larger em because their gutter font is smaller (0.8em), so
+   both folder icons and numbers shift the same ~0.2em absolute and stay aligned. */
+#folder-tree .icon {
+  margin-left: -0.2em;
+  margin-right: 0.2em;
+}
+#folder-tree .icon.track {
+  margin-left: -0.25em;
+  margin-right: 0.25em;
 }
 
 /* Number and hover play button share the one gutter cell so the button lands
@@ -2017,3 +2073,401 @@ ul {
 .path-picker button:hover {
   background: var(--surface-hover);
 }
+
+/* ==========================================================================
+   Library browse-mode navigator (Browse / Songs / Playlists / Artists / Albums)
+   under the Files tab, Replace + back model. Mirrors the folder-tree row
+   rhythm so it reads as native. See src/library-nav.ts.
+   ========================================================================== */
+#library-nav {
+  /* No box of its own: its children (the sticky back bar and the body list) lay
+     out as direct children of the scroll pane (#tab-files). That lets the sticky
+     back bar pin over the folder tree in Browse mode — a sibling of #library-nav,
+     which it otherwise couldn't reach — not just over the navigator's own list. */
+  display: contents;
+}
+
+/* Files pane: trim the top padding to a small inset that matches the row's left
+   inset, so the upper-left icon (root list's first icon / Browse back-chevron) is
+   equally distant from the panel's top and left edges. The row itself contributes
+   ~0.425em above the glyph (0.2em row padding + 0.225em mask centering); 0.1em
+   here tops it up to ~0.525em, matching the ~0.525em left gap (0.5em row padding
+   + 0.025em centering). Streams matches this so its first row hugs the top edge
+   the same way (see the #streams-list first-row rule below). The bottom carries
+   the same 0.1em inset so the last row can reach the lower rounded corner exactly
+   as the first reaches the upper one — each mode's bottom row is pulled down over
+   this padding by the *-last-child rules below. */
+#tab-files,
+#tab-streams {
+  padding: 0.1em 0;
+}
+
+/* PROTOTYPE (#2 "lens strip"): a persistent segmented control pinned to the top
+   of the Files pane. The six browse modes live here as small pills; the pane
+   below always shows the active lens's content. Pinned like the back bar so it
+   stays put as the list scrolls under it. */
+/* The lens tab bar sits in a fixed footer at the bottom of the left pane (a
+   flex-none sibling of the scroll panes), so it never scrolls and the pane's
+   content starts flush at the top. No divider — it reads as part of the panel. */
+#lens-footer {
+  flex: none;
+  background: var(--panel);
+}
+#lens-footer.hidden {
+  display: none;
+}
+.nav-lens-strip {
+  display: flex;
+  align-items: center;
+  /* Spread the icons across the pane width rather than clustering them at the
+     left — the gap between pills grows to fill, edges hug the pane insets. But
+     only up to max-width: past that the strip stops widening and stays
+     left-aligned, so on a wide pane the icons don't drift absurdly far apart.
+     (Tune the single 27em value to taste.) */
+  justify-content: space-between;
+  max-width: 27em;
+  gap: 0.15em;
+  padding: 0.35em 0.6em 0.4em 0.5em;
+}
+/* Icon-only pills: a square tap target holding one masked glyph. The label is
+   carried by the title/aria tooltip, not shown inline — that's the whole point
+   of shrinking the strip to icons. */
+.nav-lens {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.9em;
+  height: 1.9em;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.nav-lens .nav-icon {
+  /* Neutralize the row-icon box: here it's a centered glyph, not a gutter. */
+  width: 1.15em;
+  height: 1.15em;
+  mask-size: contain;
+  -webkit-mask-size: contain;
+}
+.nav-lens:hover {
+  background: var(--surface);
+}
+.nav-lens:hover .nav-icon {
+  background-color: var(--text);
+}
+/* Selected: no fill — just tint the glyph accent so the active mode reads by
+   color alone, keeping the strip quiet. */
+.nav-lens.active {
+  background: transparent;
+}
+.nav-lens.active .nav-icon,
+.nav-lens.active:hover .nav-icon {
+  background-color: var(--accent);
+}
+
+/* Back bar: a thin pinned strip shown only when drilled in; tapping it pops one
+   level. Kept deliberately short — location is implied by the content below. */
+/* Share the row grid exactly: same left inset (0.5em) and icon-gutter width
+   (1.1em) + gap (0.5em), so the chevron sits in the rows' icon column and the
+   label lands directly under the row labels below it. Kept at the rows' font
+   size so those em widths match; "thin" comes from tight vertical padding and a
+   smaller, muted label, not from shrinking the whole bar. */
+.nav-back {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  /* Full-width, but sized to fill the pane *including* padding rather than on top of
+     it. A <button> won't stretch to fill on its own (form-control quirk), so it
+     needs an explicit width; plain width:100% with box-sizing:content-box (below)
+     sizes the *content* to 100% and then adds the 1.3em horizontal padding beyond
+     it, spilling past the panel edge and giving the whole tree a horizontal
+     scrollbar. -webkit-fill-available sizes the border box to the pane instead, so
+     the bar reaches both edges with no overflow (Electron/Chromium only — fine here). */
+  width: -webkit-fill-available;
+  /* Match a row's box exactly — same padding plus the row's 1.5em min-height — so
+     the bar is the same height as the rows below and nothing shifts vertically when
+     you drill in or back out. align-items:center keeps the label centered. The top
+     padding carries an extra 0.1em (0.3 vs 0.2) — see margin-top below. As a
+     <button> this defaults to border-box (unlike the .nav-row <div>), which would
+     fold the padding into min-height and center the label a hair high — force
+     content-box so min-height + padding resolve identically to a row. */
+  box-sizing: content-box;
+  min-height: 1.5em;
+  padding: 0.3em 0.8em 0.2em 0.5em;
+  border: none;
+  /* Pinned to the panel's top edge — top:-0.1em (not 0) cancels #tab-files' 0.1em
+     top padding so the bar reaches #left's rounded corner, both at rest and when the
+     list scrolls under it. margin-top:-0.1em pulls its box up to that edge, and the
+     matching +0.1em top padding above keeps the label put. The bar's own opaque box
+     now covers the padding strip (no separate cap needed) and its hover fill follows
+     the 10px corner cleanly, matching the root menu's first row. Needs the opaque
+     panel background so rows don't show through, and z-index to sit above them. */
+  position: sticky;
+  top: -0.1em;
+  margin-top: -0.1em;
+  z-index: 1;
+  background: var(--panel);
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.nav-back:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.nav-back-chev {
+  flex: none;
+  /* Match the row icon gutter (1.1em at the row's base font size). The glyph is
+     enlarged to 1.15em to weight the chevron, so the width is divided by that same
+     factor (1.1 / 1.15) to keep the box a true 1.1em — otherwise the em width is
+     measured against the larger font and the gutter (and the label after it) drift
+     right. */
+  width: 0.957em;
+  text-align: center;
+  font-size: 1.15em;
+  line-height: 1;
+  /* The enlarged glyph's ink centers a hair above the label's when the two line
+     boxes are flex-centered; nudge it down so the chevron reads level with the
+     "Browse" text. Purely optical — affects nothing else in the bar. */
+  position: relative;
+  top: -0.05em;
+  color: var(--accent);
+  margin-left: -0.2em;
+  margin-right: 0.2em;
+}
+.nav-back-title {
+  /* Same size as a row's primary label so the word (e.g. "Browse") stays put when
+     you click into it — only the surrounding context changes (folder icon → accent
+     chevron, muted color), not the text size. Match the row label's line-height
+     (.nav-cell is 1.3, vs the button's inherited 1.5): a taller line box lands the
+     glyph's half-leading on a different pixel, which read as the label nudging ~1px
+     down on the transition into Browse. */
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Phase 1 placeholder body for the not-yet-built data views. */
+.nav-coming-soon {
+  padding: 0.8em 0.8em 0.8em 0.5em;
+  color: var(--text-dim);
+  font-size: 0.9em;
+}
+
+/* Root-menu section label (e.g. "Playlists") between the library lenses and the
+   playlist list. A quiet caps label carries the grouping on its own — whitespace,
+   not a rule, sets the two groups apart. */
+.nav-section {
+  padding: 0.5em 0.5em 0.3em;
+  color: var(--text-dim);
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Row rhythm copied from #folder-tree .node-label so the navigator sits flush
+   with the real tree. */
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  /* The gutter icon is 1.5em tall; pin that as the row's min-height so every row —
+     icon rows and the back bar (which reuses it) — shares one height, matching the
+     folder tree's rows so nothing shifts between views. */
+  min-height: 1.5em;
+  padding: 0.2em 0 0.2em 0.4em;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.nav-row:hover {
+  background: var(--surface);
+}
+/* Root menu's first row: let its hover fill reach the panel's top edge so the
+   highlight follows #left's 10px rounded corner cleanly, instead of being held
+   0.1em below it by #tab-files' top padding — which clips only the fill's corners
+   against the curve and reads as a half-finished round. Pull the row up over that
+   padding and add the same 0.1em back as top padding, so the icon stays put but
+   the background extends to the corner. Scoped to :first-child of the root list so
+   it never fires on a drilled-in list (which sits below the sticky back bar). */
+#library-nav > .nav-list:first-child > .nav-row:first-child {
+  margin-top: -0.1em;
+  padding-top: 0.3em;
+}
+/* Mirror at the bottom: the root menu's last row (Albums) reaches the lower
+   rounded corner just as the first row reaches the upper one. Scoped to the root
+   list's last-child so it never fires on a drilled-in list (whose bottom row is a
+   .nav-track-row or the create button, handled separately). */
+#library-nav > .nav-list:first-child > .nav-row:last-child {
+  margin-bottom: -0.1em;
+  padding-bottom: 0.3em;
+}
+
+.nav-cell {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.nav-primary {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-secondary {
+  font-size: 0.85em;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Masked line-art gutter icons, tinted like the tree icons: muted at rest,
+   accent on row hover. */
+.nav-icon {
+  flex: none;
+  width: 1.1em;
+  height: 1.5em;
+  background-color: var(--text-muted);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 1.05em;
+  mask-size: 1.05em;
+  transition: background-color 120ms ease;
+}
+.nav-row:hover .nav-icon {
+  background-color: var(--accent);
+}
+.nav-browse {
+  -webkit-mask-image: var(--folder-icon);
+  mask-image: var(--folder-icon);
+}
+.nav-artist {
+  -webkit-mask-image: var(--artist-icon);
+  mask-image: var(--artist-icon);
+}
+.nav-album {
+  -webkit-mask-image: var(--album-icon);
+  mask-image: var(--album-icon);
+}
+.nav-playlist {
+  -webkit-mask-image: var(--playlist-icon);
+  mask-image: var(--playlist-icon);
+}
+/* Music note (songs) — inline, only needed by the navigator. */
+.nav-songs {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5l12-2v13'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Ccircle cx='18' cy='16' r='3'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5l12-2v13'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Ccircle cx='18' cy='16' r='3'/%3E%3C/svg%3E");
+}
+/* Leaf track rows (Songs, and later album/artist/playlist detail): the shared
+   list from renderLeafTrackList. Same row rhythm as .nav-row, but with a number
+   gutter that gives way to a hover play button — mirroring the queue and tree
+   track rows so a track reads the same everywhere. */
+.nav-track-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  min-height: 1.5em;
+  padding: 0.2em 0.65em 0.2em 0.65em;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.nav-track-row:hover {
+  background: var(--surface);
+}
+/* The final leaf row reaches the panel's bottom edge — mirror of the first-row
+   rules elsewhere, pulling it down over #tab-files' 0.1em bottom padding so a
+   hovered last track's fill follows the lower rounded corner. The leaf list is
+   the last content under the back bar, so its last row is the pane's bottom. */
+#library-nav .nav-track-row:last-child {
+  margin-bottom: -0.1em;
+  padding-bottom: 0.3em;
+}
+
+/* Number and hover play button share one gutter cell (grid, both at 1/1) so the
+   button lands exactly where the number was — the same trick the queue uses. */
+.nav-num {
+  flex: none;
+  width: 1.1em;
+  display: grid;
+  /* Fixed 1.1em track (not the default content-sized auto track) so a number
+     wider than the gutter — 3+ digits — overflows symmetrically when centered,
+     splitting the spill between the empty left margin and the label gap instead
+     of driving it all into the title. Matches the tree's centered track number. */
+  grid-template-columns: 1.1em;
+  justify-items: center;
+  align-items: center;
+  /* Nudge the gutter left (with an equal right margin so the label doesn't move)
+     so the number reads centered against the panel's outer edge — #left carries a
+     0.5em margin outside its background on top of the row's 0.5em left padding, so
+     a box-model-centered number sits visually right of that wider left margin. */
+  margin-left: -0.25em;
+  margin-right: 0.25em;
+  font-variant-numeric: tabular-nums;
+  /* Same muted gray as the browse tree's track numbers (.icon.track). */
+  color: #666;
+  font-size: 0.85em;
+}
+.nav-num .nav-num-text,
+.nav-num .row-play {
+  grid-area: 1 / 1;
+}
+.nav-num .row-play {
+  display: none;
+  width: 1.1em;
+  height: 0.95em;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+}
+.nav-num .row-play::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-color: currentColor;
+  -webkit-mask-image: var(--play-icon);
+  mask-image: var(--play-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  /* Centered — matching the browse tree and queue gutters — so the triangle
+     lands where the centered number was instead of hugging the left edge. */
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+.nav-track-row:hover .nav-num .nav-num-text {
+  visibility: hidden;
+}
+.nav-track-row:hover .nav-num .row-play {
+  display: block;
+}
+.nav-track-row:hover .nav-num .row-play::before {
+  background-color: var(--accent);
+}
+
+/* Multi-select background, matching the queue's .selected row. */
+.nav-track-row.selected {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.nav-track-row.selected:hover {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ===================== END library navigator ===================== */

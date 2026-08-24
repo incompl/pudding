@@ -69,11 +69,15 @@
     <main id="main-view">
       <section id="left">
         <div class="tab-panel" id="tab-files">
+          <!-- Library browse-mode navigator (Replace + back): the root mode menu
+               and drill-down bodies render here; #folder-tree below is un-hidden
+               only in Browse mode. See src/library-nav.ts. -->
+          <div id="library-nav"></div>
           <div id="folder-tree"></div>
           <button id="create-playlist-btn" type="button">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
+              <line x1="12" y1="4" x2="12" y2="20" />
+              <line x1="4" y1="12" x2="20" y2="12" />
             </svg>
             <span>Create playlist</span>
           </button>
@@ -81,6 +85,10 @@
         <div class="tab-panel hidden" id="tab-streams">
           <div id="streams-list"></div>
         </div>
+        <!-- Lens tab bar: a fixed footer of the left pane (Files only), holding
+             the browse-mode icons. Rendered by src/library-nav.ts; visibility
+             tracks the active tab in main.ts. -->
+        <div id="lens-footer"></div>
       </section>
       <div id="splitter" role="separator" aria-orientation="vertical"></div>
       <section id="right">

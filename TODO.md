@@ -59,3 +59,7 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
 * Edit
 
 ### Edit file metadata
+
+### I think when deleting with delete key next track should be selected, check what is idiomatic
+
+### Virtualize lists
