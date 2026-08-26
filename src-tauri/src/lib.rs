@@ -23,6 +23,11 @@ use tauri::{AppHandle, Emitter, Manager, State, Wry};
 use tauri_plugin_log::{Target, TargetKind};
 
 const DB_FILE: &str = "metadata.db";
+// Default stream list seeded on first run, alongside the library DB in the app
+// data dir. Created empty (header only) so the Streams panel starts as a valid,
+// empty list rather than an unconfigured dead-end; the path stays an editable
+// setting so the user can repoint it at a curated file elsewhere.
+const DEFAULT_STREAM_LIST_FILE: &str = "streams.m3u8";
 
 // Identifies the app on every outbound HTTP request: stream list and station-art
 // fetches here, plus the ICY stream connection in the icy module. Public
@@ -139,13 +144,12 @@ struct PlaylistListing {
     name: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct Stream {
     name: String,
     url: String,
-    // Optional station art: an http(s) or file:// URL. `default` so existing
-    // stream lists without the field still deserialize.
-    #[serde(default)]
+    // Optional station art: an http(s) or file:// URL, from the #EXTINF
+    // tvg-logo attribute.
     image: Option<String>,
 }
 
@@ -614,10 +618,11 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
     })
 }
 
-// The stream list is canonically a JSON array of {name, url}, but any .m3u the
-// user already has works too: JSON is tried first, and on failure the file is
-// parsed as extended M3U. The path is a local file or an http(s) URL (remote
-// stream lists are fetched here rather than in the webview, which the CSP blocks).
+// The stream list is an extended M3U (.m3u8) file: each stream is a URL,
+// optionally preceded by an #EXTINF line carrying its display name and, via the
+// de-facto tvg-logo attribute, its station art. The path is a local file or an
+// http(s) URL (remote stream lists are fetched here rather than in the webview,
+// which the CSP blocks).
 #[tauri::command]
 fn read_stream_list(path: String) -> Result<Vec<Stream>, String> {
     let contents = if path.starts_with("http://") || path.starts_with("https://") {
@@ -633,22 +638,235 @@ fn read_stream_list(path: String) -> Result<Vec<Stream>, String> {
     } else {
         std::fs::read_to_string(&path).map_err(|e| e.to_string())?
     };
-    let json_err = match serde_json::from_str::<Vec<Stream>>(&contents) {
-        Ok(streams) => return Ok(streams),
-        Err(e) => e,
+    parse_m3u_stream_list(&contents)
+        .ok_or_else(|| "not an M3U stream list (no #EXTM3U header or stream URLs)".to_string())
+}
+
+// Resolve the default stream list path, creating an empty (header-only) file on
+// first run if it is missing. The frontend seeds this as the stream list setting
+// when none has ever been configured, so a fresh install has a valid, writable
+// list instead of the "not configured" prompt.
+fn ensure_default_stream_list(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
+    let path = app_data.join(DEFAULT_STREAM_LIST_FILE);
+    if !path.exists() {
+        std::fs::write(&path, "#EXTM3U\n").map_err(|e| e.to_string())?;
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+fn default_stream_list_path(app: AppHandle) -> Result<String, String> {
+    Ok(ensure_default_stream_list(&app)?.to_string_lossy().into_owned())
+}
+
+// A stream list on disk is only editable when it's a local file — a remote
+// http(s) list is fetched read-only, so add/update/delete all reject it up
+// front (the frontend hides the affordances too, this is the backstop).
+fn reject_remote_list(path: &str) -> Result<(), String> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        Err("can't edit a remote stream list".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+// Trim and sanity-check a station URL shared by add/update: non-empty and
+// carrying a scheme, so a typo doesn't write an unplayable entry.
+fn clean_stream_url(url: &str) -> Result<&str, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("stream URL is required".to_string());
+    }
+    if !url.contains("://") {
+        return Err("stream URL must include a scheme (e.g. https://)".to_string());
+    }
+    Ok(url)
+}
+
+// The #EXTINF line for a station: duration -1, the tvg-logo art attribute when
+// an image is given, then the (trimmed) name after the comma. Exactly the shape
+// parse_m3u_stream_list reads back.
+fn extinf_line(name: &str, image: Option<&str>) -> String {
+    let attrs = match image.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(img) => format!(" tvg-logo=\"{img}\""),
+        None => String::new(),
     };
-    parse_m3u_stream_list(&contents).ok_or_else(|| json_err.to_string())
+    format!("#EXTINF:-1{attrs},{}", name.trim())
+}
+
+// The line spans of each stream in a stream-list body, in the same order (and
+// thus by the same index) as parse_m3u_stream_list yields them. Each entry is
+// (optional #EXTINF line index, URL line index): the #EXTINF is the most recent
+// one seen since the previous URL, matching the parser's pending-title rule
+// (plain comments between #EXTINF and the URL don't reset it). Lets update and
+// delete edit one station surgically, preserving every other line (headers,
+// #EXTVLCOPT options, blank lines) verbatim.
+fn stream_spans(lines: &[&str]) -> Vec<(Option<usize>, usize)> {
+    let mut spans = Vec::new();
+    let mut pending_extinf: Option<usize> = None;
+    for (i, raw) in lines.iter().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("#EXTINF:") {
+            pending_extinf = Some(i);
+        } else if line.starts_with('#') {
+            // Other comments/options don't claim the pending title.
+        } else if line.contains("://") {
+            spans.push((pending_extinf.take(), i));
+        }
+    }
+    spans
+}
+
+// Append a station to a local stream list (.m3u8).
+#[tauri::command]
+fn add_stream(path: String, name: String, url: String, image: Option<String>) -> Result<(), String> {
+    reject_remote_list(&path)?;
+    let url = clean_stream_url(&url)?;
+    // Start from the existing file (or a fresh header if it's missing/empty),
+    // guaranteeing a trailing newline so the new #EXTINF starts its own line.
+    let mut contents = std::fs::read_to_string(&path).unwrap_or_default();
+    if contents.trim().is_empty() {
+        contents = "#EXTM3U\n".to_string();
+    } else if !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(&extinf_line(&name, image.as_deref()));
+    contents.push('\n');
+    contents.push_str(url);
+    contents.push('\n');
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
+// Rewrite the `index`-th station in place: replace its #EXTINF (inserting one
+// when the entry had none) and its URL line, leaving every other line untouched.
+// `index` is a station ordinal from read_stream_list, so it lines up with
+// stream_spans.
+#[tauri::command]
+fn update_stream(
+    path: String,
+    index: usize,
+    name: String,
+    url: String,
+    image: Option<String>,
+) -> Result<(), String> {
+    reject_remote_list(&path)?;
+    let url = clean_stream_url(&url)?;
+    let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = contents.lines().collect();
+    let &(extinf, url_line) = stream_spans(&lines)
+        .get(index)
+        .ok_or("stream index out of range")?;
+    let new_extinf = extinf_line(&name, image.as_deref());
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if Some(i) == extinf {
+            out.push_str(&new_extinf);
+        } else if i == url_line {
+            // No prior #EXTINF: introduce one so the new name/art persists.
+            if extinf.is_none() {
+                out.push_str(&new_extinf);
+                out.push('\n');
+            }
+            out.push_str(url);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    std::fs::write(&path, out).map_err(|e| e.to_string())
+}
+
+// Move the station at `from` to sit before the station currently at `to` (both
+// are ordinals from read_stream_list; `to == len` appends at the end). Each
+// station owns the run of lines from its #EXTINF (or bare URL) up to the next
+// station's start, so its #EXTVLCOPT options and any trailing blank/comment lines
+// travel with it; the preamble (#EXTM3U header and anything before the first
+// station) stays put. Rewrites the whole body in the new order.
+#[tauri::command]
+fn move_stream(path: String, from: usize, to: usize) -> Result<(), String> {
+    reject_remote_list(&path)?;
+    let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = contents.lines().collect();
+    let spans = stream_spans(&lines);
+    if from >= spans.len() || to > spans.len() {
+        return Err("stream index out of range".to_string());
+    }
+    // Each station's block runs from its start (#EXTINF or URL) up to the next
+    // station's start; the last runs to end of file.
+    let starts: Vec<usize> = spans.iter().map(|&(extinf, url)| extinf.unwrap_or(url)).collect();
+    let block = |i: usize| -> (usize, usize) {
+        (starts[i], starts.get(i + 1).copied().unwrap_or(lines.len()))
+    };
+    // Reorder the block indices: pull `from` out, reinsert before `to` (adjusting
+    // the target for the removed element when moving downward).
+    let mut order: Vec<usize> = (0..spans.len()).collect();
+    let moved = order.remove(from);
+    order.insert(if to > from { to - 1 } else { to }, moved);
+    let mut out = String::new();
+    for line in &lines[..starts[0]] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    for &i in &order {
+        let (s, e) = block(i);
+        for line in &lines[s..e] {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    std::fs::write(&path, out).map_err(|e| e.to_string())
+}
+
+// Remove the `index`-th station: drop its URL line and the whole run from its
+// #EXTINF down to that URL (taking any #EXTVLCOPT etc. that rode with it), so no
+// orphaned directive leaks onto the next station.
+#[tauri::command]
+fn delete_stream(path: String, index: usize) -> Result<(), String> {
+    reject_remote_list(&path)?;
+    let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = contents.lines().collect();
+    let &(extinf, url_line) = stream_spans(&lines)
+        .get(index)
+        .ok_or("stream index out of range")?;
+    let start = extinf.unwrap_or(url_line);
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i >= start && i <= url_line {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    std::fs::write(&path, out).map_err(|e| e.to_string())
+}
+
+// A local file path → its file:// URL, so a station image picked from the file
+// dialog is stored in the portable form get_stream_image (and other players)
+// expect. Url::from_file_path percent-encodes and handles platform path quirks.
+#[tauri::command]
+fn to_file_url(path: String) -> Result<String, String> {
+    url::Url::from_file_path(&path)
+        .map(|u| u.to_string())
+        .map_err(|()| format!("not an absolute path: {path}"))
 }
 
 // Lenient like icy::parse_playlist: #EXTINF is optional, its title (after the
 // first comma) names the following URL, and any non-comment line containing
-// "://" counts as a stream. Unnamed entries fall back to their hostname so the
-// station list never shows a raw URL. Returns None when the body has neither
-// an #EXTM3U header nor a single URL — read_stream_list then reports the JSON
-// error rather than presenting arbitrary text as an empty stream list.
+// "://" counts as a stream. Station art rides on the #EXTINF tvg-logo attribute
+// (the widely-used IPTV/radio convention), so foreign players render it too.
+// Unnamed entries fall back to their hostname so the station list never shows a
+// raw URL. Returns None when the body has neither an #EXTM3U header nor a single
+// URL, so read_stream_list can reject arbitrary text rather than presenting it
+// as an empty stream list.
 fn parse_m3u_stream_list(body: &str) -> Option<Vec<Stream>> {
     let mut saw_header = false;
     let mut pending_title: Option<String> = None;
+    let mut pending_image: Option<String> = None;
     let mut streams = Vec::new();
     for line in body.lines() {
         let line = line.trim();
@@ -656,10 +874,11 @@ fn parse_m3u_stream_list(body: &str) -> Option<Vec<Stream>> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("#EXTINF:") {
-            pending_title = rest
-                .split_once(',')
-                .map(|(_, title)| title.trim().to_string())
-                .filter(|title| !title.is_empty());
+            // Everything before the first comma is the duration and attributes;
+            // the title is what follows.
+            let (attrs, title) = rest.split_once(',').unwrap_or((rest, ""));
+            pending_title = (!title.trim().is_empty()).then(|| title.trim().to_string());
+            pending_image = extinf_attr(attrs, "tvg-logo").map(str::to_string);
         } else if line.starts_with('#') {
             saw_header |= line.starts_with("#EXTM3U");
         } else if line.contains("://") {
@@ -669,11 +888,20 @@ fn parse_m3u_stream_list(body: &str) -> Option<Vec<Stream>> {
             streams.push(Stream {
                 name,
                 url: line.to_string(),
-                image: None,
+                image: pending_image.take(),
             });
         }
     }
     (saw_header || !streams.is_empty()).then_some(streams)
+}
+
+// Value of a quoted key="value" attribute in an #EXTINF attribute list, if
+// present. Attributes are space-separated with no spaces around the '=', per the
+// tvg-* convention.
+fn extinf_attr<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("{key}=\"");
+    let start = attrs.find(&needle)? + needle.len();
+    attrs[start..].split_once('"').map(|(value, _)| value)
 }
 
 // Hostname portion of a URL, or the URL itself if it has no obvious host.
@@ -1703,6 +1931,13 @@ pub fn run() {
                 inner: Mutex::new(None),
             });
 
+            // Seed the default stream list file so a fresh install has a valid,
+            // empty list to point at. The frontend adopts this path only when no
+            // stream list has ever been configured.
+            if let Err(e) = ensure_default_stream_list(&app.handle()) {
+                log::warn!("could not create default stream list: {e}");
+            }
+
             // Bring the audio engine up before the frontend can issue play
             // commands. Failure here is fatal: the app is a media player.
             let engine = audio::start(app.handle().clone()).map_err(|e| {
@@ -1915,6 +2150,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_dir,
             read_stream_list,
+            default_stream_list_path,
+            add_stream,
+            update_stream,
+            delete_stream,
+            move_stream,
+            to_file_url,
             rescan_library,
             watch_library,
             search_tracks,
@@ -2022,16 +2263,16 @@ mod tests {
     }
 
     #[test]
-    fn json_stream_list_image_optional() {
-        let streams: Vec<Stream> = serde_json::from_str(
-            r#"[
-                {"name": "Plain", "url": "http://ex.am/a"},
-                {"name": "Remote", "url": "http://ex.am/c", "image": "https://ex.am/c.png"}
-            ]"#,
+    fn m3u_stream_list_tvg_logo_art() {
+        let streams = parse_m3u_stream_list(
+            "#EXTM3U\n#EXTINF:-1 tvg-logo=\"https://ex.am/c.png\",Arty\nhttp://ex.am/c\n#EXTINF:-1,Plain\nhttp://ex.am/a\n",
         )
         .unwrap();
-        assert_eq!(streams[0].image, None);
-        assert_eq!(streams[1].image.as_deref(), Some("https://ex.am/c.png"));
+        assert_eq!(streams[0].name, "Arty");
+        assert_eq!(streams[0].image.as_deref(), Some("https://ex.am/c.png"));
+        // No tvg-logo, and art doesn't leak onto the next stream.
+        assert_eq!(streams[1].name, "Plain");
+        assert_eq!(streams[1].image, None);
     }
 
     #[test]
@@ -2059,5 +2300,122 @@ mod tests {
         assert!(parse_m3u_stream_list("just some notes\nnothing here\n").is_none());
         // A header alone is a valid, empty stream list.
         assert_eq!(parse_m3u_stream_list("#EXTM3U\n").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn add_stream_appends_and_round_trips() {
+        let path = std::env::temp_dir().join(format!("pudding-add-{}.m3u8", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let p = path.to_string_lossy().into_owned();
+
+        // First add seeds the header on a missing file.
+        add_stream(p.clone(), "  Jazz24  ".into(), " https://ex.am/jazz ".into(), None).unwrap();
+        // Second add carries art and lands on its own line after the first.
+        add_stream(
+            p.clone(),
+            "Arty".into(),
+            "https://ex.am/art".into(),
+            Some("https://ex.am/logo.png".into()),
+        )
+        .unwrap();
+
+        let streams = parse_m3u_stream_list(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(streams.len(), 2);
+        // Name and URL are trimmed on the way in.
+        assert_eq!(streams[0].name, "Jazz24");
+        assert_eq!(streams[0].url, "https://ex.am/jazz");
+        assert_eq!(streams[0].image, None);
+        assert_eq!(streams[1].name, "Arty");
+        assert_eq!(streams[1].image.as_deref(), Some("https://ex.am/logo.png"));
+
+        // A remote list has no local path to append to, and a scheme-less URL is
+        // rejected before anything is written.
+        assert!(add_stream("https://ex.am/list.m3u8".into(), "x".into(), "y".into(), None).is_err());
+        assert!(add_stream(p.clone(), "x".into(), "not-a-url".into(), None).is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn update_and_delete_stream_edit_in_place() {
+        let path = std::env::temp_dir().join(format!("pudding-edit-{}.m3u8", std::process::id()));
+        let p = path.to_string_lossy().into_owned();
+        // A hand-authored list: header, a bare (EXTINF-less) entry, then a named
+        // entry carrying a passthrough #EXTVLCOPT option line.
+        std::fs::write(
+            &path,
+            "#EXTM3U\nhttp://ex.am/bare\n#EXTINF:-1,Named\n#EXTVLCOPT:network-caching=1000\nhttp://ex.am/named\n",
+        )
+        .unwrap();
+
+        // Updating the bare entry (index 0) introduces an #EXTINF with art.
+        update_stream(
+            p.clone(),
+            0,
+            "Now Named".into(),
+            "http://ex.am/bare2".into(),
+            Some("file:///art/x.png".into()),
+        )
+        .unwrap();
+        let streams = parse_m3u_stream_list(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(streams[0].name, "Now Named");
+        assert_eq!(streams[0].url, "http://ex.am/bare2");
+        assert_eq!(streams[0].image.as_deref(), Some("file:///art/x.png"));
+        // The second entry and its #EXTVLCOPT are untouched.
+        assert_eq!(streams[1].name, "Named");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("#EXTVLCOPT:network-caching=1000"));
+
+        // Deleting index 1 takes its #EXTINF, its #EXTVLCOPT, and its URL, leaving
+        // only the first station.
+        delete_stream(p.clone(), 1).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let streams = parse_m3u_stream_list(&contents).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].name, "Now Named");
+        assert!(!contents.contains("#EXTVLCOPT"));
+
+        // Out-of-range index is an error, not a silent no-op.
+        assert!(delete_stream(p.clone(), 9).is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn move_stream_reorders_keeping_option_lines() {
+        let path = std::env::temp_dir().join(format!("pudding-move-{}.m3u8", std::process::id()));
+        let p = path.to_string_lossy().into_owned();
+        // Three stations; the middle one carries a passthrough option line that
+        // must travel with it when it moves.
+        std::fs::write(
+            &path,
+            "#EXTM3U\n#EXTINF:-1,A\nhttp://ex.am/a\n#EXTINF:-1,B\n#EXTVLCOPT:network-caching=1000\nhttp://ex.am/b\n#EXTINF:-1,C\nhttp://ex.am/c\n",
+        )
+        .unwrap();
+
+        // Move B (index 1) to the front (before index 0).
+        move_stream(p.clone(), 1, 0).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let streams = parse_m3u_stream_list(&contents).unwrap();
+        assert_eq!(
+            streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["B", "A", "C"],
+        );
+        // B's option line rode along and the header stayed put.
+        assert!(contents.starts_with("#EXTM3U\n#EXTINF:-1,B\n#EXTVLCOPT:network-caching=1000\n"));
+
+        // Move A (now index 1) to the end (to == len).
+        move_stream(p.clone(), 1, 3).unwrap();
+        let streams =
+            parse_m3u_stream_list(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["B", "C", "A"],
+        );
+
+        // Out-of-range indices are errors.
+        assert!(move_stream(p.clone(), 9, 0).is_err());
+        assert!(move_stream(p.clone(), 0, 9).is_err());
+
+        let _ = std::fs::remove_file(&path);
     }
 }

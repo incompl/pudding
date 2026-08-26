@@ -50,7 +50,8 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 ### Internet radio
 
 - Icecast / SHOUTcast streams with in-band ICY now-playing metadata
-- Customizable station list via a simple JSON stream list — or point it at any `.m3u` you already have
+- Manage your stations right in the Streams tab — add, edit, reorder, and delete, with optional per-station art — saved to a plain `.m3u8` you can also hand-edit or share
+- Starts with a writable list on first run; point it at any existing `.m3u` / `.m3u8`, or a remote `http(s)` URL (read-only)
 - Automatic reconnect with backoff; pausing disconnects, resuming rejoins the live edge
 - `.pls` / `.m3u` playlist URLs resolve automatically
 
@@ -87,35 +88,11 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - TypeScript frontend built with [Vite](https://vitejs.dev/) - no UI framework, reactivity via [Preact signals](https://github.com/preactjs/signals)
 - Native Rust audio engine ([symphonia](https://github.com/pdeljanov/Symphonia) + [cpal](https://github.com/RustAudio/cpal)) for gapless file playback and internet radio with in-band ICY now-playing metadata
 
-## Manifest format
+## Some streams I like
 
-Defines the stream list. Configured in settings — point it at a local file or a remote `http(s)` URL.
+This project is not affiliated with these, but I listened to them a lot while working on it.
 
-```json
-[
-  { "name": "SomaFM Groove Salad", "url": "https://ice5.somafm.com/groovesalad-128-mp3" },
-  { "name": "NightRide FM", "url": "https://stream.nightride.fm/nightride.mp3" }
-]
-```
+- **[SomaFM](https://somafm.com/listen/)** ambient, downtempo, etc.
+- **[Nightride FM](https://nightride.fm)** synthwave, etc.
 
-Each entry can optionally include an `image` — shown where album art normally appears while the station plays. It's a URL, either http(s) or `file://`.
-
-```json
-[
-  {
-    "name": "SomaFM Groove Salad",
-    "url": "https://ice5.somafm.com/groovesalad-128-mp3",
-    "image": "file:///Users/me/radio-art/groove-salad.png"
-  }
-]
-```
-
-Extended M3U works too, so an existing station list from another player can be used as-is. `#EXTINF` titles become station names; entries without one are named after their hostname.
-
-```
-#EXTM3U
-#EXTINF:-1,SomaFM Groove Salad
-https://ice5.somafm.com/groovesalad-128-mp3
-#EXTINF:-1,NightRide FM
-https://stream.nightride.fm/nightride.mp3
-```
+Both run on listener support, so consider throwing them a few bucks.

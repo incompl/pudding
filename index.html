@@ -81,7 +81,7 @@
                only in Browse mode. See src/library-nav.ts. -->
           <div id="library-nav"></div>
           <div id="folder-tree"></div>
-          <button id="create-playlist-btn" type="button">
+          <button id="create-playlist-btn" class="list-add-btn" type="button">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <line x1="12" y1="4" x2="12" y2="20" />
               <line x1="4" y1="12" x2="20" y2="12" />
@@ -97,6 +97,13 @@
             <button id="streams-empty-settings" type="button" class="link-btn">settings</button>.
           </div>
           <div id="streams-list"></div>
+          <button id="add-station-btn" class="list-add-btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="12" y1="4" x2="12" y2="20" />
+              <line x1="4" y1="12" x2="20" y2="12" />
+            </svg>
+            <span>Add station</span>
+          </button>
         </div>
         <!-- Lens tab bar: a fixed footer of the left pane (Files only), holding
              the browse-mode icons. Rendered by src/library-nav.ts; visibility

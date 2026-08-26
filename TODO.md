@@ -43,18 +43,7 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
   re-saves. Decide whether delete participates (soft-delete to a trash dir, or
   just keep it as a hard action outside undo).
 
-
-### Improve initial launch state
-* Prompt for library path
-* Option to create a default radio manifest
-
 ### Support multiple library paths
-
-### Modify radio manifest in Streams tab
-
-* Reorder with drag and drop
-* Add / delete stream (follow pattern used for playlists)
-* Edit
 
 ### Edit file metadata
 

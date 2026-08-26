@@ -904,12 +904,21 @@ body.platform-mac #tabs {
    the drop would insert at. The line is a pseudo-element rather than an inset
    box-shadow so it stays straight — an inset shadow follows the row's rounded
    corners and bends at the ends. */
-.queue-row.dragging {
+.queue-row.dragging,
+.stream-row.dragging {
   opacity: 0.4;
 }
 
+/* Stream rows are static <li>s by default; make them a positioning context so the
+   drop marker (an absolutely-positioned ::after, below) rides the row. */
+.stream-row {
+  position: relative;
+}
+
 .queue-row.drop-before::after,
-.queue-row.drop-after::after {
+.queue-row.drop-after::after,
+.stream-row.drop-before::after,
+.stream-row.drop-after::after {
   content: "";
   position: absolute;
   left: 0;
@@ -917,16 +926,19 @@ body.platform-mac #tabs {
   height: 2px;
   background: var(--accent);
   pointer-events: none;
+  z-index: 1;
 }
 
 /* Straddle the row boundary (offset by half the 2px height) so "after row N" and
    "before row N+1" — the same insertion gap — render at the exact same position,
    with no jump as the pointer crosses between the two rows' halves. */
-.queue-row.drop-before::after {
+.queue-row.drop-before::after,
+.stream-row.drop-before::after {
   top: -1px;
 }
 
-.queue-row.drop-after::after {
+.queue-row.drop-after::after,
+.stream-row.drop-after::after {
   bottom: -1px;
 }
 
@@ -1586,13 +1598,14 @@ body.dragging-noselect * {
   min-height: 0;
 }
 
-/* A create-playlist affordance that flows below the tree at the bottom of the
-   files panel. Styled to match the tree rows (same inset, gap, text color, and
-   hover) so it reads as a first-class library entry, not a disabled footer. As
-   Browse mode's bottom-most row it also carries the bottom-edge reach (negative
-   margin + extra padding) so its hover fill follows the lower rounded corner,
-   mirroring the first row at the top. */
-#create-playlist-btn {
+/* A list-add affordance that flows below the tree/streams list at the bottom of
+   a panel (Create playlist under the files tree, Add station under the streams
+   list). Styled to match the tree rows (same inset, gap, text color, and hover)
+   so it reads as a first-class list entry, not a disabled footer. As the
+   bottom-most row it also carries the bottom-edge reach (negative margin + extra
+   padding) so its hover fill follows the lower rounded corner, mirroring the
+   first row at the top. */
+.list-add-btn {
   display: flex;
   align-items: center;
   /* Match the icon gutter of a .nav-row exactly (gap 0.6em, padding-left 0.4em) so
@@ -1610,14 +1623,14 @@ body.dragging-noselect * {
   transition: background 120ms ease;
 }
 
-#create-playlist-btn:hover {
+.list-add-btn:hover {
   background: var(--surface);
 }
 
 /* The plus icon matches the tree icons: muted gray by default, accent on row
    hover. It's an inline stroke="currentColor" SVG, so color it directly rather
    than inheriting the label's text color. */
-#create-playlist-btn svg {
+.list-add-btn svg {
   flex: none;
   /* 1.1em box matches a .nav-icon's gutter width, so the label lines up with the
      rows above. The plus geometry itself is widened (viewBox 4→20) so its ink spans
@@ -1629,8 +1642,105 @@ body.dragging-noselect * {
   transition: color 120ms ease;
 }
 
-#create-playlist-btn:hover svg {
+.list-add-btn:hover svg {
   color: var(--accent);
+}
+
+/* While the Add-station editor is open, its trigger button is replaced in place
+   by the form, so hide the button (the editor takes its slot below the list). */
+#tab-streams.adding-station #add-station-btn {
+  display: none;
+}
+
+/* Inline field editor: a small stacked form that expands in place (Add station
+   now; track-metadata editing later). Sits flush in the list flow, indented to
+   line up with the rows above, so it reads as the row being edited rather than a
+   floating dialog. */
+.inline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  padding: 0.5em 0.8em 0.6em 0.8em;
+}
+
+.inline-editor-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+}
+
+.inline-editor-label {
+  flex: none;
+  width: 3.2em;
+  color: var(--text-muted);
+  font-size: 0.85em;
+  text-align: right;
+}
+
+.inline-editor-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25em 0.4em;
+  border: 1px solid var(--surface-hover);
+  border-radius: 4px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+}
+
+.inline-editor-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Per-field "Choose…" button (e.g. pick an image file), sitting just right of
+   its input. Muted like a secondary control so the input stays the focus. */
+.inline-editor-browse {
+  flex: none;
+  padding: 0.25em 0.6em;
+  border: 1px solid var(--surface-hover);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.inline-editor-browse:hover {
+  background: var(--surface-hover);
+  color: inherit;
+}
+
+.inline-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4em;
+  margin-top: 0.1em;
+}
+
+.inline-editor-actions button {
+  padding: 0.25em 0.9em;
+  border: 1px solid var(--surface-hover);
+  border-radius: 4px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.inline-editor-actions button:hover {
+  background: var(--surface-hover);
+}
+
+.inline-editor-submit {
+  border-color: var(--accent) !important;
+  background: var(--accent) !important;
+  color: var(--bg) !important;
+}
+
+.inline-editor-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .empty-state,

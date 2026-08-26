@@ -105,7 +105,7 @@ interface TreeNode {
 interface Stream {
   name: string;
   url: string;
-  // Optional station art from the JSON stream list: an http(s) or file:// URL.
+  // Optional station art from the stream list (#EXTINF tvg-logo): an http(s) or file:// URL.
   image?: string | null;
 }
 
@@ -386,6 +386,10 @@ const streamListPathValid = signal(true);
 // Whether a stream list path has been configured. When false the Streams panel is
 // replaced by the same get-started prompt (see the streams-empty effect).
 const streamListPathSet = signal(false);
+// Whether the current stream list can be written to — true only for a valid
+// local file (a remote http(s) list is read-only here). Gates the Add-station
+// button: adding appends to the file, which a remote list has no path for.
+const streamListWritable = signal(false);
 // Whether the file tree has at least one top-level entry to start from. Drives
 // the idle play button: with content, an idle play "starts the library" (plays
 // the first entry) instead of sitting disabled, so the button reads ready-to-go.
@@ -1490,6 +1494,7 @@ function renderStreams(streams: Stream[]): void {
   const ul = document.createElement("ul");
   for (const stream of streams) {
     const li = document.createElement("li");
+    li.className = "stream-row";
     const label = document.createElement("span");
     label.className = "node-label";
     label.dataset.streamUrl = stream.url;
@@ -1529,10 +1534,255 @@ function renderStreams(streams: Stream[]): void {
       selectedStreamUrl.value = stream.url;
     });
     label.addEventListener("dblclick", () => playStream(stream));
+    // Right-click a station to play it, or (on a writable local list) edit it
+    // in place / remove it. Selecting the row first mirrors the tree's
+    // right-click-selects behavior.
+    label.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      lastSelectionPane = "stream";
+      selectedStreamUrl.value = stream.url;
+      const items: ContextMenuItem[] = [{ label: "Play", action: () => playStream(stream) }];
+      if (streamListWritable.value) {
+        items.push(
+          { label: "Edit…", action: () => openEditStationEditor(stream, li) },
+          { label: "Delete", action: () => void deleteStream(stream) },
+        );
+      }
+      showContextMenu(e.clientX, e.clientY, items);
+    });
     li.appendChild(label);
+    attachStreamReorder(li, stream);
     ul.appendChild(li);
   }
   streamsContainer.appendChild(ul);
+}
+
+// A reusable inline field editor: a small stacked form of labeled text inputs
+// plus Cancel/Save, meant to expand in place where the thing being edited lives
+// (the Add-station button now; a track row for metadata editing later). Kept
+// generic — the caller supplies the fields and what Save does — so both callers
+// share one look and one set of behaviors (Enter submits, Esc cancels, Save
+// disabled until the required fields are filled). Returns the <form> element for
+// the caller to insert; `onCancel` fires on Esc or the Cancel button.
+interface InlineEditorField {
+  key: string;
+  label: string;
+  value?: string;
+  placeholder?: string;
+  // When true, Save stays disabled until this field is non-empty. A form with no
+  // required fields keeps Save always enabled.
+  required?: boolean;
+  // When set, the field gets a trailing "Choose…" button; it resolves to a value
+  // to drop into the input (or null to leave it), e.g. picking an image file.
+  browse?: () => Promise<string | null>;
+}
+
+interface InlineEditorOptions {
+  fields: InlineEditorField[];
+  submitLabel: string;
+  onSubmit: (values: Record<string, string>) => void | Promise<void>;
+  onCancel: () => void;
+}
+
+function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
+  const form = document.createElement("form");
+  form.className = "inline-editor";
+  const inputs = new Map<string, HTMLInputElement>();
+  // Browse buttons are wired after submitBtn/syncEnabled exist (a pick updates
+  // the disabled state), so collect them during the build pass.
+  const browsers: { input: HTMLInputElement; browse: () => Promise<string | null> }[] = [];
+  for (const field of opts.fields) {
+    const row = document.createElement("label");
+    row.className = "inline-editor-field";
+    const name = document.createElement("span");
+    name.className = "inline-editor-label";
+    name.textContent = field.label;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = field.value ?? "";
+    if (field.placeholder) input.placeholder = field.placeholder;
+    inputs.set(field.key, input);
+    row.append(name, input);
+    if (field.browse) {
+      const browseBtn = document.createElement("button");
+      browseBtn.type = "button";
+      browseBtn.className = "inline-editor-browse";
+      browseBtn.textContent = "Choose…";
+      row.appendChild(browseBtn);
+      browsers.push({ input, browse: field.browse });
+    }
+    form.appendChild(row);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "inline-editor-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "inline-editor-cancel";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => opts.onCancel());
+  const submitBtn = document.createElement("button");
+  submitBtn.type = "submit";
+  submitBtn.className = "inline-editor-submit";
+  submitBtn.textContent = opts.submitLabel;
+  actions.append(cancelBtn, submitBtn);
+  form.appendChild(actions);
+
+  const required = opts.fields.filter((f) => f.required).map((f) => f.key);
+  const syncEnabled = (): void => {
+    submitBtn.disabled = required.some((key) => !inputs.get(key)!.value.trim());
+  };
+  for (const input of inputs.values()) input.addEventListener("input", syncEnabled);
+  for (const { input, browse } of browsers) {
+    const buttonRow = input.parentElement!.querySelector(".inline-editor-browse")!;
+    buttonRow.addEventListener("click", async () => {
+      const picked = await browse();
+      if (picked != null) {
+        input.value = picked;
+        syncEnabled();
+      }
+    });
+  }
+  syncEnabled();
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (submitBtn.disabled) return;
+    const values: Record<string, string> = {};
+    for (const [key, input] of inputs) values[key] = input.value.trim();
+    void opts.onSubmit(values);
+  });
+  // Esc cancels from anywhere in the form (matching the rename affordance).
+  form.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      opts.onCancel();
+    }
+  });
+  // Focus the first field once the form is in the DOM.
+  queueMicrotask(() => inputs.values().next().value?.focus());
+  return form;
+}
+
+// Pick a local image file and hand back its file:// URL (the portable form
+// get_stream_image reads), or null if the dialog was dismissed. A user can also
+// just type/paste an http(s) URL into the field instead of browsing.
+async function browseStationImage(): Promise<string | null> {
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+  });
+  if (typeof selected !== "string") return null;
+  try {
+    return await invoke<string>("to_file_url", { path: selected });
+  } catch (e) {
+    console.error("to_file_url failed", selected, e);
+    return null;
+  }
+}
+
+// The three fields of a station, shared by Add and Edit so both look and behave
+// identically. `stream` prefills them when editing an existing entry.
+function stationEditorFields(stream?: Stream): InlineEditorField[] {
+  return [
+    { key: "name", label: "Name", value: stream?.name, placeholder: "Pudding FM" },
+    { key: "url", label: "URL", value: stream?.url, placeholder: "https://", required: true },
+    {
+      key: "image",
+      label: "Image",
+      value: stream?.image ?? "",
+      placeholder: "URL or file",
+      browse: browseStationImage,
+    },
+  ];
+}
+
+// The Add-station editor lives just below the streams list, in the slot the
+// Add-station button occupies (the button hides via #tab-streams.adding-station
+// while it's open). Only one is open at a time.
+function closeAddStationEditor(): void {
+  const tab = document.getElementById("tab-streams");
+  tab?.classList.remove("adding-station");
+  tab?.querySelector(":scope > .inline-editor")?.remove();
+}
+
+function openAddStationEditor(): void {
+  const tab = document.getElementById("tab-streams");
+  const btn = document.getElementById("add-station-btn");
+  if (!tab || !btn || btn.classList.contains("hidden")) return;
+  if (tab.classList.contains("adding-station")) return; // already open
+  const editor = buildInlineEditor({
+    fields: stationEditorFields(),
+    submitLabel: "Add",
+    onCancel: () => closeAddStationEditor(),
+    onSubmit: async (values) => {
+      try {
+        await invoke("add_stream", {
+          path: streamListPathInput.value,
+          name: values.name,
+          url: values.url,
+          image: values.image || null,
+        });
+      } catch (e) {
+        console.error("add_stream failed", e);
+        return; // leave the form up so the user can correct and retry
+      }
+      closeAddStationEditor();
+      await refreshStreams(streamListPathInput.value);
+    },
+  });
+  tab.classList.add("adding-station");
+  btn.after(editor);
+}
+
+// Edit an existing station: the row itself becomes the inline editor, prefilled.
+// Cancel or Save just re-renders the list (restoring the row / showing the
+// change). `index` is the station's position in the file (== its index in
+// allStreams, which is the file order), resolved live so it's right even if the
+// list changed since render.
+function openEditStationEditor(stream: Stream, li: HTMLElement): void {
+  const index = allStreams.indexOf(stream);
+  if (index < 0) return;
+  closeAddStationEditor();
+  const editor = buildInlineEditor({
+    fields: stationEditorFields(stream),
+    submitLabel: "Save",
+    onCancel: () => void refreshStreams(streamListPathInput.value),
+    onSubmit: async (values) => {
+      try {
+        await invoke("update_stream", {
+          path: streamListPathInput.value,
+          index,
+          name: values.name,
+          url: values.url,
+          image: values.image || null,
+        });
+      } catch (e) {
+        console.error("update_stream failed", e);
+        return; // leave the form up so the user can correct and retry
+      }
+      await refreshStreams(streamListPathInput.value);
+    },
+  });
+  li.replaceChildren(editor);
+}
+
+async function deleteStream(stream: Stream): Promise<void> {
+  const index = allStreams.indexOf(stream);
+  if (index < 0) return;
+  const ok = await confirm(`This will remove ${stream.name} from the stream list.`, {
+    title: `Remove ${stream.name}?`,
+    kind: "warning",
+  });
+  if (!ok) return;
+  try {
+    await invoke("delete_stream", { path: streamListPathInput.value, index });
+  } catch (e) {
+    console.error("delete_stream failed", e);
+    return;
+  }
+  await refreshStreams(streamListPathInput.value);
 }
 
 // Renders the queue view's track list. Rebuilt whenever the queue or the
@@ -1726,7 +1976,10 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
 // lives in this closure.
 type DragPayload =
   | { kind: "reorder"; tracks: SearchTrack[] }
-  | { kind: "tracks"; tracks: SearchTrack[] };
+  | { kind: "tracks"; tracks: SearchTrack[] }
+  // Reorder a station within the (writable, local) stream list. Carries the
+  // dragged Stream; its live index is resolved at drop time against allStreams.
+  | { kind: "stream"; stream: Stream };
 
 // A drag only *starts* once the pointer travels this many px from where it went
 // down, so a plain click on a row still plays/commits it (no accidental reorder)
@@ -1737,6 +1990,10 @@ interface ActiveDrag {
   payload: DragPayload;
   // The reordered row, greyed while dragging; null for a tree-track insert (a copy).
   sourceEl: HTMLElement | null;
+  // The list the drop hit-tests against, and the CSS selector for its rows — so
+  // one drag engine serves the queue/playlist list and the stream list alike.
+  listEl: HTMLElement;
+  rowSelector: string;
   startX: number;
   startY: number;
   started: boolean;
@@ -1747,21 +2004,27 @@ interface ActiveDrag {
 let activeDrag: ActiveDrag | null = null;
 
 // Begin a tree-track drag (called from the tree on pointerdown). Carries the
-// track(s) to insert; the drag only engages past the movement threshold.
+// track(s) to insert; the drag only engages past the movement threshold. Drops
+// land in the open queue/playlist list.
 function startTrackDrag(e: PointerEvent, tracks: SearchTrack[]): void {
-  beginPointerDrag(e, { kind: "tracks", tracks }, null);
+  beginPointerDrag(e, { kind: "tracks", tracks }, null, queueListEl, "li.queue-row");
 }
 
 // Arm a drag from a pointerdown on a drag source (a list row, or a tree track).
+// `listEl`/`rowSelector` name the list the drop resolves against.
 function beginPointerDrag(
   e: PointerEvent,
   payload: DragPayload,
   sourceEl: HTMLElement | null,
+  listEl: HTMLElement,
+  rowSelector: string,
 ): void {
   if (e.button !== 0) return; // left button only
   activeDrag = {
     payload,
     sourceEl,
+    listEl,
+    rowSelector,
     startX: e.clientX,
     startY: e.clientY,
     started: false,
@@ -1786,7 +2049,7 @@ function onDragPointerMove(e: PointerEvent): void {
     const dy = e.clientY - d.startY;
     if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
     d.started = true;
-    if (d.payload.kind === "reorder" && d.sourceEl) d.sourceEl.classList.add("dragging");
+    if (d.sourceEl) d.sourceEl.classList.add("dragging");
     document.body.classList.add("reordering");
     // Drop any selection that slipped in before user-select:none took hold.
     window.getSelection()?.removeAllRanges();
@@ -1834,10 +2097,14 @@ function endPointerDrag(): void {
 let dragGhostEl: HTMLElement | null = null;
 
 function createDragGhost(p: DragPayload): void {
-  const n = p.tracks.length;
   const el = document.createElement("div");
   el.className = "drag-ghost";
-  el.textContent = `${n} track${n === 1 ? "" : "s"}`;
+  if (p.kind === "stream") {
+    el.textContent = p.stream.name;
+  } else {
+    const n = p.tracks.length;
+    el.textContent = `${n} track${n === 1 ? "" : "s"}`;
+  }
   document.body.appendChild(el);
   dragGhostEl = el;
 }
@@ -1871,32 +2138,35 @@ function suppressNextClick(): void {
 // pointer is off the list entirely, which cancels the drop.
 function updateDropTarget(x: number, y: number): number | null {
   clearDropMarkers();
-  const rows = Array.from(queueListEl.querySelectorAll<HTMLElement>("li.queue-row"));
+  const d = activeDrag;
+  if (!d) return null;
+  const rows = Array.from(d.listEl.querySelectorAll<HTMLElement>(d.rowSelector));
   const el = document.elementFromPoint(x, y) as HTMLElement | null;
-  const row = el?.closest("li.queue-row") as HTMLElement | null;
-  if (row && queueListEl.contains(row)) {
+  const row = el?.closest(d.rowSelector) as HTMLElement | null;
+  if (row && d.listEl.contains(row)) {
     const rect = row.getBoundingClientRect();
     const before = y < rect.top + rect.height / 2;
     row.classList.add(before ? "drop-before" : "drop-after");
     return rows.indexOf(row) + (before ? 0 : 1);
   }
   // Off the rows: an insert at the end while still within the list box, else cancel.
-  const box = queueListEl.getBoundingClientRect();
+  const box = d.listEl.getBoundingClientRect();
   const inside = x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
   return inside ? rows.length : null;
 }
 
 function clearDropMarkers(): void {
-  queueListEl
+  activeDrag?.listEl
     .querySelectorAll(".drop-before, .drop-after")
     .forEach((el) => el.classList.remove("drop-before", "drop-after"));
 }
 
-// Resolve a drop at view index `at`: an internal reorder, or an insert of
-// track(s) dragged in from the tree.
+// Resolve a drop at view index `at`: an internal reorder, an insert of track(s)
+// dragged in from the tree, or a station reorder in the stream list.
 function applyDrop(p: DragPayload, at: number): void {
   if (p.kind === "reorder") reorderCuratedTracks(p.tracks, at);
-  else insertCuratedTracks(p.tracks, at);
+  else if (p.kind === "tracks") insertCuratedTracks(p.tracks, at);
+  else void reorderStream(p.stream, at);
 }
 
 // Make a list row a drag source for reorder. A pointerdown on the row's remove
@@ -1910,8 +2180,36 @@ function attachRowReorder(li: HTMLElement, track: SearchTrack): void {
     // multi-selection reorders as one block instead of only the grabbed row.
     const sel = queueSel.signal.peek();
     const tracks = sel.has(track) && sel.size > 1 ? selectedListTracks() : [track];
-    beginPointerDrag(e, { kind: "reorder", tracks }, li);
+    beginPointerDrag(e, { kind: "reorder", tracks }, li, queueListEl, "li.queue-row");
   });
+}
+
+// Make a stream row a drag source for reordering the (writable, local) stream
+// list. A pointerdown on the hover play button is ignored so it stays a plain
+// click; the drop persists straight to the .m3u8 via move_stream + refresh.
+function attachStreamReorder(li: HTMLElement, stream: Stream): void {
+  li.addEventListener("pointerdown", (e) => {
+    if (!streamListWritable.value) return;
+    if ((e.target as HTMLElement).closest(".row-play")) return;
+    beginPointerDrag(e, { kind: "stream", stream }, li, streamsContainer, "li.stream-row");
+  });
+}
+
+// Move a dragged station to view index `to` (insert-before) and persist the new
+// order to the stream list file, then re-render. The station's live index is
+// resolved against allStreams at drop time; a no-op move is skipped so it doesn't
+// rewrite the file needlessly.
+async function reorderStream(stream: Stream, to: number): Promise<void> {
+  if (!streamListWritable.value) return;
+  const from = allStreams.indexOf(stream);
+  if (from < 0 || to === from || to === from + 1) return;
+  try {
+    await invoke("move_stream", { path: streamListPathInput.value, from, to });
+  } catch (e) {
+    console.error("move_stream failed", e);
+    return;
+  }
+  await refreshStreams(streamListPathInput.value);
 }
 
 // "<artist> – <title>" for the current track (title alone when the artist is
@@ -4539,11 +4837,16 @@ async function refreshLibrary(): Promise<void> {
   }
 }
 
+function isRemoteStreamList(path: string): boolean {
+  return path.startsWith("http://") || path.startsWith("https://");
+}
+
 async function refreshStreams(streamListPath: string): Promise<void> {
   streamListPathSet.value = !!streamListPath;
   if (!streamListPath) {
     allStreams = [];
     streamListPathValid.value = true;
+    streamListWritable.value = false;
     // The panel-wide get-started prompt (streams-empty effect) covers this case.
     setEmpty(streamsContainer, "No stream list path set");
     return;
@@ -4553,11 +4856,14 @@ async function refreshStreams(streamListPath: string): Promise<void> {
     const streams = await invoke<Stream[]>("read_stream_list", { path: streamListPath });
     allStreams = streams;
     streamListPathValid.value = true;
+    // Only a valid local file is appendable; a remote list is read-only.
+    streamListWritable.value = !isRemoteStreamList(streamListPath);
     renderStreams(streams);
   } catch (e) {
     console.error("read_stream_list failed for", streamListPath, e);
     allStreams = [];
     streamListPathValid.value = false;
+    streamListWritable.value = false;
     setEmpty(streamsContainer, "Invalid stream list path");
   }
 }
@@ -4599,7 +4905,7 @@ async function browseStreamListPath(): Promise<void> {
     directory: false,
     multiple: false,
     defaultPath: streamListPathInput.value || undefined,
-    filters: [{ name: "Stream list", extensions: ["json", "m3u", "m3u8"] }],
+    filters: [{ name: "Stream list", extensions: ["m3u8", "m3u"] }],
   });
   if (typeof selected === "string") {
     await setStreamListPath(selected);
@@ -5586,6 +5892,11 @@ function setupEffects(): void {
     const noStreamList = !streamListPathSet.value;
     document.getElementById("streams-empty")?.classList.toggle("hidden", !noStreamList);
     streamsContainer.classList.toggle("hidden", noStreamList);
+    // The Add-station button shows only for a writable (valid, local) list. When
+    // it hides, drop any open editor so a stale form can't linger.
+    const btn = document.getElementById("add-station-btn");
+    btn?.classList.toggle("hidden", !streamListWritable.value);
+    if (!streamListWritable.value) closeAddStationEditor();
   });
 
   // The two-face right pane, painted from the derived paneView. `has-nav` reveals
@@ -5773,6 +6084,10 @@ async function init(): Promise<void> {
     "click",
     () => void menuNewPlaylist(),
   );
+  (document.querySelector("#add-station-btn") as HTMLButtonElement).addEventListener(
+    "click",
+    () => openAddStationEditor(),
+  );
   streamsContainer = document.querySelector("#streams-list") as HTMLElement;
   // Same click-off convention for the streams tab: a click below the rows (or on
   // any empty space in the tab-panel) drops the stream highlight.
@@ -5819,7 +6134,20 @@ async function init(): Promise<void> {
   store = await load(STORE_FILE, { defaults: {}, autoSave: false });
 
   const libraryRoot = (await store.get<string>(KEY_LIBRARY_ROOT)) ?? "";
-  const streamListPath = (await store.get<string>(KEY_STREAM_LIST_PATH)) ?? "";
+  // First run (key never set): adopt the default stream list the backend seeds
+  // in the app data dir, and persist it so it shows in settings and can be
+  // repointed. An explicit "" (user cleared the path) is respected, not reseeded.
+  const storedStreamListPath = await store.get<string>(KEY_STREAM_LIST_PATH);
+  let streamListPath = storedStreamListPath ?? "";
+  if (storedStreamListPath === undefined) {
+    try {
+      streamListPath = await invoke<string>("default_stream_list_path");
+      await store.set(KEY_STREAM_LIST_PATH, streamListPath);
+      await store.save();
+    } catch (e) {
+      console.error("default_stream_list_path failed", e);
+    }
+  }
   const splitterWidth = (await store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
   const storedVolume = await store.get<number>(KEY_VOLUME);
   volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
