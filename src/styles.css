@@ -28,7 +28,7 @@
   /* Playlist icon (Lucide list-video): three rows plus a play triangle,
      distinguishing a playlist from folders and tracks. Same stroked/tinted
      recipe. */
-  --playlist-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 12H3'/%3E%3Cpath d='M16 6H3'/%3E%3Cpath d='M12 18H3'/%3E%3Cpath d='m16 12 5 3-5 3v-6Z'/%3E%3C/svg%3E");
+  --playlist-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15V6'/%3E%3Cpath d='M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z'/%3E%3Cpath d='M12 12H3'/%3E%3Cpath d='M16 6H3'/%3E%3Cpath d='M12 18H3'/%3E%3C/svg%3E");
 
   /* Filled triangle for the per-row hover play button in the track gutter. The
      viewBox is cropped to the triangle's bounds (not the usual 0 0 24 24) so the
