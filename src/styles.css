@@ -786,6 +786,8 @@ body.platform-mac #tabs {
 .queue-num {
   flex: none;
   width: 1.5em;
+  /* Positioning context for the absolutely-centered .row-play button. */
+  position: relative;
   display: grid;
   grid-template-columns: 1.5em;
   justify-items: center;
@@ -801,35 +803,8 @@ body.platform-mac #tabs {
   grid-area: 1 / 1;
 }
 
-.queue-num .row-play {
-  display: none;
-  width: 1.25em;
-  height: 0.95em;
-  padding: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  /* Inherit the gutter color (muted at rest, accent on the playing row) so the
-     triangle picks it up via currentColor. */
-  color: inherit;
-}
-
-.queue-num .row-play::before {
-  content: "";
-  display: block;
-  width: 100%;
-  height: 100%;
-  background-color: currentColor;
-  -webkit-mask-image: var(--play-icon);
-  mask-image: var(--play-icon);
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  /* Centered to land where the now-centered number was. */
-  -webkit-mask-position: center;
-  mask-position: center;
-  -webkit-mask-size: contain;
-  mask-size: contain;
-}
+/* Look and feel live in the shared .row-play rules; this gutter only reveals the
+   button on row hover and centers it over the number cell. */
 
 /* On row hover the gutter number gives way to the play button, which brightens
    to the accent — identical to the tree's track rows. A missing row has no play
@@ -1814,6 +1789,8 @@ ul {
    box — so the title column stays aligned with sibling folder names. */
 .icon.track {
   display: grid;
+  /* Positioning context for the absolutely-centered .row-play button. */
+  position: relative;
   /* Fixed track (not the default content-sized auto track) so a 3-digit number
      overflows symmetrically when centered rather than spilling right into the
      title — same as the Songs list's .nav-num. */
@@ -1848,41 +1825,77 @@ ul {
   grid-area: 1 / 1;
 }
 
-.icon.track .row-play,
-.icon.stream .row-play {
-  display: none;
-  /* Wide enough to stay an easy click target; the triangle sizes to `height`
-     and is centered (both this box in the cell and the mask in this box), so it
-     lands in the same column as the centered track numbers and folder icons. */
-  width: 1.25em;
-  height: 0.95em;
+/* The hover "play" button shared by every track gutter — the browse tree, the
+   queue, and the Songs-list nav all render a .row-play, so its look and feel live
+   here in one place; each gutter below only says when to reveal it and which cell
+   it centers over.
+
+   At rest it's just the filled triangle sitting where the track number was. The
+   click target, though, is a wide invisible square centered on the triangle and
+   noticeably bigger than the glyph, so it's hard to miss — the old target was
+   barely larger than the triangle, and a click a hair off it would land on the
+   row instead. There's no hover chrome (the enlarged hit area does its work
+   unseen); the feedback is all on the press (see :active).
+
+   The button is absolutely positioned and centered over its gutter cell rather
+   than sharing it in-flow: that lets the hit area grow past the narrow gutter
+   without widening the column or — since every gutter keeps its number in place
+   with visibility:hidden on hover — growing the row. The triangle keeps a fixed
+   size regardless of how big the hit area is. */
+.row-play {
+  display: none; /* revealed on row hover by each gutter below */
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  box-sizing: border-box;
+  width: 1.5em;
+  height: 1.5em;
   padding: 0;
   border: none;
   background: transparent;
   cursor: pointer;
-  /* Inherit the gutter's color (muted gray at rest, accent on the playing row)
-     so the always-on button for untagged rows below can pick it up via
-     currentColor. Buttons don't inherit color on their own. */
+  /* Inherit the gutter's color (muted gray at rest, accent on the playing row) so
+     the triangle picks it up via currentColor. Buttons don't inherit color. */
   color: inherit;
+  transition: transform 80ms ease;
 }
 
-.icon.track .row-play::before,
-.icon.stream .row-play::before {
+/* The filled triangle: a fixed size, centered over the (larger) hit area, so it
+   looks identical no matter the button's dimensions. The tight-cropped viewBox
+   (see --play-icon) has no lopsided padding, so a centered mask is optically
+   centered in the gutter column, landing where the centered number was. */
+.row-play::before {
   content: "";
-  display: block;
-  width: 100%;
-  height: 100%;
-  background-color: var(--accent);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1.25em;
+  height: 0.95em;
+  transform: translate(-50%, -50%);
+  background-color: currentColor;
   -webkit-mask-image: var(--play-icon);
   mask-image: var(--play-icon);
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
-  /* Centered — the tight-cropped viewBox (see --play-icon) has no lopsided
-     padding, so a centered triangle is optically centered in the gutter column. */
   -webkit-mask-position: center;
   mask-position: center;
   -webkit-mask-size: contain;
   mask-size: contain;
+  transition: background-color 80ms ease;
+}
+
+/* Pressed: with no hover state to build on, the feedback lives on the triangle
+   itself. It dips inward (scale) and pops to full white — on the dark UI, going
+   brighter and smaller reads as a tangible push, where darkening would just
+   recede into the background. The centering translate is preserved alongside the
+   scale. Snaps back on release. */
+.row-play:active {
+  transform: translate(-50%, -50%) scale(0.82);
+}
+
+.row-play:active::before {
+  background-color: #fff;
 }
 
 /* On row hover the gutter number gives way to the play button. */
@@ -1893,6 +1906,13 @@ ul {
 .node-label:hover .icon.track .row-play,
 .node-label:hover .icon.stream .row-play {
   display: block;
+}
+
+/* On row hover the triangle brightens to the accent, matching the queue and nav
+   gutters (and the untagged-row rule below). */
+.node-label:hover .icon.track .row-play::before,
+.node-label:hover .icon.stream .row-play::before {
+  background-color: var(--accent);
 }
 
 /* Untagged rows have no track number, which left the gutter blank and made their
@@ -1931,6 +1951,8 @@ ul {
 .icon.stream {
   display: grid;
   place-items: center;
+  /* Positioning context for the absolutely-centered .row-play button. */
+  position: relative;
 }
 
 .icon.stream .radio {
@@ -2402,6 +2424,8 @@ ul {
 .nav-num {
   flex: none;
   width: 1.1em;
+  /* Positioning context for the absolutely-centered .row-play button. */
+  position: relative;
   display: grid;
   /* Fixed 1.1em track (not the default content-sized auto track) so a number
      wider than the gutter — 3+ digits — overflows symmetrically when centered,
@@ -2422,36 +2446,8 @@ ul {
   font-size: 0.85em;
 }
 .nav-num .nav-num-text,
-.nav-num .row-play {
-  grid-area: 1 / 1;
-}
-.nav-num .row-play {
-  display: none;
-  width: 1.1em;
-  height: 0.95em;
-  padding: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: inherit;
-}
-.nav-num .row-play::before {
-  content: "";
-  display: block;
-  width: 100%;
-  height: 100%;
-  background-color: currentColor;
-  -webkit-mask-image: var(--play-icon);
-  mask-image: var(--play-icon);
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  /* Centered — matching the browse tree and queue gutters — so the triangle
-     lands where the centered number was instead of hugging the left edge. */
-  -webkit-mask-position: center;
-  mask-position: center;
-  -webkit-mask-size: contain;
-  mask-size: contain;
-}
+/* Look and feel live in the shared .row-play rules; this gutter only reveals the
+   button on row hover and centers it over the number cell. */
 .nav-track-row:hover .nav-num .nav-num-text {
   visibility: hidden;
 }
