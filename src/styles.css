@@ -1406,12 +1406,15 @@ body.platform-mac #tabs {
 
   /* Default (no track) state: the placeholder is the lone visible item, but the
      empty #now-playing-text still carries flex: 1 and shoves it to the left.
-     Zero that sibling and center the row so the placeholder lands mid-bar. It
-     matches the no-art rule above (text-align: center + the 1.3em top padding),
-     so it sits exactly where a no-art track's text does — centered between the
-     topbar and controls rather than in the whole window. */
+     Zero that sibling and center the row so the placeholder lands mid-bar.
+     align-items: center overrides the mini bar's stretch so the placeholder
+     shrinks to its text and sits on the vertical center; the top padding the
+     no-art rule adds is dropped here so it lands dead-center like the full
+     view, not pushed low. */
   #now-playing-main:has(#now-playing-empty:not(.hidden)) {
     justify-content: center;
+    align-items: center;
+    padding-top: 0;
   }
   #now-playing-main:has(#now-playing-empty:not(.hidden)) #now-playing-text {
     flex: 0;
