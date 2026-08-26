@@ -50,8 +50,6 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
 
 ### Support multiple library paths
 
-### Add "Reveal in finder" to context menus
-
 ### Modify radio manifest in Streams tab
 
 * Reorder with drag and drop
