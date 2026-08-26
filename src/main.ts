@@ -1912,12 +1912,12 @@ function upNextLabel(): string | null {
   return t.artist ? `${t.artist} – ${title}` : title;
 }
 
-// The nav bar above the transport, present whenever a list exists. It swaps the
-// two faces and names the source: on the list face the button returns to the
-// hero ("Now Playing"), on the hero face it reveals the list ("Show Queue" /
-// "Show Playlist"). A null button is hidden — an idle browse (a playlist open,
-// nothing playing) has no source to return to, so it reads "Nothing playing"
-// with no button.
+// The nav bar above the transport. It swaps the two faces and names the source:
+// on the list face the button returns to the hero ("Now Playing"), on the hero
+// face it reveals the list ("Show Queue" / "Show Playlist"). A null button is
+// hidden. An idle browse (a playlist open, nothing playing) has neither a source
+// to name nor a face to flip to, so the whole bar drops out (null nav) rather
+// than sitting empty — the list face keeps the pane.
 interface NavState {
   text: string;
   // The face-swap button's label, or null when the button is hidden.
@@ -1946,7 +1946,8 @@ interface PaneView {
   isSource: boolean;
   // The list face is up (else the hero fills the pane). Only meaningful with a list.
   showList: boolean;
-  // The nav bar's content, or null when there's no list to describe.
+  // The nav bar's content, or null when the bar should be hidden: either there's
+  // no list, or a list is browsed with nothing playing (nothing to name/flip).
   nav: NavState | null;
 }
 
@@ -1986,7 +1987,10 @@ const paneView = computed<PaneView>(() => {
           : null,
       };
     } else {
-      nav = { text: "Nothing playing", button: null, altButton: null };
+      // Browsing a list with nothing playing: no source to name, nowhere to flip
+      // to. The bar has no job, so drop it entirely (null nav hides .has-nav) —
+      // the list face still owns the pane.
+      return { list, isSource, showList, nav: null };
     }
   } else {
     const sourceName = isPlaylistSource(list) ? list.title : "Queue";
@@ -5487,10 +5491,10 @@ function setupEffects(): void {
   // scrolled row tracks advances (and clears when the queue is merely stashed),
   // even when paneView's own fields are unchanged.
   effect(() => {
-    const { list, isSource, showList } = paneView.value;
+    const { list, isSource, showList, nav } = paneView.value;
     queuePlayingIndex.value;
     const hasList = list !== null;
-    nowPlayingPanel.classList.toggle("has-nav", hasList);
+    nowPlayingPanel.classList.toggle("has-nav", hasList && nav !== null);
     nowPlayingPanel.classList.toggle("show-list", hasList && showList);
     renderQueue(list, isSource);
   });
