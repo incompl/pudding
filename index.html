@@ -69,6 +69,13 @@
     <main id="main-view">
       <section id="left">
         <div class="tab-panel" id="tab-files">
+          <!-- Get-started prompt shown across the whole Files panel until a
+               library folder is configured; hides the navigator/tree/footer.
+               Toggled by the files-empty effect in src/main.ts. -->
+          <div id="files-empty" class="panel-empty hidden">
+            To see files, add a library folder in
+            <button id="files-empty-settings" type="button" class="link-btn">settings</button>.
+          </div>
           <!-- Library browse-mode navigator (Replace + back): the root mode menu
                and drill-down bodies render here; #folder-tree below is un-hidden
                only in Browse mode. See src/library-nav.ts. -->
@@ -83,6 +90,12 @@
           </button>
         </div>
         <div class="tab-panel hidden" id="tab-streams">
+          <!-- Get-started prompt shown until a stream list path is configured;
+               replaces the streams list. Toggled by the streams-empty effect. -->
+          <div id="streams-empty" class="panel-empty hidden">
+            To see streams, add a stream list  in
+            <button id="streams-empty-settings" type="button" class="link-btn">settings</button>.
+          </div>
           <div id="streams-list"></div>
         </div>
         <!-- Lens tab bar: a fixed footer of the left pane (Files only), holding
@@ -167,10 +180,10 @@
             </div>
           </div>
           <div class="setting">
-            <label for="manifest-path">Manifest path</label>
+            <label for="stream-list-path">Stream list</label>
             <div class="path-picker">
-              <input type="text" id="manifest-path" spellcheck="false" placeholder="Choose a file or paste a URL" />
-              <button type="button" id="manifest-path-browse">Choose…</button>
+              <input type="text" id="stream-list-path" spellcheck="false" placeholder="Choose a file or paste a URL" />
+              <button type="button" id="stream-list-path-browse">Choose…</button>
             </div>
           </div>
           <p class="credit">vibed by the best<br/><a href="https://incompl.com">incompl.com</a></p>

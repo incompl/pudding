@@ -24,7 +24,7 @@ use tauri_plugin_log::{Target, TargetKind};
 
 const DB_FILE: &str = "metadata.db";
 
-// Identifies the app on every outbound HTTP request: manifest and station-art
+// Identifies the app on every outbound HTTP request: stream list and station-art
 // fetches here, plus the ICY stream connection in the icy module. Public
 // directories like radio-browser.info ask clients to send a descriptive
 // User-Agent and may throttle generic ones; the version tracks Cargo.toml.
@@ -144,7 +144,7 @@ struct Stream {
     name: String,
     url: String,
     // Optional station art: an http(s) or file:// URL. `default` so existing
-    // manifests without the field still deserialize.
+    // stream lists without the field still deserialize.
     #[serde(default)]
     image: Option<String>,
 }
@@ -614,12 +614,12 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
     })
 }
 
-// The manifest is canonically a JSON array of {name, url}, but any .m3u the
+// The stream list is canonically a JSON array of {name, url}, but any .m3u the
 // user already has works too: JSON is tried first, and on failure the file is
 // parsed as extended M3U. The path is a local file or an http(s) URL (remote
-// manifests are fetched here rather than in the webview, which the CSP blocks).
+// stream lists are fetched here rather than in the webview, which the CSP blocks).
 #[tauri::command]
-fn read_manifest(path: String) -> Result<Vec<Stream>, String> {
+fn read_stream_list(path: String) -> Result<Vec<Stream>, String> {
     let contents = if path.starts_with("http://") || path.starts_with("https://") {
         ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(15))
@@ -637,16 +637,16 @@ fn read_manifest(path: String) -> Result<Vec<Stream>, String> {
         Ok(streams) => return Ok(streams),
         Err(e) => e,
     };
-    parse_m3u_manifest(&contents).ok_or_else(|| json_err.to_string())
+    parse_m3u_stream_list(&contents).ok_or_else(|| json_err.to_string())
 }
 
 // Lenient like icy::parse_playlist: #EXTINF is optional, its title (after the
 // first comma) names the following URL, and any non-comment line containing
 // "://" counts as a stream. Unnamed entries fall back to their hostname so the
 // station list never shows a raw URL. Returns None when the body has neither
-// an #EXTM3U header nor a single URL — read_manifest then reports the JSON
-// error rather than presenting arbitrary text as an empty manifest.
-fn parse_m3u_manifest(body: &str) -> Option<Vec<Stream>> {
+// an #EXTM3U header nor a single URL — read_stream_list then reports the JSON
+// error rather than presenting arbitrary text as an empty stream list.
+fn parse_m3u_stream_list(body: &str) -> Option<Vec<Stream>> {
     let mut saw_header = false;
     let mut pending_title: Option<String> = None;
     let mut streams = Vec::new();
@@ -755,11 +755,11 @@ fn get_art(path: String) -> Option<String> {
     Some(format!("data:{};base64,{}", mime, encoded))
 }
 
-// Ceiling on a manifest station image. Anything larger than this is not
+// Ceiling on a stream list station image. Anything larger than this is not
 // plausible station art and would balloon the data URL held in the DOM.
 const MAX_STREAM_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
-// Station art for a manifest stream: `image` is an http(s) or file:// URL.
+// Station art for a stream list stream: `image` is an http(s) or file:// URL.
 // Returned as a data URL for the same reason get_art's is: the webview CSP
 // only permits 'self' and data: image sources, so neither remote URLs nor
 // arbitrary local files can be given to <img> directly.
@@ -1914,7 +1914,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_dir,
-            read_manifest,
+            read_stream_list,
             rescan_library,
             watch_library,
             search_tracks,
@@ -1985,8 +1985,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn m3u_manifest_named_and_bare_entries() {
-        let streams = parse_m3u_manifest(
+    fn m3u_stream_list_named_and_bare_entries() {
+        let streams = parse_m3u_stream_list(
             "#EXTM3U\r\n#EXTINF:-1,SomaFM Groove Salad\r\nhttps://ice5.somafm.com/groovesalad-128-mp3\r\n\r\nhttps://stream.nightride.fm/nightride.mp3\r\n",
         )
         .unwrap();
@@ -2001,19 +2001,19 @@ mod tests {
     }
 
     #[test]
-    fn m3u_manifest_headerless_and_title_variants() {
-        // Bare URL list with no #EXTM3U header is still a valid manifest.
-        let streams = parse_m3u_manifest("http://ex.am/ple\n").unwrap();
+    fn m3u_stream_list_headerless_and_title_variants() {
+        // Bare URL list with no #EXTM3U header is still a valid stream list.
+        let streams = parse_m3u_stream_list("http://ex.am/ple\n").unwrap();
         assert_eq!(streams[0].name, "ex.am");
 
         // Attribute-style EXTINF: title is everything after the first comma.
         let streams =
-            parse_m3u_manifest("#EXTINF:-1 tvg-id=\"x\",My Station\nhttp://ex.am/s\n").unwrap();
+            parse_m3u_stream_list("#EXTINF:-1 tvg-id=\"x\",My Station\nhttp://ex.am/s\n").unwrap();
         assert_eq!(streams[0].name, "My Station");
 
         // Empty EXTINF title falls back like a bare URL; other comments
         // between EXTINF and URL don't eat the pending title.
-        let streams = parse_m3u_manifest(
+        let streams = parse_m3u_stream_list(
             "#EXTINF:-1,Named\n#EXTVLCOPT:network-caching=1000\nhttp://ex.am/a\n#EXTINF:-1,\nhttp://ex.am/b\n",
         )
         .unwrap();
@@ -2022,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn json_manifest_image_optional() {
+    fn json_stream_list_image_optional() {
         let streams: Vec<Stream> = serde_json::from_str(
             r#"[
                 {"name": "Plain", "url": "http://ex.am/a"},
@@ -2054,10 +2054,10 @@ mod tests {
     }
 
     #[test]
-    fn m3u_manifest_rejects_non_playlists() {
-        // Arbitrary text with no header and no URLs is not a manifest.
-        assert!(parse_m3u_manifest("just some notes\nnothing here\n").is_none());
-        // A header alone is a valid, empty manifest.
-        assert_eq!(parse_m3u_manifest("#EXTM3U\n").unwrap().len(), 0);
+    fn m3u_stream_list_rejects_non_playlists() {
+        // Arbitrary text with no header and no URLs is not a stream list.
+        assert!(parse_m3u_stream_list("just some notes\nnothing here\n").is_none());
+        // A header alone is a valid, empty stream list.
+        assert_eq!(parse_m3u_stream_list("#EXTM3U\n").unwrap().len(), 0);
     }
 }

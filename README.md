@@ -50,7 +50,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 ### Internet radio
 
 - Icecast / SHOUTcast streams with in-band ICY now-playing metadata
-- Customizable station list via a simple JSON manifest — or point it at any `.m3u` you already have
+- Customizable station list via a simple JSON stream list — or point it at any `.m3u` you already have
 - Automatic reconnect with backoff; pausing disconnects, resuming rejoins the live edge
 - `.pls` / `.m3u` playlist URLs resolve automatically
 

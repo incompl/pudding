@@ -11,11 +11,12 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect, type Signal } from "@preact/signals-core";
 import { GaplessEngine } from "./audio-engine";
 import { maybeStartE2eBridge } from "./e2e-bridge";
-import { initLibraryNav, popNavToRoot, refreshNavPlaylists, type NavStep } from "./library-nav";
+import { initLibraryNav, popNavToRoot, refreshNavPlaylists, renderNav, type NavStep } from "./library-nav";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOT = "libraryRoot";
-const KEY_MANIFEST_PATH = "manifestPath";
+// Value stays "manifestPath" (the pre-rename key) so existing saved settings survive.
+const KEY_STREAM_LIST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
 const KEY_VOLUME = "volume";
 // Window size is remembered per layout mode so the double-click toggle can
@@ -104,7 +105,7 @@ interface TreeNode {
 interface Stream {
   name: string;
   url: string;
-  // Optional station art from the JSON manifest: an http(s) or file:// URL.
+  // Optional station art from the JSON stream list: an http(s) or file:// URL.
   image?: string | null;
 }
 
@@ -143,7 +144,7 @@ export interface SearchAlbum {
 }
 
 // Discriminated rows shown in the search dropdown: artists and albums, library
-// folders and files (all from the SQLite metadata cache), and manifest streams
+// folders and files (all from the SQLite metadata cache), and stream list streams
 // (filtered client-side).
 type SearchItem =
   | { kind: "artist"; artist: SearchArtist }
@@ -377,7 +378,14 @@ function autoadvanceEnabled(): boolean {
   return autoadvance.value;
 }
 const libraryRootValid = signal(true);
-const manifestPathValid = signal(true);
+// Whether a library root has been configured at all. When false the whole Files
+// panel is replaced by a get-started prompt (see the files-empty effect) rather
+// than showing an empty lens springboard the user can't do anything with.
+const libraryRootSet = signal(false);
+const streamListPathValid = signal(true);
+// Whether a stream list path has been configured. When false the Streams panel is
+// replaced by the same get-started prompt (see the streams-empty effect).
+const streamListPathSet = signal(false);
 // Whether the file tree has at least one top-level entry to start from. Drives
 // the idle play button: with content, an idle play "starts the library" (plays
 // the first entry) instead of sitting disabled, so the button reads ready-to-go.
@@ -658,10 +666,10 @@ function openListTracks(): SearchTrack[] {
 function selectedListTracks(): SearchTrack[] {
   return queueSel.resolveIn(openListTracks());
 }
-// Last manifest streams loaded by refreshStreams, kept so search can filter
-// them without re-reading the manifest on every keystroke.
+// Last stream list streams loaded by refreshStreams, kept so search can filter
+// them without re-reading the stream list on every keystroke.
 let allStreams: Stream[] = [];
-// Manifest name of the currently playing stream, shown as the now-playing
+// Stream list name of the currently playing stream, shown as the now-playing
 // station line. Kept separately from currentStreamUrl because ICY metadata
 // events re-render the now-playing panel after the fact.
 let currentStreamName: string | null = null;
@@ -766,8 +774,8 @@ const engine = new GaplessEngine({
   },
   // ICY now-playing for radio. The station name stays on the title line no
   // matter what so the layout never shifts when metadata arrives; the ICY
-  // title fades in below it. The manifest's stream name wins over the
-  // server's icy-name (manifest names are user-curated; icy-name is often a
+  // title fades in below it. The stream list's stream name wins over the
+  // server's icy-name (stream list names are user-curated; icy-name is often a
   // slogan). The title is conventionally "Artist - Song"; split on the first
   // separator, keeping the whole string as the song when there is none.
   onStreamMetadata: (station, title) => {
@@ -884,8 +892,8 @@ let treeContainer: HTMLElement;
 let streamsContainer: HTMLElement;
 let libraryRootInput: HTMLInputElement;
 let libraryRootBrowseBtn: HTMLButtonElement;
-let manifestPathInput: HTMLInputElement;
-let manifestPathBrowseBtn: HTMLButtonElement;
+let streamListPathInput: HTMLInputElement;
+let streamListPathBrowseBtn: HTMLButtonElement;
 let miniplayerBtn: HTMLButtonElement;
 let settingsBackBtn: HTMLButtonElement;
 let playbackModesEl: HTMLElement;
@@ -1476,7 +1484,7 @@ function renderTree(): void {
 function renderStreams(streams: Stream[]): void {
   streamsContainer.innerHTML = "";
   if (streams.length === 0) {
-    setEmpty(streamsContainer, "Manifest is empty");
+    setEmpty(streamsContainer, "Stream list is empty");
     return;
   }
   const ul = document.createElement("ul");
@@ -2470,7 +2478,7 @@ function playStream(stream: Stream): void {
   setNowPlaying(stream.name, null, null);
   npStreamMeta.value = null;
   void engine.playStream(stream.url);
-  // Manifest station art shows in the same spot as album art. Like loadArt,
+  // Stream list station art shows in the same spot as album art. Like loadArt,
   // the previous art stays up until the new image is ready (a failed or absent
   // fetch resolves to null, which clears it); stations without an image clear
   // immediately.
@@ -4307,7 +4315,7 @@ async function loadArt(path: string): Promise<void> {
   await applyArt(() => invoke<string | null>("get_art", { path }), path);
 }
 
-// Station art declared in the stream manifest, fetched by the backend (the
+// Station art declared in the stream stream list, fetched by the backend (the
 // CSP forbids remote/file <img> sources, so it arrives as a data URL just
 // like embedded track art).
 async function loadStreamArt(image: string): Promise<void> {
@@ -4351,8 +4359,11 @@ async function applyArt(
 async function refreshTree(libraryRoot: string): Promise<void> {
   rootNode = null;
   libraryHasContent.value = false;
+  libraryRootSet.value = !!libraryRoot;
   if (!libraryRoot) {
     libraryRootValid.value = true;
+    // The panel-wide get-started prompt (files-empty effect) covers this case;
+    // the tree stays empty behind it.
     setEmpty(treeContainer, "No library root set");
     return;
   }
@@ -4528,24 +4539,26 @@ async function refreshLibrary(): Promise<void> {
   }
 }
 
-async function refreshStreams(manifestPath: string): Promise<void> {
-  if (!manifestPath) {
+async function refreshStreams(streamListPath: string): Promise<void> {
+  streamListPathSet.value = !!streamListPath;
+  if (!streamListPath) {
     allStreams = [];
-    manifestPathValid.value = true;
-    setEmpty(streamsContainer, "No manifest path set");
+    streamListPathValid.value = true;
+    // The panel-wide get-started prompt (streams-empty effect) covers this case.
+    setEmpty(streamsContainer, "No stream list path set");
     return;
   }
   setEmpty(streamsContainer, "Loading…", "loading");
   try {
-    const streams = await invoke<Stream[]>("read_manifest", { path: manifestPath });
+    const streams = await invoke<Stream[]>("read_stream_list", { path: streamListPath });
     allStreams = streams;
-    manifestPathValid.value = true;
+    streamListPathValid.value = true;
     renderStreams(streams);
   } catch (e) {
-    console.error("read_manifest failed for", manifestPath, e);
+    console.error("read_stream_list failed for", streamListPath, e);
     allStreams = [];
-    manifestPathValid.value = false;
-    setEmpty(streamsContainer, "Invalid manifest path");
+    streamListPathValid.value = false;
+    setEmpty(streamsContainer, "Invalid stream list path");
   }
 }
 
@@ -4563,9 +4576,9 @@ async function setLibraryRoot(value: string): Promise<void> {
   await refreshTree(value);
 }
 
-async function setManifestPath(value: string): Promise<void> {
-  manifestPathInput.value = value;
-  await store.set(KEY_MANIFEST_PATH, value);
+async function setStreamListPath(value: string): Promise<void> {
+  streamListPathInput.value = value;
+  await store.set(KEY_STREAM_LIST_PATH, value);
   await store.save();
   await refreshStreams(value);
 }
@@ -4581,15 +4594,15 @@ async function browseLibraryRoot(): Promise<void> {
   }
 }
 
-async function browseManifestPath(): Promise<void> {
+async function browseStreamListPath(): Promise<void> {
   const selected = await open({
     directory: false,
     multiple: false,
-    defaultPath: manifestPathInput.value || undefined,
-    filters: [{ name: "Manifest", extensions: ["json", "m3u", "m3u8"] }],
+    defaultPath: streamListPathInput.value || undefined,
+    filters: [{ name: "Stream list", extensions: ["json", "m3u", "m3u8"] }],
   });
   if (typeof selected === "string") {
-    await setManifestPath(selected);
+    await setStreamListPath(selected);
   }
 }
 
@@ -4889,6 +4902,14 @@ function setupSettings(): void {
   // toggle. The Back button in the panel returns to now-playing.
   void listen("open-settings", () => { settingsOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => { settingsOpen.value = false; });
+
+  // The get-started prompts' inline "settings" links (Files: no library root,
+  // Streams: no stream list path) open the settings panel.
+  for (const id of ["files-empty-settings", "streams-empty-settings"]) {
+    document
+      .getElementById(id)
+      ?.addEventListener("click", () => { settingsOpen.value = true; });
+  }
 
   // External links must go to the OS browser, not navigate the webview.
   document.addEventListener("click", (e) => {
@@ -5550,6 +5571,23 @@ function setupEffects(): void {
     document.getElementById("lens-footer")?.classList.toggle("hidden", tab !== "files");
   });
 
+  // Until a library folder is configured, the whole Files panel is a get-started
+  // prompt instead of the lens springboard. render() owns hiding the navigator,
+  // folder tree and create button (it already gates those), so just re-render it
+  // when the root-set state flips.
+  effect(() => {
+    libraryRootSet.value;
+    renderNav();
+  });
+
+  // Streams counterpart: until a stream list path is set, swap the streams list for
+  // the get-started prompt. Simpler than Files (no navigator) — just the two.
+  effect(() => {
+    const noStreamList = !streamListPathSet.value;
+    document.getElementById("streams-empty")?.classList.toggle("hidden", !noStreamList);
+    streamsContainer.classList.toggle("hidden", noStreamList);
+  });
+
   // The two-face right pane, painted from the derived paneView. `has-nav` reveals
   // the nav bar whenever a list exists; `show-list` puts the list face up (else
   // the hero owns the pane). Reads queuePlayingIndex too so the highlighted/
@@ -5631,7 +5669,7 @@ function setupEffects(): void {
     libraryRootInput.classList.toggle("invalid", !libraryRootValid.value);
   });
   effect(() => {
-    manifestPathInput.classList.toggle("invalid", !manifestPathValid.value);
+    streamListPathInput.classList.toggle("invalid", !streamListPathValid.value);
   });
 }
 
@@ -5743,8 +5781,8 @@ async function init(): Promise<void> {
   });
   libraryRootInput = document.querySelector("#library-root") as HTMLInputElement;
   libraryRootBrowseBtn = document.querySelector("#library-root-browse") as HTMLButtonElement;
-  manifestPathInput = document.querySelector("#manifest-path") as HTMLInputElement;
-  manifestPathBrowseBtn = document.querySelector("#manifest-path-browse") as HTMLButtonElement;
+  streamListPathInput = document.querySelector("#stream-list-path") as HTMLInputElement;
+  streamListPathBrowseBtn = document.querySelector("#stream-list-path-browse") as HTMLButtonElement;
   miniplayerBtn = document.querySelector("#miniplayer-btn") as HTMLButtonElement;
   miniplayerBtn.addEventListener("click", () => void toggleMiniPlayer());
   settingsBackBtn = document.querySelector("#settings-back-btn") as HTMLButtonElement;
@@ -5781,7 +5819,7 @@ async function init(): Promise<void> {
   store = await load(STORE_FILE, { defaults: {}, autoSave: false });
 
   const libraryRoot = (await store.get<string>(KEY_LIBRARY_ROOT)) ?? "";
-  const manifestPath = (await store.get<string>(KEY_MANIFEST_PATH)) ?? "";
+  const streamListPath = (await store.get<string>(KEY_STREAM_LIST_PATH)) ?? "";
   const splitterWidth = (await store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
   const storedVolume = await store.get<number>(KEY_VOLUME);
   volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
@@ -5895,6 +5933,7 @@ async function init(): Promise<void> {
     showAlbumMenu: showAlbumContextMenu,
     showPlaylistMenu: showPlaylistContextMenu,
     persistLocation: persistNavLocation,
+    libraryRootSet: () => libraryRootSet.value,
   }, navLocation);
   setupPlaybackModes();
   await setupWindowSize(appWindow);
@@ -5906,13 +5945,13 @@ async function init(): Promise<void> {
   setupEffects();
 
   libraryRootInput.value = libraryRoot;
-  manifestPathInput.value = manifestPath;
+  streamListPathInput.value = streamListPath;
 
   libraryRootBrowseBtn.addEventListener("click", () => void browseLibraryRoot());
-  manifestPathBrowseBtn.addEventListener("click", () => void browseManifestPath());
+  streamListPathBrowseBtn.addEventListener("click", () => void browseStreamListPath());
 
   // Both path fields also accept a typed/pasted path: Enter commits (blur fires
-  // "change"), and change re-points the library / re-reads the manifest via the
+  // "change"), and change re-points the library / re-reads the stream list via the
   // same path as the Choose… button.
   libraryRootInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") libraryRootInput.blur();
@@ -5920,11 +5959,11 @@ async function init(): Promise<void> {
   libraryRootInput.addEventListener("change", () => {
     void setLibraryRoot(libraryRootInput.value.trim());
   });
-  manifestPathInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") manifestPathInput.blur();
+  streamListPathInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") streamListPathInput.blur();
   });
-  manifestPathInput.addEventListener("change", () => {
-    void setManifestPath(manifestPathInput.value.trim());
+  streamListPathInput.addEventListener("change", () => {
+    void setStreamListPath(streamListPathInput.value.trim());
   });
 
   await listen<ScanResult>("library-scanned", (event) => {
@@ -5986,7 +6025,7 @@ async function init(): Promise<void> {
 
   await refreshTree(libraryRoot);
   void refreshPlaylistIndex();
-  await refreshStreams(manifestPath);
+  await refreshStreams(streamListPath);
 
   if (libraryRoot) {
     void invoke("rescan_library", { path: libraryRoot });

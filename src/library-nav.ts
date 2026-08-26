@@ -73,6 +73,10 @@ export interface LibraryNavDeps {
   // so it can be restored on the next launch. Fire-and-forget; called on every
   // navigation change from render().
   persistLocation: (steps: NavStep[]) => void;
+  // Whether a library folder has been configured. When false the panel shows a
+  // get-started prompt (#files-empty) instead of the lens springboard; main.ts
+  // re-renders (renderNav) whenever this flips.
+  libraryRootSet: () => boolean;
 }
 
 let deps: LibraryNavDeps;
@@ -94,6 +98,7 @@ let container: HTMLElement;
 let footer: HTMLElement;
 let folderTree: HTMLElement;
 let createBtn: HTMLElement;
+let filesEmpty: HTMLElement;
 const stack: View[] = [];
 
 function list(): HTMLElement {
@@ -473,9 +478,26 @@ export function refreshNavPlaylists(): void {
   if (stack.length === 0) render();
 }
 
+// Force a re-render from outside — main.ts calls this when the library-root-set
+// state flips so render() can swap between the get-started prompt and the lenses.
+export function renderNav(): void {
+  render();
+}
+
 function render(): void {
   container.replaceChildren();
   footer.replaceChildren();
+
+  // No library folder yet: the whole panel is a get-started prompt. Every lens
+  // and the folder tree would be dead ends, so hide them and bail before the
+  // springboard is built.
+  const hasRoot = deps.libraryRootSet();
+  filesEmpty.classList.toggle("hidden", hasRoot);
+  if (!hasRoot) {
+    folderTree.classList.add("hidden");
+    createBtn.classList.add("hidden");
+    return;
+  }
 
   const atRoot = stack.length === 0;
   const top = atRoot ? null : stack[stack.length - 1];
@@ -541,6 +563,7 @@ export function initLibraryNav(d: LibraryNavDeps, initial?: NavStep[]): void {
   footer = document.getElementById("lens-footer") as HTMLElement;
   folderTree = document.getElementById("folder-tree") as HTMLElement;
   createBtn = document.getElementById("create-playlist-btn") as HTMLElement;
+  filesEmpty = document.getElementById("files-empty") as HTMLElement;
 
   // Restore the last place (empty / malformed → root menu), then render once.
   if (initial) restoreLocation(initial);
