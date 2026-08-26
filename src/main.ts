@@ -3204,6 +3204,27 @@ function removeCuratedTracks(objs: SearchTrack[]): void {
   applyCuration(tracks);
 }
 
+// The row that should take the keyboard selection after `removed` is deleted from
+// `list`, following the macOS convention: the row that slides up into the first
+// deleted slot (the first survivor at or after it), or — if the tail was deleted —
+// the last survivor before it. Null when the list is left empty. Keying on object
+// identity, so non-contiguous multi-selections and duplicate paths resolve exactly.
+function fillRowAfterRemoval(
+  list: SearchTrack[],
+  removed: SearchTrack[],
+): SearchTrack | null {
+  const drop = new Set(removed);
+  const firstIdx = list.findIndex((t) => drop.has(t));
+  if (firstIdx === -1) return null;
+  for (let i = firstIdx; i < list.length; i++) {
+    if (!drop.has(list[i])) return list[i];
+  }
+  for (let i = firstIdx - 1; i >= 0; i--) {
+    if (!drop.has(list[i])) return list[i];
+  }
+  return null;
+}
+
 // Insert tracks into the open list at `at` (drag-from-tree). Clamped to the list.
 function insertCuratedTracks(tracks: SearchTrack[], at: number): void {
   const list = curatedList();
@@ -5166,10 +5187,18 @@ function setupPlayerControls(): void {
     if (isTextInputTarget(e.target)) return;
 
     if (e.key === "Delete" || e.key === "Backspace") {
-      const sel = selectedListTracks();
+      const list = openListTracks();
+      const sel = queueSel.resolveIn(list);
       if (sel.length === 0) return;
       e.preventDefault();
+      // Keep the keyboard selection on the row that fills the first deleted slot
+      // so repeated Delete keeps clearing rows without re-reaching for the mouse.
+      const fill = fillRowAfterRemoval(list, sel);
       removeCuratedTracks(sel);
+      if (fill) {
+        queueSel.single(fill);
+        lastSelectionPane = "list";
+      }
       return;
     }
 
