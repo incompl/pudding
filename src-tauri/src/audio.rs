@@ -262,6 +262,25 @@ impl AudioEngine {
 
 // === Engine startup ===
 
+// Raise the calling thread to USER_INTERACTIVE QoS so macOS treats it as
+// latency-critical and won't throttle/deprioritize it under Low Power Mode.
+// The CoreAudio callback already runs at real-time priority; this keeps the
+// decode thread that feeds it from being the weak link. No-op off macOS.
+#[cfg(target_os = "macos")]
+fn raise_decode_thread_qos() {
+    // Safety: pthread_set_qos_class_self_np only mutates the current thread's
+    // scheduling class; the relative priority of 0 is the class default.
+    let rc = unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+    };
+    if rc != 0 {
+        log::warn!("failed to raise decode thread QoS: rc={rc}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn raise_decode_thread_qos() {}
+
 pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     let host = cpal::default_host();
     let device = host
@@ -348,6 +367,12 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
         std::thread::Builder::new()
             .name("audio-decode".into())
             .spawn(move || {
+                // Feeding the real-time CoreAudio callback is latency-critical:
+                // if this thread falls behind, the ring buffer drains and the
+                // callback stutters. Tag it USER_INTERACTIVE so macOS keeps it
+                // scheduled — otherwise Low Power Mode throttles and deprioritizes
+                // it, starving the buffer while the callback keeps draining.
+                raise_decode_thread_qos();
                 decode_loop(rb_producer, shared, origins, cmd_rx, app, output_rate);
             })
             .map_err(|e| format!("spawn decode thread: {e}"))?;

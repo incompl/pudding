@@ -3338,6 +3338,7 @@ dependencies = [
  "block2",
  "cpal",
  "crossbeam-channel",
+ "libc",
  "lofty",
  "log",
  "notify",
