@@ -1498,6 +1498,44 @@ fn artist_albums(artist: String, db: State<DbHandle>) -> Result<Vec<AlbumResult>
     Ok(out)
 }
 
+// Tracks by this artist that belong to no album (empty/NULL album tag) — the
+// complement of artist_albums, which drops them. The artist-detail view lists
+// these below the albums so an artist's loose singles aren't stranded. Filtering
+// on the *track* artist mirrors artist_albums; ordered by title for a stable,
+// readable list. Reuses SearchResult.
+#[tauri::command]
+fn artist_albumless_tracks(
+    artist: String,
+    db: State<DbHandle>,
+) -> Result<Vec<SearchResult>, String> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, title, artist, album FROM tracks
+             WHERE artist = ?1 AND (album IS NULL OR album = '')
+             ORDER BY title COLLATE NOCASE, path COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&artist], |row| {
+            Ok(SearchResult {
+                path: row.get(0)?,
+                title: row.get(1)?,
+                artist: row.get(2)?,
+                album: row.get(3)?,
+                // Flat list: the gutter shows a row index, not a within-album
+                // ordinal, so no metadata track number is carried.
+                track: None,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1859,6 +1897,7 @@ pub fn run() {
             list_all_artists,
             list_all_albums,
             artist_albums,
+            artist_albumless_tracks,
             get_art,
             get_stream_image,
             frontend_ready,
