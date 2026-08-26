@@ -45,6 +45,10 @@ const RECENT_PLAYLISTS_MAX = 10;
 // restored on launch so browse/songs/artists/albums drill-downs survive a restart.
 const KEY_NAV_LOCATION = "navLocation";
 
+// The open sidebar tab (Files/Streams), restored on launch so a Streams-focused
+// user isn't bounced back to Files every start.
+const KEY_ACTIVE_TAB = "activeTab";
+
 // Below this logical (CSS-px) height the layout collapses to the mini player.
 // Mirrors the `max-height` breakpoint in styles.css — keep the two in sync.
 const MINI_MAX_HEIGHT = 480;
@@ -4934,6 +4938,7 @@ function setupTabs(): void {
       selectedStreamUrl.value = null;
       if (lastSelectionPane !== "list") lastSelectionPane = null;
       activeTab.value = next;
+      void persistActiveTab();
     });
   }
 }
@@ -5003,6 +5008,11 @@ function setAutoadvance(enabled: boolean): void {
 
 const persistAutoadvance = async (): Promise<void> => {
   await store.set(KEY_AUTOADVANCE, autoadvance.value);
+  await store.save();
+};
+
+const persistActiveTab = async (): Promise<void> => {
+  await store.set(KEY_ACTIVE_TAB, activeTab.value);
   await store.save();
 };
 
@@ -5278,6 +5288,7 @@ function setupSearch(): void {
       void playPlaylistPath(item.playlist.path);
     } else {
       activeTab.value = "streams";
+      void persistActiveTab();
       playStream(item.stream);
     }
     searchInput.value = "";
@@ -6193,6 +6204,11 @@ async function init(): Promise<void> {
 
   // The last Files-tab place, handed to the navigator below to restore on launch.
   const navLocation = (await store.get<NavStep[]>(KEY_NAV_LOCATION)) ?? [];
+
+  // Restore the open sidebar tab. Set before setupEffects() so the tab effect
+  // renders the right panel on first paint (no Files→Streams flash).
+  const storedTab = await store.get<string>(KEY_ACTIVE_TAB);
+  if (storedTab === "streams" || storedTab === "files") activeTab.value = storedTab;
 
   // Keep "Save Queue as Playlist" enabled only while an ephemeral queue is the active
   // pool (a saved playlist autosaves; nothing else is convertible). currentNodePath
