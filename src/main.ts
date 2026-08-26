@@ -113,6 +113,11 @@ export interface SearchTrack {
   title: string | null;
   artist: string | null;
   album: string | null;
+  // The file's metadata track number, carried only where a within-album ordinal
+  // is meaningful (album_tracks) so the gutter can show the real number like the
+  // browse tree; null for flat lists (Songs, search), which show a positional
+  // index instead. See renderLeafTrackList.
+  track?: number | null;
   // Set only for playlist browse rows whose file is absent on disk: shown in the
   // view (marked, per the plan's "keep the row") but never handed to the engine.
   missing?: boolean;
@@ -4079,7 +4084,10 @@ export function renderLeafTrackList(
     num.className = "nav-num";
     const numText = document.createElement("span");
     numText.className = "nav-num-text";
-    const label = String(i + 1);
+    // Album track lists carry the file's metadata track number (matching the
+    // browse tree), so show it; flat lists (Songs) leave it null and fall back to
+    // the positional row index. A metadata number of 0 is treated as absent.
+    const label = String(t.track ? t.track : i + 1);
     numText.textContent = label;
     // Numbers up to 3 digits sit centered in the gutter at full size (see .nav-num
     // CSS). 4+ digit numbers — 1000th track and beyond — would overflow that

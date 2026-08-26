@@ -161,6 +161,11 @@ struct SearchResult {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    // The file's metadata track number, populated only where a within-album
+    // ordinal is meaningful (album_tracks). Left None for flat lists (the Songs
+    // view, search results) whose gutter shows a positional index instead. The
+    // browse tree renders the same metadata number; see main.ts renderLeafTrackList.
+    track: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -1119,6 +1124,9 @@ fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>
                 title: row.get(1)?,
                 artist: row.get(2)?,
                 album: row.get(3)?,
+                // Flat/positional list: the gutter shows a row index, not a
+                // within-album ordinal, so no metadata track number is carried.
+                track: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1215,6 +1223,9 @@ fn folder_tracks(path: String, db: State<DbHandle>) -> Result<Vec<SearchResult>,
                 title: row.get(1)?,
                 artist: row.get(2)?,
                 album: row.get(3)?,
+                // Flat/positional list: the gutter shows a row index, not a
+                // within-album ordinal, so no metadata track number is carried.
+                track: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1316,6 +1327,9 @@ fn artist_tracks(artist: String, db: State<DbHandle>) -> Result<Vec<SearchResult
                 title: row.get(1)?,
                 artist: row.get(2)?,
                 album: row.get(3)?,
+                // Flat/positional list: the gutter shows a row index, not a
+                // within-album ordinal, so no metadata track number is carried.
+                track: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1338,7 +1352,7 @@ fn album_tracks(
 ) -> Result<Vec<SearchResult>, String> {
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let sql = format!(
-        "SELECT path, title, artist, album FROM tracks
+        "SELECT path, title, artist, album, track FROM tracks
          WHERE album = ?1 AND {expr} = ?2
          ORDER BY disc, track, path COLLATE NOCASE",
         expr = ALBUM_ARTIST_EXPR
@@ -1351,6 +1365,7 @@ fn album_tracks(
                 title: row.get(1)?,
                 artist: row.get(2)?,
                 album: row.get(3)?,
+                track: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1384,6 +1399,9 @@ fn list_all_songs(db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
                 title: row.get(1)?,
                 artist: row.get(2)?,
                 album: row.get(3)?,
+                // Flat/positional list: the gutter shows a row index, not a
+                // within-album ordinal, so no metadata track number is carried.
+                track: None,
             })
         })
         .map_err(|e| e.to_string())?;

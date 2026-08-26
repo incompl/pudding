@@ -2445,7 +2445,6 @@ ul {
   color: #666;
   font-size: 0.85em;
 }
-.nav-num .nav-num-text,
 /* Look and feel live in the shared .row-play rules; this gutter only reveals the
    button on row hover and centers it over the number cell. */
 .nav-track-row:hover .nav-num .nav-num-text {
