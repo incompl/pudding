@@ -121,6 +121,9 @@ export interface SearchTrack {
   // Set only for playlist browse rows whose file is absent on disk: shown in the
   // view (marked, per the plan's "keep the row") but never handed to the engine.
   missing?: boolean;
+  // Track length in seconds (absent/null when unknown). Not shown per-row; summed
+  // to display a total runtime beside a queue/playlist's track count.
+  duration?: number | null;
 }
 
 interface SearchFolder {
@@ -177,6 +180,31 @@ interface Queue {
 // title would drift. Placeholder framing ("Untitled") anticipates saving it as a
 // named playlist later.
 const UNTITLED_PLAYLIST_TITLE = "Untitled";
+
+// Human runtime for a queue/playlist total. Rounds to whole minutes past a
+// minute ("1 hr 32 min", "47 min"); a sub-minute total (a single short track)
+// shows seconds so it isn't misreported as "0 min".
+function formatRuntime(seconds: number): string {
+  const total = Math.round(seconds);
+  if (total < 60) return `${total} sec`;
+  const mins = Math.round(total / 60);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m === 0 ? `${h} hr` : `${h} hr ${m} min`;
+}
+
+// The subtitle under a queue/playlist header: the track count, plus the summed
+// runtime when durations are known ("24 tracks, 1 hr 32 min"). The runtime is
+// omitted entirely if no row carries a duration (e.g. an all-out-of-library
+// playlist), so the count never sits beside a bogus "0 min".
+function trackCountSubtitle(tracks: SearchTrack[]): string {
+  const n = tracks.length;
+  const count = `${n} track${n === 1 ? "" : "s"}`;
+  let secs = 0;
+  for (const t of tracks) if (t.duration) secs += t.duration;
+  return secs > 0 ? `${count}, ${formatRuntime(secs)}` : count;
+}
 
 interface ScanResult {
   ok: boolean;
@@ -2538,12 +2566,11 @@ async function playFolder(folder: SearchFolder): Promise<void> {
   // instead of the old "secret queue" that played but stayed on the card. A
   // folder can span albums (recursive flatten), so it's text-only like an
   // artist queue, keyed on the folder path.
-  const n = tracks.length;
   playQueue(
     {
       kind: "folder",
       title: folder.name,
-      subtitle: `${n} track${n === 1 ? "" : "s"}`,
+      subtitle: trackCountSubtitle(tracks),
       tracks,
     },
     `queue:folder:${folder.path}`,
@@ -2563,6 +2590,7 @@ interface PlaylistTrack {
   track: number | null;
   inLibrary: boolean;
   missing: boolean;
+  duration: number | null;
 }
 
 interface PlaylistData {
@@ -2576,7 +2604,13 @@ interface PlaylistData {
 function playlistPlayableTracks(data: PlaylistData): SearchTrack[] {
   return data.tracks
     .filter((t) => !t.missing)
-    .map((t) => ({ path: t.path, title: t.title, artist: t.artist, album: t.album }));
+    .map((t) => ({
+      path: t.path,
+      title: t.title,
+      artist: t.artist,
+      album: t.album,
+      duration: t.duration,
+    }));
 }
 
 // Every row of a playlist as SearchTracks — including missing files, carried
@@ -2591,6 +2625,7 @@ function playlistViewTracks(data: PlaylistData): SearchTrack[] {
     artist: t.artist,
     album: t.album,
     missing: t.missing,
+    duration: t.duration,
   }));
 }
 
@@ -2637,12 +2672,11 @@ async function playPlaylistPath(path: string): Promise<void> {
   // when nothing is playable, so an all-dangling playlist doesn't open a dead queue.
   const tracks = playlistViewTracks(data);
   if (tracks.every((t) => t.missing)) return;
-  const n = tracks.length;
   playQueue(
     {
       kind: "playlist",
       title: data.name,
-      subtitle: `${n} track${n === 1 ? "" : "s"}`,
+      subtitle: trackCountSubtitle(tracks),
       tracks,
       sourcePath: data.path,
     },
@@ -2677,11 +2711,10 @@ async function browsePlaylistPath(path: string): Promise<void> {
   // playlist whose files can't be resolved doesn't collapse to near-nothing.
   // Playback (playPlaylist / Add to queue) still filters missing.
   const tracks = playlistViewTracks(data);
-  const n = tracks.length;
   browsedPlaylist.value = {
     kind: "playlist",
     title: data.name,
-    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+    subtitle: trackCountSubtitle(tracks),
     tracks,
     sourcePath: data.path,
   };
@@ -3015,11 +3048,10 @@ function applyCuration(newTracks: SearchTrack[]): void {
   // Capture the playing instance (by ref) from the *old* array before the swap.
   const playingObj = isPool ? playingTrackObj(list) : null;
 
-  const n = newTracks.length;
   const updated: Queue = {
     ...list,
     tracks: newTracks,
-    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+    subtitle: trackCountSubtitle(newTracks),
   };
   if (browsed) browsedPlaylist.value = updated;
   else activeQueue.value = updated;
@@ -3190,11 +3222,10 @@ function appendToActivePool(active: Queue, tracks: SearchTrack[]): void {
   const isPool = queueIsActivePool();
   const playingObj = isPool ? playingTrackObj(active) : null;
   const next = [...active.tracks, ...tracks];
-  const n = next.length;
   activeQueue.value = {
     ...active,
     tracks: next,
-    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+    subtitle: trackCountSubtitle(next),
   };
   if (isPool) reconcilePoolEdit(next, playingObj);
   if (active.sourcePath) void saveOpenPlaylist(active.sourcePath, active.title, next);
@@ -3405,12 +3436,11 @@ async function openArtistQueue(name: string): Promise<void> {
     return;
   }
   if (tracks.length === 0) return;
-  const n = tracks.length;
   playQueue(
     {
       kind: "artist",
       title: name,
-      subtitle: `${n} track${n === 1 ? "" : "s"}`,
+      subtitle: trackCountSubtitle(tracks),
       tracks,
     },
     `queue:artist:${name}`,
@@ -3426,12 +3456,11 @@ async function openAlbumQueue(album: string, albumArtist: string): Promise<void>
     return;
   }
   if (tracks.length === 0) return;
-  const n = tracks.length;
   playQueue(
     {
       kind: "album",
       title: album,
-      subtitle: `${n} track${n === 1 ? "" : "s"}`,
+      subtitle: trackCountSubtitle(tracks),
       tracks,
     },
     // NUL joins the two keys so a "/" in either can't forge a collision.
@@ -3524,11 +3553,11 @@ function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
   // list would snap back to the playing row and hide the addition below the fold).
   pendingQueueScrollIndex = q.tracks.length;
   // Reassign to re-render the list + count.
-  const n = q.tracks.length + tracks.length;
+  const combined = [...q.tracks, ...tracks];
   openActiveQueue({
     ...q,
-    tracks: [...q.tracks, ...tracks],
-    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+    tracks: combined,
+    subtitle: trackCountSubtitle(combined),
   });
 }
 
@@ -3560,7 +3589,7 @@ function seedQueueFromCurrent(): void {
   openActiveQueue({
     kind: "playlist",
     title,
-    subtitle: "1 track",
+    subtitle: trackCountSubtitle([track]),
     tracks: [track],
   });
 }
@@ -3573,7 +3602,6 @@ function seedQueueFromCurrent(): void {
 function armQueueAtRest(tracks: SearchTrack[]): void {
   const playable = tracks.filter((t) => !t.missing);
   if (playable.length === 0) return;
-  const n = tracks.length;
   currentParent = syntheticParent(
     `queue:adhoc:${Date.now()}`,
     UNTITLED_PLAYLIST_TITLE,
@@ -3589,7 +3617,7 @@ function armQueueAtRest(tracks: SearchTrack[]): void {
   openActiveQueue({
     kind: "playlist",
     title: UNTITLED_PLAYLIST_TITLE,
-    subtitle: `${n} track${n === 1 ? "" : "s"}`,
+    subtitle: trackCountSubtitle(tracks),
     tracks,
   });
   listFaceOpen.value = true;
@@ -3607,7 +3635,6 @@ function armQueueAtRest(tracks: SearchTrack[]): void {
 // so the appended rows are visible, rather than flashing a toast.
 function addToQueue(tracks: SearchTrack[]): void {
   if (tracks.length === 0) return;
-  const n = tracks.length;
   if (!activeQueue.value) {
     if (hasTrack.value && currentNodePath.value && !isStream.value) {
       seedQueueFromCurrent();
@@ -3624,7 +3651,7 @@ function addToQueue(tracks: SearchTrack[]): void {
         {
           kind: "playlist",
           title: UNTITLED_PLAYLIST_TITLE,
-          subtitle: `${n} track${n === 1 ? "" : "s"}`,
+          subtitle: trackCountSubtitle(tracks),
           tracks,
         },
         `queue:adhoc:${Date.now()}`,
@@ -6072,7 +6099,7 @@ async function init(): Promise<void> {
           {
             kind: "folder",
             title: "E2E Pool",
-            subtitle: `${tracks.length} tracks`,
+            subtitle: trackCountSubtitle(tracks),
             tracks,
           },
           "queue:e2e:pool",

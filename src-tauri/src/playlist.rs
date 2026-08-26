@@ -58,6 +58,9 @@ pub struct PlaylistTrack {
     #[serde(rename = "inLibrary")]
     in_library: bool,
     missing: bool,
+    // Track length in seconds (None when unknown / out of library). Summed for
+    // the playlist's runtime beside its track count.
+    duration: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -242,7 +245,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                 .to_string();
             let missing = !Path::new(&e.path).exists();
             match meta_map.get(&e.path).cloned() {
-                Some((title, artist, album, album_artist, disc, track)) => PlaylistTrack {
+                Some((title, artist, album, album_artist, disc, track, duration)) => PlaylistTrack {
                     path: e.path,
                     name: basename,
                     title,
@@ -253,6 +256,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     track,
                     in_library: true,
                     missing,
+                    duration,
                 },
                 None => PlaylistTrack {
                     // Out-of-library: no DB metadata; show the `#EXTINF` title
@@ -267,6 +271,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     track: None,
                     in_library: false,
                     missing,
+                    duration: None,
                 },
             }
         })
@@ -281,7 +286,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
 
 // Serialize a playlist to extended-M3U text (UTF-8). Paths under the playlist's
 // directory are written relative; others absolute. `#EXTINF` carries the DB
-// display for portability (duration unknown → -1).
+// display for portability, with the cached runtime in seconds (−1 if unknown).
 fn serialize(path: &str, name: &str, tracks: &[String], conn: &Connection) -> Result<String, String> {
     let base_dir = playlist_base_dir(path);
     let meta_map = fetch_meta(conn, tracks)?;
@@ -289,14 +294,15 @@ fn serialize(path: &str, name: &str, tracks: &[String], conn: &Connection) -> Re
     let mut out = String::from("#EXTM3U\n");
     out.push_str(&format!("#PLAYLIST:{}\n", sanitize_line(name)));
     for t in tracks {
-        if let Some((title, artist, ..)) = meta_map.get(t) {
+        if let Some((title, artist, _, _, _, _, duration)) = meta_map.get(t) {
             let display = match (artist, title) {
                 (Some(a), Some(ti)) => format!("{} - {}", a, ti),
                 (_, Some(ti)) => ti.clone(),
                 _ => String::new(),
             };
             if !display.is_empty() {
-                out.push_str(&format!("#EXTINF:-1,{}\n", sanitize_line(&display)));
+                let secs = duration.map(|d| d.round() as i64).unwrap_or(-1);
+                out.push_str(&format!("#EXTINF:{},{}\n", secs, sanitize_line(&display)));
             }
         }
         out.push_str(&relativize(&base_dir, t));
@@ -660,7 +666,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE tracks (path TEXT, title TEXT, artist TEXT, album TEXT, \
-             album_artist TEXT, disc INTEGER, track INTEGER);",
+             album_artist TEXT, disc INTEGER, track INTEGER, duration REAL);",
         )
         .unwrap();
         conn

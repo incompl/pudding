@@ -166,6 +166,9 @@ struct SearchResult {
     // view, search results) whose gutter shows a positional index instead. The
     // browse tree renders the same metadata number; see main.ts renderLeafTrackList.
     track: Option<u32>,
+    // Track length in seconds (None when unknown). Summed per queue/playlist for
+    // the runtime shown beside the track count; individual rows don't display it.
+    duration: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -204,11 +207,15 @@ struct Tags {
     album_artist: Option<String>,
     disc: Option<u32>,
     track: Option<u32>,
+    // Track length in seconds, read from the decoded file's properties (not a
+    // tag). None when lofty can't determine it. Summed per queue/playlist to
+    // show a total runtime beside the track count.
+    duration: Option<f64>,
 }
 
 // The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
 // and the next startup will drop and recreate it.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 // WAL lets the scan's write transaction run without blocking concurrent reads
 // (list_dir, get_metadata) on the main connection.
@@ -234,7 +241,8 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             album TEXT,
             album_artist TEXT,
             disc INTEGER,
-            track INTEGER
+            track INTEGER,
+            duration REAL
         );",
     )?;
     if version != SCHEMA_VERSION {
@@ -251,12 +259,22 @@ fn read_tags(path: &std::path::Path) -> Tags {
         album_artist: None,
         disc: None,
         track: None,
+        duration: None,
     };
     let Ok(tagged) = lofty::read_from_path(path) else {
         return empty;
     };
+    // The runtime comes from the decoded audio properties, not a tag, so it's
+    // available even for otherwise-untagged files.
+    let duration = {
+        let secs = tagged.properties().duration().as_secs_f64();
+        (secs > 0.0).then_some(secs)
+    };
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
-        return empty;
+        return Tags {
+            duration,
+            ..empty
+        };
     };
     let norm = |v: Option<std::borrow::Cow<'_, str>>| {
         v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -273,6 +291,7 @@ fn read_tags(path: &std::path::Path) -> Tags {
         ),
         disc: tag.disk(),
         track: tag.track(),
+        duration,
     }
 }
 
@@ -354,8 +373,8 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
 
         let tags = read_tags(file);
         let _ = tx.execute(
-            "INSERT INTO tracks (path, mtime, size, title, artist, album, album_artist, disc, track)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO tracks (path, mtime, size, title, artist, album, album_artist, disc, track, duration)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(path) DO UPDATE SET
                  mtime = excluded.mtime,
                  size = excluded.size,
@@ -364,7 +383,8 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
                  album = excluded.album,
                  album_artist = excluded.album_artist,
                  disc = excluded.disc,
-                 track = excluded.track",
+                 track = excluded.track,
+                 duration = excluded.duration",
             params![
                 path_str,
                 mtime,
@@ -374,7 +394,8 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
                 tags.album,
                 tags.album_artist,
                 tags.disc,
-                tags.track
+                tags.track,
+                tags.duration
             ],
         );
     }
@@ -471,6 +492,7 @@ type MetaRow = (
     Option<String>,
     Option<u32>,
     Option<u32>,
+    Option<f64>,
 );
 
 // Fetches (title, artist, album, disc, track) for many paths in one round trip
@@ -482,7 +504,7 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
     for chunk in paths.chunks(900) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT path, title, artist, album, album_artist, disc, track FROM tracks WHERE path IN ({})",
+            "SELECT path, title, artist, album, album_artist, disc, track, duration FROM tracks WHERE path IN ({})",
             placeholders
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -497,6 +519,7 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
                         row.get(4)?,
                         row.get(5)?,
                         row.get(6)?,
+                        row.get(7)?,
                     ),
                 ))
             })
@@ -553,10 +576,12 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
     };
     let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
     for (name, full) in file_names.into_iter().zip(fulls.into_iter()) {
-        let (title, artist, album, album_artist, disc, track) = meta_map
+        // The browse tree doesn't show per-track runtime, so the duration column
+        // fetch_meta now returns is ignored here.
+        let (title, artist, album, album_artist, disc, track, _duration) = meta_map
             .get(&full)
             .cloned()
-            .unwrap_or((None, None, None, None, None, None));
+            .unwrap_or((None, None, None, None, None, None, None));
         files.push(FileEntry {
             name,
             title,
@@ -1106,7 +1131,7 @@ fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn
         .prepare(
-            "SELECT path, title, artist, album FROM tracks
+            "SELECT path, title, artist, album, duration FROM tracks
              WHERE title LIKE ?1 ESCAPE '\\'
                 OR artist LIKE ?1 ESCAPE '\\'
                 OR album LIKE ?1 ESCAPE '\\'
@@ -1127,6 +1152,7 @@ fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>
                 // Flat/positional list: the gutter shows a row index, not a
                 // within-album ordinal, so no metadata track number is carried.
                 track: None,
+                duration: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1210,7 +1236,7 @@ fn folder_tracks(path: String, db: State<DbHandle>) -> Result<Vec<SearchResult>,
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn
         .prepare(
-            "SELECT path, title, artist, album FROM tracks
+            "SELECT path, title, artist, album, duration FROM tracks
              WHERE path LIKE ?1 ESCAPE '\\'
              ORDER BY album IS NULL, album COLLATE NOCASE,
                       disc, track, path COLLATE NOCASE",
@@ -1226,6 +1252,7 @@ fn folder_tracks(path: String, db: State<DbHandle>) -> Result<Vec<SearchResult>,
                 // Flat/positional list: the gutter shows a row index, not a
                 // within-album ordinal, so no metadata track number is carried.
                 track: None,
+                duration: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1314,7 +1341,7 @@ fn artist_tracks(artist: String, db: State<DbHandle>) -> Result<Vec<SearchResult
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn
         .prepare(
-            "SELECT path, title, artist, album FROM tracks
+            "SELECT path, title, artist, album, duration FROM tracks
              WHERE artist = ?1
              ORDER BY album IS NULL, album COLLATE NOCASE,
                       disc, track, path COLLATE NOCASE",
@@ -1330,6 +1357,7 @@ fn artist_tracks(artist: String, db: State<DbHandle>) -> Result<Vec<SearchResult
                 // Flat/positional list: the gutter shows a row index, not a
                 // within-album ordinal, so no metadata track number is carried.
                 track: None,
+                duration: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1352,7 +1380,7 @@ fn album_tracks(
 ) -> Result<Vec<SearchResult>, String> {
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let sql = format!(
-        "SELECT path, title, artist, album, track FROM tracks
+        "SELECT path, title, artist, album, track, duration FROM tracks
          WHERE album = ?1 AND {expr} = ?2
          ORDER BY disc, track, path COLLATE NOCASE",
         expr = ALBUM_ARTIST_EXPR
@@ -1366,6 +1394,7 @@ fn album_tracks(
                 artist: row.get(2)?,
                 album: row.get(3)?,
                 track: row.get(4)?,
+                duration: row.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1386,7 +1415,7 @@ fn list_all_songs(db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn
         .prepare(
-            "SELECT path, title, artist, album FROM tracks
+            "SELECT path, title, artist, album, duration FROM tracks
              ORDER BY artist IS NULL, artist COLLATE NOCASE,
                       album COLLATE NOCASE, disc, track,
                       title COLLATE NOCASE",
@@ -1402,6 +1431,7 @@ fn list_all_songs(db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
                 // Flat/positional list: the gutter shows a row index, not a
                 // within-album ordinal, so no metadata track number is carried.
                 track: None,
+                duration: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1511,7 +1541,7 @@ fn artist_albumless_tracks(
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn
         .prepare(
-            "SELECT path, title, artist, album FROM tracks
+            "SELECT path, title, artist, album, duration FROM tracks
              WHERE artist = ?1 AND (album IS NULL OR album = '')
              ORDER BY title COLLATE NOCASE, path COLLATE NOCASE",
         )
@@ -1526,6 +1556,7 @@ fn artist_albumless_tracks(
                 // Flat list: the gutter shows a row index, not a within-album
                 // ordinal, so no metadata track number is carried.
                 track: None,
+                duration: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?;
