@@ -1915,6 +1915,14 @@ ul {
   background-color: var(--accent);
 }
 
+/* Optical alignment for the tree gutter: the triangle's mask bounding box is
+   centered on the cell, but it reads a touch right of the centered track numbers
+   it replaces on hover. Nudge it left so the play button lands right on the
+   numbers. Scoped to the tree so the queue/nav gutters keep their own centering. */
+#folder-tree .icon.track .row-play::before {
+  transform: translate(calc(-50% - -0.2em), -50%);
+}
+
 /* Untagged rows have no track number, which left the gutter blank and made their
    titles read as mis-indented against numbered siblings. Show the play button at
    rest instead, so the gutter always has a visible anchor. currentColor renders
