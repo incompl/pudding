@@ -2031,10 +2031,11 @@ const paneView = computed<PaneView>(() => {
     // Describe what's coming. Shuffle and repeat-one have no single "next track"
     // to name — say what mode is running over the source instead. Otherwise name
     // the next track (repeat-all wraps), and only a genuine end reads "End of
-    // queue".
+    // queue" — or "End of playlist" when the source is a playlist, which is not a
+    // queue.
     let text: string;
     if (!hasTrack.value || (!hasNextTrack() && repeatMode.value !== "one")) {
-      text = "End of queue";
+      text = isPlaylistSource(list) ? "End of playlist" : "End of queue";
     } else if (shuffleMode.value) {
       text = `Shuffling ${sourceName}`;
     } else if (repeatMode.value === "one") {
