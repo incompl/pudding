@@ -4,6 +4,9 @@
   --splitter-width: 5px;
   --bg: #000;
   --panel: #0f0f0f;
+  /* A touch darker than --surface: reads as a lifted, focused element (popovers,
+     the inline editor) without going all the way to the near-black panel. */
+  --surface-raised: #1a1a1a;
   --surface: #272727;
   --surface-hover: #3f3f3f;
   --text: #f1f1f1;
@@ -303,9 +306,7 @@ body.platform-mac #tabs {
   width: 320px;
   max-height: 60vh;
   overflow-y: auto;
-  /* A touch darker than the resting surface reads as a lifted, focused
-     element, without going all the way to the near-black sidebar panel. */
-  background: #1a1a1a;
+  background: var(--surface-raised);
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   z-index: 20;
@@ -405,7 +406,7 @@ body.platform-mac #tabs {
 .context-menu {
   position: fixed;
   min-width: 140px;
-  background: #1a1a1a;
+  background: var(--surface-raised);
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   z-index: 30;
@@ -1602,7 +1603,7 @@ body.dragging-noselect * {
 }
 
 /* A list-add affordance that flows below the tree/streams list at the bottom of
-   a panel (Create playlist under the files tree, Add station under the streams
+   a panel (Create playlist under the files tree, Add stream under the streams
    list). Styled to match the tree rows (same inset, gap, text color, and hover)
    so it reads as a first-class list entry, not a disabled footer. As the
    bottom-most row it also carries the bottom-edge reach (negative margin + extra
@@ -1655,15 +1656,32 @@ body.dragging-noselect * {
   display: none;
 }
 
-/* Inline field editor: a small stacked form that expands in place (Add station
+/* Inline field editor: a small stacked form that expands in place (Add stream
    now; track-metadata editing later). Sits flush in the list flow, indented to
    line up with the rows above, so it reads as the row being edited rather than a
    floating dialog. */
+/* Contained panel so the editor reads as one distinct thing dropped into the
+   tree, not loose rows: a raised fill + rounded corners give it a clear start
+   and end without a border. Small margin keeps it off the neighbouring rows. */
 .inline-editor {
   display: flex;
   flex-direction: column;
   gap: 0.4em;
   padding: 0.5em 0.8em 0.6em 0.8em;
+  margin: 0.15em 0.2em;
+  border-radius: 6px;
+  background: var(--surface-raised);
+}
+
+/* "Editing <filename>" line above the fields — cues that this rewrites the file
+   itself and keeps the row identified after its tree row scrolls away. Ellipsized
+   so a long filename can't widen the form. */
+.inline-editor-heading {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inline-editor-field {
@@ -1675,6 +1693,10 @@ body.dragging-noselect * {
 .inline-editor-label {
   flex: none;
   width: 3.2em;
+  /* Tight line-height so a two-line label ("Album Artist") still fits within the
+     input's height — the row height then tracks the input, keeping every field
+     row the same height and the spacing even. */
+  line-height: 1.05;
   color: var(--text-muted);
   font-size: 0.85em;
   text-align: right;
@@ -1684,7 +1706,9 @@ body.dragging-noselect * {
   flex: 1;
   min-width: 0;
   padding: 0.25em 0.4em;
-  border: 1px solid var(--surface-hover);
+  /* Transparent so there's no resting border, but focus can tint it accent
+     without shifting the layout. */
+  border: 1px solid transparent;
   border-radius: 4px;
   background: var(--surface);
   color: inherit;
@@ -1701,7 +1725,7 @@ body.dragging-noselect * {
 .inline-editor-browse {
   flex: none;
   padding: 0.25em 0.6em;
-  border: 1px solid var(--surface-hover);
+  border: none;
   border-radius: 4px;
   background: var(--surface);
   color: var(--text-muted);
@@ -1714,6 +1738,19 @@ body.dragging-noselect * {
   color: inherit;
 }
 
+/* Reason Save is disabled (e.g. the edited track is playing). Right-aligned to
+   sit above the actions row; hidden until the block applies. */
+.inline-editor-note {
+  align-self: flex-end;
+  color: var(--text-muted);
+  font-size: 0.85em;
+  margin-top: 0.2em;
+}
+
+.inline-editor-note.hidden {
+  display: none;
+}
+
 .inline-editor-actions {
   display: flex;
   justify-content: flex-end;
@@ -1723,22 +1760,26 @@ body.dragging-noselect * {
 
 .inline-editor-actions button {
   padding: 0.25em 0.9em;
-  border: 1px solid var(--surface-hover);
+  border: none;
   border-radius: 4px;
-  background: var(--surface);
-  color: inherit;
   font: inherit;
   cursor: pointer;
 }
 
-.inline-editor-actions button:hover {
+/* Cancel is a plain surface-filled button, just borderless. */
+.inline-editor-cancel {
+  background: var(--surface);
+  color: inherit;
+}
+
+.inline-editor-cancel:hover {
   background: var(--surface-hover);
 }
 
+/* Save is the primary action: a solid accent fill. */
 .inline-editor-submit {
-  border-color: var(--accent) !important;
-  background: var(--accent) !important;
-  color: var(--bg) !important;
+  background: var(--accent);
+  color: var(--bg);
 }
 
 .inline-editor-submit:disabled {

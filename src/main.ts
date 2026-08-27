@@ -1316,6 +1316,10 @@ function renderNode(
         }
         items.push({ label: "Add to queue", action: () => addToQueue([nodeToTrack(node)]) });
         items.push(addToPlaylistItem(() => [nodeToTrack(node)]));
+        items.push({
+          label: "Edit metadata…",
+          action: () => openEditTrackEditor(node, parent, li, showArtist),
+        });
         items.push(showInFinderItem(node.path));
       }
       showContextMenu(e.clientX, e.clientY, items);
@@ -1584,13 +1588,29 @@ interface InlineEditorField {
 interface InlineEditorOptions {
   fields: InlineEditorField[];
   submitLabel: string;
+  // Optional line above the fields, e.g. "Editing <filename>". Signals that the
+  // editor rewrites the underlying file (not just the library) and keeps the
+  // edited row identified after the tree row it replaced scrolls away.
+  heading?: string;
   onSubmit: (values: Record<string, string>) => void | Promise<void>;
   onCancel: () => void;
+  // When set, Save is disabled whenever this returns true (on top of the
+  // required-field check), and `blockedNote` shows above the buttons to say why.
+  // It's read inside a reactive effect, so referencing a signal re-evaluates the
+  // gate live (e.g. re-enabling Save the moment playback leaves the edited file).
+  blocked?: () => boolean;
+  blockedNote?: string;
 }
 
 function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
   const form = document.createElement("form");
   form.className = "inline-editor";
+  if (opts.heading) {
+    const heading = document.createElement("div");
+    heading.className = "inline-editor-heading";
+    heading.textContent = opts.heading;
+    form.appendChild(heading);
+  }
   const inputs = new Map<string, HTMLInputElement>();
   // Browse buttons are wired after submitBtn/syncEnabled exist (a pick updates
   // the disabled state), so collect them during the build pass.
@@ -1629,12 +1649,25 @@ function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
   submitBtn.type = "submit";
   submitBtn.className = "inline-editor-submit";
   submitBtn.textContent = opts.submitLabel;
+  // Optional note above the buttons, shown only while `blocked` holds (e.g.
+  // "Can't save while this track is playing"). Present in the DOM from the start
+  // so toggling it doesn't reflow the actions row.
+  let noteEl: HTMLElement | null = null;
+  if (opts.blocked && opts.blockedNote) {
+    noteEl = document.createElement("div");
+    noteEl.className = "inline-editor-note hidden";
+    noteEl.textContent = opts.blockedNote;
+    form.appendChild(noteEl);
+  }
+
   actions.append(cancelBtn, submitBtn);
   form.appendChild(actions);
 
   const required = opts.fields.filter((f) => f.required).map((f) => f.key);
   const syncEnabled = (): void => {
-    submitBtn.disabled = required.some((key) => !inputs.get(key)!.value.trim());
+    const blocked = opts.blocked?.() ?? false;
+    submitBtn.disabled = blocked || required.some((key) => !inputs.get(key)!.value.trim());
+    noteEl?.classList.toggle("hidden", !blocked);
   };
   for (const input of inputs.values()) input.addEventListener("input", syncEnabled);
   for (const { input, browse } of browsers) {
@@ -1648,6 +1681,24 @@ function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
     });
   }
   syncEnabled();
+
+  // Keep the Save gate live: re-run syncEnabled whenever a signal read by
+  // `blocked` changes. There's no teardown hook for the editor, so the effect
+  // self-disposes once the form leaves the DOM (Save/Cancel re-render the row).
+  // The first run happens before the caller mounts the form, so the disconnect
+  // check is gated on `mounted` to avoid disposing before it's ever shown.
+  if (opts.blocked) {
+    let mounted = false;
+    const stop = effect(() => {
+      opts.blocked!(); // subscribe to whatever signals the predicate reads
+      if (mounted && !form.isConnected) {
+        stop();
+        return;
+      }
+      syncEnabled();
+    });
+    mounted = true;
+  }
 
   form.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -1716,6 +1767,11 @@ function openAddStationEditor(): void {
   const btn = document.getElementById("add-station-btn");
   if (!tab || !btn || btn.classList.contains("hidden")) return;
   if (tab.classList.contains("adding-station")) return; // already open
+  // Cancel any station currently being edited (its row became an inline editor)
+  // so only one stream editor is ever open at a time.
+  if (streamsContainer?.querySelector(".inline-editor")) {
+    void refreshStreams(streamListPathInput.value);
+  }
   const editor = buildInlineEditor({
     fields: stationEditorFields(),
     submitLabel: "Add",
@@ -1769,6 +1825,104 @@ function openEditStationEditor(stream: Stream, li: HTMLElement): void {
       await refreshStreams(streamListPathInput.value);
     },
   });
+  li.replaceChildren(editor);
+}
+
+// The editable audio tags of a track, prefilled from the node. Duration is
+// derived from the decoded audio (not a tag), so it isn't offered. Disc/Track are
+// integers stored as text here; openEditTrackEditor parses them back on save.
+function trackEditorFields(node: TreeNode): InlineEditorField[] {
+  return [
+    { key: "title", label: "Title", value: node.title ?? "", placeholder: node.name },
+    { key: "artist", label: "Artist", value: node.artist ?? "" },
+    { key: "album", label: "Album", value: node.album ?? "" },
+    { key: "albumArtist", label: "Album Artist", value: node.albumArtist ?? "" },
+    { key: "disc", label: "Disc", value: node.disc?.toString() ?? "" },
+    { key: "track", label: "Track", value: node.track?.toString() ?? "" },
+  ];
+}
+
+// Cancels the currently-open track metadata editor, if any, restoring its row.
+// Set while an editor is open (see openEditTrackEditor) so opening a second one
+// tears down the first — only one track editor lives at a time.
+let closeOpenTrackEditor: (() => void) | null = null;
+
+// Edit a track's embedded tags in place: the tree row becomes the inline editor,
+// mirroring openEditStationEditor. write_tags rewrites the file and syncs the
+// library cache row, handing back the re-read tags; we fold them into the node
+// and re-render the row (showArtist preserved so the row looks identical). Cancel
+// and errors just restore the row. The caller must not offer this for the file
+// the engine is playing — see the single-track context menu.
+function openEditTrackEditor(
+  node: TreeNode,
+  parent: TreeNode,
+  li: HTMLLIElement,
+  showArtist: boolean,
+): void {
+  closeAddStationEditor();
+  // Only one track editor open at a time: cancel any other before opening this.
+  closeOpenTrackEditor?.();
+  // Hold off the watcher-driven tree rebuild while the editor is open: a
+  // `library-scanned` event (this save's own write, or unrelated fs activity)
+  // would otherwise renderTree() and tear the form out mid-edit — which also
+  // orphans its reactive Save-gate effect. Mirrors the tree-rename editor.
+  inlineEditing = true;
+  const restore = () => {
+    if (closeOpenTrackEditor === restore) closeOpenTrackEditor = null;
+    inlineEditing = false;
+    li.replaceWith(renderNode(node, parent, showArtist));
+    // Flush a rebuild the watcher deferred while the editor was open, now that
+    // tearing out the (closed) editor is safe. Matches renameTreePlaylist's finish().
+    if (refreshDeferredWhileEditing) {
+      refreshDeferredWhileEditing = false;
+      void refreshLibrary();
+    }
+  };
+  // Empty or non-positive parses to null (clears the tag); disc/track are 1-based.
+  const parsePositive = (s: string): number | null => {
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const editor = buildInlineEditor({
+    fields: trackEditorFields(node),
+    submitLabel: "Save",
+    heading: `Editing ${node.name}`,
+    // Editing is always allowed, but saving rewrites the file in place — unsafe
+    // while the engine holds it open (playback may have advanced into this track
+    // after the editor opened). Gate Save on that, live.
+    blocked: () => currentNodePath.value === node.path,
+    blockedNote: "Can't save while this track is playing",
+    onCancel: restore,
+    onSubmit: async (values) => {
+      // Defensive re-check: the reactive gate keeps Save disabled while playing,
+      // so this only trips on a same-tick race. Leave the form up (the note is
+      // already showing) rather than rewriting the file under the decoder.
+      if (currentNodePath.value === node.path) return;
+      let res: FileEntry;
+      try {
+        res = await invoke<FileEntry>("write_tags", {
+          path: node.path,
+          title: values.title || null,
+          artist: values.artist || null,
+          albumArtist: values.albumArtist || null,
+          album: values.album || null,
+          disc: parsePositive(values.disc),
+          track: parsePositive(values.track),
+        });
+      } catch (e) {
+        console.error("write_tags failed", e);
+        return; // leave the form up so the user can correct and retry
+      }
+      node.title = res.title;
+      node.artist = res.artist;
+      node.album = res.album;
+      node.albumArtist = res.albumArtist;
+      node.disc = res.disc;
+      node.track = res.track;
+      restore();
+    },
+  });
+  closeOpenTrackEditor = restore;
   li.replaceChildren(editor);
 }
 

@@ -1160,6 +1160,118 @@ fn prepare_external_file(path: String) -> Result<TrackMeta, String> {
     })
 }
 
+// Write the editable tags back into a file and sync the library cache row, so
+// the Songs/Artists/Albums views reflect the change without waiting for the
+// debounced watcher rescan. Mirrors read_tags: it mutates the *primary* tag (the
+// one read_tags reads), creating one of the file's native type when the file is
+// untagged. Empty/omitted fields clear the corresponding item. `duration` comes
+// from the decoded audio, not a tag, so it is neither shown nor written here.
+//
+// The frontend refuses this for the file the audio engine currently holds open
+// (lofty rewrites the file in place, which would corrupt an in-progress decode),
+// so this command assumes the file is not being played.
+#[tauri::command]
+fn write_tags(
+    path: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album_artist: Option<String>,
+    album: Option<String>,
+    disc: Option<u32>,
+    track: Option<u32>,
+    db: State<DbHandle>,
+) -> Result<FileEntry, String> {
+    let p = PathBuf::from(&path);
+    let mut tagged = lofty::read_from_path(&p).map_err(|e| format!("read failed: {}", e))?;
+
+    // Untagged files have no tag to mutate; give them one of the container's
+    // native type (ID3v2 for MP3, MP4 atoms for m4a, Vorbis comments for FLAC…).
+    if tagged.primary_tag_mut().is_none() {
+        let tag_type = tagged.primary_tag_type();
+        tagged.insert_tag(lofty::tag::Tag::new(tag_type));
+    }
+    let tag = tagged
+        .primary_tag_mut()
+        .expect("primary tag present (inserted above when absent)");
+
+    // Trim, and treat empty as "clear" — symmetric with read_tags' norm().
+    let norm = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let title = norm(title);
+    let artist = norm(artist);
+    let album = norm(album);
+    let album_artist = norm(album_artist);
+
+    match &title {
+        Some(v) => tag.set_title(v.clone()),
+        None => tag.remove_title(),
+    }
+    match &artist {
+        Some(v) => tag.set_artist(v.clone()),
+        None => tag.remove_artist(),
+    }
+    match &album {
+        Some(v) => tag.set_album(v.clone()),
+        None => tag.remove_album(),
+    }
+    // No Accessor shortcut for album artist (see read_tags): set/clear by key.
+    match &album_artist {
+        Some(v) => {
+            tag.insert_text(lofty::tag::ItemKey::AlbumArtist, v.clone());
+        }
+        None => tag.remove_key(&lofty::tag::ItemKey::AlbumArtist),
+    }
+    match disc {
+        Some(d) => tag.set_disk(d),
+        None => tag.remove_disk(),
+    }
+    match track {
+        Some(t) => tag.set_track(t),
+        None => tag.remove_track(),
+    }
+
+    tagged
+        .save_to_path(&p, lofty::config::WriteOptions::default())
+        .map_err(|e| format!("save failed: {}", e))?;
+
+    // Re-stat after the write so the cached mtime/size match the file lofty just
+    // rewrote. The incremental scan skips rows whose mtime+size are unchanged, so
+    // recording the post-write values makes the watcher's self-write event a
+    // no-op instead of a redundant re-read.
+    let (mtime, size) = std::fs::metadata(&p)
+        .map(|m| {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            (mtime, m.len() as i64)
+        })
+        .unwrap_or((0, 0));
+
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let _ = conn.execute(
+            "UPDATE tracks SET mtime = ?2, size = ?3, title = ?4, artist = ?5,
+                 album = ?6, album_artist = ?7, disc = ?8, track = ?9 WHERE path = ?1",
+            params![path, mtime, size, title, artist, album, album_artist, disc, track],
+        );
+    }
+
+    Ok(FileEntry {
+        name: p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        title,
+        artist,
+        album,
+        album_artist,
+        disc,
+        track,
+    })
+}
+
 // === Audio playback commands ===
 //
 // The native audio engine runs on its own threads (output, decode, position).
@@ -2175,6 +2287,7 @@ pub fn run() {
             frontend_ready,
             e2e_port,
             prepare_external_file,
+            write_tags,
             audio_play,
             audio_play_stream,
             audio_toggle_pause,
