@@ -2349,6 +2349,26 @@ ul {
   background: var(--surface-hover);
 }
 
+/* Stack the per-folder library rows; the Add-folder button sits below them. */
+#library-roots {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+}
+
+/* The × that removes a library-folder row. Square, matching the input height, so
+   the row reads input | Choose… | ×. */
+.path-picker button.path-remove {
+  padding: 0 0.7em;
+  font-size: 1.1em;
+  line-height: 1;
+  color: var(--text-muted);
+}
+
+.path-picker button.path-remove:hover {
+  color: var(--danger);
+}
+
 /* ==========================================================================
    Library browse-mode navigator (Browse / Songs / Playlists / Artists / Albums)
    under the Files tab, Replace + back model. Mirrors the folder-tree row

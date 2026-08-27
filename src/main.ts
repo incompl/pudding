@@ -14,7 +14,7 @@ import { maybeStartE2eBridge } from "./e2e-bridge";
 import { initLibraryNav, popNavToRoot, refreshNavPlaylists, reloadNavView, renderNav, type NavStep } from "./library-nav";
 
 const STORE_FILE = "settings.json";
-const KEY_LIBRARY_ROOT = "libraryRoot";
+const KEY_LIBRARY_ROOTS = "libraryRoots";
 // Value stays "manifestPath" (the pre-rename key) so existing saved settings survive.
 const KEY_STREAM_LIST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
@@ -381,7 +381,6 @@ const autoadvance = signal(true);
 function autoadvanceEnabled(): boolean {
   return autoadvance.value;
 }
-const libraryRootValid = signal(true);
 // Whether a library root has been configured at all. When false the whole Files
 // panel is replaced by a get-started prompt (see the files-empty effect) rather
 // than showing an empty lens springboard the user can't do anything with.
@@ -451,6 +450,24 @@ function setEmpty(container: HTMLElement, message: string, kind: "empty" | "load
 
 let store: Store;
 let rootNode: TreeNode | null = null;
+
+// The configured library folders (source of truth). The tree is built from
+// these: one root shows its contents at top level; two or more each show as a
+// top-level folder under a synthetic virtual rootNode (see refreshTree). Edited
+// by the Settings library-roots rows.
+let libraryRoots: string[] = [];
+
+// Library folders whose list_dir failed (missing / unreadable). Their Settings
+// rows show the .invalid outline. Recomputed by refreshTree; read by
+// renderLibraryRootRows. Not reactive — refreshTree re-renders the rows itself.
+let invalidLibraryRoots = new Set<string>();
+
+// The configured library folders, as an array. rootNode.path is a per-node
+// concept (empty for the virtual root), so anything that means "the library
+// root(s)" — playlist scanning, default save dir, search context — reads this.
+function libraryRootPaths(): string[] {
+  return libraryRoots;
+}
 
 // --- File-tree multi-select ---
 //
@@ -898,8 +915,8 @@ let volumePopover: HTMLElement;
 let volumeBar: HTMLInputElement;
 let treeContainer: HTMLElement;
 let streamsContainer: HTMLElement;
-let libraryRootInput: HTMLInputElement;
-let libraryRootBrowseBtn: HTMLButtonElement;
+let libraryRootsContainer: HTMLElement;
+let libraryRootAddBtn: HTMLButtonElement;
 let streamListPathInput: HTMLInputElement;
 let streamListPathBrowseBtn: HTMLButtonElement;
 let miniplayerBtn: HTMLButtonElement;
@@ -3261,13 +3278,19 @@ export interface PlaylistRef {
 let playlistIndex: PlaylistRef[] = [];
 
 async function refreshPlaylistIndex(): Promise<void> {
-  const root = rootNode?.path;
-  if (!root) {
+  const roots = libraryRootPaths();
+  if (roots.length === 0) {
     playlistIndex = [];
+    refreshNavPlaylists();
     return;
   }
   try {
-    playlistIndex = await invoke<PlaylistRef[]>("list_all_playlists", { root });
+    // list_all_playlists is keyed to one root (it walks that tree), so scan each
+    // configured folder and merge into a single index.
+    const perRoot = await Promise.all(
+      roots.map((root) => invoke<PlaylistRef[]>("list_all_playlists", { root })),
+    );
+    playlistIndex = perRoot.flat();
   } catch (e) {
     console.error("list_all_playlists failed", e);
   }
@@ -3284,10 +3307,10 @@ function playlistNameFromPath(path: string): string {
   return stem || "Untitled";
 }
 
-// Default directory for a save dialog: the library root when set, else let the
-// OS pick. Used so New / Save-as land in the library by default.
+// Default directory for a save dialog: the first library folder when set, else
+// let the OS pick. Used so New / Save-as land in the library by default.
 function defaultPlaylistDir(): string | null {
-  return rootNode?.path ?? null;
+  return libraryRootPaths()[0] ?? null;
 }
 
 async function persistRecentPlaylists(): Promise<void> {
@@ -4548,12 +4571,16 @@ function showPlaylistContextMenu(x: number, y: number, path: string): void {
   ]);
 }
 
-// Loads the root menu's playlist section. list_all_playlists is keyed to the
-// library root (it walks the tree), so it yields nothing until a library is set.
+// Loads the root menu's playlist section. list_all_playlists is keyed to one
+// library folder (it walks that tree), so scan each and merge; yields nothing
+// until a library folder is set.
 async function loadAllPlaylists(): Promise<PlaylistRef[]> {
-  const root = rootNode?.path;
-  if (!root) return [];
-  return invoke<PlaylistRef[]>("list_all_playlists", { root });
+  const roots = libraryRootPaths();
+  if (roots.length === 0) return [];
+  const perRoot = await Promise.all(
+    roots.map((root) => invoke<PlaylistRef[]>("list_all_playlists", { root })),
+  );
+  return perRoot.flat();
 }
 
 // --- Shared leaf-row list (library navigator) ---------------------------------
@@ -4846,31 +4873,20 @@ async function applyArt(
 
 // --- Library / streams loading ---
 
-async function refreshTree(libraryRoot: string): Promise<void> {
-  rootNode = null;
-  libraryHasContent.value = false;
-  libraryRootSet.value = !!libraryRoot;
-  if (!libraryRoot) {
-    libraryRootValid.value = true;
-    // The panel-wide get-started prompt (files-empty effect) covers this case;
-    // the tree stays empty behind it.
-    setEmpty(treeContainer, "No library root set");
-    return;
-  }
-  setEmpty(treeContainer, "Loading…", "loading");
-  let listing: DirListing;
-  try {
-    listing = await invoke<DirListing>("list_dir", { path: libraryRoot });
-  } catch (e) {
-    console.error("list_dir failed for", libraryRoot, e);
-    libraryRootValid.value = false;
-    setEmpty(treeContainer, "Invalid library root");
-    return;
-  }
-  libraryRootValid.value = true;
-  rootNode = {
-    path: libraryRoot,
-    name: libraryRoot,
+// The final path segment (trailing slashes ignored) — the folder's display name
+// when several library roots share the top level. Falls back to the whole path.
+function basename(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : path;
+}
+
+// A loaded, expanded folder TreeNode wrapping a directory listing. `name` is the
+// display label (the whole path for the sole root; the basename when several
+// roots share the top level).
+function makeRootFolderNode(path: string, name: string, listing: DirListing): TreeNode {
+  return {
+    path,
+    name,
     title: null,
     artist: null,
     album: null,
@@ -4880,8 +4896,66 @@ async function refreshTree(libraryRoot: string): Promise<void> {
     isFolder: true,
     loaded: true,
     expanded: true,
-    children: nodesFromListing(libraryRoot, listing),
+    children: nodesFromListing(path, listing),
   };
+}
+
+// Build the Files tree from the configured library folders. With one folder the
+// tree is that folder (its contents shown at top level, as with a lone root).
+// With several, a synthetic virtual rootNode (path "") holds one folder node per
+// library root, so each appears as an expandable top-level row. Zero folders
+// leaves the tree empty behind the get-started prompt.
+async function refreshTree(roots: string[]): Promise<void> {
+  rootNode = null;
+  libraryHasContent.value = false;
+  libraryRootSet.value = roots.length > 0;
+  invalidLibraryRoots = new Set();
+  if (roots.length === 0) {
+    // The panel-wide get-started prompt (files-empty effect) covers this case;
+    // the tree stays empty behind it.
+    setEmpty(treeContainer, "No library folder set");
+    renderLibraryRootRows();
+    return;
+  }
+  setEmpty(treeContainer, "Loading…", "loading");
+  // List every root in parallel; a failed root becomes an empty folder node and
+  // is flagged invalid (its Settings row outlines red) rather than sinking the
+  // whole tree.
+  const nodes = await Promise.all(
+    roots.map(async (root) => {
+      try {
+        const listing = await invoke<DirListing>("list_dir", { path: root });
+        const name = roots.length === 1 ? root : basename(root);
+        return makeRootFolderNode(root, name, listing);
+      } catch (e) {
+        console.error("list_dir failed for", root, e);
+        invalidLibraryRoots.add(root);
+        const name = roots.length === 1 ? root : basename(root);
+        return makeRootFolderNode(root, name, { folders: [], files: [], playlists: [] });
+      }
+    }),
+  );
+  renderLibraryRootRows();
+  if (roots.length === 1) {
+    rootNode = nodes[0];
+  } else {
+    // Virtual root: not a real folder on disk (path ""), just a container whose
+    // children are the library folders. renderTree renders its children.
+    rootNode = {
+      path: "",
+      name: "",
+      title: null,
+      artist: null,
+      album: null,
+      albumArtist: null,
+      disc: null,
+      track: null,
+      isFolder: true,
+      loaded: true,
+      expanded: true,
+      children: nodes,
+    };
+  }
   libraryHasContent.value = rootNode.children.length > 0;
   renderTree();
 }
@@ -4894,6 +4968,13 @@ async function refreshTree(libraryRoot: string): Promise<void> {
 // stubs — they'll list correctly when clicked.
 async function reconcileNode(node: TreeNode): Promise<void> {
   if (!node.isFolder || !node.loaded) return;
+  // The synthetic virtual root (multiple library folders) has no path of its own
+  // — its children are the library folders. Skip its list_dir and reconcile each
+  // folder directly.
+  if (node.path === "") {
+    await Promise.all(node.children.map((child) => reconcileNode(child)));
+    return;
+  }
   let listing: DirListing;
   try {
     listing = await invoke<DirListing>("list_dir", { path: node.path });
@@ -5060,18 +5141,72 @@ async function refreshStreams(streamListPath: string): Promise<void> {
   }
 }
 
-async function setLibraryRoot(value: string): Promise<void> {
-  libraryRootInput.value = value;
-  await store.set(KEY_LIBRARY_ROOT, value);
+// Commit a new set of library folders: persist, re-render the settings rows,
+// rescan + (re)watch the whole set, and rebuild the tree. Empty paths and
+// duplicates are dropped so the array stays clean. Passing [] tears every
+// watcher down and returns the Files panel to its get-started prompt.
+async function setLibraryRoots(paths: string[]): Promise<void> {
+  const seen = new Set<string>();
+  libraryRoots = paths.map((p) => p.trim()).filter((p) => p && !seen.has(p) && seen.add(p));
+  await store.set(KEY_LIBRARY_ROOTS, libraryRoots);
   await store.save();
-  if (value) {
-    void invoke("rescan_library", { path: value });
+  renderLibraryRootRows();
+  if (libraryRoots.length) {
+    void invoke("rescan_libraries", { paths: libraryRoots });
   }
-  // Watch the new root (or, when value is "", tear the old watcher down).
-  void invoke("watch_library", { path: value }).catch((e) =>
-    console.error("watch_library failed", e),
+  // (Re)watch the new set (or, when empty, tear all old watchers down).
+  void invoke("watch_libraries", { paths: libraryRoots }).catch((e) =>
+    console.error("watch_libraries failed", e),
   );
-  await refreshTree(value);
+  await refreshTree(libraryRoots);
+  void refreshPlaylistIndex();
+}
+
+// Rebuild the Settings library-folder rows from `libraryRoots`. Each row is a
+// .path-picker: the folder path (editable), a Choose… button that repoints that
+// row, and an × that removes it. All three edit paths funnel through
+// setLibraryRoots so persistence, rescan/watch, and the tree stay in step.
+function renderLibraryRootRows(): void {
+  libraryRootsContainer.innerHTML = "";
+  libraryRoots.forEach((path, index) => {
+    const row = document.createElement("div");
+    row.className = "path-picker";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.spellcheck = false;
+    input.value = path;
+    input.classList.toggle("invalid", invalidLibraryRoots.has(path));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") input.blur();
+    });
+    input.addEventListener("change", () => {
+      const next = [...libraryRoots];
+      const value = input.value.trim();
+      if (value) next[index] = value;
+      else next.splice(index, 1);
+      void setLibraryRoots(next);
+    });
+
+    const choose = document.createElement("button");
+    choose.type = "button";
+    choose.textContent = "Choose…";
+    choose.addEventListener("click", () => void browseLibraryRoot(index));
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "path-remove";
+    remove.textContent = "×";
+    remove.title = "Remove this folder";
+    remove.addEventListener("click", () => {
+      const next = [...libraryRoots];
+      next.splice(index, 1);
+      void setLibraryRoots(next);
+    });
+
+    row.append(input, choose, remove);
+    libraryRootsContainer.appendChild(row);
+  });
 }
 
 async function setStreamListPath(value: string): Promise<void> {
@@ -5081,15 +5216,19 @@ async function setStreamListPath(value: string): Promise<void> {
   await refreshStreams(value);
 }
 
-async function browseLibraryRoot(): Promise<void> {
+// Open a folder picker for the library. With an index, it repoints that row;
+// without one (the Add button), it appends a new folder.
+async function browseLibraryRoot(index?: number): Promise<void> {
   const selected = await open({
     directory: true,
     multiple: false,
-    defaultPath: libraryRootInput.value || undefined,
+    defaultPath: (index != null ? libraryRoots[index] : undefined) || undefined,
   });
-  if (typeof selected === "string") {
-    await setLibraryRoot(selected);
-  }
+  if (typeof selected !== "string") return;
+  const next = [...libraryRoots];
+  if (index != null) next[index] = selected;
+  else next.push(selected);
+  await setLibraryRoots(next);
 }
 
 async function browseStreamListPath(): Promise<void> {
@@ -5533,15 +5672,18 @@ function setupSearch(): void {
         icon.className = "search-icon";
         row.appendChild(icon);
         primary.textContent = item.folder.name;
-        // The containing folder's path (relative to the library root) gives
+        // The containing folder's path (relative to its library folder) gives
         // context — which artist an album sits under. Skipped for top-level
-        // folders, where the parent is the root itself and adds only noise.
+        // folders, where the parent is a library folder itself and adds only
+        // noise. With several library folders, strip whichever one contains it.
         const parentPath = item.folder.path.split("/").slice(0, -1).join("/");
-        const root = rootNode?.path ?? "";
-        if (parentPath !== root) {
-          secondary.textContent = parentPath.startsWith(root + "/")
-            ? parentPath.slice(root.length + 1)
-            : parentPath;
+        const root = libraryRootPaths().find(
+          (r) => parentPath === r || parentPath.startsWith(r + "/"),
+        );
+        if (root && parentPath !== root) {
+          secondary.textContent = parentPath.slice(root.length + 1);
+        } else if (!root) {
+          secondary.textContent = parentPath;
         }
       } else if (item.kind === "file") {
         const l = searchLabel(item.track);
@@ -6183,9 +6325,8 @@ function setupEffects(): void {
     modeRepeatBtn.title = label;
   });
 
-  effect(() => {
-    libraryRootInput.classList.toggle("invalid", !libraryRootValid.value);
-  });
+  // Library-folder rows get their .invalid outline in renderLibraryRootRows
+  // (per-row, driven by invalidLibraryRoots).
   effect(() => {
     streamListPathInput.classList.toggle("invalid", !streamListPathValid.value);
   });
@@ -6301,8 +6442,8 @@ async function init(): Promise<void> {
   (document.querySelector("#tab-streams") as HTMLElement).addEventListener("click", (e) => {
     if (!(e.target as HTMLElement).closest(".node-label")) selectedStreamUrl.value = null;
   });
-  libraryRootInput = document.querySelector("#library-root") as HTMLInputElement;
-  libraryRootBrowseBtn = document.querySelector("#library-root-browse") as HTMLButtonElement;
+  libraryRootsContainer = document.querySelector("#library-roots") as HTMLElement;
+  libraryRootAddBtn = document.querySelector("#library-root-add") as HTMLButtonElement;
   streamListPathInput = document.querySelector("#stream-list-path") as HTMLInputElement;
   streamListPathBrowseBtn = document.querySelector("#stream-list-path-browse") as HTMLButtonElement;
   miniplayerBtn = document.querySelector("#miniplayer-btn") as HTMLButtonElement;
@@ -6341,7 +6482,7 @@ async function init(): Promise<void> {
 
   store = await load(STORE_FILE, { defaults: {}, autoSave: false });
 
-  const libraryRoot = (await store.get<string>(KEY_LIBRARY_ROOT)) ?? "";
+  libraryRoots = (await store.get<string[]>(KEY_LIBRARY_ROOTS)) ?? [];
   // First run (key never set): adopt the default stream list the backend seeds
   // in the app data dir, and persist it so it shows in settings and can be
   // repointed. An explicit "" (user cleared the path) is respected, not reseeded.
@@ -6485,21 +6626,17 @@ async function init(): Promise<void> {
   setupVolumeControl();
   setupEffects();
 
-  libraryRootInput.value = libraryRoot;
+  renderLibraryRootRows();
   streamListPathInput.value = streamListPath;
 
-  libraryRootBrowseBtn.addEventListener("click", () => void browseLibraryRoot());
+  // The + under the library rows appends a folder via the same picker as a row's
+  // Choose… button.
+  libraryRootAddBtn.addEventListener("click", () => void browseLibraryRoot());
   streamListPathBrowseBtn.addEventListener("click", () => void browseStreamListPath());
 
-  // Both path fields also accept a typed/pasted path: Enter commits (blur fires
-  // "change"), and change re-points the library / re-reads the stream list via the
-  // same path as the Choose… button.
-  libraryRootInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") libraryRootInput.blur();
-  });
-  libraryRootInput.addEventListener("change", () => {
-    void setLibraryRoot(libraryRootInput.value.trim());
-  });
+  // The stream field also accepts a typed/pasted path: Enter commits (blur fires
+  // "change"), and change re-reads the stream list via the same path as the
+  // Choose… button. (Library rows wire their own inputs in renderLibraryRootRows.)
   streamListPathInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") streamListPathInput.blur();
   });
@@ -6564,14 +6701,14 @@ async function init(): Promise<void> {
     openAssociatedFile(pendingOpen);
   }
 
-  await refreshTree(libraryRoot);
+  await refreshTree(libraryRoots);
   void refreshPlaylistIndex();
   await refreshStreams(streamListPath);
 
-  if (libraryRoot) {
-    void invoke("rescan_library", { path: libraryRoot });
-    void invoke("watch_library", { path: libraryRoot }).catch((e) =>
-      console.error("watch_library failed", e),
+  if (libraryRoots.length) {
+    void invoke("rescan_libraries", { paths: libraryRoots });
+    void invoke("watch_libraries", { paths: libraryRoots }).catch((e) =>
+      console.error("watch_libraries failed", e),
     );
   }
 
@@ -6644,10 +6781,10 @@ async function init(): Promise<void> {
       // acting on the object-keyed list selection.
       addListSelectionToQueue: () => addToQueue(selectedListTracks()),
       removeListSelection: () => removeCuratedTracks(selectedListTracks()),
-      // Point the library at a folder through the real setLibraryRoot path
-      // (rescan + watch + refreshTree), so tree-interaction tests can populate
-      // the file browser without the native folder picker.
-      setLibraryRoot: (arg) => setLibraryRoot(String((arg as { path: string }).path)),
+      // Point the library at a single folder through the real setLibraryRoots
+      // path (rescan + watch + refreshTree), so tree-interaction tests can
+      // populate the file browser without the native folder picker.
+      setLibraryRoot: (arg) => setLibraryRoots([String((arg as { path: string }).path)]),
       // Toggle the global autoadvance through the real setAutoadvance path (the
       // same one the OS Playback menu drives), so a toggle mid-play also
       // reconciles the engine via applyAutoadvanceChange.

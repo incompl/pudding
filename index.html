@@ -186,11 +186,17 @@
         <div id="settings-panel" class="hidden">
           <h2>Settings</h2>
           <div class="setting">
-            <label for="library-root">Library root</label>
-            <div class="path-picker">
-              <input type="text" id="library-root" spellcheck="false" placeholder="Choose a folder or paste a path" />
-              <button type="button" id="library-root-browse">Choose…</button>
-            </div>
+            <label>Library folders</label>
+            <!-- One .path-picker row per configured folder (input + Choose… + ×),
+                 rendered by renderLibraryRootRows in src/main.ts. -->
+            <div id="library-roots"></div>
+            <button type="button" id="library-root-add" class="list-add-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="12" y1="4" x2="12" y2="20" />
+                <line x1="4" y1="12" x2="20" y2="12" />
+              </svg>
+              <span>Add library folder</span>
+            </button>
           </div>
           <div class="setting">
             <label for="stream-list-path">Stream list</label>

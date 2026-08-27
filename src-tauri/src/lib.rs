@@ -40,11 +40,11 @@ struct DbHandle {
     path: PathBuf,
 }
 
-// Holds the recursive filesystem watcher for the current library root. Replaced
-// (the old debouncer dropped, which stops its thread) whenever the root changes;
-// None when no library root is set.
+// Holds the recursive filesystem watchers — one per configured library root.
+// The whole set is replaced (old debouncers dropped, which stops their threads)
+// whenever the roots change; empty when no library roots are set.
 struct WatcherState {
-    inner: Mutex<Option<Debouncer<RecommendedWatcher, FileIdMap>>>,
+    inner: Mutex<Vec<Debouncer<RecommendedWatcher, FileIdMap>>>,
 }
 
 // Handles to the Playback menu's checkboxes. The frontend owns the authoritative
@@ -918,58 +918,66 @@ fn m3u_fallback_name(url: &str) -> &str {
 }
 
 #[tauri::command]
-fn rescan_library(path: String, db: State<DbHandle>, app: AppHandle) {
-    request_scan(PathBuf::from(path), db.path.clone(), app);
+fn rescan_libraries(paths: Vec<String>, db: State<DbHandle>, app: AppHandle) {
+    for path in paths {
+        if path.is_empty() {
+            continue;
+        }
+        request_scan(PathBuf::from(path), db.path.clone(), app.clone());
+    }
 }
 
-// Starts (or replaces) a recursive watcher on the library root. Any filesystem
-// change under it triggers a debounced incremental rescan, which emits
-// "library-scanned" exactly like an explicit rescan so the frontend refreshes
-// uniformly. An empty path just tears the watcher down.
+// Starts (or replaces) recursive watchers on the library roots — one debouncer
+// per root. Any filesystem change under a root triggers a debounced incremental
+// rescan of that root, which emits "library-scanned" exactly like an explicit
+// rescan so the frontend refreshes uniformly. An empty list just tears every
+// watcher down.
 #[tauri::command]
-fn watch_library(
-    path: String,
+fn watch_libraries(
+    paths: Vec<String>,
     app: AppHandle,
     db: State<DbHandle>,
     watcher: State<WatcherState>,
 ) -> Result<(), String> {
     let mut guard = watcher.inner.lock().map_err(|e| e.to_string())?;
-    // Drop the old debouncer first so we never hold two watchers on overlapping
-    // trees during a root change.
-    *guard = None;
-    if path.is_empty() {
-        return Ok(());
-    }
+    // Drop the old debouncers first so we never hold two watchers on overlapping
+    // trees during a roots change.
+    guard.clear();
 
-    let root = PathBuf::from(&path);
-    let db_path = db.path.clone();
-    let app_handle = app.clone();
-    let scan_root = root.clone();
-    let mut debouncer = new_debouncer(
-        Duration::from_secs(2),
-        None,
-        move |res: DebounceEventResult| {
-            // Watcher-internal errors (e.g. transient rename races) are ignored
-            // — the next event re-syncs. request_scan coalesces: a burst of
-            // flushes during an in-flight scan collapses into one follow-up
-            // pass rather than a thread + full walk per flush.
-            if res.is_ok() {
-                request_scan(scan_root.clone(), db_path.clone(), app_handle.clone());
-            }
-        },
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Watches the root itself: if it is deleted or renamed at runtime the watch
-    // goes dead and does not self-heal until the root is set again (which calls
-    // this command afresh). Acceptable for a music library; the explicit-rescan
-    // and boot paths still function.
-    debouncer
-        .watcher()
-        .watch(&root, RecursiveMode::Recursive)
+    for path in paths {
+        if path.is_empty() {
+            continue;
+        }
+        let root = PathBuf::from(&path);
+        let db_path = db.path.clone();
+        let app_handle = app.clone();
+        let scan_root = root.clone();
+        let mut debouncer = new_debouncer(
+            Duration::from_secs(2),
+            None,
+            move |res: DebounceEventResult| {
+                // Watcher-internal errors (e.g. transient rename races) are ignored
+                // — the next event re-syncs. request_scan coalesces: a burst of
+                // flushes during an in-flight scan collapses into one follow-up
+                // pass rather than a thread + full walk per flush.
+                if res.is_ok() {
+                    request_scan(scan_root.clone(), db_path.clone(), app_handle.clone());
+                }
+            },
+        )
         .map_err(|e| e.to_string())?;
-    debouncer.cache().add_root(&root, RecursiveMode::Recursive);
-    *guard = Some(debouncer);
+
+        // Watches the root itself: if it is deleted or renamed at runtime the watch
+        // goes dead and does not self-heal until the roots are set again (which calls
+        // this command afresh). Acceptable for a music library; the explicit-rescan
+        // and boot paths still function.
+        debouncer
+            .watcher()
+            .watch(&root, RecursiveMode::Recursive)
+            .map_err(|e| e.to_string())?;
+        debouncer.cache().add_root(&root, RecursiveMode::Recursive);
+        guard.push(debouncer);
+    }
     Ok(())
 }
 
@@ -2063,7 +2071,7 @@ pub fn run() {
                 path: db_path,
             });
             app.manage(WatcherState {
-                inner: Mutex::new(None),
+                inner: Mutex::new(Vec::new()),
             });
 
             // Seed the default stream list file so a fresh install has a valid,
@@ -2291,8 +2299,8 @@ pub fn run() {
             delete_stream,
             move_stream,
             to_file_url,
-            rescan_library,
-            watch_library,
+            rescan_libraries,
+            watch_libraries,
             search_tracks,
             search_folders,
             folder_tracks,

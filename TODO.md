@@ -43,8 +43,6 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
   re-saves. Decide whether delete participates (soft-delete to a trash dir, or
   just keep it as a hard action outside undo).
 
-### Support multiple library paths
-
 ### Edit file metadata
 
 Phase 1 shipped: a single-track "Edit metadata…" verb in the tree context menu
