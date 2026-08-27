@@ -34,9 +34,6 @@ import {
   toggleTreeSelection,
   selectTreeRangeTo,
   selectTreeSingle,
-  playFile,
-  playFolder,
-  playStream,
   addFolderToQueue,
   addToQueue,
   addPlaylistToQueue,
@@ -55,6 +52,7 @@ import {
   commitBrowsedPlaylist,
 } from "./main";
 import { editMetadataItem } from "./editors";
+import { playFile, playFolder, playStream } from "./playback";
 
 // Child nodes for one directory listing. Display order comes entirely from
 // the backend: list_dir returns folders sorted by name and files sorted by

@@ -25,11 +25,10 @@ import {
 import {
   siblingByPath,
   queueIsActivePool,
-  setNowPlaying,
   loadArt,
-  handleEnded,
   cleanStreamText,
 } from "./main";
+import { setNowPlaying, handleEnded } from "./playback";
 
 export const engine = new GaplessEngine({
   onAdvance: (path) => {

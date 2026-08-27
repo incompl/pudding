@@ -17,7 +17,8 @@ import { showContextMenu } from "./context-menu";
 import { attachStreamReorder } from "./drag-drop";
 import { buildInlineEditor, closePaneEditor, openPaneEditor } from "./editors";
 import { refreshStreams } from "./library";
-import { setEmpty, playStream } from "./main";
+import { setEmpty } from "./main";
+import { playStream } from "./playback";
 
 export function renderStreams(streams: Stream[]): void {
   streamsContainer.innerHTML = "";

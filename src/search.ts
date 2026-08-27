@@ -17,16 +17,14 @@ import { showContextMenu } from "./context-menu";
 import {
   openArtistQueue,
   openAlbumQueue,
-  playFolder,
-  playSearchTrack,
   playPlaylistPath,
-  playStream,
   persistActiveTab,
   libraryRootPaths,
   searchItemTrackProvider,
   addToPlaylistItem,
   debounce,
 } from "./main";
+import { playFolder, playSearchTrack, playStream } from "./playback";
 
 function searchLabel(t: SearchTrack): { primary: string; secondary: string } {
   const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
