@@ -11,12 +11,8 @@ import { h } from "./dom";
 import type { ActiveDrag, DragPayload, SearchTrack, Stream } from "./types";
 import { queueListEl, streamsContainer, streamListPathInput } from "./dom-refs";
 import { streamListWritable, app } from "./state";
-import {
-  queueSel,
-  selectedListTracks,
-  reorderCuratedTracks,
-  insertCuratedTracks,
-} from "./main";
+import { queueSel, selectedListTracks } from "./main";
+import { reorderCuratedTracks, insertCuratedTracks } from "./queue";
 import { refreshStreams } from "./library";
 
 // A drag only *starts* once the pointer travels this many px from where it went

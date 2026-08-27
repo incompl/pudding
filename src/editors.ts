@@ -22,7 +22,8 @@ import { paneEditorView, queueTitleEl } from "./dom-refs";
 import { reloadNavView } from "./library-nav";
 import { findNode, refreshLibrary } from "./library";
 import { renderTree } from "./tree-view";
-import { renderQueue, curatedList, renameOpenPlaylist } from "./main";
+import { renameOpenPlaylist } from "./main";
+import { renderQueue, curatedList } from "./queue";
 
 export function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
   const form = h("form", { class: "inline-editor" });
