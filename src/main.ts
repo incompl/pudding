@@ -83,6 +83,60 @@ import {
   resetToLonePlayback,
   autoadvanceEnabled,
 } from "./state";
+import {
+  bindDom,
+  nowPlayingTitleEl,
+  nowPlayingTitleInner,
+  nowPlayingArtistEl,
+  nowPlayingArtistInner,
+  nowPlayingAlbumEl,
+  nowPlayingAlbumInner,
+  navBarTextEl,
+  navBarBtnEl,
+  navBarAltBtnEl,
+  nowPlayingStreamMetaEl,
+  streamMetaSongEl,
+  streamMetaSongInner,
+  streamMetaArtistEl,
+  streamMetaArtistInner,
+  liveIndicatorEl,
+  nowPlayingArtEl,
+  nowPlayingEmptyEl,
+  playPauseBtn,
+  prevBtn,
+  nextBtn,
+  seekBar,
+  timeCurrentEl,
+  timeRemainingEl,
+  volumeControlEl,
+  volumeBtn,
+  volumePopover,
+  volumeBar,
+  treeContainer,
+  streamsContainer,
+  libraryRootsContainer,
+  libraryRootAddBtn,
+  streamListPathInput,
+  streamListPathBrowseBtn,
+  miniplayerBtn,
+  settingsBackBtn,
+  playbackModesEl,
+  modeShuffleBtn,
+  modeRepeatBtn,
+  searchEl,
+  searchInput,
+  searchResultsEl,
+  nowPlayingPanel,
+  settingsPanel,
+  splitterEl,
+  queueTitleEl,
+  queueSubtitleEl,
+  queueListEl,
+  queueCloseBtn,
+  queueRenameBtn,
+  toastEl,
+  paneEditorView,
+} from "./dom-refs";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOTS = "libraryRoots";
@@ -625,56 +679,6 @@ effect(() => {
   pushPlayback(currentTime.peek());
 });
 
-let nowPlayingTitleEl: HTMLElement;
-let nowPlayingTitleInner: HTMLElement;
-let nowPlayingArtistEl: HTMLElement;
-let nowPlayingArtistInner: HTMLElement;
-let nowPlayingAlbumEl: HTMLElement;
-let nowPlayingAlbumInner: HTMLElement;
-let navBarTextEl: HTMLElement;
-let navBarBtnEl: HTMLButtonElement;
-let navBarAltBtnEl: HTMLButtonElement;
-let nowPlayingStreamMetaEl: HTMLElement;
-let streamMetaSongEl: HTMLElement;
-let streamMetaSongInner: HTMLElement;
-let streamMetaArtistEl: HTMLElement;
-let streamMetaArtistInner: HTMLElement;
-let liveIndicatorEl: HTMLElement;
-let nowPlayingArtEl: HTMLImageElement;
-let nowPlayingEmptyEl: HTMLElement;
-let playPauseBtn: HTMLButtonElement;
-let prevBtn: HTMLButtonElement;
-let nextBtn: HTMLButtonElement;
-let seekBar: HTMLInputElement;
-let timeCurrentEl: HTMLElement;
-let timeRemainingEl: HTMLElement;
-let volumeControlEl: HTMLElement;
-let volumeBtn: HTMLButtonElement;
-let volumePopover: HTMLElement;
-let volumeBar: HTMLInputElement;
-let treeContainer: HTMLElement;
-let streamsContainer: HTMLElement;
-let libraryRootsContainer: HTMLElement;
-let libraryRootAddBtn: HTMLButtonElement;
-let streamListPathInput: HTMLInputElement;
-let streamListPathBrowseBtn: HTMLButtonElement;
-let miniplayerBtn: HTMLButtonElement;
-let settingsBackBtn: HTMLButtonElement;
-let playbackModesEl: HTMLElement;
-let modeShuffleBtn: HTMLButtonElement;
-let modeRepeatBtn: HTMLButtonElement;
-let searchEl: HTMLElement;
-let searchInput: HTMLInputElement;
-let searchResultsEl: HTMLElement;
-let nowPlayingPanel: HTMLElement;
-let settingsPanel: HTMLElement;
-let splitterEl: HTMLElement;
-let queueTitleEl: HTMLElement;
-let queueSubtitleEl: HTMLElement;
-let queueListEl: HTMLElement;
-let queueCloseBtn: HTMLButtonElement;
-let queueRenameBtn: HTMLButtonElement;
-let toastEl: HTMLElement;
 
 // --- Tree ---
 
@@ -1534,8 +1538,6 @@ function openEditStationEditor(stream: Stream): void {
 // the streams-writability effect close just the stream editor. The form itself is
 // rebuilt on each open, so this needn't carry any per-edit state.
 
-// The #pane-editor-view element the form mounts into (assigned at init).
-let paneEditorView: HTMLElement;
 
 // Close the editor face, revealing whatever face was underneath. Idempotent.
 function closePaneEditor(): void {
@@ -5956,25 +5958,12 @@ async function init(): Promise<void> {
   const expandBtn = document.querySelector("#expand-btn") as HTMLButtonElement;
   expandBtn.addEventListener("click", () => void toggleMiniPlayer());
 
-  nowPlayingTitleEl = document.querySelector("#now-playing-title") as HTMLElement;
-  nowPlayingTitleInner = nowPlayingTitleEl.querySelector(".marquee-inner") as HTMLElement;
-  nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;
-  nowPlayingArtistInner = nowPlayingArtistEl.querySelector(".marquee-inner") as HTMLElement;
-  nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
-  nowPlayingAlbumInner = nowPlayingAlbumEl.querySelector(".marquee-inner") as HTMLElement;
-  navBarTextEl = document.querySelector("#nav-bar-text") as HTMLElement;
-  navBarBtnEl = document.querySelector("#nav-bar-btn") as HTMLButtonElement;
+  bindDom();
   navBarBtnEl.addEventListener("click", toggleNavFace);
-  navBarAltBtnEl = document.querySelector("#nav-bar-alt-btn") as HTMLButtonElement;
   navBarAltBtnEl.addEventListener("click", showSourceList);
   // Double-click the bar's text (not the button) toggles the mini player, like
   // the hero card it sits beneath.
   navBarTextEl.addEventListener("dblclick", () => void toggleMiniPlayer());
-  nowPlayingStreamMetaEl = document.querySelector("#now-playing-stream-meta") as HTMLElement;
-  streamMetaSongEl = document.querySelector("#stream-meta-song") as HTMLElement;
-  streamMetaSongInner = streamMetaSongEl.querySelector(".marquee-inner") as HTMLElement;
-  streamMetaArtistEl = document.querySelector("#stream-meta-artist") as HTMLElement;
-  streamMetaArtistInner = streamMetaArtistEl.querySelector(".marquee-inner") as HTMLElement;
   // The metadata above is selectable text (copy "what's playing"), so a
   // double-click on it selects a word instead of bubbling to #now-playing-main's
   // mini-player toggle. The panel's art and empty space still toggle as before.
@@ -5986,20 +5975,6 @@ async function init(): Promise<void> {
   ]) {
     el.addEventListener("dblclick", (e) => e.stopPropagation());
   }
-  liveIndicatorEl = document.querySelector("#live-indicator") as HTMLElement;
-  nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
-  nowPlayingEmptyEl = document.querySelector("#now-playing-empty") as HTMLElement;
-  playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
-  prevBtn = document.querySelector("#prev-btn") as HTMLButtonElement;
-  nextBtn = document.querySelector("#next-btn") as HTMLButtonElement;
-  seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
-  timeCurrentEl = document.querySelector("#time-current") as HTMLElement;
-  timeRemainingEl = document.querySelector("#time-remaining") as HTMLElement;
-  volumeControlEl = document.querySelector("#volume-control") as HTMLElement;
-  volumeBtn = document.querySelector("#volume-btn") as HTMLButtonElement;
-  volumePopover = document.querySelector("#volume-popover") as HTMLElement;
-  volumeBar = document.querySelector("#volume-bar") as HTMLInputElement;
-  treeContainer = document.querySelector("#folder-tree") as HTMLElement;
   // Click-off deselect for the Files tab's own rows (the file-manager convention),
   // bound to the whole scrolling tab-panel (not just #folder-tree, which only grows
   // to its content) so the blank area below the last row deselects too. A click off
@@ -6020,32 +5995,12 @@ async function init(): Promise<void> {
     "click",
     () => openAddStationEditor(),
   );
-  streamsContainer = document.querySelector("#streams-list") as HTMLElement;
   // Same click-off convention for the streams tab: a click below the rows (or on
   // any empty space in the tab-panel) drops the stream highlight.
   (document.querySelector("#tab-streams") as HTMLElement).addEventListener("click", (e) => {
     if (!(e.target as HTMLElement).closest(".node-label")) selectedStreamUrl.value = null;
   });
-  libraryRootsContainer = document.querySelector("#library-roots") as HTMLElement;
-  libraryRootAddBtn = document.querySelector("#library-root-add") as HTMLButtonElement;
-  streamListPathInput = document.querySelector("#stream-list-path") as HTMLInputElement;
-  streamListPathBrowseBtn = document.querySelector("#stream-list-path-browse") as HTMLButtonElement;
-  miniplayerBtn = document.querySelector("#miniplayer-btn") as HTMLButtonElement;
   miniplayerBtn.addEventListener("click", () => void toggleMiniPlayer());
-  settingsBackBtn = document.querySelector("#settings-back-btn") as HTMLButtonElement;
-  playbackModesEl = document.querySelector("#playback-modes") as HTMLElement;
-  modeShuffleBtn = document.querySelector("#mode-shuffle") as HTMLButtonElement;
-  modeRepeatBtn = document.querySelector("#mode-repeat") as HTMLButtonElement;
-  searchEl = document.querySelector("#search") as HTMLElement;
-  searchInput = document.querySelector("#search-input") as HTMLInputElement;
-  searchResultsEl = document.querySelector("#search-results") as HTMLElement;
-  nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
-  paneEditorView = document.querySelector("#pane-editor-view") as HTMLElement;
-  settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
-  splitterEl = document.querySelector("#splitter") as HTMLElement;
-  queueTitleEl = document.querySelector("#queue-title-text") as HTMLElement;
-  queueSubtitleEl = document.querySelector("#queue-subtitle") as HTMLElement;
-  queueListEl = document.querySelector("#queue-list") as HTMLElement;
   // Click-off deselect for the queue, mirroring the Files handler: a click off any
   // row drops the queue's own multi-select. Selecting a queue row already drops the
   // Files-tab selections (see makeTrackSelection's onSelect wiring), so this
@@ -6053,16 +6008,13 @@ async function init(): Promise<void> {
   queueListEl.addEventListener("click", (e) => {
     if (!(e.target as HTMLElement).closest(".queue-row")) queueSel.clear();
   });
-  queueCloseBtn = document.querySelector("#queue-close-btn") as HTMLButtonElement;
   queueCloseBtn.addEventListener("click", closeQueue);
-  queueRenameBtn = document.querySelector("#queue-rename-btn") as HTMLButtonElement;
   // Clicking anywhere on the title — the text or the hover pencil — starts an
   // inline rename; startTitleEdit no-ops when the header isn't a playlist.
   (document.querySelector("#queue-title") as HTMLElement).addEventListener("click", startTitleEdit);
   // Dropping onto the list's empty area (below the last row, or an empty playlist)
   // targets the end of the list — that case is resolved by updateDropTarget's
   // hit-test against the list box, so no container drop listener is needed.
-  toastEl = document.querySelector("#toast") as HTMLElement;
 
   store = await load(STORE_FILE, { defaults: {}, autoSave: false });
 

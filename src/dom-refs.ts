@@ -1,0 +1,114 @@
+// The renderer's DOM element references. Each is queried once by bindDom() at
+// startup and then only read, so a plain exported `let` (a live binding importers
+// can read but not reassign) is safe — no signals, no `dom.` object needed.
+//
+// A leaf module: imported by main.ts and feature modules, imports nothing itself.
+
+export let nowPlayingTitleEl: HTMLElement;
+export let nowPlayingTitleInner: HTMLElement;
+export let nowPlayingArtistEl: HTMLElement;
+export let nowPlayingArtistInner: HTMLElement;
+export let nowPlayingAlbumEl: HTMLElement;
+export let nowPlayingAlbumInner: HTMLElement;
+export let navBarTextEl: HTMLElement;
+export let navBarBtnEl: HTMLButtonElement;
+export let navBarAltBtnEl: HTMLButtonElement;
+export let nowPlayingStreamMetaEl: HTMLElement;
+export let streamMetaSongEl: HTMLElement;
+export let streamMetaSongInner: HTMLElement;
+export let streamMetaArtistEl: HTMLElement;
+export let streamMetaArtistInner: HTMLElement;
+export let liveIndicatorEl: HTMLElement;
+export let nowPlayingArtEl: HTMLImageElement;
+export let nowPlayingEmptyEl: HTMLElement;
+export let playPauseBtn: HTMLButtonElement;
+export let prevBtn: HTMLButtonElement;
+export let nextBtn: HTMLButtonElement;
+export let seekBar: HTMLInputElement;
+export let timeCurrentEl: HTMLElement;
+export let timeRemainingEl: HTMLElement;
+export let volumeControlEl: HTMLElement;
+export let volumeBtn: HTMLButtonElement;
+export let volumePopover: HTMLElement;
+export let volumeBar: HTMLInputElement;
+export let treeContainer: HTMLElement;
+export let streamsContainer: HTMLElement;
+export let libraryRootsContainer: HTMLElement;
+export let libraryRootAddBtn: HTMLButtonElement;
+export let streamListPathInput: HTMLInputElement;
+export let streamListPathBrowseBtn: HTMLButtonElement;
+export let miniplayerBtn: HTMLButtonElement;
+export let settingsBackBtn: HTMLButtonElement;
+export let playbackModesEl: HTMLElement;
+export let modeShuffleBtn: HTMLButtonElement;
+export let modeRepeatBtn: HTMLButtonElement;
+export let searchEl: HTMLElement;
+export let searchInput: HTMLInputElement;
+export let searchResultsEl: HTMLElement;
+export let nowPlayingPanel: HTMLElement;
+export let settingsPanel: HTMLElement;
+export let splitterEl: HTMLElement;
+export let queueTitleEl: HTMLElement;
+export let queueSubtitleEl: HTMLElement;
+export let queueListEl: HTMLElement;
+export let queueCloseBtn: HTMLButtonElement;
+export let queueRenameBtn: HTMLButtonElement;
+export let toastEl: HTMLElement;
+// The right-pane editor face mount point (track metadata / stream forms).
+export let paneEditorView: HTMLElement;
+
+// Query every element ref once. Called from init() before any event wiring that
+// reads these refs. Free of listeners and feature logic so this stays a leaf.
+export function bindDom(): void {
+  nowPlayingTitleEl = document.querySelector("#now-playing-title") as HTMLElement;
+  nowPlayingTitleInner = nowPlayingTitleEl.querySelector(".marquee-inner") as HTMLElement;
+  nowPlayingArtistEl = document.querySelector("#now-playing-artist") as HTMLElement;
+  nowPlayingArtistInner = nowPlayingArtistEl.querySelector(".marquee-inner") as HTMLElement;
+  nowPlayingAlbumEl = document.querySelector("#now-playing-album") as HTMLElement;
+  nowPlayingAlbumInner = nowPlayingAlbumEl.querySelector(".marquee-inner") as HTMLElement;
+  navBarTextEl = document.querySelector("#nav-bar-text") as HTMLElement;
+  navBarBtnEl = document.querySelector("#nav-bar-btn") as HTMLButtonElement;
+  navBarAltBtnEl = document.querySelector("#nav-bar-alt-btn") as HTMLButtonElement;
+  nowPlayingStreamMetaEl = document.querySelector("#now-playing-stream-meta") as HTMLElement;
+  streamMetaSongEl = document.querySelector("#stream-meta-song") as HTMLElement;
+  streamMetaSongInner = streamMetaSongEl.querySelector(".marquee-inner") as HTMLElement;
+  streamMetaArtistEl = document.querySelector("#stream-meta-artist") as HTMLElement;
+  streamMetaArtistInner = streamMetaArtistEl.querySelector(".marquee-inner") as HTMLElement;
+  liveIndicatorEl = document.querySelector("#live-indicator") as HTMLElement;
+  nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
+  nowPlayingEmptyEl = document.querySelector("#now-playing-empty") as HTMLElement;
+  playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
+  prevBtn = document.querySelector("#prev-btn") as HTMLButtonElement;
+  nextBtn = document.querySelector("#next-btn") as HTMLButtonElement;
+  seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
+  timeCurrentEl = document.querySelector("#time-current") as HTMLElement;
+  timeRemainingEl = document.querySelector("#time-remaining") as HTMLElement;
+  volumeControlEl = document.querySelector("#volume-control") as HTMLElement;
+  volumeBtn = document.querySelector("#volume-btn") as HTMLButtonElement;
+  volumePopover = document.querySelector("#volume-popover") as HTMLElement;
+  volumeBar = document.querySelector("#volume-bar") as HTMLInputElement;
+  treeContainer = document.querySelector("#folder-tree") as HTMLElement;
+  streamsContainer = document.querySelector("#streams-list") as HTMLElement;
+  libraryRootsContainer = document.querySelector("#library-roots") as HTMLElement;
+  libraryRootAddBtn = document.querySelector("#library-root-add") as HTMLButtonElement;
+  streamListPathInput = document.querySelector("#stream-list-path") as HTMLInputElement;
+  streamListPathBrowseBtn = document.querySelector("#stream-list-path-browse") as HTMLButtonElement;
+  miniplayerBtn = document.querySelector("#miniplayer-btn") as HTMLButtonElement;
+  settingsBackBtn = document.querySelector("#settings-back-btn") as HTMLButtonElement;
+  playbackModesEl = document.querySelector("#playback-modes") as HTMLElement;
+  modeShuffleBtn = document.querySelector("#mode-shuffle") as HTMLButtonElement;
+  modeRepeatBtn = document.querySelector("#mode-repeat") as HTMLButtonElement;
+  searchEl = document.querySelector("#search") as HTMLElement;
+  searchInput = document.querySelector("#search-input") as HTMLInputElement;
+  searchResultsEl = document.querySelector("#search-results") as HTMLElement;
+  nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
+  paneEditorView = document.querySelector("#pane-editor-view") as HTMLElement;
+  settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
+  splitterEl = document.querySelector("#splitter") as HTMLElement;
+  queueTitleEl = document.querySelector("#queue-title-text") as HTMLElement;
+  queueSubtitleEl = document.querySelector("#queue-subtitle") as HTMLElement;
+  queueListEl = document.querySelector("#queue-list") as HTMLElement;
+  queueCloseBtn = document.querySelector("#queue-close-btn") as HTMLButtonElement;
+  queueRenameBtn = document.querySelector("#queue-rename-btn") as HTMLButtonElement;
+  toastEl = document.querySelector("#toast") as HTMLElement;
+}
