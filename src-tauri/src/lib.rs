@@ -1165,6 +1165,29 @@ fn prepare_external_file(path: String) -> Result<TrackMeta, String> {
 // debounced watcher rescan. Mirrors read_tags: it mutates the *primary* tag (the
 // one read_tags reads), creating one of the file's native type when the file is
 // untagged. Empty/omitted fields clear the corresponding item. `duration` comes
+// Read a file's current tags straight from disk to seed the metadata editor.
+// Views carry only partial rows for a track — a SearchResult (Songs/album/artist
+// leaf lists) has no album-artist or disc — so seeding from the row would let a
+// save write those fields back as empty and wipe them. Reading fresh gives the
+// editor the whole tag set. Shape matches what write_tags returns.
+#[tauri::command]
+fn read_file_tags(path: String) -> Result<FileEntry, String> {
+    let p = PathBuf::from(&path);
+    let tags = read_tags(&p);
+    Ok(FileEntry {
+        name: p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        title: tags.title,
+        artist: tags.artist,
+        album: tags.album,
+        album_artist: tags.album_artist,
+        disc: tags.disc,
+        track: tags.track,
+    })
+}
+
 // from the decoded audio, not a tag, so it is neither shown nor written here.
 //
 // The frontend refuses this for the file the audio engine currently holds open
@@ -2288,6 +2311,7 @@ pub fn run() {
             e2e_port,
             prepare_external_file,
             write_tags,
+            read_file_tags,
             audio_play,
             audio_play_stream,
             audio_toggle_pause,

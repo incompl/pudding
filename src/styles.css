@@ -613,6 +613,17 @@ body.platform-mac #tabs {
   min-height: 0;
 }
 
+/* The editor face: hidden until `.show-editor` reveals it (full view only,
+   below), scrolling if the fields outgrow the pane. The form inside is
+   buildInlineEditor's output (heading + fields + Save/Cancel). */
+#pane-editor-view {
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: 0.25em;
+}
+
 /* The nav bar: one muted line pinned above the transport, a face-swap button at
    its right. Revealed by .has-nav in the full-view query below; hidden otherwise
    (including the mini bar). */
@@ -672,6 +683,18 @@ body.platform-mac #tabs {
      bare centered hero keeps its original position. */
   .has-nav #now-playing-controls {
     margin-top: 0.6em;
+  }
+  /* Editor face: takes the pane over whichever face was up. Ordered after the
+     .show-list / .has-nav rules above so it wins the equal-specificity tie and
+     hides them while editing; the transport row stays put below it. */
+  .show-editor #pane-editor-view {
+    display: flex;
+    flex: 1;
+  }
+  .show-editor #now-playing-main,
+  .show-editor #queue-view,
+  .show-editor #nav-bar {
+    display: none;
   }
 }
 
@@ -1657,12 +1680,6 @@ body.dragging-noselect * {
   color: var(--accent);
 }
 
-/* While the Add-station editor is open, its trigger button is replaced in place
-   by the form, so hide the button (the editor takes its slot below the list). */
-#tab-streams.adding-station #add-station-btn {
-  display: none;
-}
-
 /* Inline field editor: a small stacked form that expands in place (Add stream
    now; track-metadata editing later). Sits flush in the list flow, indented to
    line up with the rows above, so it reads as the row being edited rather than a
@@ -1792,6 +1809,43 @@ body.dragging-noselect * {
 .inline-editor-submit:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* The pane editors (track metadata, stream add/edit) reuse .inline-editor, but
+   in the right pane it's a full-pane form, not a card dropped into the tree.
+   Drop the raised "card" fill (the panel frame already sets it apart) so it sits
+   on the panel's black, and relax the tree-fit margins/gaps now that there's
+   room to breathe. */
+#pane-editor-view .inline-editor {
+  background: none;
+  margin: 0;
+  padding: 0 0.25em;
+  gap: 0.7em;
+}
+
+/* Wider label column so "Album Artist" fits on one line instead of wrapping —
+   the pane has the horizontal room the tree didn't. */
+#pane-editor-view .inline-editor-label {
+  width: 5em;
+  line-height: 1.2;
+}
+
+/* Roomier inputs to match the more open layout. */
+#pane-editor-view .inline-editor-field input {
+  padding: 0.4em 0.55em;
+}
+
+/* In the tree this heading is a tiny muted caption; in the pane it's the title
+   of the view, so give it more presence — brighter and a touch larger — and a
+   little separation below it. */
+#pane-editor-view .inline-editor-heading {
+  color: var(--text);
+  font-size: 0.95em;
+  margin-bottom: 0.35em;
+}
+
+#pane-editor-view .inline-editor-actions {
+  margin-top: 0.5em;
 }
 
 .empty-state,

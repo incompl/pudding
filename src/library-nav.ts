@@ -484,6 +484,16 @@ export function renderNav(): void {
   render();
 }
 
+// Reload the current drill view from the backend — main.ts calls this after a
+// metadata edit. Rebuilding re-runs the view's load(), so a track edited out of
+// this album/artist drops away and the list re-sorts (membership here is derived
+// from the tags just written). Scroll resets, which reads as intentional since
+// the list's contents changed. A no-op-ish refresh at the root (Browse/tree self-
+// refresh by other means) but harmless.
+export function reloadNavView(): void {
+  render();
+}
+
 function render(): void {
   container.replaceChildren();
   footer.replaceChildren();

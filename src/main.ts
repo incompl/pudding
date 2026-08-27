@@ -11,7 +11,7 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect, type Signal } from "@preact/signals-core";
 import { GaplessEngine } from "./audio-engine";
 import { maybeStartE2eBridge } from "./e2e-bridge";
-import { initLibraryNav, popNavToRoot, refreshNavPlaylists, renderNav, type NavStep } from "./library-nav";
+import { initLibraryNav, popNavToRoot, refreshNavPlaylists, reloadNavView, renderNav, type NavStep } from "./library-nav";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOT = "libraryRoot";
@@ -1316,10 +1316,7 @@ function renderNode(
         }
         items.push({ label: "Add to queue", action: () => addToQueue([nodeToTrack(node)]) });
         items.push(addToPlaylistItem(() => [nodeToTrack(node)]));
-        items.push({
-          label: "Edit metadata…",
-          action: () => openEditTrackEditor(node, parent, li, showArtist),
-        });
+        items.push(editMetadataItem(node.path));
         items.push(showInFinderItem(node.path));
       }
       showContextMenu(e.clientX, e.clientY, items);
@@ -1552,7 +1549,7 @@ function renderStreams(streams: Stream[]): void {
       const items: ContextMenuItem[] = [{ label: "Play", action: () => playStream(stream) }];
       if (streamListWritable.value) {
         items.push(
-          { label: "Edit…", action: () => openEditStationEditor(stream, li) },
+          { label: "Edit…", action: () => openEditStationEditor(stream) },
           { label: "Delete", action: () => void deleteStream(stream) },
         );
       }
@@ -1565,12 +1562,12 @@ function renderStreams(streams: Stream[]): void {
   streamsContainer.appendChild(ul);
 }
 
-// A reusable inline field editor: a small stacked form of labeled text inputs
-// plus Cancel/Save, meant to expand in place where the thing being edited lives
-// (the Add-station button now; a track row for metadata editing later). Kept
-// generic — the caller supplies the fields and what Save does — so both callers
-// share one look and one set of behaviors (Enter submits, Esc cancels, Save
-// disabled until the required fields are filled). Returns the <form> element for
+// A reusable field editor: a small stacked form of labeled text inputs plus
+// Cancel/Save. Both callers mount it in the right-pane editor face (track
+// metadata, stream add/edit — see openPaneEditor). Kept generic — the caller
+// supplies the fields and what Save does — so they share one look and one set of
+// behaviors (Enter submits, Esc cancels, Save disabled until the required fields
+// are filled). Returns the <form> element for
 // the caller to insert; `onCancel` fires on Esc or the Cancel button.
 interface InlineEditorField {
   key: string;
@@ -1588,9 +1585,9 @@ interface InlineEditorField {
 interface InlineEditorOptions {
   fields: InlineEditorField[];
   submitLabel: string;
-  // Optional line above the fields, e.g. "Editing <filename>". Signals that the
-  // editor rewrites the underlying file (not just the library) and keeps the
-  // edited row identified after the tree row it replaced scrolls away.
+  // Optional title line above the fields, e.g. "Editing <filename>" or "New
+  // station" — the editor face fills the pane, so it names what's being edited
+  // now that there's no adjacent row to imply it.
   heading?: string;
   onSubmit: (values: Record<string, string>) => void | Promise<void>;
   onCancel: () => void;
@@ -1753,29 +1750,17 @@ function stationEditorFields(stream?: Stream): InlineEditorField[] {
   ];
 }
 
-// The Add-station editor lives just below the streams list, in the slot the
-// Add-station button occupies (the button hides via #tab-streams.adding-station
-// while it's open). Only one is open at a time.
-function closeAddStationEditor(): void {
-  const tab = document.getElementById("tab-streams");
-  tab?.classList.remove("adding-station");
-  tab?.querySelector(":scope > .inline-editor")?.remove();
-}
-
+// Add a station: open the editor face (see openPaneEditor) with an empty form.
+// Only reachable when the list is writable (the Add button hides otherwise), and
+// the face replaces its own contents, so no "already open" guard is needed. Save
+// writes the stream, refreshes the list, and closes; Cancel just closes.
 function openAddStationEditor(): void {
-  const tab = document.getElementById("tab-streams");
-  const btn = document.getElementById("add-station-btn");
-  if (!tab || !btn || btn.classList.contains("hidden")) return;
-  if (tab.classList.contains("adding-station")) return; // already open
-  // Cancel any station currently being edited (its row became an inline editor)
-  // so only one stream editor is ever open at a time.
-  if (streamsContainer?.querySelector(".inline-editor")) {
-    void refreshStreams(streamListPathInput.value);
-  }
+  if (!streamListWritable.value) return;
   const editor = buildInlineEditor({
     fields: stationEditorFields(),
     submitLabel: "Add",
-    onCancel: () => closeAddStationEditor(),
+    heading: "New station",
+    onCancel: closePaneEditor,
     onSubmit: async (values) => {
       try {
         await invoke("add_stream", {
@@ -1788,27 +1773,26 @@ function openAddStationEditor(): void {
         console.error("add_stream failed", e);
         return; // leave the form up so the user can correct and retry
       }
-      closeAddStationEditor();
+      closePaneEditor();
       await refreshStreams(streamListPathInput.value);
     },
   });
-  tab.classList.add("adding-station");
-  btn.after(editor);
+  openPaneEditor("stream", editor);
 }
 
-// Edit an existing station: the row itself becomes the inline editor, prefilled.
-// Cancel or Save just re-renders the list (restoring the row / showing the
-// change). `index` is the station's position in the file (== its index in
-// allStreams, which is the file order), resolved live so it's right even if the
-// list changed since render.
-function openEditStationEditor(stream: Stream, li: HTMLElement): void {
+// Edit an existing station in the editor face, prefilled. `index` is the
+// station's position in the file (== its index in allStreams, which is the file
+// order), resolved live so it's right even if the list changed since render.
+// Save rewrites the entry and refreshes the list; Cancel just closes (the row was
+// never touched, so nothing to restore).
+function openEditStationEditor(stream: Stream): void {
   const index = allStreams.indexOf(stream);
   if (index < 0) return;
-  closeAddStationEditor();
   const editor = buildInlineEditor({
     fields: stationEditorFields(stream),
     submitLabel: "Save",
-    onCancel: () => void refreshStreams(streamListPathInput.value),
+    heading: `Editing ${stream.name}`,
+    onCancel: closePaneEditor,
     onSubmit: async (values) => {
       try {
         await invoke("update_stream", {
@@ -1822,86 +1806,83 @@ function openEditStationEditor(stream: Stream, li: HTMLElement): void {
         console.error("update_stream failed", e);
         return; // leave the form up so the user can correct and retry
       }
+      closePaneEditor();
       await refreshStreams(streamListPathInput.value);
     },
   });
-  li.replaceChildren(editor);
+  openPaneEditor("stream", editor);
 }
 
-// The editable audio tags of a track, prefilled from the node. Duration is
-// derived from the decoded audio (not a tag), so it isn't offered. Disc/Track are
-// integers stored as text here; openEditTrackEditor parses them back on save.
-function trackEditorFields(node: TreeNode): InlineEditorField[] {
-  return [
-    { key: "title", label: "Title", value: node.title ?? "", placeholder: node.name },
-    { key: "artist", label: "Artist", value: node.artist ?? "" },
-    { key: "album", label: "Album", value: node.album ?? "" },
-    { key: "albumArtist", label: "Album Artist", value: node.albumArtist ?? "" },
-    { key: "disc", label: "Disc", value: node.disc?.toString() ?? "" },
-    { key: "track", label: "Track", value: node.track?.toString() ?? "" },
-  ];
+// --- Right-pane editor face ---
+//
+// Editing a track's tags or a stream is a *right-pane mode*, not an inline row
+// swap: the context menus that trigger it (tree, Songs/album/artist leaf lists,
+// queue/playlist for tracks; the streams list for stations) build a form and open
+// the editor face over whatever the pane was showing. Closing it clears the face
+// signal and the pane falls back to the hero/list it was on — so you land back
+// where you were, no saved "return to" state needed. A row swap couldn't work
+// uniformly for tags: album/artist lists derive membership from the very tags
+// being edited, so an in-place patch would strand an ejected track; here the edit
+// is decoupled from any row and applyTagUpdate refreshes each surface after the
+// write. Streams follow the same face for consistency.
+
+// Which editor the face is showing ("metadata" or "stream"), or null when it's
+// closed. Only its presence drives the `.show-editor` face toggle; the kind lets
+// the streams-writability effect close just the stream editor. The form itself is
+// rebuilt on each open, so this needn't carry any per-edit state.
+const paneEditor = signal<"metadata" | "stream" | null>(null);
+
+// The #pane-editor-view element the form mounts into (assigned at init).
+let paneEditorView: HTMLElement;
+
+// Close the editor face, revealing whatever face was underneath. Idempotent.
+function closePaneEditor(): void {
+  paneEditor.value = null;
+  paneEditorView.replaceChildren();
 }
 
-// Cancels the currently-open track metadata editor, if any, restoring its row.
-// Set while an editor is open (see openEditTrackEditor) so opening a second one
-// tears down the first — only one track editor lives at a time.
-let closeOpenTrackEditor: (() => void) | null = null;
+// Mount `form` as the editor face and reveal it. `kind` tags which editor is up.
+function openPaneEditor(kind: "metadata" | "stream", form: HTMLElement): void {
+  paneEditorView.replaceChildren(form);
+  paneEditor.value = kind;
+}
 
-// Edit a track's embedded tags in place: the tree row becomes the inline editor,
-// mirroring openEditStationEditor. write_tags rewrites the file and syncs the
-// library cache row, handing back the re-read tags; we fold them into the node
-// and re-render the row (showArtist preserved so the row looks identical). Cancel
-// and errors just restore the row. The caller must not offer this for the file
-// the engine is playing — see the single-track context menu.
-function openEditTrackEditor(
-  node: TreeNode,
-  parent: TreeNode,
-  li: HTMLLIElement,
-  showArtist: boolean,
-): void {
-  closeAddStationEditor();
-  // Only one track editor open at a time: cancel any other before opening this.
-  closeOpenTrackEditor?.();
-  // Hold off the watcher-driven tree rebuild while the editor is open: a
-  // `library-scanned` event (this save's own write, or unrelated fs activity)
-  // would otherwise renderTree() and tear the form out mid-edit — which also
-  // orphans its reactive Save-gate effect. Mirrors the tree-rename editor.
-  inlineEditing = true;
-  const restore = () => {
-    if (closeOpenTrackEditor === restore) closeOpenTrackEditor = null;
-    inlineEditing = false;
-    li.replaceWith(renderNode(node, parent, showArtist));
-    // Flush a rebuild the watcher deferred while the editor was open, now that
-    // tearing out the (closed) editor is safe. Matches renameTreePlaylist's finish().
-    if (refreshDeferredWhileEditing) {
-      refreshDeferredWhileEditing = false;
-      void refreshLibrary();
-    }
-  };
+// Open the metadata editor for `path`, prefilled from `seed` (its current tags,
+// read fresh from disk — see editMetadataItem). Building the form here means one
+// editor surface no matter which menu opened it. Save writes the tags, refreshes
+// every surface that shows the track (applyTagUpdate), and closes; Cancel closes.
+function openMetadataEditor(path: string, seed: FileEntry): void {
   // Empty or non-positive parses to null (clears the tag); disc/track are 1-based.
   const parsePositive = (s: string): number | null => {
     const n = parseInt(s, 10);
     return Number.isFinite(n) && n > 0 ? n : null;
   };
   const editor = buildInlineEditor({
-    fields: trackEditorFields(node),
+    fields: [
+      { key: "title", label: "Title", value: seed.title ?? "", placeholder: seed.name },
+      { key: "artist", label: "Artist", value: seed.artist ?? "" },
+      { key: "album", label: "Album", value: seed.album ?? "" },
+      { key: "albumArtist", label: "Album Artist", value: seed.albumArtist ?? "" },
+      { key: "disc", label: "Disc", value: seed.disc?.toString() ?? "" },
+      { key: "track", label: "Track", value: seed.track?.toString() ?? "" },
+    ],
     submitLabel: "Save",
-    heading: `Editing ${node.name}`,
-    // Editing is always allowed, but saving rewrites the file in place — unsafe
-    // while the engine holds it open (playback may have advanced into this track
-    // after the editor opened). Gate Save on that, live.
-    blocked: () => currentNodePath.value === node.path,
+    heading: `Editing ${seed.name}`,
+    // Saving rewrites the file in place — unsafe while the engine holds it open
+    // (you can open this for the playing track, or playback may advance into it
+    // while the editor is up). Gate Save on that, live.
+    blocked: () => currentNodePath.value === path,
     blockedNote: "Can't save while this track is playing",
-    onCancel: restore,
+    onCancel: closePaneEditor,
     onSubmit: async (values) => {
       // Defensive re-check: the reactive gate keeps Save disabled while playing,
-      // so this only trips on a same-tick race. Leave the form up (the note is
-      // already showing) rather than rewriting the file under the decoder.
-      if (currentNodePath.value === node.path) return;
+      // so this only trips on a same-tick race. Leave the form up rather than
+      // rewriting the file under the decoder.
+      if (currentNodePath.value === path) return;
       let res: FileEntry;
       try {
         res = await invoke<FileEntry>("write_tags", {
-          path: node.path,
+          path,
           title: values.title || null,
           artist: values.artist || null,
           albumArtist: values.albumArtist || null,
@@ -1913,17 +1894,68 @@ function openEditTrackEditor(
         console.error("write_tags failed", e);
         return; // leave the form up so the user can correct and retry
       }
-      node.title = res.title;
-      node.artist = res.artist;
-      node.album = res.album;
-      node.albumArtist = res.albumArtist;
-      node.disc = res.disc;
-      node.track = res.track;
-      restore();
+      applyTagUpdate(path, res);
+      closePaneEditor();
     },
   });
-  closeOpenTrackEditor = restore;
-  li.replaceChildren(editor);
+  openPaneEditor("metadata", editor);
+}
+
+// The single "Edit metadata…" context-menu verb, shared by every track surface.
+// Reads the file's tags fresh from disk before opening — a view carries only a
+// partial row (a SearchTrack from Songs/album/artist lists has no album-artist or
+// disc), so seeding the editor from the row would let a save write those fields
+// back empty and wipe them. read_file_tags returns the whole tag set.
+function editMetadataItem(path: string): ContextMenuItem {
+  return {
+    label: "Edit metadata…",
+    action: async () => {
+      let seed: FileEntry;
+      try {
+        seed = await invoke<FileEntry>("read_file_tags", { path });
+      } catch (e) {
+        console.error("read_file_tags failed", e);
+        return;
+      }
+      openMetadataEditor(path, seed);
+    },
+  };
+}
+
+// Refresh every surface that might show a just-edited track, after write_tags. The
+// edit is decoupled from any one row, so each surface updates through its own path:
+//   - Tree: the fs watcher's own scan skips this row (write_tags pre-synced
+//     mtime/size), so patch the in-memory node and repaint the tree here.
+//   - Library nav lenses (Songs/Artists/Albums + detail): reload so tag-derived
+//     membership recomputes — an edited-away track drops out and the list re-sorts.
+//   - Open right-pane list (queue / browsed playlist): membership is by path
+//     (unchanged), so patch the matching rows' display fields in place and repaint.
+function applyTagUpdate(path: string, tags: FileEntry): void {
+  if (rootNode) {
+    const found = findNode(rootNode, path);
+    if (found && !found.node.isFolder) {
+      const n = found.node;
+      n.title = tags.title;
+      n.artist = tags.artist;
+      n.album = tags.album;
+      n.albumArtist = tags.albumArtist;
+      n.disc = tags.disc;
+      n.track = tags.track;
+      renderTree();
+    }
+  }
+  reloadNavView();
+  const list = browsedPlaylist.value ?? activeQueue.value;
+  if (list && list.tracks.some((t) => t.path === path)) {
+    for (const t of list.tracks) {
+      if (t.path !== path) continue;
+      t.title = tags.title;
+      t.artist = tags.artist;
+      t.album = tags.album;
+      t.track = tags.track;
+    }
+    renderQueue(list, browsedPlaylist.value === null);
+  }
 }
 
 async function deleteStream(stream: Stream): Promise<void> {
@@ -2114,6 +2146,7 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
           showContextMenu(e.clientX, e.clientY, [
             { label: "Add to queue", action: () => addToQueue([t]) },
             addToPlaylistItem(() => [t]),
+            editMetadataItem(t.path),
           ]);
         }
       });
@@ -4672,6 +4705,7 @@ export function renderLeafTrackList(
           { label: "Add to queue", action: () => addToQueue([t]) },
           addToPlaylistItem(() => [t]),
           ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: null }),
+          editMetadataItem(t.path),
           showInFinderItem(t.path),
         ]);
       }
@@ -6058,10 +6092,11 @@ function setupEffects(): void {
     document.getElementById("streams-empty")?.classList.toggle("hidden", !noStreamList);
     streamsContainer.classList.toggle("hidden", noStreamList);
     // The Add-station button shows only for a writable (valid, local) list. When
-    // it hides, drop any open editor so a stale form can't linger.
+    // the list stops being writable, drop any open stream editor so a stale form
+    // can't linger (a metadata editor is unrelated, so leave it be).
     const btn = document.getElementById("add-station-btn");
     btn?.classList.toggle("hidden", !streamListWritable.value);
-    if (!streamListWritable.value) closeAddStationEditor();
+    if (!streamListWritable.value && paneEditor.value === "stream") closePaneEditor();
   });
 
   // The two-face right pane, painted from the derived paneView. `has-nav` reveals
@@ -6076,6 +6111,13 @@ function setupEffects(): void {
     nowPlayingPanel.classList.toggle("has-nav", hasList && nav !== null);
     nowPlayingPanel.classList.toggle("show-list", hasList && showList);
     renderQueue(list, isSource);
+  });
+
+  // The editor face: `.show-editor` takes the pane over whichever face was up while
+  // a track's tags or a stream are being edited; clearing paneEditor reveals it
+  // again (see openPaneEditor). Its own effect so it doesn't rebuild the queue list.
+  effect(() => {
+    nowPlayingPanel.classList.toggle("show-editor", paneEditor.value !== null);
   });
 
   // Paint the list-pane multi-select background reactively, so cmd/shift-click
@@ -6273,6 +6315,7 @@ async function init(): Promise<void> {
   searchInput = document.querySelector("#search-input") as HTMLInputElement;
   searchResultsEl = document.querySelector("#search-results") as HTMLElement;
   nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
+  paneEditorView = document.querySelector("#pane-editor-view") as HTMLElement;
   settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
   splitterEl = document.querySelector("#splitter") as HTMLElement;
   queueTitleEl = document.querySelector("#queue-title-text") as HTMLElement;

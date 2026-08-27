@@ -143,6 +143,12 @@
               </div>
             </div>
           </div>
+          <!-- The editor face: a third face that takes the pane when editing a
+               track's tags or a stream (see openPaneEditor). Shown by
+               `.show-editor`, which hides the hero, list, and nav bar; closing it
+               reveals whatever face was underneath, so you land back where you
+               were. The form itself is built by buildInlineEditor. -->
+          <div id="pane-editor-view"></div>
           <!-- The nav bar: one line pinned above the transport whenever a list
                exists, carrying the source context and the button that swaps the
                two faces (see renderNavBar / .has-nav in styles.css). -->
