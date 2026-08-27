@@ -23,8 +23,8 @@ import {
   streamListPathInput,
 } from "./dom-refs";
 import { nodesFromListing, renderTree } from "./tree-view";
+import { renderStreams } from "./streams-view";
 import {
-  renderStreams,
   refreshPlaylistIndex,
   setEmpty,
   queueIsActivePool,
