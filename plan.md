@@ -4,6 +4,65 @@
 bindings (incl. ~50 DOM element refs), ~180 functions. The functions are easy to
 move; the obstacle is the shared mutable state everything reaches into.
 
+## Progress (updated 2026-08-27)
+
+**Foundational layer done — 6 commits, each typecheck + unit-test green:**
+
+- `types.ts` — all 29 shared interfaces/types. `library-nav.ts` and the tests
+  now import types from here, not `main.ts` (the old coupling is gone).
+- `state.ts` — the 31 signals + the pure-signal helpers, **plus the `app` state
+  object** (see below).
+- `dom-refs.ts` — the 51 element refs + `bindDom()`. Realized as exported `let`s
+  with live bindings (each ref is assigned exactly once, in `bindDom()`, so
+  importers only ever read them — no `dom.` object / no read-site churn needed).
+- `context-menu.ts` — the self-contained menu leaf; only `showContextMenu` public.
+
+**The app-object migration is DONE** (the plan's hardest step): 25 cross-module
+plumbing `let`s (272 references) now live as fields on `export const app` in
+`state.ts`. This resolved the core live-binding obstacle, so the remaining
+feature modules can be carved out with plain imports.
+
+`main.ts` is down from 6885 → ~6311 lines. Working tree committed, `pnpm
+typecheck` + `pnpm test:unit` green.
+
+### Decisions locked in (for the next session)
+
+- **app-object + direct inter-module imports, NOT DI.** Confirmed as the chosen
+  approach. Runtime-only call cycles between feature modules (e.g.
+  queue↔drag-drop, engine↔playback) are ES-safe, so modules import each other
+  directly. DI (the `library-nav.ts` pattern) is *not* used for the clusters.
+- **Module-local state stays local, not on `app`.** Drag/stream-private lets
+  (`activeDrag`, `dragGhostEl`, `renderedStreamMeta`, `streamMetaFadeTimer`) move
+  *with* their module as a plain `let`; only genuinely cross-module plumbing is
+  on `app`. Also still main-local for now: `normalSize`/`miniSize` (window),
+  `toastTimer` (toast), `lastNonZeroVolume` (volume) — relocate with whatever
+  owns them, or leave in the trimmed `main.ts`.
+- **`paneView` and `queueIsActivePool` deliberately stayed in `main.ts`** — they
+  call feature functions, and `state.ts` must stay dependency-light (types +
+  signal/engine libs only, never a feature module).
+- **`engine` is a `const`** (not a reassigned `let`), so it needs no `app` field:
+  when `engine-glue.ts` is extracted it becomes `export const engine` there and
+  is imported back — read sites don't change.
+
+### Gotchas learned (extraction via script)
+
+The scratchpad scripts worked well, but the `app`-rename (`\bNAME\b` →
+`app.NAME`) needed two guards, both worth repeating for any future bulk rename:
+- **String literals** matching a name get clobbered — critically the *persisted*
+  store-key values (`KEY_LIBRARY_ROOTS = "libraryRoots"`) and import paths
+  (`plugin-store`). Skip inside quotes.
+- **Spread `...name`** looks like member access to a `(?<!\.)` lookbehind and is
+  skipped — handle `...` explicitly.
+- Verify afterward with a string-aware scan for `app.` leaking into any quoted
+  string or comment.
+
+### Remaining work
+
+Steps 4b + 5 + 6 below: engine-glue, drag-drop, playback, queue, playlists,
+library, tree-view, streams-view, search, editors — then shrink `main.ts` to
+`init()` + the `setup*()` wiring. All now mechanical relocation; extract one at a
+time, typecheck + `test:unit` after each, commit per module.
+
 ## The core obstacle: shared mutable `let` state
 
 `import { rootNode }` gives a **read-only live binding** — any file that does
