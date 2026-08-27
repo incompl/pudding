@@ -61,6 +61,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
   doc.registerRoot("lens-footer");
   const folderTree = doc.registerRoot("folder-tree");
   const createBtn = doc.registerRoot("create-playlist-btn");
+  doc.registerRoot("files-empty");
 
   const calls: Call[] = [];
   const leafCtx: LeafListContext[] = [];
@@ -91,7 +92,9 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
             { album: "Split", artist: "Various" },
           ]
         : [{ album: "Split", artist: "Various" }],
+    artistAlbumlessTracks: async () => [],
     albumTracks: async () => songs,
+    libraryRootSet: () => true,
     renderLeafTrackList: (_tracks, ctx) => {
       leafCtx.push(ctx);
       return doc.createElement("div") as unknown as HTMLElement;

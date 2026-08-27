@@ -7,11 +7,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "preview": "vite preview",
     "tauri": "tauri",
     "build:e2e": "tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
-    "test:unit": "node --import tsx --test test/*.test.ts",
+    "test:unit": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test test/*.test.ts",
     "test:e2e": "node --import tsx --test --test-concurrency=1 e2e/tests/*.test.ts",
     "e2e": "pnpm build:e2e && pnpm test:e2e",
     "drive": "node e2e/drive.mjs --dev"

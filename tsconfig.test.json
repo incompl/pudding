@@ -1,0 +1,9 @@
+{
+  // Same compiler settings as the app build, but widened to include test/ so the
+  // unit tests and the fake DOM are typechecked too. The base config only compiles
+  // src/, which is why injected-dep drift (a fixture missing a LibraryNavDeps field)
+  // slipped through to a runtime crash instead of a compile error. test:unit runs
+  // this before the node:test run so that class of drift fails fast.
+  "extends": "./tsconfig.json",
+  "include": ["src", "test"]
+}
