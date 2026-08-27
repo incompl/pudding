@@ -1759,7 +1759,7 @@ function openAddStationEditor(): void {
   const editor = buildInlineEditor({
     fields: stationEditorFields(),
     submitLabel: "Add",
-    heading: "New station",
+    heading: "New stream",
     onCancel: closePaneEditor,
     onSubmit: async (values) => {
       try {
