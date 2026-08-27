@@ -22,9 +22,8 @@ import {
   libraryRootsContainer,
   streamListPathInput,
 } from "./dom-refs";
+import { nodesFromListing, renderTree } from "./tree-view";
 import {
-  nodesFromListing,
-  renderTree,
   renderStreams,
   refreshPlaylistIndex,
   setEmpty,

@@ -1,0 +1,512 @@
+// The Files-tab library tree: lazy folder loading, row rendering (folders,
+// tracks, playlists), click/select/context-menu wiring, and Enter-to-play
+// dispatch across panes. Rendering only — the tree *data* + refresh lifecycle
+// lives in library.ts.
+
+import { invoke } from "@tauri-apps/api/core";
+import { h } from "./dom";
+import type {
+  TreeNode,
+  DirListing,
+  SearchTrack,
+  ContextMenuItem,
+  PlaylistData,
+} from "./types";
+import {
+  app,
+  queuePlayingIndex,
+  currentNodePath,
+  activeQueue,
+  browsedPlaylist,
+  treeSelection,
+  activeTab,
+  selectedStreamUrl,
+  resetToLonePlayback,
+} from "./state";
+import { treeContainer } from "./dom-refs";
+import { showContextMenu } from "./context-menu";
+import { startTrackDrag } from "./drag-drop";
+import {
+  joinPath,
+  displayLabel,
+  setEmpty,
+  selectedTracks,
+  toggleTreeSelection,
+  selectTreeRangeTo,
+  selectTreeSingle,
+  playFile,
+  playFolder,
+  playStream,
+  addFolderToQueue,
+  addToQueue,
+  addPlaylistToQueue,
+  playPlaylist,
+  startTreePlaylistRename,
+  deletePlaylistNode,
+  showInFinderItem,
+  addToPlaylistItem,
+  playlistPlayableTracks,
+  trackContextItems,
+  editMetadataItem,
+  nodeToTrack,
+  attachPlaylistClicks,
+  paneView,
+  queueSel,
+  playQueueTrack,
+  commitBrowsedPlaylist,
+} from "./main";
+
+// Child nodes for one directory listing. Display order comes entirely from
+// the backend: list_dir returns folders sorted by name and files sorted by
+// (disc, track, name), and folders-before-files holds by construction here.
+// `oldFolders` lets reconcileNode carry over an existing folder node (with its
+// loaded/expanded state and children) instead of resetting it to a lazy stub.
+export function nodesFromListing(
+  parentPath: string,
+  listing: DirListing,
+  oldFolders?: Map<string, TreeNode>,
+): TreeNode[] {
+  return [
+    ...listing.folders.map<TreeNode>(
+      (name) =>
+        oldFolders?.get(name) ?? {
+          path: joinPath(parentPath, name),
+          name,
+          title: null,
+          artist: null,
+          album: null,
+          albumArtist: null,
+          disc: null,
+          track: null,
+          isFolder: true,
+          loaded: false,
+          expanded: false,
+          children: [],
+        },
+    ),
+    ...listing.files.map<TreeNode>((f) => ({
+      path: joinPath(parentPath, f.name),
+      name: f.name,
+      title: f.title,
+      artist: f.artist,
+      album: f.album,
+      albumArtist: f.albumArtist,
+      disc: f.disc,
+      track: f.track,
+      isFolder: false,
+      loaded: true,
+      expanded: false,
+      children: [],
+    })),
+    // Playlists sort after all tracks (the backend already orders them
+    // alphabetically). `name` is the display name; `path` the file.
+    ...listing.playlists.map<TreeNode>((p) => ({
+      path: joinPath(parentPath, p.file),
+      name: p.name,
+      title: null,
+      artist: null,
+      album: null,
+      albumArtist: null,
+      disc: null,
+      track: null,
+      isFolder: false,
+      isPlaylist: true,
+      loaded: true,
+      expanded: false,
+      children: [],
+    })),
+  ];
+}
+
+export async function fetchChildren(node: TreeNode): Promise<void> {
+  if (node.loaded || !node.isFolder) return;
+  try {
+    const listing = await invoke<DirListing>("list_dir", { path: node.path });
+    node.children = nodesFromListing(node.path, listing);
+    node.loaded = true;
+  } catch (e) {
+    console.error("list_dir failed for", node.path, e);
+    node.loaded = true;
+    node.children = [];
+  }
+}
+
+async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
+  if (node.loaded || !node.isFolder) return;
+  const childUl = h(
+    "ul",
+    {},
+    h("li", { class: "loading-state", text: "Loading…" }),
+  );
+  li.appendChild(childUl);
+  try {
+    await fetchChildren(node);
+  } finally {
+    childUl.remove();
+  }
+}
+
+
+
+// Whether a track's artist is worth showing in a given folder. Suppressed only
+// when it's pure repetition: a multi-track album whose tagged tracks all share
+// one artist (the folder header already carries it). Shown when the artists vary
+// (compilations, a lone guest feature, "Various Artists") and when the folder
+// holds a single tagged track — a loose single, where there's nothing to repeat.
+function folderArtistsVary(children: TreeNode[]): boolean {
+  const artists = new Set<string>();
+  let tagged = 0;
+  for (const c of children) {
+    if (c.isFolder || !c.artist) continue;
+    tagged++;
+    artists.add(c.artist);
+    if (artists.size > 1) return true;
+  }
+  return tagged === 1;
+}
+
+function renderNode(
+  node: TreeNode,
+  parent: TreeNode,
+  showArtist = true,
+): HTMLLIElement {
+  const li = h("li");
+  // Every row carries its path so the playing-highlight effect can find it.
+  // The tree row skips the accent while a queue/playlist owns the playhead — the
+  // now-playing highlight belongs to the context playing the track, not to every
+  // copy of the same file (see the highlight effect and queueIsActivePool).
+  const label = h("span", { class: "node-label", data: { path: node.path } });
+  // Mirror the highlight effect's basis: a live queue row means a queue owns the
+  // playhead, so the tree's copy of its track stays plain and the playlist's own
+  // row carries the accent instead. Keeps a mid-playback re-render in agreement.
+  const queueOwnsPlayhead = queuePlayingIndex.peek() !== null;
+  if (!node.isFolder && currentNodePath.value === node.path && !queueOwnsPlayhead) {
+    label.classList.add("playing");
+  }
+  if (node.isPlaylist && queueOwnsPlayhead) {
+    const q = activeQueue.peek();
+    if (q?.kind === "playlist" && q.sourcePath === node.path) {
+      label.classList.add("playing");
+    }
+  }
+  // The open (browsed) playlist carries a persistent selection background so a
+  // re-render keeps showing which playlist is open (the highlight effect below
+  // reapplies it reactively; this keeps a mid-browse re-render in agreement).
+  if (node.isPlaylist && browsedPlaylist.peek()?.sourcePath === node.path) {
+    label.classList.add("open");
+  }
+  // Multi-select background, reapplied on re-render like the highlight classes
+  // above (the selection effect keeps it live). Only tracks are selectable.
+  if (!node.isFolder && !node.isPlaylist && treeSelection.peek().has(node.path)) {
+    label.classList.add("selected");
+  }
+  // Folders show an open/closed folder. A track's slot carries its tagged track
+  // number when it has one (the playing row just recolors it) and, on row hover,
+  // a play button in the same cell — clicking a row now selects rather than
+  // plays, so the hover button (or a double-click) is how you play one track.
+  // Every track keeps the gutter even when untagged/loose so the play button has
+  // a home and titles stay aligned with sibling folders.
+  if (node.isPlaylist) {
+    // A playlist gets its own "stack of rows" glyph, distinct from folders and
+    // tracks, and always occupies the gutter.
+    label.appendChild(h("span", { class: "icon playlist" }));
+  } else if (node.isFolder) {
+    label.appendChild(
+      h("span", { class: `icon ${node.expanded ? "folder-open" : "folder"}` }),
+    );
+  } else {
+    label.appendChild(
+      h(
+        "span",
+        { class: "icon track" },
+        h("span", {
+          class: "track-num",
+          text:
+            parent !== app.rootNode && node.track != null ? String(node.track) : "",
+        }),
+        // The button plays directly and swallows the click so the row's
+        // select-on-click doesn't also fire.
+        h("button", {
+          class: "row-play",
+          attrs: { "aria-label": "Play" },
+          on: {
+            click: (e) => {
+              e.stopPropagation();
+              playTreeTrack(node, parent);
+            },
+          },
+        }),
+      ),
+    );
+  }
+  // A tagged track reads as two lines — title over a de-emphasized artist —
+  // like a search result. Folders and untagged files keep a single plain line.
+  const text =
+    !node.isFolder && node.title
+      ? h(
+          "span",
+          { class: "label-text" },
+          h("span", { class: "primary", text: node.title }),
+          node.artist && showArtist &&
+            h("span", { class: "secondary", text: node.artist }),
+        )
+      : h("span", { class: "label-text", text: displayLabel(node) });
+  label.appendChild(text);
+  if (node.isPlaylist) {
+    attachPlaylistClicks(label, node);
+  } else {
+    label.addEventListener("click", (e) => onNodeClick(node, parent, li, e));
+  }
+  // Right-click a playlist to play it, add its tracks to the queue, or curate it
+  // (Rename rewrites the #PLAYLIST: directive; Delete removes the file).
+  if (node.isPlaylist) {
+    label.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showContextMenu(e.clientX, e.clientY, [
+        { label: "Play", action: () => void playPlaylist(node) },
+        { label: "Add to queue", action: () => void addPlaylistToQueue(node) },
+        addToPlaylistItem(async () =>
+          playlistPlayableTracks(
+            await invoke<PlaylistData>("read_playlist", { path: node.path }),
+          ),
+        ),
+        { label: "Rename", action: () => startTreePlaylistRename(node, label) },
+        { label: "Delete", action: () => void deletePlaylistNode(node) },
+        showInFinderItem(node.path),
+      ]);
+    });
+  } else if (node.isFolder) {
+    label.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showContextMenu(e.clientX, e.clientY, [
+        {
+          label: "Play folder",
+          action: () => {
+            // The queue pane is the feedback for this action, so leave the tree
+            // where it is — no recursive expand or scroll-to.
+            void playFolder({ path: node.path, name: node.name });
+          },
+        },
+        {
+          label: "Add to queue",
+          action: () => void addFolderToQueue({ path: node.path, name: node.name }),
+        },
+        addToPlaylistItem(() =>
+          invoke<SearchTrack[]>("folder_tracks", { path: node.path }),
+        ),
+        showInFinderItem(node.path),
+      ]);
+    });
+  } else {
+    // Right-click a track to jump to its artist or album as a queue page. Each
+    // item is only offered when that tag exists. An untagged track (common for
+    // OST rips named purely by filename) has neither, so fall back to "Play
+    // folder" on its containing folder — right-click always does something.
+    label.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      // Finder-style: right-clicking a row outside the current selection makes it
+      // the selection; right-clicking inside a multi-selection keeps it. The verbs
+      // then act on the whole selection (see selectedTracks).
+      if (!treeSelection.peek().has(node.path)) {
+        treeSelection.value = new Set([node.path]);
+        app.selectionAnchor = node.path;
+      }
+      const sel = selectedTracks();
+      const items: ContextMenuItem[] = [];
+      if (sel.length > 1) {
+        // Multi-select: the per-track navigation verbs (Play artist/album) don't
+        // apply to a heterogeneous set, so offer only the list-building verbs,
+        // acting on every selected track. Count in the label confirms the scope.
+        items.push({ label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) });
+        items.push(addToPlaylistItem(() => sel));
+        // revealItemInDir takes one path; reveal the first selected track.
+        items.push(showInFinderItem(sel[0].path));
+      } else {
+        // The Play verbs lead — the navigation verbs (Play artist / Play album)
+        // when their tags exist, else "Play folder" on the container for an
+        // untagged track (which has neither) so right-click always does something.
+        // "Add to queue" always comes last, matching the folder menu's order.
+        const nav = trackContextItems({
+          artist: node.artist,
+          album: node.album,
+          albumArtist: node.albumArtist,
+        });
+        items.push(...nav);
+        if (nav.length === 0 && parent.isFolder) {
+          items.push({
+            label: "Play folder",
+            action: () => void playFolder({ path: parent.path, name: parent.name }),
+          });
+        }
+        items.push({ label: "Add to queue", action: () => addToQueue([nodeToTrack(node)]) });
+        items.push(addToPlaylistItem(() => [nodeToTrack(node)]));
+        items.push(editMetadataItem(node.path));
+        items.push(showInFinderItem(node.path));
+      }
+      showContextMenu(e.clientX, e.clientY, items);
+    });
+    // A track can be dragged out of the tree into an open playlist/queue list to
+    // add it at a position (the tree itself accepts no drops). The payload is the
+    // track as a SearchTrack; the list's drop resolves an insert and autosaves.
+    // Pointer-based (not HTML5 DnD) so it coexists with Tauri's native OS
+    // file-drop handler — see beginPointerDrag.
+    label.addEventListener("pointerdown", (e) => {
+      // Dragging a selected row carries the whole selection into the drop target;
+      // dragging an unselected one carries just that track.
+      const sel = treeSelection.peek();
+      const tracks =
+        sel.has(node.path) && sel.size > 1 ? selectedTracks() : [nodeToTrack(node)];
+      startTrackDrag(e, tracks);
+    });
+    // Double-click anywhere on the row plays it — the second verb alongside the
+    // hover play button, now that a plain click only selects.
+    label.addEventListener("dblclick", () => playTreeTrack(node, parent));
+  }
+  li.appendChild(label);
+
+  if (node.isFolder && node.expanded) {
+    const childUl = h("ul");
+    if (node.children.length === 0) {
+      childUl.appendChild(h("li", { class: "empty-state", text: "(empty)" }));
+    } else {
+      const showArtist = folderArtistsVary(node.children);
+      for (const child of node.children) {
+        childUl.appendChild(renderNode(child, node, showArtist));
+      }
+    }
+    li.appendChild(childUl);
+  }
+  return li;
+}
+
+async function onNodeClick(
+  node: TreeNode,
+  parent: TreeNode,
+  li: HTMLLIElement,
+  e?: MouseEvent,
+): Promise<void> {
+  if (node.isFolder) {
+    if (!node.loaded) await loadChildren(node, li);
+    node.expanded = !node.expanded;
+    li.replaceWith(renderNode(node, parent));
+    return;
+  }
+  app.lastSelectionPane = "tree";
+  if (e && (e.metaKey || e.ctrlKey)) {
+    // Cmd/Ctrl-click builds a discontiguous selection without playing anything.
+    toggleTreeSelection(node.path);
+  } else if (e && e.shiftKey) {
+    // Shift-click extends a contiguous range from the anchor, also without playing.
+    selectTreeRangeTo(node.path);
+  } else {
+    // A plain click now selects the single row (and anchors a following
+    // Shift-range here) instead of playing — play is the hover play button or a
+    // double-click (see playTreeTrack). Matches playlists (single = inspect,
+    // double = commit) and lets you browse without interrupting playback.
+    selectTreeSingle(node.path);
+  }
+}
+
+// Play a tree track — the hover play button or a double-click. Selects the
+// played row (dropping any multi-select) so it stays highlighted, matching Apple
+// Music, and clears the queue highlight so the folder becomes the pool. Does NOT
+// clear any explicit queue — that stays stashed and visible so the user can
+// return to it. A lone track is bare continuation (hero only), so dismiss any
+// open queue/playlist chrome first.
+function playTreeTrack(node: TreeNode, parent: TreeNode): void {
+  selectTreeSingle(node.path);
+  queuePlayingIndex.value = null;
+  resetToLonePlayback();
+  playFile(node, parent);
+}
+
+// Find a loaded track node and its parent by path, walking every loaded folder
+// (so a selection under a collapsed folder still resolves). Returns null for a
+// path that isn't a currently-loaded track — e.g. a folder collapsed away its
+// children after selection.
+function findTreeNodeAndParent(path: string): { node: TreeNode; parent: TreeNode } | null {
+  let found: { node: TreeNode; parent: TreeNode } | null = null;
+  const walk = (parent: TreeNode): void => {
+    for (const child of parent.children) {
+      if (found) return;
+      if (child.isFolder) {
+        if (child.loaded) walk(child);
+      } else if (!child.isPlaylist && child.path === path) {
+        found = { node: child, parent };
+      }
+    }
+  };
+  if (app.rootNode) walk(app.rootNode);
+  return found;
+}
+
+// Play whatever a keyboard Enter should commit: the selected row in the pane the
+// user last acted in. A commit for the same row a plain click now merely selects.
+// Returns true when it played something (so the caller can preventDefault).
+// Sidebar panes only fire when their tab is showing, so Enter never plays a row
+// hidden behind the other tab; the list pane is always visible.
+export function playSelectedRow(): boolean {
+  if (app.lastSelectionPane === "stream" && activeTab.value === "streams") {
+    const url = selectedStreamUrl.value;
+    const stream = url ? app.allStreams.find((s) => s.url === url) : undefined;
+    if (stream) {
+      playStream(stream);
+      return true;
+    }
+    return false;
+  }
+  if (app.lastSelectionPane === "tree" && activeTab.value === "files") {
+    // The anchor is the last row a click touched — the natural "focused" row to
+    // commit when a range is selected. Fall back to a lone selected path.
+    const sel = treeSelection.value;
+    const path =
+      app.selectionAnchor && sel.has(app.selectionAnchor)
+        ? app.selectionAnchor
+        : sel.size === 1
+          ? [...sel][0]
+          : null;
+    const hit = path ? findTreeNodeAndParent(path) : null;
+    if (hit) {
+      playTreeTrack(hit.node, hit.parent);
+      return true;
+    }
+    return false;
+  }
+  if (app.lastSelectionPane === "list") {
+    const { list, isSource } = paneView.value;
+    if (!list) return false;
+    // The anchor is the focused row; fall back to a lone selection. Map it to a
+    // playable-pool index (missing rows are skipped, mirroring renderQueue).
+    const sel = queueSel.signal.value;
+    const lone = sel.size === 1 ? [...sel][0] : null;
+    const anchor = queueSel.anchor();
+    const target = anchor && sel.has(anchor) ? anchor : lone;
+    if (!target || target.missing) return false;
+    let poolIdx = 0;
+    for (const row of list.tracks) {
+      if (row.missing) continue;
+      if (row === target) {
+        if (isSource) playQueueTrack(poolIdx);
+        else commitBrowsedPlaylist(poolIdx);
+        return true;
+      }
+      poolIdx++;
+    }
+    return false;
+  }
+  return false;
+}
+
+export function renderTree(): void {
+  treeContainer.innerHTML = "";
+  if (!app.rootNode) return;
+  if (app.rootNode.children.length === 0) {
+    setEmpty(treeContainer, "Library is empty");
+    return;
+  }
+  const ul = h("ul");
+  for (const child of app.rootNode.children) {
+    ul.appendChild(renderNode(child, app.rootNode));
+  }
+  treeContainer.appendChild(ul);
+}
