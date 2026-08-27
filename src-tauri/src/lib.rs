@@ -2228,8 +2228,9 @@ pub fn run() {
             // with a placeholder; the frontend syncs both after load.
             let new_playlist =
                 MenuItemBuilder::with_id("playlist-new", "New Playlist…").build(app)?;
-            let open_playlist = MenuItemBuilder::with_id("playlist-open", "Open…").build(app)?;
-            let recent_submenu = SubmenuBuilder::new(app, "Open Recent").build()?;
+            let open_playlist =
+                MenuItemBuilder::with_id("playlist-open", "Open Playlist…").build(app)?;
+            let recent_submenu = SubmenuBuilder::new(app, "Open Recent Playlist").build()?;
             let recent_placeholder =
                 MenuItemBuilder::with_id("playlist-recent-empty", "No Recent Playlists")
                     .enabled(false)
@@ -2242,7 +2243,7 @@ pub fn run() {
             let move_file = MenuItemBuilder::with_id("playlist-move", "Move Playlist File…")
                 .enabled(false)
                 .build(app)?;
-            let playlist_menu = SubmenuBuilder::new(app, "Playlist")
+            let playlist_menu = SubmenuBuilder::new(app, "File")
                 .item(&new_playlist)
                 .item(&open_playlist)
                 .item(&recent_submenu)
@@ -2274,8 +2275,8 @@ pub fn run() {
                 .build()?;
             app.manage(WindowMenu { miniplayer });
 
-            // Order follows macOS convention: the app menu, then the "File"-slot
-            // menu (Playlist owns New/Open/Save, so it sits where File would),
+            // Order follows macOS convention: the app menu, then File (which owns
+            // New/Open/Save — playlists are Pudding's only document type),
             // Edit, our Playback menu, and Window last.
             let menu = MenuBuilder::new(app)
                 .items(&[

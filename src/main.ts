@@ -10,6 +10,7 @@ import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect, type Signal } from "@preact/signals-core";
 import { GaplessEngine } from "./audio-engine";
+import { h } from "./dom";
 import { maybeStartE2eBridge } from "./e2e-bridge";
 import { initLibraryNav, popNavToRoot, refreshNavPlaylists, reloadNavView, renderNav, type NavStep } from "./library-nav";
 
@@ -440,10 +441,12 @@ function isTextInputTarget(target: EventTarget | null): boolean {
 
 function setEmpty(container: HTMLElement, message: string, kind: "empty" | "loading" = "empty"): void {
   container.innerHTML = "";
-  const div = document.createElement("div");
-  div.className = kind === "loading" ? "loading-state" : "empty-state";
-  div.textContent = message;
-  container.appendChild(div);
+  container.appendChild(
+    h("div", {
+      class: kind === "loading" ? "loading-state" : "empty-state",
+      text: message,
+    }),
+  );
 }
 
 // --- Module state (non-reactive) ---
@@ -1016,11 +1019,11 @@ async function fetchChildren(node: TreeNode): Promise<void> {
 
 async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
   if (node.loaded || !node.isFolder) return;
-  const loadingLi = document.createElement("li");
-  loadingLi.className = "loading-state";
-  loadingLi.textContent = "Loading…";
-  const childUl = document.createElement("ul");
-  childUl.appendChild(loadingLi);
+  const childUl = h(
+    "ul",
+    {},
+    h("li", { class: "loading-state", text: "Loading…" }),
+  );
   li.appendChild(childUl);
   try {
     await fetchChildren(node);
@@ -1097,12 +1100,9 @@ function positionContextMenu(menu: HTMLElement, x: number, y: number): void {
 // Build one menu level (root or flyout) at `depth`. Hovering any row closes
 // deeper flyouts; a `submenu` row then opens its own flyout beside itself.
 function buildContextMenu(items: ContextMenuItem[], depth: number): HTMLElement {
-  const menu = document.createElement("div");
-  menu.className = "context-menu";
+  const menu = h("div", { class: "context-menu" });
   for (const item of items) {
-    const row = document.createElement("div");
-    row.className = "context-menu-item";
-    row.textContent = item.label;
+    const row = h("div", { class: "context-menu-item", text: item.label });
     if ("submenu" in item) {
       row.classList.add("has-submenu");
       const submenu = item.submenu;
@@ -1160,14 +1160,12 @@ function renderNode(
   parent: TreeNode,
   showArtist = true,
 ): HTMLLIElement {
-  const li = document.createElement("li");
-  const label = document.createElement("span");
-  label.className = "node-label";
+  const li = h("li");
   // Every row carries its path so the playing-highlight effect can find it.
   // The tree row skips the accent while a queue/playlist owns the playhead — the
   // now-playing highlight belongs to the context playing the track, not to every
   // copy of the same file (see the highlight effect and queueIsActivePool).
-  label.dataset.path = node.path;
+  const label = h("span", { class: "node-label", data: { path: node.path } });
   // Mirror the highlight effect's basis: a live queue row means a queue owns the
   // playhead, so the tree's copy of its track stays plain and the playlist's own
   // row carries the accent instead. Keeps a mid-playback re-render in agreement.
@@ -1192,8 +1190,6 @@ function renderNode(
   if (!node.isFolder && !node.isPlaylist && treeSelection.peek().has(node.path)) {
     label.classList.add("selected");
   }
-  const icon = document.createElement("span");
-  icon.className = "icon";
   // Folders show an open/closed folder. A track's slot carries its tagged track
   // number when it has one (the playing row just recolors it) and, on row hover,
   // a play button in the same cell — clicking a row now selects rather than
@@ -1203,47 +1199,48 @@ function renderNode(
   if (node.isPlaylist) {
     // A playlist gets its own "stack of rows" glyph, distinct from folders and
     // tracks, and always occupies the gutter.
-    icon.classList.add("playlist");
-    label.appendChild(icon);
+    label.appendChild(h("span", { class: "icon playlist" }));
   } else if (node.isFolder) {
-    icon.classList.add(node.expanded ? "folder-open" : "folder");
-    label.appendChild(icon);
+    label.appendChild(
+      h("span", { class: `icon ${node.expanded ? "folder-open" : "folder"}` }),
+    );
   } else {
-    icon.classList.add("track");
-    const num = document.createElement("span");
-    num.className = "track-num";
-    if (parent !== rootNode && node.track != null) num.textContent = String(node.track);
-    icon.appendChild(num);
-    const playBtn = document.createElement("button");
-    playBtn.className = "row-play";
-    playBtn.setAttribute("aria-label", "Play");
-    // The button plays directly and swallows the click so the row's
-    // select-on-click doesn't also fire.
-    playBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      playTreeTrack(node, parent);
-    });
-    icon.appendChild(playBtn);
-    label.appendChild(icon);
+    label.appendChild(
+      h(
+        "span",
+        { class: "icon track" },
+        h("span", {
+          class: "track-num",
+          text:
+            parent !== rootNode && node.track != null ? String(node.track) : "",
+        }),
+        // The button plays directly and swallows the click so the row's
+        // select-on-click doesn't also fire.
+        h("button", {
+          class: "row-play",
+          attrs: { "aria-label": "Play" },
+          on: {
+            click: (e) => {
+              e.stopPropagation();
+              playTreeTrack(node, parent);
+            },
+          },
+        }),
+      ),
+    );
   }
-  const text = document.createElement("span");
-  text.className = "label-text";
   // A tagged track reads as two lines — title over a de-emphasized artist —
   // like a search result. Folders and untagged files keep a single plain line.
-  if (!node.isFolder && node.title) {
-    const primary = document.createElement("span");
-    primary.className = "primary";
-    primary.textContent = node.title;
-    text.appendChild(primary);
-    if (node.artist && showArtist) {
-      const secondary = document.createElement("span");
-      secondary.className = "secondary";
-      secondary.textContent = node.artist;
-      text.appendChild(secondary);
-    }
-  } else {
-    text.textContent = displayLabel(node);
-  }
+  const text =
+    !node.isFolder && node.title
+      ? h(
+          "span",
+          { class: "label-text" },
+          h("span", { class: "primary", text: node.title }),
+          node.artist && showArtist &&
+            h("span", { class: "secondary", text: node.artist }),
+        )
+      : h("span", { class: "label-text", text: displayLabel(node) });
   label.appendChild(text);
   if (node.isPlaylist) {
     attachPlaylistClicks(label, node);
@@ -1358,12 +1355,9 @@ function renderNode(
   li.appendChild(label);
 
   if (node.isFolder && node.expanded) {
-    const childUl = document.createElement("ul");
+    const childUl = h("ul");
     if (node.children.length === 0) {
-      const emptyLi = document.createElement("li");
-      emptyLi.className = "empty-state";
-      emptyLi.textContent = "(empty)";
-      childUl.appendChild(emptyLi);
+      childUl.appendChild(h("li", { class: "empty-state", text: "(empty)" }));
     } else {
       const showArtist = folderArtistsVary(node.children);
       for (const child of node.children) {
@@ -1500,7 +1494,7 @@ function renderTree(): void {
     setEmpty(treeContainer, "Library is empty");
     return;
   }
-  const ul = document.createElement("ul");
+  const ul = h("ul");
   for (const child of rootNode.children) {
     ul.appendChild(renderNode(child, rootNode));
   }
@@ -1513,13 +1507,12 @@ function renderStreams(streams: Stream[]): void {
     setEmpty(streamsContainer, "Stream list is empty");
     return;
   }
-  const ul = document.createElement("ul");
+  const ul = h("ul");
   for (const stream of streams) {
-    const li = document.createElement("li");
-    li.className = "stream-row";
-    const label = document.createElement("span");
-    label.className = "node-label";
-    label.dataset.streamUrl = stream.url;
+    const label = h("span", {
+      class: "node-label",
+      data: { streamUrl: stream.url },
+    });
     if (currentStreamUrl.value === stream.url) {
       label.classList.add("playing");
     }
@@ -1529,26 +1522,26 @@ function renderStreams(streams: Stream[]): void {
     // The gutter shows the station glyph at rest and a play button on hover —
     // the same swap tree tracks do with their track number, now that a plain
     // click selects rather than plays.
-    const icon = document.createElement("span");
-    icon.className = "icon stream";
-    const glyph = document.createElement("span");
-    glyph.className = "radio";
-    icon.appendChild(glyph);
-    const playBtn = document.createElement("button");
-    playBtn.className = "row-play";
-    playBtn.setAttribute("aria-label", "Play");
-    // Plays directly and swallows the click so the row's select-on-click doesn't
-    // also fire.
-    playBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      playStream(stream);
-    });
-    icon.appendChild(playBtn);
-    label.appendChild(icon);
-    const text = document.createElement("span");
-    text.className = "label-text";
-    text.textContent = stream.name;
-    label.appendChild(text);
+    label.appendChild(
+      h(
+        "span",
+        { class: "icon stream" },
+        h("span", { class: "radio" }),
+        // Plays directly and swallows the click so the row's select-on-click
+        // doesn't also fire.
+        h("button", {
+          class: "row-play",
+          attrs: { "aria-label": "Play" },
+          on: {
+            click: (e) => {
+              e.stopPropagation();
+              playStream(stream);
+            },
+          },
+        }),
+      ),
+    );
+    label.appendChild(h("span", { class: "label-text", text: stream.name }));
     // Single click selects (highlight only); the hover play button or a
     // double-click commits — matching the file tree and playlists.
     label.addEventListener("click", () => {
@@ -1572,7 +1565,7 @@ function renderStreams(streams: Stream[]): void {
       }
       showContextMenu(e.clientX, e.clientY, items);
     });
-    li.appendChild(label);
+    const li = h("li", { class: "stream-row" }, label);
     attachStreamReorder(li, stream);
     ul.appendChild(li);
   }
@@ -1617,65 +1610,65 @@ interface InlineEditorOptions {
 }
 
 function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
-  const form = document.createElement("form");
-  form.className = "inline-editor";
+  const form = h("form", { class: "inline-editor" });
   if (opts.heading) {
-    const heading = document.createElement("div");
-    heading.className = "inline-editor-heading";
-    heading.textContent = opts.heading;
-    form.appendChild(heading);
+    form.appendChild(
+      h("div", { class: "inline-editor-heading", text: opts.heading }),
+    );
   }
   const inputs = new Map<string, HTMLInputElement>();
   // Browse buttons are wired after submitBtn/syncEnabled exist (a pick updates
   // the disabled state), so collect them during the build pass.
   const browsers: { input: HTMLInputElement; browse: () => Promise<string | null> }[] = [];
   for (const field of opts.fields) {
-    const row = document.createElement("label");
-    row.className = "inline-editor-field";
-    const name = document.createElement("span");
-    name.className = "inline-editor-label";
-    name.textContent = field.label;
-    const input = document.createElement("input");
-    input.type = "text";
+    const input = h("input", {
+      attrs: { type: "text", placeholder: field.placeholder ?? false },
+    });
     input.value = field.value ?? "";
-    if (field.placeholder) input.placeholder = field.placeholder;
     inputs.set(field.key, input);
-    row.append(name, input);
-    if (field.browse) {
-      const browseBtn = document.createElement("button");
-      browseBtn.type = "button";
-      browseBtn.className = "inline-editor-browse";
-      browseBtn.textContent = "Choose…";
-      row.appendChild(browseBtn);
-      browsers.push({ input, browse: field.browse });
-    }
-    form.appendChild(row);
+    form.appendChild(
+      h(
+        "label",
+        { class: "inline-editor-field" },
+        h("span", { class: "inline-editor-label", text: field.label }),
+        input,
+        field.browse &&
+          h("button", {
+            class: "inline-editor-browse",
+            attrs: { type: "button" },
+            text: "Choose…",
+          }),
+      ),
+    );
+    if (field.browse) browsers.push({ input, browse: field.browse });
   }
 
-  const actions = document.createElement("div");
-  actions.className = "inline-editor-actions";
-  const cancelBtn = document.createElement("button");
-  cancelBtn.type = "button";
-  cancelBtn.className = "inline-editor-cancel";
-  cancelBtn.textContent = "Cancel";
-  cancelBtn.addEventListener("click", () => opts.onCancel());
-  const submitBtn = document.createElement("button");
-  submitBtn.type = "submit";
-  submitBtn.className = "inline-editor-submit";
-  submitBtn.textContent = opts.submitLabel;
+  const cancelBtn = h("button", {
+    class: "inline-editor-cancel",
+    attrs: { type: "button" },
+    text: "Cancel",
+    on: { click: () => opts.onCancel() },
+  });
+  const submitBtn = h("button", {
+    class: "inline-editor-submit",
+    attrs: { type: "submit" },
+    text: opts.submitLabel,
+  });
   // Optional note above the buttons, shown only while `blocked` holds (e.g.
   // "Can't save while this track is playing"). Present in the DOM from the start
   // so toggling it doesn't reflow the actions row.
   let noteEl: HTMLElement | null = null;
   if (opts.blocked && opts.blockedNote) {
-    noteEl = document.createElement("div");
-    noteEl.className = "inline-editor-note hidden";
-    noteEl.textContent = opts.blockedNote;
+    noteEl = h("div", {
+      class: "inline-editor-note hidden",
+      text: opts.blockedNote,
+    });
     form.appendChild(noteEl);
   }
 
-  actions.append(cancelBtn, submitBtn);
-  form.appendChild(actions);
+  form.appendChild(
+    h("div", { class: "inline-editor-actions" }, cancelBtn, submitBtn),
+  );
 
   const required = opts.fields.filter((f) => f.required).map((f) => f.key);
   const syncEnabled = (): void => {
@@ -2042,14 +2035,54 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
   // index so the right row highlights and a click maps back to its pool position.
   let poolIdx = 0;
   queue.tracks.forEach((t, i) => {
-    const li = document.createElement("li");
-    li.className = "queue-row";
-    // The view index, so the reactive selection effect can map its object-keyed
-    // set back to rows without a unique path (duplicates share one).
-    li.dataset.rowIndex = String(i);
     const rowPoolIdx = t.missing ? -1 : poolIdx;
     if (!t.missing) poolIdx++;
     const isPlaying = rowPoolIdx === playing;
+    // The playing row keeps its index and just recolors to the accent (like the
+    // tree's track rows), rather than swapping in a glyph. The number and the
+    // hover play button share this one gutter cell (see CSS), so the button
+    // lands exactly where the number was.
+    const label = String(i + 1);
+    const num = h(
+      "span",
+      { class: "queue-num" },
+      h("span", {
+        class: "queue-num-text",
+        text: label,
+        // 4+ digit numbers shrink to the 3-digit width so they stay centered
+        // without overflowing (same rule as the Songs list — tabular digits are
+        // equal width, so N digits fit 3 digits' width at scale 3/N).
+        style: label.length > 3 ? { "font-size": `${3 / label.length}em` } : {},
+      }),
+    );
+    // A missing playlist row is shown but can't be played: dim it, label it, and
+    // skip the click handler so it reads as unavailable rather than dropped.
+    const secondaryText = t.missing ? "Missing file" : (t.artist ?? t.album ?? "");
+    const text = h(
+      "span",
+      { class: "queue-text" },
+      h("span", {
+        class: "queue-primary",
+        text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
+      }),
+      secondaryText && h("span", { class: "queue-secondary", text: secondaryText }),
+    );
+    // Row remove (curation): strips this row from the list (and file, if a
+    // playlist). Stops propagation so it never counts as a play/commit click.
+    const remove = h("button", {
+      class: "queue-remove",
+      text: "✕",
+      attrs: { type: "button", title: "Remove from list", "aria-label": "Remove from list" },
+      on: {
+        click: (e) => {
+          e.stopPropagation();
+          removeCuratedRow(i);
+        },
+      },
+    });
+    // The view index, so the reactive selection effect can map its object-keyed
+    // set back to rows without a unique path (duplicates share one).
+    const li = h("li", { class: "queue-row", data: { rowIndex: i } }, num, text, remove);
     if (isPlaying) {
       li.classList.add("playing");
       activeRow = li;
@@ -2058,48 +2091,6 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
     // selection effect keeps it live between rebuilds).
     if (!t.missing && queueSel.signal.peek().has(t)) li.classList.add("selected");
     if (i === scrollTo) scrollRow = li;
-    const num = document.createElement("span");
-    num.className = "queue-num";
-    // The playing row keeps its index and just recolors to the accent (like the
-    // tree's track rows), rather than swapping in a glyph. The number and the
-    // hover play button share this one gutter cell (see CSS), so the button
-    // lands exactly where the number was.
-    const numText = document.createElement("span");
-    numText.className = "queue-num-text";
-    const label = String(i + 1);
-    numText.textContent = label;
-    // 4+ digit numbers shrink to the 3-digit width so they stay centered without
-    // overflowing (same rule as the Songs list — tabular digits are equal width,
-    // so N digits fit 3 digits' width at scale 3/N).
-    if (label.length > 3) numText.style.fontSize = `${3 / label.length}em`;
-    num.appendChild(numText);
-    const text = document.createElement("span");
-    text.className = "queue-text";
-    const primary = document.createElement("span");
-    primary.className = "queue-primary";
-    primary.textContent = t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path);
-    const secondary = document.createElement("span");
-    secondary.className = "queue-secondary";
-    // A missing playlist row is shown but can't be played: dim it, label it, and
-    // skip the click handler so it reads as unavailable rather than dropped.
-    secondary.textContent = t.missing ? "Missing file" : (t.artist ?? t.album ?? "");
-    text.appendChild(primary);
-    if (secondary.textContent) text.appendChild(secondary);
-    li.appendChild(num);
-    li.appendChild(text);
-    // Row remove (curation): strips this row from the list (and file, if a
-    // playlist). Stops propagation so it never counts as a play/commit click.
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "queue-remove";
-    remove.textContent = "✕";
-    remove.title = "Remove from list";
-    remove.setAttribute("aria-label", "Remove from list");
-    remove.addEventListener("click", (e) => {
-      e.stopPropagation();
-      removeCuratedRow(i);
-    });
-    li.appendChild(remove);
     if (t.missing) {
       li.classList.add("missing");
     } else {
@@ -2114,15 +2105,18 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
       };
       // Hover play button in the gutter, mirroring the tree's track rows. Swallows
       // the click so the row's select-on-click doesn't also fire.
-      const playBtn = document.createElement("button");
-      playBtn.type = "button";
-      playBtn.className = "row-play";
-      playBtn.setAttribute("aria-label", "Play");
-      playBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        playRow();
-      });
-      num.appendChild(playBtn);
+      num.appendChild(
+        h("button", {
+          class: "row-play",
+          attrs: { type: "button", "aria-label": "Play" },
+          on: {
+            click: (e) => {
+              e.stopPropagation();
+              playRow();
+            },
+          },
+        }),
+      );
       li.addEventListener("click", (e) => {
         lastSelectionPane = "list";
         // Cmd/Ctrl- and Shift-click build a selection; a plain click selects just
@@ -2305,14 +2299,11 @@ function endPointerDrag(): void {
 let dragGhostEl: HTMLElement | null = null;
 
 function createDragGhost(p: DragPayload): void {
-  const el = document.createElement("div");
-  el.className = "drag-ghost";
-  if (p.kind === "stream") {
-    el.textContent = p.stream.name;
-  } else {
-    const n = p.tracks.length;
-    el.textContent = `${n} track${n === 1 ? "" : "s"}`;
-  }
+  const n = p.kind === "stream" ? 0 : p.tracks.length;
+  const el = h("div", {
+    class: "drag-ghost",
+    text: p.kind === "stream" ? p.stream.name : `${n} track${n === 1 ? "" : "s"}`,
+  });
   document.body.appendChild(el);
   dragGhostEl = el;
 }
@@ -3909,11 +3900,11 @@ function editInline(
   host.style.minHeight = `${lockHeight}px`;
   const hidden = Array.from(host.children) as HTMLElement[];
   for (const el of hidden) el.style.display = "none";
-  const input = document.createElement("input");
-  input.type = "text";
-  input.className = "inline-edit";
+  const input = h("input", {
+    class: "inline-edit",
+    attrs: { type: "text", autocomplete: "off" },
+  });
   input.value = initial;
-  input.autocomplete = "off";
   input.spellcheck = false;
   host.appendChild(input);
   // preventScroll: focusing an element otherwise scrolls it into view. Harmless on
@@ -4627,8 +4618,7 @@ export function renderLeafTrackList(
   ctx: LeafListContext,
 ): HTMLElement {
   navLeafTracks = tracks;
-  const ul = document.createElement("div");
-  ul.className = "nav-list";
+  const ul = h("div", { class: "nav-list" });
 
   // Play from `index` in context (cf. playTreeTrack): select the row so it stays
   // highlighted, drop the queue-row highlight, dismiss any queue/playlist chrome
@@ -4644,109 +4634,114 @@ export function renderLeafTrackList(
   };
 
   tracks.forEach((t, i) => {
-    const row = document.createElement("div");
-    row.className = "nav-track-row";
-    // View index, so the reactive painter maps the object-keyed selection back to
-    // rows without relying on unique paths.
-    row.dataset.rowIndex = String(i);
-    if (navSel.signal.peek().has(t)) row.classList.add("selected");
-
-    // Number gutter that gives way to a hover play button, matching the queue and
-    // tree track rows (see .nav-num CSS).
-    const num = document.createElement("span");
-    num.className = "nav-num";
-    const numText = document.createElement("span");
-    numText.className = "nav-num-text";
     // Album track lists carry the file's metadata track number (matching the
     // browse tree), so show it; flat lists (Songs) leave it null and fall back to
     // the positional row index. A metadata number of 0 is treated as absent.
     const label = String(t.track ? t.track : i + 1);
-    numText.textContent = label;
-    // Numbers up to 3 digits sit centered in the gutter at full size (see .nav-num
-    // CSS). 4+ digit numbers — 1000th track and beyond — would overflow that
-    // footprint, so shrink them to the 3-digit width (tabular digits are equal
-    // width, so N digits fit 3 digits' width at scale 3/N). Self-limiting: the
-    // number never grows past the 3-digit footprint, it just gets smaller, and
-    // that only bites at track counts (10k+, 100k+) real libraries never reach.
-    if (label.length > 3) numText.style.fontSize = `${3 / label.length}em`;
-    num.appendChild(numText);
-    const playBtn = document.createElement("button");
-    playBtn.type = "button";
-    playBtn.className = "row-play";
-    playBtn.setAttribute("aria-label", "Play");
-    playBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      playAt(t, i);
+    const numText = h("span", {
+      class: "nav-num-text",
+      text: label,
+      // Numbers up to 3 digits sit centered in the gutter at full size (see .nav-num
+      // CSS). 4+ digit numbers — 1000th track and beyond — would overflow that
+      // footprint, so shrink them to the 3-digit width (tabular digits are equal
+      // width, so N digits fit 3 digits' width at scale 3/N). Self-limiting: the
+      // number never grows past the 3-digit footprint, it just gets smaller, and
+      // that only bites at track counts (10k+, 100k+) real libraries never reach.
+      style: label.length > 3 ? { "font-size": `${3 / label.length}em` } : {},
     });
-    num.appendChild(playBtn);
+    // Number gutter that gives way to a hover play button, matching the queue and
+    // tree track rows (see .nav-num CSS).
+    const num = h(
+      "span",
+      { class: "nav-num" },
+      numText,
+      h("button", {
+        class: "row-play",
+        attrs: { type: "button", "aria-label": "Play" },
+        on: {
+          click: (e) => {
+            e.stopPropagation();
+            playAt(t, i);
+          },
+        },
+      }),
+    );
 
-    const cell = document.createElement("span");
-    cell.className = "nav-cell";
-    const primary = document.createElement("span");
-    primary.className = "nav-primary";
-    primary.textContent = t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path);
-    cell.appendChild(primary);
     const secondaryText = [t.artist, t.album].filter(Boolean).join(" · ");
-    if (secondaryText) {
-      const secondary = document.createElement("span");
-      secondary.className = "nav-secondary";
-      secondary.textContent = secondaryText;
-      cell.appendChild(secondary);
-    }
-    row.append(num, cell);
+    const cell = h(
+      "span",
+      { class: "nav-cell" },
+      h("span", {
+        class: "nav-primary",
+        text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
+      }),
+      secondaryText && h("span", { class: "nav-secondary", text: secondaryText }),
+    );
 
-    row.addEventListener("click", (e) => {
-      // Note: lastSelectionPane is left untouched — the navigator is a distinct
-      // surface from the right-pane list, and keyboard Enter-to-play for it is
-      // deferred (see plan.md Phase 1's "keyboard back shortcut is still TBD").
-      if (e.metaKey || e.ctrlKey) {
-        navSel.toggle(t);
-        return;
-      }
-      if (e.shiftKey) {
-        navSel.rangeTo(t, tracks);
-        return;
-      }
-      navSel.single(t);
-    });
-    row.addEventListener("dblclick", () => playAt(t, i));
-
-    row.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      // Finder-style: right-clicking outside the selection makes this the
-      // selection; inside a multi-selection it's kept.
-      if (!navSel.signal.peek().has(t)) navSel.single(t);
-      const sel = navSel.resolveIn(tracks);
-      if (sel.length > 1) {
-        showContextMenu(e.clientX, e.clientY, [
-          { label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) },
-          addToPlaylistItem(() => sel),
-          showInFinderItem(sel[0].path),
-        ]);
-      } else {
-        // A plain click only selects here (unlike the tree), so the menu leads with
-        // an explicit Play; then the list-building verbs and the per-track
-        // navigation (Play artist / album when tagged), matching the tree order.
-        showContextMenu(e.clientX, e.clientY, [
-          { label: "Play", action: () => playAt(t, i) },
-          { label: "Add to queue", action: () => addToQueue([t]) },
-          addToPlaylistItem(() => [t]),
-          ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: null }),
-          editMetadataItem(t.path),
-          showInFinderItem(t.path),
-        ]);
-      }
-    });
-
-    // Drag a row (or the whole selection) into an open playlist/queue list, like a
-    // tree track. Pointer-based so it coexists with the native OS file-drop; the
-    // 5px threshold keeps a plain click a select/play.
-    row.addEventListener("pointerdown", (e) => {
-      const selSet = navSel.signal.peek();
-      const dragTracks =
-        selSet.has(t) && selSet.size > 1 ? navSel.resolveIn(tracks) : [t];
-      startTrackDrag(e, dragTracks);
-    });
+    const row = h(
+      "div",
+      {
+        class: "nav-track-row",
+        // View index, so the reactive painter maps the object-keyed selection back
+        // to rows without relying on unique paths.
+        data: { rowIndex: i },
+        on: {
+          click: (e) => {
+            // Note: lastSelectionPane is left untouched — the navigator is a distinct
+            // surface from the right-pane list, and keyboard Enter-to-play for it is
+            // deferred (see plan.md Phase 1's "keyboard back shortcut is still TBD").
+            if (e.metaKey || e.ctrlKey) {
+              navSel.toggle(t);
+              return;
+            }
+            if (e.shiftKey) {
+              navSel.rangeTo(t, tracks);
+              return;
+            }
+            navSel.single(t);
+          },
+          dblclick: () => playAt(t, i),
+          contextmenu: (e) => {
+            e.preventDefault();
+            // Finder-style: right-clicking outside the selection makes this the
+            // selection; inside a multi-selection it's kept.
+            if (!navSel.signal.peek().has(t)) navSel.single(t);
+            const sel = navSel.resolveIn(tracks);
+            if (sel.length > 1) {
+              showContextMenu(e.clientX, e.clientY, [
+                { label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) },
+                addToPlaylistItem(() => sel),
+                showInFinderItem(sel[0].path),
+              ]);
+            } else {
+              // A plain click only selects here (unlike the tree), so the menu leads
+              // with an explicit Play; then the list-building verbs and the per-track
+              // navigation (Play artist / album when tagged), matching the tree order.
+              showContextMenu(e.clientX, e.clientY, [
+                { label: "Play", action: () => playAt(t, i) },
+                { label: "Add to queue", action: () => addToQueue([t]) },
+                addToPlaylistItem(() => [t]),
+                ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: null }),
+                editMetadataItem(t.path),
+                showInFinderItem(t.path),
+              ]);
+            }
+          },
+          // Drag a row (or the whole selection) into an open playlist/queue list,
+          // like a tree track. Pointer-based so it coexists with the native OS
+          // file-drop; the 5px threshold keeps a plain click a select/play.
+          pointerdown: (e) => {
+            const selSet = navSel.signal.peek();
+            const dragTracks =
+              selSet.has(t) && selSet.size > 1 ? navSel.resolveIn(tracks) : [t];
+            startTrackDrag(e, dragTracks);
+          },
+        },
+      },
+      num,
+      cell,
+    );
+    if (navSel.signal.peek().has(t)) row.classList.add("selected");
 
     ul.appendChild(row);
   });
@@ -5169,43 +5164,47 @@ async function setLibraryRoots(paths: string[]): Promise<void> {
 function renderLibraryRootRows(): void {
   libraryRootsContainer.innerHTML = "";
   libraryRoots.forEach((path, index) => {
-    const row = document.createElement("div");
-    row.className = "path-picker";
-
-    const input = document.createElement("input");
-    input.type = "text";
+    const input = h("input", {
+      class: invalidLibraryRoots.has(path) ? "invalid" : "",
+      attrs: { type: "text" },
+      on: {
+        keydown: (e) => {
+          if (e.key === "Enter") input.blur();
+        },
+        change: () => {
+          const next = [...libraryRoots];
+          const value = input.value.trim();
+          if (value) next[index] = value;
+          else next.splice(index, 1);
+          void setLibraryRoots(next);
+        },
+      },
+    });
     input.spellcheck = false;
     input.value = path;
-    input.classList.toggle("invalid", invalidLibraryRoots.has(path));
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") input.blur();
-    });
-    input.addEventListener("change", () => {
-      const next = [...libraryRoots];
-      const value = input.value.trim();
-      if (value) next[index] = value;
-      else next.splice(index, 1);
-      void setLibraryRoots(next);
+
+    const choose = h("button", {
+      attrs: { type: "button" },
+      text: "Choose…",
+      on: { click: () => void browseLibraryRoot(index) },
     });
 
-    const choose = document.createElement("button");
-    choose.type = "button";
-    choose.textContent = "Choose…";
-    choose.addEventListener("click", () => void browseLibraryRoot(index));
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "path-remove";
-    remove.textContent = "×";
-    remove.title = "Remove this folder";
-    remove.addEventListener("click", () => {
-      const next = [...libraryRoots];
-      next.splice(index, 1);
-      void setLibraryRoots(next);
+    const remove = h("button", {
+      class: "path-remove",
+      attrs: { type: "button", title: "Remove this folder" },
+      text: "×",
+      on: {
+        click: () => {
+          const next = [...libraryRoots];
+          next.splice(index, 1);
+          void setLibraryRoots(next);
+        },
+      },
     });
 
-    row.append(input, choose, remove);
-    libraryRootsContainer.appendChild(row);
+    libraryRootsContainer.appendChild(
+      h("div", { class: "path-picker" }, input, choose, remove),
+    );
   });
 }
 
@@ -5626,52 +5625,32 @@ function setupSearch(): void {
   function render(): void {
     searchResultsEl.innerHTML = "";
     if (items.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "search-empty";
-      empty.textContent = "No results";
-      searchResultsEl.appendChild(empty);
+      searchResultsEl.appendChild(
+        h("div", { class: "search-empty", text: "No results" }),
+      );
       searchResultsEl.classList.remove("hidden");
       return;
     }
     let activeRow: HTMLElement | null = null;
     items.forEach((item, i) => {
-      const row = document.createElement("div");
-      row.className = "search-result";
-      row.setAttribute("role", "option");
-      if (i === activeIndex) {
-        row.classList.add("active");
-        activeRow = row;
-      }
-      const text = document.createElement("span");
-      text.className = "text";
-      const primary = document.createElement("div");
-      primary.className = "primary";
-      const secondary = document.createElement("div");
-      secondary.className = "secondary";
+      // Distinct masked-SVG icons (like the folder row's) mark artist, album,
+      // folder and playlist rows so the library row types read apart at a glance;
+      // file/stream rows carry no icon. The glyph is a masked SVG in .search-icon
+      // so it takes the row's color instead of the OS emoji.
+      let iconClass: string | null = null;
+      let primaryText = "";
+      let secondaryText = "";
       if (item.kind === "artist") {
-        // Distinct masked-SVG icons (like the folder row's) mark artist and
-        // album rows so the four library row types read apart at a glance.
-        const icon = document.createElement("span");
-        icon.className = "search-icon icon-artist";
-        row.appendChild(icon);
-        primary.textContent = item.artist.name;
-        secondary.textContent = "Artist";
+        iconClass = "search-icon icon-artist";
+        primaryText = item.artist.name;
+        secondaryText = "Artist";
       } else if (item.kind === "album") {
-        const icon = document.createElement("span");
-        icon.className = "search-icon icon-album";
-        row.appendChild(icon);
-        primary.textContent = item.album.album;
-        secondary.textContent = item.album.artist
-          ? `Album · ${item.album.artist}`
-          : "Album";
+        iconClass = "search-icon icon-album";
+        primaryText = item.album.album;
+        secondaryText = item.album.artist ? `Album · ${item.album.artist}` : "Album";
       } else if (item.kind === "folder") {
-        // A folder icon distinguishes "play this whole folder" rows from the
-        // single-track and stream rows around them. The glyph is a masked SVG
-        // in .search-icon so it takes the row's color instead of the OS emoji.
-        const icon = document.createElement("span");
-        icon.className = "search-icon";
-        row.appendChild(icon);
-        primary.textContent = item.folder.name;
+        iconClass = "search-icon";
+        primaryText = item.folder.name;
         // The containing folder's path (relative to its library folder) gives
         // context — which artist an album sits under. Skipped for top-level
         // folders, where the parent is a library folder itself and adds only
@@ -5681,36 +5660,47 @@ function setupSearch(): void {
           (r) => parentPath === r || parentPath.startsWith(r + "/"),
         );
         if (root && parentPath !== root) {
-          secondary.textContent = parentPath.slice(root.length + 1);
+          secondaryText = parentPath.slice(root.length + 1);
         } else if (!root) {
-          secondary.textContent = parentPath;
+          secondaryText = parentPath;
         }
       } else if (item.kind === "file") {
         const l = searchLabel(item.track);
-        primary.textContent = l.primary;
-        secondary.textContent = l.secondary;
+        primaryText = l.primary;
+        secondaryText = l.secondary;
       } else if (item.kind === "playlist") {
-        // The playlist glyph (matching the tree row) marks a hit that opens a
-        // playlist rather than plays a track.
-        const icon = document.createElement("span");
-        icon.className = "search-icon icon-playlist";
-        row.appendChild(icon);
-        primary.textContent = item.playlist.name;
-        secondary.textContent = "Playlist";
+        iconClass = "search-icon icon-playlist";
+        primaryText = item.playlist.name;
+        secondaryText = "Playlist";
       } else {
-        primary.textContent = item.stream.name;
+        primaryText = item.stream.name;
       }
-      text.appendChild(primary);
-      if (secondary.textContent) text.appendChild(secondary);
-      row.appendChild(text);
-      // mousedown, not click: clicking a row blurs the input first, and a blur
-      // handler that closed the dropdown would remove the row before click.
-      // preventDefault keeps the input focused (so the dropdown survives a
-      // right-click); only a left-click chooses the row.
-      row.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        if (e.button === 0) choose(item);
-      });
+      const text = h(
+        "span",
+        { class: "text" },
+        h("div", { class: "primary", text: primaryText }),
+        secondaryText && h("div", { class: "secondary", text: secondaryText }),
+      );
+      const row = h(
+        "div",
+        {
+          class: i === activeIndex ? "search-result active" : "search-result",
+          attrs: { role: "option" },
+          // mousedown, not click: clicking a row blurs the input first, and a blur
+          // handler that closed the dropdown would remove the row before click.
+          // preventDefault keeps the input focused (so the dropdown survives a
+          // right-click); only a left-click chooses the row.
+          on: {
+            mousedown: (e) => {
+              e.preventDefault();
+              if (e.button === 0) choose(item);
+            },
+          },
+        },
+        iconClass && h("span", { class: iconClass }),
+        text,
+      );
+      if (i === activeIndex) activeRow = row;
       // Right-click a track-bearing hit to add it to a playlist.
       const provider = searchItemTrackProvider(item);
       if (provider) {

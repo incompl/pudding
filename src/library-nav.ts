@@ -20,6 +20,7 @@ import type {
   PlaylistRef,
   LeafListContext,
 } from "./main";
+import { h } from "./dom";
 
 type IconKind = "browse" | "songs" | "playlist" | "artist" | "album";
 
@@ -102,9 +103,7 @@ let filesEmpty: HTMLElement;
 const stack: View[] = [];
 
 function list(): HTMLElement {
-  const ul = document.createElement("div");
-  ul.className = "nav-list";
-  return ul;
+  return h("div", { class: "nav-list" });
 }
 
 // ---- navigation entry points -----------------------------------------------
@@ -170,16 +169,11 @@ function rootMenuBody(): HTMLElement {
     );
   }
 
-  const header = document.createElement("div");
-  header.className = "nav-section";
-  header.textContent = "Playlists";
-  host.appendChild(header);
+  host.appendChild(h("div", { class: "nav-section", text: "Playlists" }));
 
   // Playlists load asynchronously; show a placeholder line and swap in the rows.
   const plHost = list();
-  const loading = document.createElement("div");
-  loading.className = "nav-coming-soon";
-  loading.textContent = "Loading…";
+  const loading = h("div", { class: "nav-coming-soon", text: "Loading…" });
   plHost.appendChild(loading);
   host.appendChild(plHost);
   deps
@@ -187,10 +181,9 @@ function rootMenuBody(): HTMLElement {
     .then((playlists) => {
       plHost.replaceChildren();
       if (playlists.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "nav-coming-soon";
-        empty.textContent = "No playlists yet";
-        plHost.appendChild(empty);
+        plHost.appendChild(
+          h("div", { class: "nav-coming-soon", text: "No playlists yet" }),
+        );
         return;
       }
       for (const p of playlists) {
@@ -225,9 +218,7 @@ function asyncListBody<T>(opts: {
   fill: (items: T[], host: HTMLElement) => void;
 }): HTMLElement {
   const host = list();
-  const loading = document.createElement("div");
-  loading.className = "nav-coming-soon";
-  loading.textContent = "Loading…";
+  const loading = h("div", { class: "nav-coming-soon", text: "Loading…" });
   host.appendChild(loading);
   opts
     .load()
@@ -264,23 +255,18 @@ function drillRow(opts: {
   onPlay?: () => void;
   onMenu?: (x: number, y: number) => void;
 }): HTMLElement {
-  const row = document.createElement("div");
-  row.className = "nav-row";
-  const icon = document.createElement("span");
-  icon.className = `nav-icon nav-${opts.icon}`;
-  const cell = document.createElement("span");
-  cell.className = "nav-cell";
-  const primary = document.createElement("span");
-  primary.className = "nav-primary";
-  primary.textContent = opts.primary;
-  cell.appendChild(primary);
-  if (opts.secondary) {
-    const secondary = document.createElement("span");
-    secondary.className = "nav-secondary";
-    secondary.textContent = opts.secondary;
-    cell.appendChild(secondary);
-  }
-  row.append(icon, cell);
+  const cell = h(
+    "span",
+    { class: "nav-cell" },
+    h("span", { class: "nav-primary", text: opts.primary }),
+    opts.secondary && h("span", { class: "nav-secondary", text: opts.secondary }),
+  );
+  const row = h(
+    "div",
+    { class: "nav-row" },
+    h("span", { class: `nav-icon nav-${opts.icon}` }),
+    cell,
+  );
   row.addEventListener("click", opts.onOpen);
   if (opts.onPlay) row.addEventListener("dblclick", opts.onPlay);
   if (opts.onMenu) {
@@ -519,19 +505,14 @@ function render(): void {
   createBtn.classList.toggle("hidden", !atRoot);
 
   if (!atRoot && top) {
-    const header = document.createElement("button");
-    header.type = "button";
-    header.className = "nav-back";
-    const chev = document.createElement("span");
-    chev.className = "nav-back-chev";
-    chev.textContent = "‹";
     // iPod-style: the bar carries the current location (not the word "Back") and
     // the whole strip is the up-one-level control.
-    const label = document.createElement("span");
-    label.className = "nav-back-title";
-    label.textContent = top.title;
-    header.append(chev, label);
-    header.addEventListener("click", back);
+    const header = h(
+      "button",
+      { class: "nav-back", attrs: { type: "button" }, on: { click: back } },
+      h("span", { class: "nav-back-chev", text: "‹" }),
+      h("span", { class: "nav-back-title", text: top.title }),
+    );
     container.appendChild(header);
   }
 
