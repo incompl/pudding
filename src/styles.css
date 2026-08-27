@@ -38,6 +38,13 @@
      glyph has no built-in left padding — left-aligned in its box it then lines
      up with the left-aligned track numbers it replaces on hover. */
   --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='8 5 11 14' fill='%23fff'%3E%3Cpath d='M8 5v14l11-7z'/%3E%3C/svg%3E");
+  /* The two-note glyph for the Songs navigator (.nav-songs). */
+  --note-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5l12-2v13'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Ccircle cx='18' cy='16' r='3'/%3E%3C/svg%3E");
+  /* A single eighth note (filled head, straight stem, flag) in that same stroke
+     style, for an untagged track's resting gutter glyph. Its head/stem/flag are
+     laid out so the glyph's bounding box is horizontally centered in the viewBox,
+     so mask-size:contain lands it on the same column as the other gutter icons. */
+  --eighth-note-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12.5 18V5'/%3E%3Cpath d='M12.5 5c3 .5 5 2.5 5 6'/%3E%3Ccircle cx='9.5' cy='18' r='3' fill='%23fff' stroke='none'/%3E%3C/svg%3E");
 }
 
 html,
@@ -2101,21 +2108,28 @@ ul {
 }
 
 /* Untagged rows have no track number, which left the gutter blank and made their
-   titles read as mis-indented against numbered siblings. Show the play button at
-   rest instead, so the gutter always has a visible anchor. currentColor renders
-   it in the same muted gray as the numbers (and the accent on the playing row,
-   which recolors .icon.track); on hover it brightens to the accent, identical to
-   a numbered row's hover state. */
-.icon.track .track-num:empty ~ .row-play {
+   titles read as mis-indented against numbered siblings. Fill the cell with a
+   music note at rest so the gutter always has a visible anchor — a play triangle
+   here read too much like an expand/collapse chevron, whereas the note echoes the
+   Songs navigator glyph. currentColor renders it in the same muted gray as the numbers
+   (and the accent on the playing row, which recolors .icon.track). On hover the
+   note gives way to the play triangle just as a numbered row's number does — the
+   :empty span is hidden with the other numbers and the shared hover rules above
+   reveal (and accent) the triangle. */
+.icon.track .track-num:empty::before {
+  content: "";
   display: block;
-}
-
-.icon.track .track-num:empty ~ .row-play::before {
+  width: 1.4em;
+  height: 1.4em;
   background-color: currentColor;
-}
-
-.node-label:hover .icon.track .track-num:empty ~ .row-play::before {
-  background-color: var(--accent);
+  -webkit-mask-image: var(--eighth-note-icon);
+  mask-image: var(--eighth-note-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 
 .icon.folder {
@@ -2574,10 +2588,10 @@ ul {
   -webkit-mask-image: var(--playlist-icon);
   mask-image: var(--playlist-icon);
 }
-/* Music note (songs) — inline, only needed by the navigator. */
+/* Music note (songs) — the navigator glyph. */
 .nav-songs {
-  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5l12-2v13'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Ccircle cx='18' cy='16' r='3'/%3E%3C/svg%3E");
-  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5l12-2v13'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Ccircle cx='18' cy='16' r='3'/%3E%3C/svg%3E");
+  -webkit-mask-image: var(--note-icon);
+  mask-image: var(--note-icon);
 }
 /* Leaf track rows (Songs, and later album/artist/playlist detail): the shared
    list from renderLeafTrackList. Same row rhythm as .nav-row, but with a number
