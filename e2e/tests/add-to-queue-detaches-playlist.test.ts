@@ -58,7 +58,11 @@ test("Add to queue while a playlist plays detaches it — the file never changes
         return (
           p.isPlaying === true &&
           p.queueLength === 2 &&
-          p.activePoolIsPlaylist === true
+          p.activePoolIsPlaylist === true &&
+          // Gate on the playhead landing on row 0 too: it's set by the engine's
+          // initial advance event, which trails the isPlaying flip. Without this
+          // the add can race ahead of it and read queuePlayingIndex still null.
+          p.queuePlayingIndex === 0
         );
       },
       { message: "P never started playing as a playlist-source pool" },

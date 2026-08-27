@@ -113,14 +113,6 @@ export function startHarness(): Promise<Harness> {
   const wss = new WebSocketServer({ port: PORT, host: "127.0.0.1" });
   let child: ChildProcess | undefined;
 
-  const spawnApp = process.env.PUDDING_E2E_NO_SPAWN !== "1";
-  if (spawnApp) {
-    child = spawn(appBin, [], {
-      env: { ...process.env, PUDDING_E2E_PORT: String(PORT) },
-      stdio: "inherit",
-    });
-  }
-
   return new Promise<Harness>((resolve, reject) => {
     const timer = setTimeout(() => {
       wss.close();
@@ -131,6 +123,18 @@ export function startHarness(): Promise<Harness> {
         ),
       );
     }, 60_000);
+
+    // Only spawn the app once we own the port. Spawning before the server is
+    // listening lets the app dial in to *another* process holding :PORT (a stale
+    // `pnpm drive` reuses this same default port), so it never reaches us.
+    wss.once("listening", () => {
+      if (process.env.PUDDING_E2E_NO_SPAWN !== "1") {
+        child = spawn(appBin, [], {
+          env: { ...process.env, PUDDING_E2E_PORT: String(PORT) },
+          stdio: "inherit",
+        });
+      }
+    });
 
     wss.once("connection", (ws) => {
       clearTimeout(timer);
@@ -149,7 +153,22 @@ export function startHarness(): Promise<Harness> {
 
     wss.on("error", (e) => {
       clearTimeout(timer);
-      reject(e);
+      wss.close();
+      child?.kill();
+      // A raw EADDRINUSE here is almost always a leftover `pnpm drive` (it binds
+      // this same default port) or an orphaned test app still holding :PORT.
+      // Surface that instead of the bare errno so the fix is obvious.
+      const code = (e as NodeJS.ErrnoException).code;
+      reject(
+        code === "EADDRINUSE"
+          ? new Error(
+              `e2e port :${PORT} is already in use — a \`pnpm drive\` session or a ` +
+                `leftover test app is still running. Free it with ` +
+                `\`lsof -nP -iTCP:${PORT}\` then kill the PID, or set PUDDING_E2E_PORT ` +
+                `to another port.`,
+            )
+          : e,
+      );
     });
   });
 }
