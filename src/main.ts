@@ -41,6 +41,48 @@ import type {
   TrackProvider,
   LeafListContext,
 } from "./types";
+import {
+  hasTrack,
+  npTitle,
+  npArtist,
+  npAlbum,
+  npArt,
+  npStreamMeta,
+  isStream,
+  isPlaying,
+  currentTime,
+  duration,
+  volume,
+  volumePopoverOpen,
+  currentNodePath,
+  currentStreamUrl,
+  selectedStreamUrl,
+  settingsOpen,
+  activeTab,
+  activeQueue,
+  browsedPlaylist,
+  listFaceOpen,
+  queuePlayingIndex,
+  shuffleMode,
+  repeatMode,
+  autoadvance,
+  libraryRootSet,
+  streamListPathValid,
+  streamListPathSet,
+  streamListWritable,
+  libraryHasContent,
+  treeSelection,
+  paneEditor,
+  openActiveQueue,
+  clearActiveQueue,
+  isPlaylistSource,
+  openPlaylistPath,
+  showListFace,
+  showHeroFace,
+  showSourceList,
+  resetToLonePlayback,
+  autoadvanceEnabled,
+} from "./state";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOTS = "libraryRoots";
@@ -119,133 +161,6 @@ function trackCountSubtitle(tracks: SearchTrack[]): string {
 }
 
 
-// --- Reactive state ---
-
-const hasTrack = signal(false);
-const npTitle = signal("");
-const npArtist = signal<string | null>(null);
-const npAlbum = signal<string | null>(null);
-const npArt = signal<string | null>(null);
-// ICY now-playing (song + artist) shown under the station name during
-// streams. Null until the first title arrives (or forever, for stations that
-// never send one); the block is absolutely positioned so its arrival never
-// shifts the station name.
-const npStreamMeta = signal<{ song: string; artist: string | null } | null>(
-  null,
-);
-
-const isStream = signal(false);
-const isPlaying = signal(false);
-const currentTime = signal(0);
-const duration = signal(0);
-const volume = signal(1);
-const volumePopoverOpen = signal(false);
-
-const currentNodePath = signal<string | null>(null);
-const currentStreamUrl = signal<string | null>(null);
-// The stream row highlighted by a single click — a select, not a commit. Mirrors
-// the tree's select-on-click (play is the hover button or a double-click), so a
-// click can preview which station you're about to start without interrupting
-// what's already playing.
-const selectedStreamUrl = signal<string | null>(null);
-
-const settingsOpen = signal(false);
-const activeTab = signal<"files" | "streams">("files");
-
-// The playing *source* as a navigable list: an ephemeral queue (Play
-// folder/album/artist, Add to queue) or a *played* playlist (kind "playlist"
-// with a sourcePath). Null when a lone track / stream plays with no queue. This
-// is what's playing (or stashed while something else plays); it is distinct from
-// `browsedPlaylist` below — a playlist you're merely *looking at* changes no
-// playback. Together they feed the two-face right pane (see paneView).
-const activeQueue = signal<Queue | null>(null);
-
-// Named for intent at the call sites; both just set `activeQueue`.
-function openActiveQueue(queue: Queue): void {
-  activeQueue.value = queue;
-}
-function clearActiveQueue(): void {
-  activeQueue.value = null;
-}
-
-// A playlist opened for *browsing* only — single-click in the tree, OS Open… /
-// Open Recent, or New Playlist. Viewing/curating it never changes playback: a
-// queue can keep playing (as `activeQueue`) while you look at a playlist here.
-// Playing *from* it (double-click, or clicking a row) is the commit that makes
-// it the source — moving it into `activeQueue` and clearing this.
-const browsedPlaylist = signal<Queue | null>(null);
-
-// Which face fills the right pane: true = the list face (the queue or the open
-// playlist), false = the now-playing hero. Only meaningful when a list exists
-// (see paneView); the CSS falls back to the hero otherwise.
-const listFaceOpen = signal(false);
-
-// A Queue is a *real playlist* (a backing .m3u8 file) iff it carries a
-// sourcePath. The `kind` field is overloaded — ephemeral queues seeded by hand
-// also use kind "playlist" — so path presence, not kind, is the true test.
-function isPlaylistSource(q: Queue | null | undefined): boolean {
-  return q?.sourcePath != null;
-}
-
-// The list the list-face shows — a browsed playlist wins over the playing source
-// (you can browse a playlist while a queue plays underneath) — is derived, along
-// with everything else the right pane renders, by `paneView`.
-
-// The open playlist file the OS menu acts on (Move Playlist File…): the one
-// being browsed, else the one playing.
-function openPlaylistPath(): string | undefined {
-  if (isPlaylistSource(browsedPlaylist.value)) return browsedPlaylist.value!.sourcePath;
-  if (isPlaylistSource(activeQueue.value)) return activeQueue.value!.sourcePath;
-  return undefined;
-}
-
-// Swap to the list face (reveals the queue / open playlist).
-function showListFace(): void {
-  listFaceOpen.value = true;
-}
-
-// Swap to the now-playing hero. Leaving the list abandons any *browsed*
-// playlist: the back button is source-anchored — you re-reach a merely-browsed
-// playlist from the tree, never from the hero (which returns to what's playing).
-// The queue stays put (still playing / stashed), so the hero's nav bar still
-// offers to show it.
-function showHeroFace(): void {
-  listFaceOpen.value = false;
-  browsedPlaylist.value = null;
-}
-
-// Leave a browsed playlist for the playing source's own list, staying on the
-// list face (unlike showHeroFace, which flips to the hero). Lets you jump
-// straight from a playlist you're eyeing to the queue/playlist that's playing.
-function showSourceList(): void {
-  browsedPlaylist.value = null;
-  listFaceOpen.value = true;
-}
-
-// A lone playback — a tree track, stream, search hit, external file, or idle
-// play — is bare continuation: the track (its album under the hood) becomes the
-// whole story. It dismisses any open queue/playlist entirely, so the pane is the
-// hero alone with no nav bar. Distinct from showHeroFace (the nav bar's flip),
-// which keeps the queue. Callers repoint the engine themselves (playFile /
-// playStream / …), so dropping the queue here is state-only.
-function resetToLonePlayback(): void {
-  clearActiveQueue();
-  browsedPlaylist.value = null;
-  listFaceOpen.value = false;
-}
-
-// The queue row currently playing, or null when playback is outside the queue
-// (folder autoplay, a lone search/external track, or a stream). Not a boolean
-// "am I in the queue" flag: a queue can hold the same track at several rows, so
-// only an index can say which instance is live — driving the single-row
-// highlight (and, at rest after the queue drains, the absence of one). The
-// queue and folder autoplay are fully independent: normal playback never flows
-// into the queue on its own; the only way to play the queue is to play from it
-// (a queue row, or Play folder/album/artist). Whether the queue is the *audible
-// pool* — for Close's teardown and the play-restart — is read from
-// `queueIsActivePool()` (the synthetic `queue:` parent), not from this index,
-// which goes null while the drained queue rests.
-const queuePlayingIndex = signal<number | null>(null);
 
 // A queue is the engine's active pool iff currentParent is one of the synthetic
 // `queue:` parents (real folders are filesystem paths). Distinguishes "the queue
@@ -255,50 +170,6 @@ function queueIsActivePool(): boolean {
   return currentParent?.path.startsWith("queue:") ?? false;
 }
 
-// Playback-mode controls (files view only): Shuffle (on/off) and Repeat, a
-// three-state cycle matching every mainstream player — off (play through and
-// stop), all (loop the album), one (loop the current track).
-//
-// The native engine plays a queue straight through and reports when it drains
-// (onQueueEnded); shuffle and repeat live entirely here. Straight play hands the
-// whole album to the engine for gapless auto-advance; shuffle and repeat-one
-// hand one track at a time and pick the next at each queue-ended — which is also
-// why shuffle gets an ordinary track gap (no gapless), desirable since
-// crossfading random tracks is worse, not better. Turning a per-track mode on
-// mid-album drops the engine's queued tail (audio_clear_upcoming) so it engages
-// at the current track's end without restarting what's playing.
-const shuffleMode = signal(false);
-const repeatMode = signal<RepeatMode>("off");
-
-// Autoadvance: when a track ends, does playback flow on to the next one? A single
-// global, persistent preference (not a per-play choice), set from the OS Playback
-// menu, never the app UI. Defaults on, matching what a media player is expected to
-// do. When off, the engine is only ever handed the current track (never its tail),
-// so gapless prep has nothing to advance into and handleEnded stops at each
-// track's end. See applyAutoadvance.
-const autoadvance = signal(true);
-
-// Whether playback flows to the next track. One global setting now — no context
-// branching. Read at each advancement point and each engine hand-off.
-function autoadvanceEnabled(): boolean {
-  return autoadvance.value;
-}
-// Whether a library root has been configured at all. When false the whole Files
-// panel is replaced by a get-started prompt (see the files-empty effect) rather
-// than showing an empty lens springboard the user can't do anything with.
-const libraryRootSet = signal(false);
-const streamListPathValid = signal(true);
-// Whether a stream list path has been configured. When false the Streams panel is
-// replaced by the same get-started prompt (see the streams-empty effect).
-const streamListPathSet = signal(false);
-// Whether the current stream list can be written to — true only for a valid
-// local file (a remote http(s) list is read-only here). Gates the Add-station
-// button: adding appends to the file, which a remote list has no path for.
-const streamListWritable = signal(false);
-// Whether the file tree has at least one top-level entry to start from. Drives
-// the idle play button: with content, an idle play "starts the library" (plays
-// the first entry) instead of sitting disabled, so the button reads ready-to-go.
-const libraryHasContent = signal(false);
 
 // --- Helpers ---
 
@@ -384,7 +255,6 @@ function libraryRootPaths(): string[] {
 // it isn't drawn. The track context-menu verbs (Add to queue / Add to playlist)
 // act on the whole selection when non-empty. Reactive so a `.selected` row
 // highlight tracks it (see the selection effect and renderNode).
-const treeSelection = signal<Set<string>>(new Set());
 // The pivot a Shift-click ranges from — the last track any click touched
 // (including a plain play-click, so click A then Shift-click B selects A..B).
 let selectionAnchor: string | null = null;
@@ -1663,7 +1533,6 @@ function openEditStationEditor(stream: Stream): void {
 // closed. Only its presence drives the `.show-editor` face toggle; the kind lets
 // the streams-writability effect close just the stream editor. The form itself is
 // rebuilt on each open, so this needn't carry any per-edit state.
-const paneEditor = signal<"metadata" | "stream" | null>(null);
 
 // The #pane-editor-view element the form mounts into (assigned at init).
 let paneEditorView: HTMLElement;
