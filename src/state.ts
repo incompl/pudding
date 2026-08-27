@@ -7,7 +7,93 @@
 // feature functions (paneView, queueIsActivePool) deliberately stays in main.ts.
 
 import { signal } from "@preact/signals-core";
-import type { Queue, RepeatMode } from "./types";
+import type { Store } from "@tauri-apps/plugin-store";
+import type {
+  Queue,
+  RepeatMode,
+  TreeNode,
+  Stream,
+  SearchTrack,
+  RecentPlaylist,
+  PlaylistRef,
+} from "./types";
+
+// --- Non-reactive plumbing state ---
+//
+// The reassigned module-level `let`s that aren't reactive — "the current value,
+// no re-render on change". They live as fields on one shared object so any
+// feature module can read AND write them (`app.currentParent = …`) without the
+// read-only live-binding problem a plain exported `let` would hit. Reactive
+// state stays in the signals below; DOM refs live in dom-refs.ts.
+//
+// State whose home is unambiguously one module (drag ghost, stream-meta fade)
+// stays a local `let` there; only genuinely cross-module plumbing lives here.
+export interface AppState {
+  store: Store;
+  // The library tree root (Files tab). Null until the first scan populates it.
+  rootNode: TreeNode | null;
+  libraryRoots: string[];
+  invalidLibraryRoots: Set<string>;
+  // File-tree multi-select Shift-range pivot (path of the last click).
+  selectionAnchor: string | null;
+  // Which pane last committed a selection, so cross-pane clears stay coordinated.
+  lastSelectionPane: "tree" | "list" | "stream" | null;
+  allStreams: Stream[];
+  currentStreamName: string | null;
+  // The synthetic/real parent whose children form the audible pool.
+  currentParent: TreeNode | null;
+  // Bumps per art request so a stale async art load can't overwrite a newer one.
+  artRequestId: number;
+  // The engine's current pool + index, snapshotted for restart/advance logic.
+  lastQueue: string[];
+  lastIndex: number;
+  pendingQueueIndex: number | null;
+  queueEnded: boolean;
+  shuffleBag: string[];
+  // Throttle tell for pushPlayback ticks.
+  lastPlaybackPush: number;
+  pendingQueueScrollIndex: number | null;
+  recentPlaylists: RecentPlaylist[];
+  playlistIndex: PlaylistRef[];
+  // The leaf list currently shown in the navigator (maps the nav selection back
+  // to rows by view index).
+  navLeafTracks: SearchTrack[];
+  // Library-refresh coalescing + edit-deferral flags.
+  libraryRefreshing: boolean;
+  libraryRefreshPending: boolean;
+  inlineEditing: boolean;
+  refreshDeferredWhileEditing: boolean;
+  // A playlist file to reveal in the tree once the next refresh lands.
+  pendingRevealPlaylistPath: string | null;
+}
+
+export const app: AppState = {
+  store: undefined as unknown as Store, // assigned in init(), like the old `let`
+  rootNode: null,
+  libraryRoots: [],
+  invalidLibraryRoots: new Set<string>(),
+  selectionAnchor: null,
+  lastSelectionPane: null,
+  allStreams: [],
+  currentStreamName: null,
+  currentParent: null,
+  artRequestId: 0,
+  lastQueue: [],
+  lastIndex: 0,
+  pendingQueueIndex: null,
+  queueEnded: false,
+  shuffleBag: [],
+  lastPlaybackPush: 0,
+  pendingQueueScrollIndex: null,
+  recentPlaylists: [],
+  playlistIndex: [],
+  navLeafTracks: [],
+  libraryRefreshing: false,
+  libraryRefreshPending: false,
+  inlineEditing: false,
+  refreshDeferredWhileEditing: false,
+  pendingRevealPlaylistPath: null,
+};
 
 // --- Reactive state ---
 

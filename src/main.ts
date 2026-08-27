@@ -5,7 +5,7 @@ import {
   LogicalSize,
   PhysicalPosition,
 } from "@tauri-apps/api/window";
-import { load, type Store } from "@tauri-apps/plugin-store";
+import { load } from "@tauri-apps/plugin-store";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect } from "@preact/signals-core";
@@ -138,6 +138,7 @@ import {
   paneEditorView,
 } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
+import { app } from "./state";
 
 const STORE_FILE = "settings.json";
 const KEY_LIBRARY_ROOTS = "libraryRoots";
@@ -222,7 +223,7 @@ function trackCountSubtitle(tracks: SearchTrack[]): string {
 // is playing / rests at its end" from "a queue is merely stashed while a folder,
 // stream, or lone track plays".
 function queueIsActivePool(): boolean {
-  return currentParent?.path.startsWith("queue:") ?? false;
+  return app.currentParent?.path.startsWith("queue:") ?? false;
 }
 
 
@@ -278,25 +279,21 @@ function setEmpty(container: HTMLElement, message: string, kind: "empty" | "load
 
 // --- Module state (non-reactive) ---
 
-let store: Store;
-let rootNode: TreeNode | null = null;
 
 // The configured library folders (source of truth). The tree is built from
 // these: one root shows its contents at top level; two or more each show as a
 // top-level folder under a synthetic virtual rootNode (see refreshTree). Edited
 // by the Settings library-roots rows.
-let libraryRoots: string[] = [];
 
 // Library folders whose list_dir failed (missing / unreadable). Their Settings
 // rows show the .invalid outline. Recomputed by refreshTree; read by
 // renderLibraryRootRows. Not reactive — refreshTree re-renders the rows itself.
-let invalidLibraryRoots = new Set<string>();
 
 // The configured library folders, as an array. rootNode.path is a per-node
 // concept (empty for the virtual root), so anything that means "the library
 // root(s)" — playlist scanning, default save dir, search context — reads this.
 function libraryRootPaths(): string[] {
-  return libraryRoots;
+  return app.libraryRoots;
 }
 
 // --- File-tree multi-select ---
@@ -312,7 +309,6 @@ function libraryRootPaths(): string[] {
 // highlight tracks it (see the selection effect and renderNode).
 // The pivot a Shift-click ranges from — the last track any click touched
 // (including a plain play-click, so click A then Shift-click B selects A..B).
-let selectionAnchor: string | null = null;
 
 // Track nodes in render order. `visibleOnly` descends into expanded folders alone
 // (matching what renderNode paints) for Shift-range selection; false walks every
@@ -329,7 +325,7 @@ function collectTrackNodes(visibleOnly: boolean): TreeNode[] {
       }
     }
   };
-  if (rootNode) walk(rootNode);
+  if (app.rootNode) walk(app.rootNode);
   return out;
 }
 
@@ -344,7 +340,7 @@ function selectedTracks(): SearchTrack[] {
 }
 
 function clearTreeSelection(): void {
-  selectionAnchor = null;
+  app.selectionAnchor = null;
   if (treeSelection.peek().size === 0) return;
   treeSelection.value = new Set();
 }
@@ -362,7 +358,7 @@ function clearRowSelections(): void {
 function selectTreeSingle(path: string): void {
   clearRowSelections();
   treeSelection.value = new Set([path]);
-  selectionAnchor = path;
+  app.selectionAnchor = path;
 }
 
 // Cmd/Ctrl-click: add or remove one track, and re-anchor the range here.
@@ -372,7 +368,7 @@ function toggleTreeSelection(path: string): void {
   if (next.has(path)) next.delete(path);
   else next.add(path);
   treeSelection.value = next;
-  selectionAnchor = path;
+  app.selectionAnchor = path;
 }
 
 // Shift-click: replace the selection with the contiguous range from the anchor to
@@ -386,15 +382,15 @@ function selectTreeRangeTo(path: string): void {
     const next = new Set(sel);
     next.delete(path);
     treeSelection.value = next;
-    selectionAnchor = path;
+    app.selectionAnchor = path;
     return;
   }
   const order = collectTrackNodes(true).map((n) => n.path);
   const to = order.indexOf(path);
   if (to === -1) return;
   const anchor =
-    selectionAnchor && order.includes(selectionAnchor) ? selectionAnchor : path;
-  selectionAnchor = anchor;
+    app.selectionAnchor && order.includes(app.selectionAnchor) ? app.selectionAnchor : path;
+  app.selectionAnchor = anchor;
   const from = order.indexOf(anchor);
   const [lo, hi] = from <= to ? [from, to] : [to, from];
   treeSelection.value = new Set(order.slice(lo, hi + 1));
@@ -475,7 +471,6 @@ const navSel: TrackSelection = makeTrackSelection(() => {
 // last touched a selection in the tree, the list, or the streams pane. Enter is a
 // commit for the same row a click now merely selects, so it needs to know which
 // of the (independently selectable) panes the user last acted in.
-let lastSelectionPane: "tree" | "list" | "stream" | null = null;
 
 function openListTracks(): SearchTrack[] {
   return (browsedPlaylist.value ?? activeQueue.value)?.tracks ?? [];
@@ -487,38 +482,29 @@ function selectedListTracks(): SearchTrack[] {
 }
 // Last stream list streams loaded by refreshStreams, kept so search can filter
 // them without re-reading the stream list on every keystroke.
-let allStreams: Stream[] = [];
 // Stream list name of the currently playing stream, shown as the now-playing
 // station line. Kept separately from currentStreamUrl because ICY metadata
 // events re-render the now-playing panel after the fact.
-let currentStreamName: string | null = null;
 // Album-folder context for the currently playing track. Held so an
 // auto-advance event from the engine can look up the matching TreeNode (for
 // the row highlight + now-playing UI) via siblingByPath. Null while playing
 // a stream, a search hit, or an external file — those have no album context.
-let currentParent: TreeNode | null = null;
-let artRequestId = 0;
 // Last queue + index handed to the engine. Held so play-after-queue-ended
 // restarts from the same track the user last heard (the existing UX: hit play
 // after the album finishes → resume from the last track).
-let lastQueue: string[] = [];
-let lastIndex = 0;
 // The queue-row index the *next* engine play should land on, consumed by the
 // following onAdvance to set queuePlayingIndex. Set right before every play that
 // starts or jumps within the queue pool; left null for gapless auto-advance,
 // which onAdvance treats as "the next row down" (so duplicate rows are tracked
 // positionally, matching the engine's sequential advance).
-let pendingQueueIndex: number | null = null;
 // True once the engine has played through the queue's last track. Cleared on
 // the next Play (file selection, seek, or restart-from-end via play button).
-let queueEnded = false;
 
 // Upcoming tracks for shuffle playback: a shuffled permutation of the album
 // pool, consumed one entry per queue-ended. Draining it to empty means the
 // shuffle cycle is done (stop when repeat is off, reshuffle when repeat all).
 // Filled when shuffle turns on or a shuffled album starts; cleared for straight
 // play so a stale order can't leak into the next album.
-let shuffleBag: string[] = [];
 
 // Some stations relay scraped playlists and broadcast titles that were never
 // cleaned for ICY: HTML entities still encoded ("&#23665;" for 山) and the
@@ -554,9 +540,9 @@ function cleanStreamText(raw: string): string {
 // stays within the current album folder, so currentParent's children are the
 // universe; external/streamed playback has no parent and never advances.
 function siblingByPath(path: string): TreeNode | null {
-  if (!currentParent) return null;
+  if (!app.currentParent) return null;
   return (
-    currentParent.children.find((c) => !c.isFolder && c.path === path) ?? null
+    app.currentParent.children.find((c) => !c.isFolder && c.path === path) ?? null
   );
 }
 
@@ -574,11 +560,11 @@ const engine = new GaplessEngine({
     // down (positional, so duplicate rows resolve to the right instance).
     if (queueIsActivePool()) {
       queuePlayingIndex.value =
-        pendingQueueIndex ?? (queuePlayingIndex.value ?? -1) + 1;
+        app.pendingQueueIndex ?? (queuePlayingIndex.value ?? -1) + 1;
     } else {
       queuePlayingIndex.value = null;
     }
-    pendingQueueIndex = null;
+    app.pendingQueueIndex = null;
     setNowPlaying(node.title ?? node.name, node.artist, node.album);
     void loadArt(node.path);
   },
@@ -600,7 +586,7 @@ const engine = new GaplessEngine({
   onStreamMetadata: (station, title) => {
     if (!isStream.value) return;
     const stationName =
-      currentStreamName ?? (station ? cleanStreamText(station) : null);
+      app.currentStreamName ?? (station ? cleanStreamText(station) : null);
     setNowPlaying(stationName || "Stream", null, null);
     const cleaned = title ? cleanStreamText(title) : "";
     if (cleaned) {
@@ -642,21 +628,20 @@ function pushNowPlayingMeta(): void {
   });
 }
 
-let lastPlaybackPush = 0;
 function pushPlayback(elapsed: number): void {
   if (!hasTrack.value) return;
   void invoke("now_playing_set_playback", {
     playing: isPlaying.value,
     elapsed,
   });
-  lastPlaybackPush = performance.now();
+  app.lastPlaybackPush = performance.now();
 }
 
 // Throttled position refresh, called from the engine's position callback so the
 // OS elapsed time re-syncs (e.g. after a seek) without one IPC call per tick.
 function nowPlayingPositionTick(t: number): void {
   if (!isPlaying.value) return;
-  if (performance.now() - lastPlaybackPush > 1000) pushPlayback(t);
+  if (performance.now() - app.lastPlaybackPush > 1000) pushPlayback(t);
 }
 
 // Metadata card: fires on any change to the fields that make it up.
@@ -849,7 +834,7 @@ function renderNode(
         h("span", {
           class: "track-num",
           text:
-            parent !== rootNode && node.track != null ? String(node.track) : "",
+            parent !== app.rootNode && node.track != null ? String(node.track) : "",
         }),
         // The button plays directly and swallows the click so the row's
         // select-on-click doesn't also fire.
@@ -936,7 +921,7 @@ function renderNode(
       // then act on the whole selection (see selectedTracks).
       if (!treeSelection.peek().has(node.path)) {
         treeSelection.value = new Set([node.path]);
-        selectionAnchor = node.path;
+        app.selectionAnchor = node.path;
       }
       const sel = selectedTracks();
       const items: ContextMenuItem[] = [];
@@ -1018,7 +1003,7 @@ async function onNodeClick(
     li.replaceWith(renderNode(node, parent));
     return;
   }
-  lastSelectionPane = "tree";
+  app.lastSelectionPane = "tree";
   if (e && (e.metaKey || e.ctrlKey)) {
     // Cmd/Ctrl-click builds a discontiguous selection without playing anything.
     toggleTreeSelection(node.path);
@@ -1063,7 +1048,7 @@ function findTreeNodeAndParent(path: string): { node: TreeNode; parent: TreeNode
       }
     }
   };
-  if (rootNode) walk(rootNode);
+  if (app.rootNode) walk(app.rootNode);
   return found;
 }
 
@@ -1073,22 +1058,22 @@ function findTreeNodeAndParent(path: string): { node: TreeNode; parent: TreeNode
 // Sidebar panes only fire when their tab is showing, so Enter never plays a row
 // hidden behind the other tab; the list pane is always visible.
 function playSelectedRow(): boolean {
-  if (lastSelectionPane === "stream" && activeTab.value === "streams") {
+  if (app.lastSelectionPane === "stream" && activeTab.value === "streams") {
     const url = selectedStreamUrl.value;
-    const stream = url ? allStreams.find((s) => s.url === url) : undefined;
+    const stream = url ? app.allStreams.find((s) => s.url === url) : undefined;
     if (stream) {
       playStream(stream);
       return true;
     }
     return false;
   }
-  if (lastSelectionPane === "tree" && activeTab.value === "files") {
+  if (app.lastSelectionPane === "tree" && activeTab.value === "files") {
     // The anchor is the last row a click touched — the natural "focused" row to
     // commit when a range is selected. Fall back to a lone selected path.
     const sel = treeSelection.value;
     const path =
-      selectionAnchor && sel.has(selectionAnchor)
-        ? selectionAnchor
+      app.selectionAnchor && sel.has(app.selectionAnchor)
+        ? app.selectionAnchor
         : sel.size === 1
           ? [...sel][0]
           : null;
@@ -1099,7 +1084,7 @@ function playSelectedRow(): boolean {
     }
     return false;
   }
-  if (lastSelectionPane === "list") {
+  if (app.lastSelectionPane === "list") {
     const { list, isSource } = paneView.value;
     if (!list) return false;
     // The anchor is the focused row; fall back to a lone selection. Map it to a
@@ -1126,14 +1111,14 @@ function playSelectedRow(): boolean {
 
 function renderTree(): void {
   treeContainer.innerHTML = "";
-  if (!rootNode) return;
-  if (rootNode.children.length === 0) {
+  if (!app.rootNode) return;
+  if (app.rootNode.children.length === 0) {
     setEmpty(treeContainer, "Library is empty");
     return;
   }
   const ul = h("ul");
-  for (const child of rootNode.children) {
-    ul.appendChild(renderNode(child, rootNode));
+  for (const child of app.rootNode.children) {
+    ul.appendChild(renderNode(child, app.rootNode));
   }
   treeContainer.appendChild(ul);
 }
@@ -1182,7 +1167,7 @@ function renderStreams(streams: Stream[]): void {
     // Single click selects (highlight only); the hover play button or a
     // double-click commits — matching the file tree and playlists.
     label.addEventListener("click", () => {
-      lastSelectionPane = "stream";
+      app.lastSelectionPane = "stream";
       selectedStreamUrl.value = stream.url;
     });
     label.addEventListener("dblclick", () => playStream(stream));
@@ -1191,7 +1176,7 @@ function renderStreams(streams: Stream[]): void {
     // right-click-selects behavior.
     label.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      lastSelectionPane = "stream";
+      app.lastSelectionPane = "stream";
       selectedStreamUrl.value = stream.url;
       const items: ContextMenuItem[] = [{ label: "Play", action: () => playStream(stream) }];
       if (streamListWritable.value) {
@@ -1397,7 +1382,7 @@ function openAddStationEditor(): void {
 // Save rewrites the entry and refreshes the list; Cancel just closes (the row was
 // never touched, so nothing to restore).
 function openEditStationEditor(stream: Stream): void {
-  const index = allStreams.indexOf(stream);
+  const index = app.allStreams.indexOf(stream);
   if (index < 0) return;
   const editor = buildInlineEditor({
     fields: stationEditorFields(stream),
@@ -1539,8 +1524,8 @@ function editMetadataItem(path: string): ContextMenuItem {
 //   - Open right-pane list (queue / browsed playlist): membership is by path
 //     (unchanged), so patch the matching rows' display fields in place and repaint.
 function applyTagUpdate(path: string, tags: FileEntry): void {
-  if (rootNode) {
-    const found = findNode(rootNode, path);
+  if (app.rootNode) {
+    const found = findNode(app.rootNode, path);
     if (found && !found.node.isFolder) {
       const n = found.node;
       n.title = tags.title;
@@ -1567,7 +1552,7 @@ function applyTagUpdate(path: string, tags: FileEntry): void {
 }
 
 async function deleteStream(stream: Stream): Promise<void> {
-  const index = allStreams.indexOf(stream);
+  const index = app.allStreams.indexOf(stream);
   if (index < 0) return;
   const ok = await confirm(`This will remove ${stream.name} from the stream list.`, {
     title: `Remove ${stream.name}?`,
@@ -1593,7 +1578,6 @@ async function deleteStream(stream: Stream): Promise<void> {
 // One-shot: the index a just-appended track wants brought into view. renderQueue
 // consumes it so the re-render lands on the new row rather than the default
 // scroll-to-playing (which sits earlier, and would otherwise hide the addition).
-let pendingQueueScrollIndex: number | null = null;
 
 // Renders the list face. `isSource` is true when the list is the playing
 // source (the queue, or a played playlist) and false when it's a playlist being
@@ -1623,8 +1607,8 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
   // A pending append target wins over the playing row for this render only, and
   // only when we're actually showing the queue it was appended to (a browsed
   // playlist has its own, unrelated rows).
-  const scrollTo = isSource ? pendingQueueScrollIndex : null;
-  pendingQueueScrollIndex = null;
+  const scrollTo = isSource ? app.pendingQueueScrollIndex : null;
+  app.pendingQueueScrollIndex = null;
   queueListEl.innerHTML = "";
   let activeRow: HTMLElement | null = null;
   let scrollRow: HTMLElement | null = null;
@@ -1716,7 +1700,7 @@ function renderQueue(queue: Queue | null, isSource: boolean): void {
         }),
       );
       li.addEventListener("click", (e) => {
-        lastSelectionPane = "list";
+        app.lastSelectionPane = "list";
         // Cmd/Ctrl- and Shift-click build a selection; a plain click selects just
         // this row (and anchors a following Shift-range here). Play is the hover
         // button or a double-click, matching the tree.
@@ -1977,7 +1961,7 @@ function attachStreamReorder(li: HTMLElement, stream: Stream): void {
 // rewrite the file needlessly.
 async function reorderStream(stream: Stream, to: number): Promise<void> {
   if (!streamListWritable.value) return;
-  const from = allStreams.indexOf(stream);
+  const from = app.allStreams.indexOf(stream);
   if (from < 0 || to === from || to === from + 1) return;
   try {
     await invoke("move_stream", { path: streamListPathInput.value, from, to });
@@ -2021,7 +2005,7 @@ function upNextLabel(): string | null {
   const nextPath = pool[nextIdx];
   if (curIdx < 0 || !nextPath) return null;
   const t = (activeQueue.value?.tracks ?? []).find((x) => x.path === nextPath)
-    ?? currentParent?.children.find((c) => c.path === nextPath);
+    ?? app.currentParent?.children.find((c) => c.path === nextPath);
   if (!t) return null;
   const title = t.title ?? (nextPath.split(/[\\/]/).pop() ?? nextPath);
   return t.artist ? `${t.artist} – ${title}` : title;
@@ -2131,7 +2115,7 @@ function setNowPlaying(
 // as an explicit playlist. A loose top-level file plays on its own. This keeps
 // the idle play button ready-to-go rather than a dead disabled control.
 async function startLibrary(): Promise<void> {
-  const root = rootNode;
+  const root = app.rootNode;
   const first = root?.children[0];
   if (!root || !first) return;
   // Idle play starts a lone track (album continuation) — the hero, no list.
@@ -2150,17 +2134,17 @@ function togglePlayPause(): void {
   // by "Add to queue" without auto-playing — starts from the top. This is checked
   // before the idle-play fallback so an armed queue (hasTrack still false, nothing
   // ever played) starts itself rather than the whole library.
-  if (queueEnded && lastQueue.length > 0) {
-    queueEnded = false;
+  if (app.queueEnded && app.lastQueue.length > 0) {
+    app.queueEnded = false;
     if (queueIsActivePool()) {
       // The queue rests with no playhead, so play restarts it from the top rather
       // than resuming any one track. (activeQueue can now be set while a folder
       // plays with the queue merely stashed — the pool, not its mere existence,
       // is what decides this.)
       const pool = poolPaths();
-      lastQueue = pool;
-      lastIndex = 0;
-      pendingQueueIndex = 0;
+      app.lastQueue = pool;
+      app.lastIndex = 0;
+      app.pendingQueueIndex = 0;
       currentNodePath.value = pool[0] ?? null;
       feedEngine(pool, 0);
     } else {
@@ -2168,9 +2152,9 @@ function togglePlayPause(): void {
       // play restarts it from the start of the folder — matching how a queue pool
       // and the navigator's leaf lists restart from their top rather than resuming
       // the track you happened to start on.
-      lastIndex = 0;
-      currentNodePath.value = lastQueue[0] ?? null;
-      feedEngine(lastQueue, 0);
+      app.lastIndex = 0;
+      currentNodePath.value = app.lastQueue[0] ?? null;
+      feedEngine(app.lastQueue, 0);
     }
     return;
   }
@@ -2184,8 +2168,8 @@ function togglePlayPause(): void {
 }
 
 const persistVolume = debounce(async (v: number) => {
-  await store.set(KEY_VOLUME, v);
-  await store.save();
+  await app.store.set(KEY_VOLUME, v);
+  await app.store.save();
 }, 200);
 
 // Most recent non-muted volume, restored when unmuting via the volume button.
@@ -2201,13 +2185,13 @@ function setVolume(v: number): void {
 
 function seekBy(seconds: number): void {
   if (isStream.value) return;
-  queueEnded = false;
+  app.queueEnded = false;
   void engine.seekBy(seconds);
 }
 
 function seekTo(seconds: number): void {
   if (isStream.value) return;
-  queueEnded = false;
+  app.queueEnded = false;
   void engine.seekTo(seconds);
 }
 
@@ -2215,13 +2199,13 @@ function seekTo(seconds: number): void {
 // the folder's tracks in listing order; a search hit or external file has no
 // album context, so the pool is just that single track.
 function poolPaths(): string[] {
-  if (currentParent) {
-    return currentParent.children.filter((c) => !c.isFolder).map((c) => c.path);
+  if (app.currentParent) {
+    return app.currentParent.children.filter((c) => !c.isFolder).map((c) => c.path);
   }
   if (currentNodePath.value) return [currentNodePath.value];
   // Search hit or external file: no album context, so the queue itself is the
   // pool (a single track). Lets repeat still loop it.
-  return lastQueue;
+  return app.lastQueue;
 }
 
 function shuffled<T>(items: T[]): T[] {
@@ -2239,7 +2223,7 @@ function shuffled<T>(items: T[]): T[] {
 function refillShuffleBag(current: string | null): void {
   const pool = poolPaths();
   const rest = pool.filter((p) => p !== current);
-  shuffleBag = shuffled(rest.length ? rest : pool);
+  app.shuffleBag = shuffled(rest.length ? rest : pool);
 }
 
 // Hand the engine a single track and remember it as the queue, so play-after-end
@@ -2247,9 +2231,9 @@ function refillShuffleBag(current: string | null): void {
 // art) follows from the engine's track-changed → onAdvance for album tracks;
 // for a lone search/external track it's already correct (same track).
 function playSingle(path: string, queueIndex?: number): void {
-  queueEnded = false;
-  lastQueue = [path];
-  lastIndex = 0;
+  app.queueEnded = false;
+  app.lastQueue = [path];
+  app.lastIndex = 0;
   currentTime.value = 0;
   // Shuffle / repeat-one hand the engine one track at a time; when that track is
   // a queue row, mark which one so onAdvance highlights it. Callers pass the
@@ -2257,10 +2241,10 @@ function playSingle(path: string, queueIndex?: number): void {
   // heavy queue) so the correct instance is highlighted rather than the first match.
   if (queueIsActivePool()) {
     if (queueIndex != null) {
-      pendingQueueIndex = queueIndex;
+      app.pendingQueueIndex = queueIndex;
     } else {
-      const found = currentParent?.children.findIndex((c) => c.path === path) ?? -1;
-      pendingQueueIndex = found >= 0 ? found : null;
+      const found = app.currentParent?.children.findIndex((c) => c.path === path) ?? -1;
+      app.pendingQueueIndex = found >= 0 ? found : null;
     }
   }
   void engine.play([path], 0);
@@ -2280,10 +2264,10 @@ function feedEngine(list: string[], idx: number): void {
 // straight-play advance, repeat-all wrap, and manual skip). When the pool is the
 // queue, `idx` is also the row to highlight next.
 function playPool(pool: string[], idx: number): void {
-  queueEnded = false;
-  lastQueue = pool;
-  lastIndex = idx;
-  if (queueIsActivePool()) pendingQueueIndex = idx;
+  app.queueEnded = false;
+  app.lastQueue = pool;
+  app.lastIndex = idx;
+  if (queueIsActivePool()) app.pendingQueueIndex = idx;
   feedEngine(pool, idx);
 }
 
@@ -2293,7 +2277,7 @@ function playPool(pool: string[], idx: number): void {
 // Implicit folder continuation keeps its row highlighted so play resumes the
 // track that just finished.
 function stopAtQueueEnd(): void {
-  queueEnded = true;
+  app.queueEnded = true;
   // A drained queue rests with no playhead (rows stay, none highlighted); folder
   // autoplay instead keeps its row so play resumes the finished track. The two
   // never hand off: playback outside the queue stops at the folder's end rather
@@ -2312,7 +2296,7 @@ function handleEnded(): void {
   const mode = repeatMode.value;
   // currentNodePath is null for an external file; fall back to the queue so
   // repeat still identifies the track to loop.
-  const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
+  const current = currentNodePath.value ?? app.lastQueue[app.lastIndex] ?? null;
 
   // Repeat-one loops the finished track regardless of shuffle.
   if (mode === "one" && current) {
@@ -2329,7 +2313,7 @@ function handleEnded(): void {
   }
 
   if (shuffleMode.value) {
-    if (shuffleBag.length === 0) {
+    if (app.shuffleBag.length === 0) {
       // Cycle exhausted: reshuffle and keep going when repeating, else stop.
       if (mode !== "all") {
         stopAtQueueEnd();
@@ -2337,7 +2321,7 @@ function handleEnded(): void {
       }
       refillShuffleBag(current);
     }
-    const next = shuffleBag.shift();
+    const next = app.shuffleBag.shift();
     if (next) playSingle(next);
     else stopAtQueueEnd();
     return;
@@ -2371,11 +2355,11 @@ function handleEnded(): void {
 // handleEnded, but a manual next overrides repeat-one (skip, don't re-loop).
 function skipNext(): void {
   if (isStream.value) return;
-  const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
+  const current = currentNodePath.value ?? app.lastQueue[app.lastIndex] ?? null;
 
   if (shuffleMode.value) {
-    if (shuffleBag.length === 0) refillShuffleBag(current);
-    const next = shuffleBag.shift();
+    if (app.shuffleBag.length === 0) refillShuffleBag(current);
+    const next = app.shuffleBag.shift();
     if (next) playSingle(next);
     return;
   }
@@ -2405,7 +2389,7 @@ function skipPrev(): void {
     void engine.seekTo(0);
     return;
   }
-  const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
+  const current = currentNodePath.value ?? app.lastQueue[app.lastIndex] ?? null;
   const pool = poolPaths();
   // Prefer the live row index in the queue pool so a duplicated track steps back
   // from the instance actually playing, not the first path match (see skipNext).
@@ -2432,7 +2416,7 @@ function hasNextTrack(): boolean {
   const pool = poolPaths();
   if (pool.length === 0) return false;
   if (repeatMode.value === "all") return true;
-  const current = currentNodePath.value ?? lastQueue[lastIndex] ?? null;
+  const current = currentNodePath.value ?? app.lastQueue[app.lastIndex] ?? null;
   // In the queue pool, trust the live row index (positional) so a duplicated
   // track resolves to the instance playing, matching skipNext.
   const curIdx = queueIsActivePool() && queuePlayingIndex.value != null
@@ -2446,7 +2430,7 @@ function hasNextTrack(): boolean {
 // clicked instance rather than the first path match. Omitted for folder/tree
 // clicks, where the node's path is unambiguous within its folder.
 function playFile(node: TreeNode, parent: TreeNode, startIndex?: number): void {
-  currentParent = parent;
+  app.currentParent = parent;
   currentNodePath.value = node.path;
   currentStreamUrl.value = null;
   isStream.value = false;
@@ -2459,14 +2443,14 @@ function playFile(node: TreeNode, parent: TreeNode, startIndex?: number): void {
   if (!queueIsActivePool()) queuePlayingIndex.value = null;
   currentTime.value = 0;
   duration.value = 0;
-  queueEnded = false;
+  app.queueEnded = false;
   setNowPlaying(node.title ?? node.name, node.artist, node.album);
   void loadArt(node.path);
   const siblings = parent.children.filter((c) => !c.isFolder);
   const tracks = siblings.map((c) => c.path);
   if (repeatMode.value === "one") {
     // Loop this track; the album never enters the queue.
-    shuffleBag = [];
+    app.shuffleBag = [];
     playSingle(node.path, startIndex);
   } else if (shuffleMode.value) {
     // One track at a time, next picked at each queue-ended. Seed the bag with
@@ -2478,14 +2462,14 @@ function playFile(node: TreeNode, parent: TreeNode, startIndex?: number): void {
     // engine auto-advances gaplessly (it treats this list as the complete queue,
     // replaced when another file is clicked); with it off, feedEngine hands over
     // only this track so playback stops at its end.
-    shuffleBag = [];
+    app.shuffleBag = [];
     const idx = startIndex ?? Math.max(
       0,
       siblings.findIndex((c) => c.path === node.path),
     );
-    lastQueue = tracks;
-    lastIndex = idx;
-    if (queueIsActivePool()) pendingQueueIndex = idx;
+    app.lastQueue = tracks;
+    app.lastIndex = idx;
+    if (queueIsActivePool()) app.pendingQueueIndex = idx;
     feedEngine(tracks, idx);
   }
 }
@@ -2496,19 +2480,19 @@ function playStream(stream: Stream): void {
   // track-changed, so onAdvance won't).
   resetToLonePlayback();
   queuePlayingIndex.value = null;
-  currentParent = null;
+  app.currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = stream.url;
   // The played station is also the selected row, so selection follows playback
   // (matching a played tree track) rather than leaving a stale prior highlight.
   selectedStreamUrl.value = stream.url;
-  currentStreamName = stream.name;
+  app.currentStreamName = stream.name;
   isStream.value = true;
   currentTime.value = 0;
   duration.value = 0;
-  queueEnded = false;
-  lastQueue = [];
-  shuffleBag = [];
+  app.queueEnded = false;
+  app.lastQueue = [];
+  app.shuffleBag = [];
   // Station name until the first ICY title arrives (or forever, for stations
   // that don't send titles).
   setNowPlaying(stream.name, null, null);
@@ -2534,16 +2518,16 @@ function playSearchTrack(t: SearchTrack): void {
   // on the hero. currentParent is null so onAdvance won't touch the highlight.
   resetToLonePlayback();
   queuePlayingIndex.value = null;
-  currentParent = null;
+  app.currentParent = null;
   currentNodePath.value = t.path;
   currentStreamUrl.value = null;
   isStream.value = false;
   currentTime.value = 0;
   duration.value = 0;
-  queueEnded = false;
-  lastQueue = [t.path];
-  lastIndex = 0;
-  shuffleBag = [];
+  app.queueEnded = false;
+  app.lastQueue = [t.path];
+  app.lastIndex = 0;
+  app.shuffleBag = [];
   const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
   setNowPlaying(t.title ?? fallbackName, t.artist, t.album);
   void loadArt(t.path);
@@ -2767,7 +2751,6 @@ async function addPlaylistToQueue(node: TreeNode): Promise<void> {
 // the native Open Recent submenu via set_recent_playlists).
 
 
-let recentPlaylists: RecentPlaylist[] = [];
 
 // --- Playlist index (phase 4) ---
 // Every `.m3u/.m3u8` under the library root — path + display name — backing the
@@ -2776,12 +2759,11 @@ let recentPlaylists: RecentPlaylist[] = [];
 // runs on every library change, our own writes included). Read synchronously
 // when a context menu is built, so the submenu reflects the current library.
 
-let playlistIndex: PlaylistRef[] = [];
 
 async function refreshPlaylistIndex(): Promise<void> {
   const roots = libraryRootPaths();
   if (roots.length === 0) {
-    playlistIndex = [];
+    app.playlistIndex = [];
     refreshNavPlaylists();
     return;
   }
@@ -2791,7 +2773,7 @@ async function refreshPlaylistIndex(): Promise<void> {
     const perRoot = await Promise.all(
       roots.map((root) => invoke<PlaylistRef[]>("list_all_playlists", { root })),
     );
-    playlistIndex = perRoot.flat();
+    app.playlistIndex = perRoot.flat();
   } catch (e) {
     console.error("list_all_playlists failed", e);
   }
@@ -2815,8 +2797,8 @@ function defaultPlaylistDir(): string | null {
 }
 
 async function persistRecentPlaylists(): Promise<void> {
-  await store.set(KEY_RECENT_PLAYLISTS, recentPlaylists);
-  await store.save();
+  await app.store.set(KEY_RECENT_PLAYLISTS, app.recentPlaylists);
+  await app.store.save();
 }
 
 // Save the navigator's current place so it's restored on the next launch. The
@@ -2824,30 +2806,30 @@ async function persistRecentPlaylists(): Promise<void> {
 // at click frequency, so no debounce is needed.
 function persistNavLocation(steps: NavStep[]): void {
   void (async () => {
-    await store.set(KEY_NAV_LOCATION, steps);
-    await store.save();
+    await app.store.set(KEY_NAV_LOCATION, steps);
+    await app.store.save();
   })();
 }
 
 // Push a playlist to the front of the recents (most-recent first, deduped by
 // path, capped), persist, and rebuild the native Open Recent submenu.
 function addRecentPlaylist(path: string, name: string): void {
-  recentPlaylists = [
+  app.recentPlaylists = [
     { path, name },
-    ...recentPlaylists.filter((r) => r.path !== path),
+    ...app.recentPlaylists.filter((r) => r.path !== path),
   ].slice(0, RECENT_PLAYLISTS_MAX);
   void persistRecentPlaylists();
   syncRecentPlaylistsMenu();
 }
 
 function removeRecentPlaylist(path: string): void {
-  recentPlaylists = recentPlaylists.filter((r) => r.path !== path);
+  app.recentPlaylists = app.recentPlaylists.filter((r) => r.path !== path);
   void persistRecentPlaylists();
   syncRecentPlaylistsMenu();
 }
 
 function syncRecentPlaylistsMenu(): void {
-  void invoke("set_recent_playlists", { items: recentPlaylists });
+  void invoke("set_recent_playlists", { items: app.recentPlaylists });
 }
 
 // New Playlist…: save dialog → write an empty .m3u8 → open it ready to fill.
@@ -3097,17 +3079,17 @@ function applyCuration(newTracks: SearchTrack[]): void {
 // is then either kept (playback undisturbed — indices refreshed, gapless tail
 // rebuilt to match the new order) or, if it was the removed row, skipped past.
 function reconcilePoolEdit(newTracks: SearchTrack[], playingObj: SearchTrack | null): void {
-  if (!currentParent) return;
+  if (!app.currentParent) return;
   const playable = newTracks.filter((t) => !t.missing);
   // Rebuild the synthetic parent's children in place (same path, so
   // queueIsActivePool stays true and the pane keeps rendering this pool).
-  currentParent.children = syntheticParent(
-    currentParent.path,
-    currentParent.name,
+  app.currentParent.children = syntheticParent(
+    app.currentParent.path,
+    app.currentParent.name,
     playable,
   ).children;
   const poolPathsNew = playable.map((t) => t.path);
-  lastQueue = poolPathsNew;
+  app.lastQueue = poolPathsNew;
 
   const oldPlayableIdx = queuePlayingIndex.value;
   // Nothing was playing (queue drained or never started): just refresh the pool.
@@ -3120,10 +3102,10 @@ function reconcilePoolEdit(newTracks: SearchTrack[], playingObj: SearchTrack | n
     // matches. Only straight-play-with-autoadvance holds a tail to fix — per-track
     // modes hand the engine one track at a time, so a reorder is inaudible there.
     queuePlayingIndex.value = newPlayableIdx;
-    lastIndex = newPlayableIdx;
+    app.lastIndex = newPlayableIdx;
     if (shuffleMode.value) {
       // Drop any removed paths from the pending bag (dup-lossy, acceptable).
-      shuffleBag = shuffleBag.filter((p) => poolPathsNew.includes(p));
+      app.shuffleBag = app.shuffleBag.filter((p) => poolPathsNew.includes(p));
     } else if (repeatMode.value !== "one" && autoadvanceEnabled()) {
       // Rebuild the gapless tail: drop the stale upcoming tracks, then re-append
       // the new order. Chained so the append can't race ahead of the clear.
@@ -3148,8 +3130,8 @@ function advanceAfterRemovedPlaying(pool: string[], slot: number): void {
     return;
   }
   if (shuffleMode.value) {
-    if (shuffleBag.length === 0) refillShuffleBag(null);
-    const next = shuffleBag.shift();
+    if (app.shuffleBag.length === 0) refillShuffleBag(null);
+    const next = app.shuffleBag.shift();
     if (next) playSingle(next);
     else stopAfterRemove();
     return;
@@ -3174,7 +3156,7 @@ function advanceAfterRemovedPlaying(pool: string[], slot: number): void {
 function stopAfterRemove(): void {
   queuePlayingIndex.value = null;
   currentNodePath.value = null;
-  shuffleBag = [];
+  app.shuffleBag = [];
   void engine.stop();
 }
 
@@ -3332,7 +3314,7 @@ async function renameTreePlaylist(node: TreeNode, label: HTMLElement, raw: strin
   addRecentPlaylist(path, name);
   // Re-sort the tree now (deterministic, not waiting on the watcher's debounce) and
   // scroll the renamed row into view at its new position.
-  pendingRevealPlaylistPath = path;
+  app.pendingRevealPlaylistPath = path;
   await refreshLibrary();
 }
 
@@ -3397,7 +3379,7 @@ function editInline(
   // Guard against a second click (on the host, the pencil, or the input itself)
   // reopening an edit that's already in progress.
   if (host.querySelector(":scope > .inline-edit")) return;
-  inlineEditing = true;
+  app.inlineEditing = true;
   // Lock the row to its current height for the duration of the edit. The input's
   // line box can be a hair shorter than the label it replaces (their line-heights
   // differ across contexts); if the row shrinks while the panel is scrolled to its
@@ -3427,7 +3409,7 @@ function editInline(
   const finish = (commit: boolean): void => {
     if (done) return;
     done = true;
-    inlineEditing = false;
+    app.inlineEditing = false;
     const value = input.value;
     input.remove();
     host.style.minHeight = prevMinHeight;
@@ -3437,8 +3419,8 @@ function editInline(
     // Flush any watcher refresh that arrived while the edit was open (e.g. the
     // scan from a prior rename's write). Runs after onCommit so this rename's own
     // write is included in the single rebuild.
-    if (refreshDeferredWhileEditing) {
-      refreshDeferredWhileEditing = false;
+    if (app.refreshDeferredWhileEditing) {
+      app.refreshDeferredWhileEditing = false;
       void refreshLibrary();
     }
   };
@@ -3568,10 +3550,10 @@ function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
     // Grow the playback pool: onAdvance/siblingByPath and poolPaths read
     // currentParent.children, so appended tracks live there to resolve on
     // auto-advance and to join shuffle/repeat.
-    if (currentParent) currentParent.children.push(...tracks.map(trackToNode));
-    lastQueue = [...lastQueue, ...paths];
+    if (app.currentParent) app.currentParent.children.push(...tracks.map(trackToNode));
+    app.lastQueue = [...app.lastQueue, ...paths];
 
-    if (queueEnded) {
+    if (app.queueEnded) {
       // The queue rests with no playhead — drained at its end, or armed from
       // silence by "Add to queue" without auto-playing. Appends grow the pool
       // (done above) but never start playback: "Add to queue" is play-later, so
@@ -3586,7 +3568,7 @@ function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
     } else if (shuffleMode.value) {
       // Shuffle hands the engine one track at a time (handleEnded picks the next
       // from the bag), so route the new tracks through the pending bag.
-      shuffleBag.push(...shuffled(paths));
+      app.shuffleBag.push(...shuffled(paths));
     }
     // repeat-one: nothing to enqueue now; the appended tracks joined the pool for
     // when repeat-one is turned off.
@@ -3594,7 +3576,7 @@ function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
 
   // Bring the first appended row into view on the coming re-render (else the
   // list would snap back to the playing row and hide the addition below the fold).
-  pendingQueueScrollIndex = q.tracks.length;
+  app.pendingQueueScrollIndex = q.tracks.length;
   // Reassign to re-render the list + count.
   const combined = [...q.tracks, ...tracks];
   openActiveQueue({
@@ -3613,18 +3595,18 @@ function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
 function seedQueueFromCurrent(): void {
   const path = currentNodePath.value;
   if (!path) return;
-  const cur = currentParent?.children.find((c) => c.path === path);
+  const cur = app.currentParent?.children.find((c) => c.path === path);
   const track: SearchTrack = cur
     ? nodeToTrack(cur)
     : { path, title: npTitle.value || null, artist: npArtist.value, album: npAlbum.value };
   const title = UNTITLED_PLAYLIST_TITLE;
-  currentParent = syntheticParent(`queue:current:${Date.now()}`, title, [track]);
-  lastQueue = [path];
-  lastIndex = 0;
+  app.currentParent = syntheticParent(`queue:current:${Date.now()}`, title, [track]);
+  app.lastQueue = [path];
+  app.lastIndex = 0;
   // The audible track is now the queue's row 0 and keeps playing (no new engine
   // play fires here), so highlight it directly rather than waiting on onAdvance.
   queuePlayingIndex.value = 0;
-  shuffleBag = [];
+  app.shuffleBag = [];
   // Straight play holds the whole folder in the engine for gapless auto-advance;
   // drop that tail so the current track is the queue's last entry until the
   // append extends it. (Per-track modes already hold only the current track.)
@@ -3645,17 +3627,17 @@ function seedQueueFromCurrent(): void {
 function armQueueAtRest(tracks: SearchTrack[]): void {
   const playable = tracks.filter((t) => !t.missing);
   if (playable.length === 0) return;
-  currentParent = syntheticParent(
+  app.currentParent = syntheticParent(
     `queue:adhoc:${Date.now()}`,
     UNTITLED_PLAYLIST_TITLE,
     playable,
   );
-  lastQueue = playable.map((t) => t.path);
-  lastIndex = 0;
-  queueEnded = true;
+  app.lastQueue = playable.map((t) => t.path);
+  app.lastIndex = 0;
+  app.queueEnded = true;
   queuePlayingIndex.value = null;
   currentNodePath.value = null;
-  shuffleBag = [];
+  app.shuffleBag = [];
   browsedPlaylist.value = null;
   openActiveQueue({
     kind: "playlist",
@@ -3749,14 +3731,14 @@ function closeQueue(): void {
   }
 
   const current = currentNodePath.value;
-  if (current && !queueEnded) {
+  if (current && !app.queueEnded) {
     // The queue is gone but its current track keeps playing — hand it back to
     // the file browser as its context. Drop the engine's gapless tail so the
     // vanished queue's rows don't play on; straight-play autoadvance resumes at
     // this track's end via handleEnded. The now-playing card and playback are
     // untouched.
-    pendingQueueIndex = null;
-    shuffleBag = [];
+    app.pendingQueueIndex = null;
+    app.shuffleBag = [];
     if (!shuffleMode.value && repeatMode.value !== "one") void engine.clearUpcoming();
     // If the track's home folder is loaded in the tree, rebind playback to it
     // so Next/Prev walk the album (its siblings) and autoadvance flows on — the
@@ -3767,16 +3749,16 @@ function closeQueue(): void {
     // writes below, so the transport effect they fire recomputes Next/Prev's
     // enabled state against the rebound folder — poolPaths reads currentParent,
     // which no signal tracks, so the effect only sees it if it runs afterward.
-    const home = rootNode ? findNode(rootNode, current) : null;
+    const home = app.rootNode ? findNode(app.rootNode, current) : null;
     if (home) {
-      currentParent = home.parent;
+      app.currentParent = home.parent;
       const pool = poolPaths();
-      lastQueue = pool;
-      lastIndex = Math.max(0, pool.indexOf(current));
+      app.lastQueue = pool;
+      app.lastIndex = Math.max(0, pool.indexOf(current));
     } else {
-      currentParent = null;
-      lastQueue = [current];
-      lastIndex = 0;
+      app.currentParent = null;
+      app.lastQueue = [current];
+      app.lastIndex = 0;
     }
     clearActiveQueue();
     queuePlayingIndex.value = null;
@@ -3794,12 +3776,12 @@ function closeQueue(): void {
 // first so the reactive writes below fire their effects against a fully cleared
 // context. Used by Close on a drained queue and by deleting the playing playlist.
 function teardownPlaybackToEmpty(): void {
-  currentParent = null;
-  queueEnded = false;
-  lastQueue = [];
-  lastIndex = 0;
-  pendingQueueIndex = null;
-  shuffleBag = [];
+  app.currentParent = null;
+  app.queueEnded = false;
+  app.lastQueue = [];
+  app.lastIndex = 0;
+  app.pendingQueueIndex = null;
+  app.shuffleBag = [];
   clearActiveQueue();
   queuePlayingIndex.value = null;
   listFaceOpen.value = false;
@@ -3887,7 +3869,7 @@ function addToPlaylistItem(getTracks: TrackProvider): ContextMenuItem {
   ];
   // Duplicate #PLAYLIST: names may yield two identically-labelled entries
   // (accepted limitation); they still target distinct files by path.
-  for (const pl of playlistIndex) {
+  for (const pl of app.playlistIndex) {
     submenu.push({
       label: pl.name,
       action: () => void addTracksToPlaylist(pl.path, getTracks),
@@ -4111,13 +4093,12 @@ async function loadAllPlaylists(): Promise<PlaylistRef[]> {
 // The leaf list currently shown in the navigator, so the reactive nav-selection
 // painter can map its object-keyed Set back to rows by view index (mirrors how
 // the queue painter reads openListTracks()).
-let navLeafTracks: SearchTrack[] = [];
 
 export function renderLeafTrackList(
   tracks: SearchTrack[],
   ctx: LeafListContext,
 ): HTMLElement {
-  navLeafTracks = tracks;
+  app.navLeafTracks = tracks;
   const ul = h("div", { class: "nav-list" });
 
   // Play from `index` in context (cf. playTreeTrack): select the row so it stays
@@ -4262,8 +4243,8 @@ export function renderLeafTrackList(
 function playQueueTrack(poolIndex: number): void {
   const q = activeQueue.value;
   if (!q) return;
-  const parent = queueIsActivePool() && currentParent
-    ? currentParent
+  const parent = queueIsActivePool() && app.currentParent
+    ? app.currentParent
     : syntheticParent(
         `queue:active:${Date.now()}`,
         q.title,
@@ -4302,16 +4283,16 @@ async function openExternalFile(path: string): Promise<void> {
   // any open queue/playlist; null the highlight since this plays outside it.
   resetToLonePlayback();
   queuePlayingIndex.value = null;
-  currentParent = null;
+  app.currentParent = null;
   currentNodePath.value = null;
   currentStreamUrl.value = null;
   isStream.value = false;
   currentTime.value = 0;
   duration.value = 0;
-  queueEnded = false;
-  lastQueue = [path];
-  lastIndex = 0;
-  shuffleBag = [];
+  app.queueEnded = false;
+  app.lastQueue = [path];
+  app.lastIndex = 0;
+  app.shuffleBag = [];
   const fallback = path.split(/[\\/]/).pop() ?? path;
   setNowPlaying(meta.title ?? fallback, meta.artist, meta.album);
   void loadArt(path);
@@ -4319,7 +4300,7 @@ async function openExternalFile(path: string): Promise<void> {
 }
 
 function clearArt(): void {
-  artRequestId++;
+  app.artRequestId++;
   npArt.value = null;
 }
 
@@ -4338,7 +4319,7 @@ async function applyArt(
   fetchArt: () => Promise<string | null>,
   source: string,
 ): Promise<void> {
-  const id = ++artRequestId;
+  const id = ++app.artRequestId;
   // Note: we intentionally do NOT clear npArt here. Keeping the previous
   // track's art on screen until the new one is fetched and decoded avoids a
   // black flash on track change — most noticeably between tracks of the same
@@ -4350,7 +4331,7 @@ async function applyArt(
     console.error("art load failed for", source, e);
     return;
   }
-  if (id !== artRequestId) return;
+  if (id !== app.artRequestId) return;
   if (dataUrl) {
     // Decode off-screen so the on-screen swap is instantaneous rather than
     // showing a half-painted image.
@@ -4361,7 +4342,7 @@ async function applyArt(
     } catch {
       /* decode can reject on detached images; assign anyway */
     }
-    if (id !== artRequestId) return;
+    if (id !== app.artRequestId) return;
   }
   npArt.value = dataUrl;
 }
@@ -4401,10 +4382,10 @@ function makeRootFolderNode(path: string, name: string, listing: DirListing): Tr
 // library root, so each appears as an expandable top-level row. Zero folders
 // leaves the tree empty behind the get-started prompt.
 async function refreshTree(roots: string[]): Promise<void> {
-  rootNode = null;
+  app.rootNode = null;
   libraryHasContent.value = false;
   libraryRootSet.value = roots.length > 0;
-  invalidLibraryRoots = new Set();
+  app.invalidLibraryRoots = new Set();
   if (roots.length === 0) {
     // The panel-wide get-started prompt (files-empty effect) covers this case;
     // the tree stays empty behind it.
@@ -4424,7 +4405,7 @@ async function refreshTree(roots: string[]): Promise<void> {
         return makeRootFolderNode(root, name, listing);
       } catch (e) {
         console.error("list_dir failed for", root, e);
-        invalidLibraryRoots.add(root);
+        app.invalidLibraryRoots.add(root);
         const name = roots.length === 1 ? root : basename(root);
         return makeRootFolderNode(root, name, { folders: [], files: [], playlists: [] });
       }
@@ -4432,11 +4413,11 @@ async function refreshTree(roots: string[]): Promise<void> {
   );
   renderLibraryRootRows();
   if (roots.length === 1) {
-    rootNode = nodes[0];
+    app.rootNode = nodes[0];
   } else {
     // Virtual root: not a real folder on disk (path ""), just a container whose
     // children are the library folders. renderTree renders its children.
-    rootNode = {
+    app.rootNode = {
       path: "",
       name: "",
       title: null,
@@ -4451,7 +4432,7 @@ async function refreshTree(roots: string[]): Promise<void> {
       children: nodes,
     };
   }
-  libraryHasContent.value = rootNode.children.length > 0;
+  libraryHasContent.value = app.rootNode.children.length > 0;
   renderTree();
 }
 
@@ -4508,18 +4489,13 @@ function findNode(
   return null;
 }
 
-let libraryRefreshing = false;
-let libraryRefreshPending = false;
 // True while an inline edit (tree rename) is open. The filesystem watcher fires
 // `library-scanned` a beat after any write — including our own rename's — and that
 // lands a renderTree() that would tear out the live edit input (and disturb
 // scroll). While an edit is open we defer the refresh and flush it on finish.
-let inlineEditing = false;
-let refreshDeferredWhileEditing = false;
 // Set by a tree rename to the renamed playlist's path; the next renderTree scrolls
 // that row into view and flashes it, so following it to its new sorted slot reads
 // as deliberate. Cleared once consumed.
-let pendingRevealPlaylistPath: string | null = null;
 
 // Scroll a tree row (by file path) into view and briefly flash it. Used to follow
 // a renamed playlist to its re-sorted position. No-op if the row isn't present.
@@ -4549,20 +4525,20 @@ async function refreshLibrary(): Promise<void> {
   void refreshPlaylistIndex();
   // Hold off rebuilding the tree while an inline edit is open — a renderTree()
   // here would destroy the edit input mid-type. finish() re-runs this once closed.
-  if (inlineEditing) {
-    refreshDeferredWhileEditing = true;
+  if (app.inlineEditing) {
+    app.refreshDeferredWhileEditing = true;
     return;
   }
-  if (libraryRefreshing) {
-    libraryRefreshPending = true;
+  if (app.libraryRefreshing) {
+    app.libraryRefreshPending = true;
     return;
   }
-  libraryRefreshing = true;
+  app.libraryRefreshing = true;
   try {
     do {
-      libraryRefreshPending = false;
-      if (!rootNode) break;
-      await reconcileNode(rootNode);
+      app.libraryRefreshPending = false;
+      if (!app.rootNode) break;
+      await reconcileNode(app.rootNode);
       // reconcile rebuilds node objects, so the currentParent captured at
       // play time now points outside the tree. Re-bind it by path so the
       // playing-row highlight and album auto-advance keep working. If the
@@ -4576,17 +4552,17 @@ async function refreshLibrary(): Promise<void> {
       // (a real folder is the pool) must still re-bind so folder playback survives.
       const path = currentNodePath.value;
       if (path && !queueIsActivePool()) {
-        const found = findNode(rootNode, path);
+        const found = findNode(app.rootNode, path);
         if (found) {
-          currentParent = found.parent;
+          app.currentParent = found.parent;
         }
       }
       // An edit may have opened while we were mid-reconcile (the entry guard only
       // catches edits that predate the refresh). Rendering now would tear out its
       // input and shift scroll — the "scrolls after the 2nd edit" case. Defer the
       // paint; finish() re-runs refreshLibrary once the edit closes.
-      if (inlineEditing) {
-        refreshDeferredWhileEditing = true;
+      if (app.inlineEditing) {
+        app.refreshDeferredWhileEditing = true;
         break;
       }
       const filesTab = document.getElementById("tab-files");
@@ -4595,13 +4571,13 @@ async function refreshLibrary(): Promise<void> {
       if (filesTab) filesTab.scrollTop = scrollTop;
       // Follow a just-renamed playlist to its new alphabetical slot so the re-sort
       // reads as intentional rather than the row vanishing. Consumed once here.
-      if (pendingRevealPlaylistPath) {
-        revealTreeRow(pendingRevealPlaylistPath);
-        pendingRevealPlaylistPath = null;
+      if (app.pendingRevealPlaylistPath) {
+        revealTreeRow(app.pendingRevealPlaylistPath);
+        app.pendingRevealPlaylistPath = null;
       }
-    } while (libraryRefreshPending);
+    } while (app.libraryRefreshPending);
   } finally {
-    libraryRefreshing = false;
+    app.libraryRefreshing = false;
   }
 }
 
@@ -4612,7 +4588,7 @@ function isRemoteStreamList(path: string): boolean {
 async function refreshStreams(streamListPath: string): Promise<void> {
   streamListPathSet.value = !!streamListPath;
   if (!streamListPath) {
-    allStreams = [];
+    app.allStreams = [];
     streamListPathValid.value = true;
     streamListWritable.value = false;
     // The panel-wide get-started prompt (streams-empty effect) covers this case.
@@ -4622,14 +4598,14 @@ async function refreshStreams(streamListPath: string): Promise<void> {
   setEmpty(streamsContainer, "Loading…", "loading");
   try {
     const streams = await invoke<Stream[]>("read_stream_list", { path: streamListPath });
-    allStreams = streams;
+    app.allStreams = streams;
     streamListPathValid.value = true;
     // Only a valid local file is appendable; a remote list is read-only.
     streamListWritable.value = !isRemoteStreamList(streamListPath);
     renderStreams(streams);
   } catch (e) {
     console.error("read_stream_list failed for", streamListPath, e);
-    allStreams = [];
+    app.allStreams = [];
     streamListPathValid.value = false;
     streamListWritable.value = false;
     setEmpty(streamsContainer, "Invalid stream list path");
@@ -4642,18 +4618,18 @@ async function refreshStreams(streamListPath: string): Promise<void> {
 // watcher down and returns the Files panel to its get-started prompt.
 async function setLibraryRoots(paths: string[]): Promise<void> {
   const seen = new Set<string>();
-  libraryRoots = paths.map((p) => p.trim()).filter((p) => p && !seen.has(p) && seen.add(p));
-  await store.set(KEY_LIBRARY_ROOTS, libraryRoots);
-  await store.save();
+  app.libraryRoots = paths.map((p) => p.trim()).filter((p) => p && !seen.has(p) && seen.add(p));
+  await app.store.set(KEY_LIBRARY_ROOTS, app.libraryRoots);
+  await app.store.save();
   renderLibraryRootRows();
-  if (libraryRoots.length) {
-    void invoke("rescan_libraries", { paths: libraryRoots });
+  if (app.libraryRoots.length) {
+    void invoke("rescan_libraries", { paths: app.libraryRoots });
   }
   // (Re)watch the new set (or, when empty, tear all old watchers down).
-  void invoke("watch_libraries", { paths: libraryRoots }).catch((e) =>
+  void invoke("watch_libraries", { paths: app.libraryRoots }).catch((e) =>
     console.error("watch_libraries failed", e),
   );
-  await refreshTree(libraryRoots);
+  await refreshTree(app.libraryRoots);
   void refreshPlaylistIndex();
 }
 
@@ -4663,16 +4639,16 @@ async function setLibraryRoots(paths: string[]): Promise<void> {
 // setLibraryRoots so persistence, rescan/watch, and the tree stay in step.
 function renderLibraryRootRows(): void {
   libraryRootsContainer.innerHTML = "";
-  libraryRoots.forEach((path, index) => {
+  app.libraryRoots.forEach((path, index) => {
     const input = h("input", {
-      class: invalidLibraryRoots.has(path) ? "invalid" : "",
+      class: app.invalidLibraryRoots.has(path) ? "invalid" : "",
       attrs: { type: "text" },
       on: {
         keydown: (e) => {
           if (e.key === "Enter") input.blur();
         },
         change: () => {
-          const next = [...libraryRoots];
+          const next = [...app.libraryRoots];
           const value = input.value.trim();
           if (value) next[index] = value;
           else next.splice(index, 1);
@@ -4695,7 +4671,7 @@ function renderLibraryRootRows(): void {
       text: "×",
       on: {
         click: () => {
-          const next = [...libraryRoots];
+          const next = [...app.libraryRoots];
           next.splice(index, 1);
           void setLibraryRoots(next);
         },
@@ -4710,8 +4686,8 @@ function renderLibraryRootRows(): void {
 
 async function setStreamListPath(value: string): Promise<void> {
   streamListPathInput.value = value;
-  await store.set(KEY_STREAM_LIST_PATH, value);
-  await store.save();
+  await app.store.set(KEY_STREAM_LIST_PATH, value);
+  await app.store.save();
   await refreshStreams(value);
 }
 
@@ -4721,10 +4697,10 @@ async function browseLibraryRoot(index?: number): Promise<void> {
   const selected = await open({
     directory: true,
     multiple: false,
-    defaultPath: (index != null ? libraryRoots[index] : undefined) || undefined,
+    defaultPath: (index != null ? app.libraryRoots[index] : undefined) || undefined,
   });
   if (typeof selected !== "string") return;
-  const next = [...libraryRoots];
+  const next = [...app.libraryRoots];
   if (index != null) next[index] = selected;
   else next.push(selected);
   await setLibraryRoots(next);
@@ -4762,7 +4738,7 @@ function setupTabs(): void {
       // stale, invisible selection (and a stray Enter target).
       clearTreeSelection();
       selectedStreamUrl.value = null;
-      if (lastSelectionPane !== "list") lastSelectionPane = null;
+      if (app.lastSelectionPane !== "list") app.lastSelectionPane = null;
       activeTab.value = next;
       void persistActiveTab();
     });
@@ -4779,11 +4755,11 @@ function setupTabs(): void {
 // nothing to drop.
 function applyModeChange(): void {
   const perTrack = shuffleMode.value || repeatMode.value === "one";
-  if (perTrack && !isStream.value && lastQueue.length > 1) {
+  if (perTrack && !isStream.value && app.lastQueue.length > 1) {
     void engine.clearUpcoming();
     if (currentNodePath.value) {
-      lastQueue = [currentNodePath.value];
-      lastIndex = 0;
+      app.lastQueue = [currentNodePath.value];
+      app.lastIndex = 0;
     }
   }
 }
@@ -4811,14 +4787,14 @@ function applyAutoadvanceChange(): void {
       : pool.indexOf(current);
     if (idx >= 0 && idx < pool.length - 1) {
       void engine.append(pool.slice(idx + 1));
-      lastQueue = pool;
-      lastIndex = idx;
+      app.lastQueue = pool;
+      app.lastIndex = idx;
     }
-  } else if (lastQueue.length > 1) {
+  } else if (app.lastQueue.length > 1) {
     // Drop the tail so the current track is the last thing the engine plays.
     void engine.clearUpcoming();
-    lastQueue = [current];
-    lastIndex = 0;
+    app.lastQueue = [current];
+    app.lastIndex = 0;
   }
 }
 
@@ -4833,19 +4809,19 @@ function setAutoadvance(enabled: boolean): void {
 }
 
 const persistAutoadvance = async (): Promise<void> => {
-  await store.set(KEY_AUTOADVANCE, autoadvance.value);
-  await store.save();
+  await app.store.set(KEY_AUTOADVANCE, autoadvance.value);
+  await app.store.save();
 };
 
 const persistActiveTab = async (): Promise<void> => {
-  await store.set(KEY_ACTIVE_TAB, activeTab.value);
-  await store.save();
+  await app.store.set(KEY_ACTIVE_TAB, activeTab.value);
+  await app.store.save();
 };
 
 const persistPlaybackModes = async (): Promise<void> => {
-  await store.set(KEY_SHUFFLE, shuffleMode.value);
-  await store.set(KEY_REPEAT, repeatMode.value);
-  await store.save();
+  await app.store.set(KEY_SHUFFLE, shuffleMode.value);
+  await app.store.set(KEY_REPEAT, repeatMode.value);
+  await app.store.save();
 };
 
 // Shared by the toolbar button and the Playback menu so both take the same path.
@@ -4854,7 +4830,7 @@ function toggleShuffle(): void {
   // Seed the bag so a shuffle turned on mid-album has a full cycle ready;
   // clear it when turning shuffle off.
   if (shuffleMode.value) refillShuffleBag(currentNodePath.value);
-  else shuffleBag = [];
+  else app.shuffleBag = [];
   applyModeChange();
   void persistPlaybackModes();
 }
@@ -4903,8 +4879,8 @@ function setupSplitter(initialWidth: string | null): void {
         .getPropertyValue("--left-width")
         .trim();
       if (final) {
-        await store.set(KEY_SPLITTER_WIDTH, final);
-        await store.save();
+        await app.store.set(KEY_SPLITTER_WIDTH, final);
+        await app.store.save();
       }
     };
     document.addEventListener("mousemove", onMove);
@@ -4969,13 +4945,13 @@ async function setupWindowSize(
   // now in the mini range (or vice versa) is discarded in favor of the default,
   // so the toggle can never get stuck resizing to a size that stays in the same
   // mode.
-  const storedNormal = await store.get<{ width: number; height: number }>(
+  const storedNormal = await app.store.get<{ width: number; height: number }>(
     KEY_WINDOW_SIZE_NORMAL,
   );
   if (storedNormal && storedNormal.width > 0 && storedNormal.height > MINI_MAX_HEIGHT) {
     normalSize = storedNormal;
   }
-  const storedMini = await store.get<{ width: number; height: number }>(
+  const storedMini = await app.store.get<{ width: number; height: number }>(
     KEY_WINDOW_SIZE_MINI,
   );
   if (storedMini && storedMini.width > 0 && storedMini.height > 0 && storedMini.height <= MINI_MAX_HEIGHT) {
@@ -5000,12 +4976,12 @@ async function setupWindowSize(
     if (width <= 0 || height <= 0) return;
     if (isMiniViewport()) {
       miniSize = { width, height };
-      await store.set(KEY_WINDOW_SIZE_MINI, miniSize);
+      await app.store.set(KEY_WINDOW_SIZE_MINI, miniSize);
     } else {
       normalSize = { width, height };
-      await store.set(KEY_WINDOW_SIZE_NORMAL, normalSize);
+      await app.store.set(KEY_WINDOW_SIZE_NORMAL, normalSize);
     }
-    await store.save();
+    await app.store.save();
   }, 400);
 
   // Keep the Window menu's "Mini Player" checkmark mirroring the current mode.
@@ -5021,7 +4997,7 @@ async function setupWindowSize(
     syncMiniplayerChecked();
   });
 
-  const storedPos = await store.get<{ x: number; y: number }>(
+  const storedPos = await app.store.get<{ x: number; y: number }>(
     KEY_WINDOW_POSITION,
   );
   if (storedPos) {
@@ -5029,8 +5005,8 @@ async function setupWindowSize(
   }
 
   const persistPos = debounce(async (x: number, y: number) => {
-    await store.set(KEY_WINDOW_POSITION, { x, y });
-    await store.save();
+    await app.store.set(KEY_WINDOW_POSITION, { x, y });
+    await app.store.save();
   }, 400);
 
   await appWindow.onMoved(({ payload }) => {
@@ -5223,12 +5199,12 @@ function setupSearch(): void {
       return;
     }
     const needle = query.toLowerCase();
-    const streamItems: SearchItem[] = allStreams
+    const streamItems: SearchItem[] = app.allStreams
       .filter((s) => s.name.toLowerCase().includes(needle))
       .map((s) => ({ kind: "stream", stream: s }));
     // Playlists are indexed client-side (kept fresh by the watcher), so they
     // filter here alongside streams rather than through a backend query.
-    const playlistItems: SearchItem[] = playlistIndex
+    const playlistItems: SearchItem[] = app.playlistIndex
       .filter((p) => p.name.toLowerCase().includes(needle))
       .map((p) => ({ kind: "playlist", playlist: p }));
     let artistItems: SearchItem[] = [];
@@ -5355,7 +5331,7 @@ function setupPlayerControls(): void {
       removeCuratedTracks(sel);
       if (fill) {
         queueSel.single(fill);
-        lastSelectionPane = "list";
+        app.lastSelectionPane = "list";
       }
       return;
     }
@@ -5776,7 +5752,7 @@ function setupEffects(): void {
     document
       .querySelectorAll<HTMLElement>("#library-nav .nav-track-row")
       .forEach((el) => {
-        const t = navLeafTracks[Number(el.dataset.rowIndex)];
+        const t = app.navLeafTracks[Number(el.dataset.rowIndex)];
         el.classList.toggle("selected", !!t && sel.has(t));
       });
   });
@@ -5920,25 +5896,25 @@ async function init(): Promise<void> {
   // targets the end of the list — that case is resolved by updateDropTarget's
   // hit-test against the list box, so no container drop listener is needed.
 
-  store = await load(STORE_FILE, { defaults: {}, autoSave: false });
+  app.store = await load(STORE_FILE, { defaults: {}, autoSave: false });
 
-  libraryRoots = (await store.get<string[]>(KEY_LIBRARY_ROOTS)) ?? [];
+  app.libraryRoots = (await app.store.get<string[]>(KEY_LIBRARY_ROOTS)) ?? [];
   // First run (key never set): adopt the default stream list the backend seeds
   // in the app data dir, and persist it so it shows in settings and can be
   // repointed. An explicit "" (user cleared the path) is respected, not reseeded.
-  const storedStreamListPath = await store.get<string>(KEY_STREAM_LIST_PATH);
+  const storedStreamListPath = await app.store.get<string>(KEY_STREAM_LIST_PATH);
   let streamListPath = storedStreamListPath ?? "";
   if (storedStreamListPath === undefined) {
     try {
       streamListPath = await invoke<string>("default_stream_list_path");
-      await store.set(KEY_STREAM_LIST_PATH, streamListPath);
-      await store.save();
+      await app.store.set(KEY_STREAM_LIST_PATH, streamListPath);
+      await app.store.save();
     } catch (e) {
       console.error("default_stream_list_path failed", e);
     }
   }
-  const splitterWidth = (await store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
-  const storedVolume = await store.get<number>(KEY_VOLUME);
+  const splitterWidth = (await app.store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
+  const storedVolume = await app.store.get<number>(KEY_VOLUME);
   volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
   if (volume.value > 0) lastNonZeroVolume = volume.value;
 
@@ -5946,8 +5922,8 @@ async function init(): Promise<void> {
   // browsing setting so an existing user's off-preference carries over. Sync the
   // OS Playback-menu checkmark, then listen for the menu's toggle.
   autoadvance.value =
-    (await store.get<boolean>(KEY_AUTOADVANCE)) ??
-    (await store.get<boolean>(KEY_AUTOADVANCE_FILES)) ??
+    (await app.store.get<boolean>(KEY_AUTOADVANCE)) ??
+    (await app.store.get<boolean>(KEY_AUTOADVANCE_FILES)) ??
     true;
   void invoke("set_autoadvance_checked", { enabled: autoadvance.value });
   await listen<boolean>("menu:autoadvance", (event) => {
@@ -5957,8 +5933,8 @@ async function init(): Promise<void> {
   // Playback modes (both default off). The button effects read these signals, so
   // setting them here syncs the toolbar; the shuffle bag is refilled lazily at
   // the next play, so no need to seed it now.
-  shuffleMode.value = (await store.get<boolean>(KEY_SHUFFLE)) ?? false;
-  const storedRepeat = await store.get<RepeatMode>(KEY_REPEAT);
+  shuffleMode.value = (await app.store.get<boolean>(KEY_SHUFFLE)) ?? false;
+  const storedRepeat = await app.store.get<RepeatMode>(KEY_REPEAT);
   repeatMode.value =
     storedRepeat === "all" || storedRepeat === "one" ? storedRepeat : "off";
 
@@ -5977,15 +5953,15 @@ async function init(): Promise<void> {
 
   // Recent playlists → the OS "Open Recent ▸" submenu. Load the persisted list
   // and push it into the native menu.
-  recentPlaylists = (await store.get<RecentPlaylist[]>(KEY_RECENT_PLAYLISTS)) ?? [];
+  app.recentPlaylists = (await app.store.get<RecentPlaylist[]>(KEY_RECENT_PLAYLISTS)) ?? [];
   syncRecentPlaylistsMenu();
 
   // The last Files-tab place, handed to the navigator below to restore on launch.
-  const navLocation = (await store.get<NavStep[]>(KEY_NAV_LOCATION)) ?? [];
+  const navLocation = (await app.store.get<NavStep[]>(KEY_NAV_LOCATION)) ?? [];
 
   // Restore the open sidebar tab. Set before setupEffects() so the tab effect
   // renders the right panel on first paint (no Files→Streams flash).
-  const storedTab = await store.get<string>(KEY_ACTIVE_TAB);
+  const storedTab = await app.store.get<string>(KEY_ACTIVE_TAB);
   if (storedTab === "streams" || storedTab === "files") activeTab.value = storedTab;
 
   // Keep "Save Queue as Playlist" enabled only while an ephemeral queue is the active
@@ -6023,7 +5999,7 @@ async function init(): Promise<void> {
         void menuMovePlaylist();
         break;
       case "recent-clear":
-        recentPlaylists = [];
+        app.recentPlaylists = [];
         void persistRecentPlaylists();
         syncRecentPlaylistsMenu();
         break;
@@ -6141,13 +6117,13 @@ async function init(): Promise<void> {
     openAssociatedFile(pendingOpen);
   }
 
-  await refreshTree(libraryRoots);
+  await refreshTree(app.libraryRoots);
   void refreshPlaylistIndex();
   await refreshStreams(streamListPath);
 
-  if (libraryRoots.length) {
-    void invoke("rescan_libraries", { paths: libraryRoots });
-    void invoke("watch_libraries", { paths: libraryRoots }).catch((e) =>
+  if (app.libraryRoots.length) {
+    void invoke("rescan_libraries", { paths: app.libraryRoots });
+    void invoke("watch_libraries", { paths: app.libraryRoots }).catch((e) =>
       console.error("watch_libraries failed", e),
     );
   }
