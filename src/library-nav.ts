@@ -19,7 +19,7 @@ import type {
   SearchAlbum,
   PlaylistRef,
   LeafListContext,
-} from "./main";
+} from "./types";
 import { h } from "./dom";
 
 type IconKind = "browse" | "songs" | "playlist" | "artist" | "album";

@@ -24,7 +24,7 @@ import type {
   SearchAlbum,
   PlaylistRef,
   LeafListContext,
-} from "../src/main.ts";
+} from "../src/types.ts";
 
 // Imported after the module surface is known; library-nav reads `document` only
 // inside functions (never at import), so importing it before we install the fake
