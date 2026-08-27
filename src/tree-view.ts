@@ -34,20 +34,22 @@ import {
   toggleTreeSelection,
   selectTreeRangeTo,
   selectTreeSingle,
-  addPlaylistToQueue,
-  playPlaylist,
-  startTreePlaylistRename,
-  deletePlaylistNode,
   showInFinderItem,
   addToPlaylistItem,
-  playlistPlayableTracks,
   trackContextItems,
-  attachPlaylistClicks,
   paneView,
   queueSel,
   playQueueTrack,
   commitBrowsedPlaylist,
 } from "./main";
+import {
+  addPlaylistToQueue,
+  playPlaylist,
+  startTreePlaylistRename,
+  deletePlaylistNode,
+  playlistPlayableTracks,
+  attachPlaylistClicks,
+} from "./playlists";
 import { editMetadataItem } from "./editors";
 import { playFile, playFolder, playStream } from "./playback";
 import { addToQueue, addFolderToQueue, nodeToTrack } from "./queue";

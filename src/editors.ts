@@ -22,7 +22,7 @@ import { paneEditorView, queueTitleEl } from "./dom-refs";
 import { reloadNavView } from "./library-nav";
 import { findNode, refreshLibrary } from "./library";
 import { renderTree } from "./tree-view";
-import { renameOpenPlaylist } from "./main";
+import { renameOpenPlaylist } from "./playlists";
 import { renderQueue, curatedList } from "./queue";
 
 export function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {

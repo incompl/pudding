@@ -25,12 +25,12 @@ import {
 import { nodesFromListing, renderTree } from "./tree-view";
 import { renderStreams } from "./streams-view";
 import {
-  refreshPlaylistIndex,
   setEmpty,
   queueIsActivePool,
   KEY_LIBRARY_ROOTS,
   KEY_STREAM_LIST_PATH,
 } from "./main";
+import { refreshPlaylistIndex } from "./playlists";
 
 // The final path segment (trailing slashes ignored) — the folder's display name
 // when several library roots share the top level. Falls back to the whole path.

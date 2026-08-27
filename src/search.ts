@@ -17,13 +17,13 @@ import { showContextMenu } from "./context-menu";
 import {
   openArtistQueue,
   openAlbumQueue,
-  playPlaylistPath,
   persistActiveTab,
   libraryRootPaths,
   searchItemTrackProvider,
   addToPlaylistItem,
   debounce,
 } from "./main";
+import { playPlaylistPath } from "./playlists";
 import { playFolder, playSearchTrack, playStream } from "./playback";
 
 function searchLabel(t: SearchTrack): { primary: string; secondary: string } {

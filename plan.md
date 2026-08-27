@@ -22,7 +22,7 @@ plumbing `let`s (272 references) now live as fields on `export const app` in
 `state.ts`. This resolved the core live-binding obstacle, so the remaining
 feature modules can be carved out with plain imports.
 
-**Feature modules extracted — 9 more commits, each typecheck + unit-test green
+**Feature modules extracted — 10 commits, each typecheck + unit-test green
 (one module per commit, verbatim relocation — no logic changes):**
 
 - `drag-drop.ts` — pointer drag/ghost/drop curation.
@@ -42,6 +42,15 @@ feature modules can be carved out with plain imports.
 - `queue.ts` — right-pane list face (`renderQueue`), curation (applyCuration /
   reconcile / insert / remove / reorder), and the Add-to-queue family
   (seed/arm/append/close/teardown).
+- `playlists.ts` — playlist data/IO + play/browse, the OS Playlist menu + client
+  index, rename/delete, and the three `Add to playlist ▸` submenu ops
+  (`newPlaylistWithTracks`/`addTracksToPlaylist`/`loadAllPlaylists`). The
+  `KEY_RECENT_PLAYLISTS`/`RECENT_PLAYLISTS_MAX` store constants moved here too;
+  `main.ts` imports the key to hydrate. Shared menu builders (`addToPlaylistItem`,
+  `show*ContextMenu`) stayed in `main.ts` and call in. The queue↔playlists and
+  editors↔playlists runtime cycles are ES-safe (playlists imports
+  `insertCuratedTracks`/`appendToActivePool` from queue and `editInline` from
+  editors; those modules import playlist fns back).
 
 **Approach that worked (repeat for `playlists.ts`):** slice the function block(s)
 to a scratch file with `scratchpad/slice.mjs`, prepend an import header, add
@@ -54,8 +63,12 @@ function was imported by another module from `./main`, repoint that import to th
 new module. Cross-module runtime cycles are fine (ES-safe); several exist already
 (e.g. `queue`↔`main`, `playback`↔`engine-glue`).
 
-`main.ts` is down from 6885 → **~3089 lines** (was 6311 at the start of this
+`main.ts` is down from 6885 → **~2583 lines** (was 6311 at the start of this
 pass). Working tree committed, `pnpm typecheck` + `pnpm test:unit` green.
+
+**All planned feature modules are now extracted — the split the plan set out to
+do is DONE.** What's left in `main.ts` is the deliberate end state (`init()` +
+`setup*()` wiring + shared glue; see "Deliberately staying in `main.ts`" below).
 
 ### Decisions locked in (for the next session)
 
@@ -90,31 +103,19 @@ The scratchpad scripts worked well, but the `app`-rename (`\bNAME\b` →
 
 ### Remaining work
 
-**One planned module left: `playlists.ts`.** Everything else is either extracted
-or legitimately stays in `main.ts` (see below). The playlist code is the most
-*scattered* cluster — no single contiguous block — so it's the fiddliest slice,
-but it's still verbatim relocation. Group into `playlists.ts`:
+**None of the planned modules remain — `playlists.ts` was the last, and it is
+extracted.** It was the most *scattered* cluster (no single contiguous block), so
+it came out as six slices (`main.ts` ~713–848 / 850–905 / 917–1046 / 1088–1196 /
+1303–1371 / 1478–1488), skipping `persistNavLocation` (nav), `playQueue`/
+`commitBrowsedPlaylist` (queue-source glue), and the shared menu layer
+(`showInFinderItem`/`addToPlaylistItem`/`trackContextItems`/
+`searchItemTrackProvider`/`addProviderToQueue`/`show*ContextMenu`) — all of which
+stayed in `main.ts`.
 
-- Playlist data/IO + play/browse: `playlistPlayableTracks`, `playlistViewTracks`,
-  `attachPlaylistClicks`, `playPlaylist`, `playPlaylistPath`, `browsePlaylist`,
-  `browsePlaylistPath`, `addPlaylistToQueue` (~`main.ts:715–848`).
-- OS Playlist menu + client index: `refreshPlaylistIndex`, `playlistNameFromPath`,
-  `defaultPlaylistDir`, `persistRecentPlaylists`, `addRecentPlaylist`,
-  `removeRecentPlaylist`, `syncRecentPlaylistsMenu`, `menuNewPlaylist`,
-  `menuOpenPlaylist`, `menuSavePlaylist`, `queueCanSaveAsPlaylist`,
-  `saveQueueAsPlaylist`, `menuMovePlaylist` (~`850–1054`). (`persistNavLocation`
-  sits in this range but is nav, not playlist — leave it in `main.ts`.)
-- Rename/delete: `renameOpenPlaylist`, `renameTreePlaylist`,
-  `startTreePlaylistRename`, `deletePlaylistNode` (~`1088–1196`).
-- Add-to-playlist ▸ submenu: `newPlaylistWithTracks`, `addTracksToPlaylist`,
-  `loadAllPlaylists` (~`1305–1489`, interleaved with the context-menu builders —
-  take only these three; `showInFinderItem`/`addToPlaylistItem`/`trackContextItems`/
-  `searchItemTrackProvider`/`addProviderToQueue`/`show*ContextMenu` are the shared
-  menu layer — see below).
-
-Watch the same two rename-script guards (string literals like the store keys;
-spread `...name`). `addTracksToPlaylist` calls `appendToActivePool`/`applyCuration`
-(now in `queue.ts`) — import them; the queue↔playlists runtime cycle is fine.
+Any further work is optional: the `main.ts` residue below is the plan's intended
+end state, not a pending module. If someone wants to keep splitting, the nav-bar +
+album-art + shared-menu clusters are the natural next carve-outs, but none is
+load-bearing for the boundary the plan established.
 
 **Deliberately staying in `main.ts`** (the plan's target end state — `init()` +
 `setup*()` wiring + the small shared glue that doesn't warrant its own module):
