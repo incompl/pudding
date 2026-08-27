@@ -16,8 +16,8 @@ import {
   selectedListTracks,
   reorderCuratedTracks,
   insertCuratedTracks,
-  refreshStreams,
 } from "./main";
+import { refreshStreams } from "./library";
 
 // A drag only *starts* once the pointer travels this many px from where it went
 // down, so a plain click on a row still plays/commits it (no accidental reorder)
