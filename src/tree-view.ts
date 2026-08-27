@@ -47,7 +47,6 @@ import {
   addToPlaylistItem,
   playlistPlayableTracks,
   trackContextItems,
-  editMetadataItem,
   nodeToTrack,
   attachPlaylistClicks,
   paneView,
@@ -55,6 +54,7 @@ import {
   playQueueTrack,
   commitBrowsedPlaylist,
 } from "./main";
+import { editMetadataItem } from "./editors";
 
 // Child nodes for one directory listing. Display order comes entirely from
 // the backend: list_dir returns folders sorted by name and files sorted by
