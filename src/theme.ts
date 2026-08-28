@@ -34,35 +34,49 @@ export interface AccentTheme {
 export const DARK_THEMES: AccentTheme[] = [
   { id: "pistachio", name: "Pistachio", accent: "#b5d17a", accentDim: "#7e9152" },
   { id: "dreamcicle", name: "Dreamcicle", accent: "#f5a966", accentDim: "#be7637" },
-  { id: "blackberry", name: "Blackberry", accent: "#ad7ad2", accentDim: "#785393" },
-  // Strawberry holds the base pale pastel (accent ≈ S~55% L65%, dim ≈ S~38%
-  // L45%) rotated to berry-red ~352°. Blueberry is pushed off that base to be
-  // less gray + creamier: saturation raised and lightness lifted a touch (accent
-  // ≈ S65% L72%) so it reads as a soft, milky periwinkle-blue ~223° instead of a
-  // grayish slate. Banana, like Dreamcicle, is pushed brighter/more saturated
-  // than the base — a creamy yellow ~46° rather than a muddy tan.
-  { id: "blueberry", name: "Blueberry", accent: "#8aa6ea", accentDim: "#556fb5" },
+  // Blackberry, Blueberry, and Strawberry were repunched (2026-08-27) to match
+  // the vividness of Pistachio/Dreamcicle/Banana — the earlier pale-pastel base
+  // read drab/grayish next to them. Each keeps its hue but is pushed to high
+  // saturation with a richer (more saturated) dim: Blackberry violet ~280°
+  // (accent ≈ S80% L68%, hue nudged toward magenta + saturation raised for more
+  // pop), Blueberry an azure ~207° (accent ≈ S95% L62%, saturation near max — a
+  // "pure" blue reads dark and slate, so leaning toward cyan is what makes it
+  // pop; dialed to just shy of crossing into teal), Strawberry
+  // berry-red ~352° (accent ≈ S80% L68%). Banana, like Dreamcicle, is a bright
+  // creamy yellow ~46°.
+  { id: "blackberry", name: "Blackberry", accent: "#c36cef", accentDim: "#8834b2" },
+  { id: "blueberry", name: "Blueberry", accent: "#42a7fa", accentDim: "#257bc1" },
   { id: "banana", name: "Banana", accent: "#f0d375", accentDim: "#b19843" },
-  { id: "strawberry", name: "Strawberry", accent: "#de7c89", accentDim: "#a94c58" },
+  { id: "strawberry", name: "Strawberry", accent: "#ef6c7e", accentDim: "#b23444" },
 ];
 
 // The light accent set — its own gemstone-named themes, distinct from the dark
-// set. Recipe (reworked 2026-08-27): each theme is a BOLD, vivid accent that
-// pops on the white ground, paired with a DARK version of the SAME hue for
-// --accent-dim. In light mode --accent-dim is text-only (active search subtitle,
-// link hover, playing-node subtitle), so a deeper shade of the accent's hue
-// reads crisply on white — brightened just enough to stay legibly *colored*
-// rather than sinking to near-black. Hues: Emerald ~160°, Sunstone orange ~28°,
-// Amethyst violet ~274°, Sapphire royal blue ~224°, Ruby electric raspberry
-// ~345°. Leather is the exception — a "dark yellow" reads muddy, so it's tuned
-// by eye as two warm browns (cognac accent, deep espresso dim) that both sit
-// well on white. Tweak visually.
+// set. Recipe (repunched 2026-08-27 to match Ruby): Ruby's electric raspberry
+// (accent ≈ S92% L54%, dim the same hue dropped to ≈ S76% L38%) set the bar, and
+// the earlier themes read muted/dark beside it. Each now keeps its own hue but is
+// pushed to Ruby's punch — near-max saturation at a bright, vivid lightness for
+// --accent, paired with a same-hue darker --accent-dim (in light mode --accent-dim
+// is text-only: active search subtitle, link hover, playing-node subtitle, so it
+// stays deep enough to read crisply on white while remaining legibly *colored*).
+// --accent also doubles as on-white text (Back button, tab labels), and green
+// reads perceptually lighter, so Emerald sits notably darker than the others to
+// stay legible as text — that ~3:1 on-white contrast is its electric ceiling;
+// brighter greens stop reading as text on white. Sapphire is kept saturated by
+// holding lightness down (raising it lifts the red channel and washes it pastel).
+// Hues: Emerald ~158°, Sunstone orange ~26°, Amethyst
+// violet ~274°, Sapphire electric blue ~227°, Ruby raspberry ~345°. Coffee is the
+// exception — an "electric brown" just reads muddy, so it's two warm browns tuned
+// by eye. Unlike the others (which pair one hue light+dark), Coffee deliberately
+// SPLITS the two hues for a "brown and tan" read: a golden tan core/accent ~32°
+// against a deep red-chocolate ring/dim ~18°, ~14° apart instead of ~1°. Accent
+// stays dark enough (L~38%, ~5:1 on white) to keep working as on-white text.
+// Tweak visually.
 export const LIGHT_THEMES: AccentTheme[] = [
-  { id: "emerald", name: "Emerald", accent: "#00a36c", accentDim: "#157a52" },
-  { id: "sunstone", name: "Sunstone", accent: "#ef6c00", accentDim: "#b8500a" },
-  { id: "amethyst", name: "Amethyst", accent: "#8a20d4", accentDim: "#641a99" },
-  { id: "sapphire", name: "Sapphire", accent: "#1f5eff", accentDim: "#1b3f9e" },
-  { id: "leather", name: "Leather", accent: "#a05a2a", accentDim: "#6b3d1b" },
+  { id: "emerald", name: "Emerald", accent: "#00a86b", accentDim: "#0a9c68" },
+  { id: "sunstone", name: "Sunstone", accent: "#ff740a", accentDim: "#b25811" },
+  { id: "amethyst", name: "Amethyst", accent: "#9c2af4", accentDim: "#701ab3" },
+  { id: "sapphire", name: "Sapphire", accent: "#0a3dff", accentDim: "#1334ae" },
+  { id: "coffee", name: "Coffee", accent: "#966428", accentDim: "#673018" },
   { id: "ruby", name: "Ruby", accent: "#f61d52", accentDim: "#ab1741" },
 ];
 
