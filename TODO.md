@@ -43,44 +43,4 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
   re-saves. Decide whether delete participates (soft-delete to a trash dir, or
   just keep it as a hard action outside undo).
 
-### Edit file metadata
-
-Phase 1 shipped: a single-track "Edit metadata…" verb in the tree context menu
-opens the row as an inline editor (reusing `buildInlineEditor`, same as station
-editing) over Title / Artist / Album / Album Artist / Disc / Track. The
-`write_tags` command (`src-tauri/src/lib.rs`) mutates the file's primary tag via
-lofty — creating a native tag for untagged files — then syncs the `tracks` cache
-row so the library views update without a rescan. `save_to_path` rewrites the
-file in place, which would corrupt the decode of a track the engine is holding
-open, so any track is editable but **Save is gated** (disabled, with a note)
-while that track is the one playing — checked reactively, since playback can
-advance into the edited track after the editor opens.
-
-Remaining:
-
-- **Batch edit for a multi-track selection** (set Album/Artist/Album Artist
-  across the whole selection). The wrinkle is mixed values: the inline editor
-  has no "leave unchanged" state, so fields whose selected tracks disagree need a
-  distinct placeholder (e.g. "Multiple values") that only writes the field the
-  user actually touches. `write_tags` already takes one path; loop it, or add a
-  batch command. The multi-select branch of the tree context menu
-  (`src/main.ts`, `Add N to queue`) is where the verb would attach.
-
-- **Genre and Year.** Not in the `tracks` schema, so surfacing them in the
-  Songs/Artists/Albums views (or search) means a schema migration (bump
-  `SCHEMA_VERSION`, add columns, extend `read_tags`/`write_tags`). Cheap to write
-  to the file; the cost is the indexed columns.
-
-- **Album art embedding.** Add/replace/remove the front-cover picture (lofty
-  `Picture` + MIME + `PictureType::CoverFront`). A separate affordance from the
-  text fields — closer to the station-image "Choose…" browse than a text input —
-  and interacts with `get_art`, which reads the first embedded picture.
-
-- **Saving edits to the now-playing file.** Save is currently blocked while the
-  edited track is playing. Could be allowed by pausing + releasing the engine's
-  file handle, saving, then reopening at the saved position — only worth it if
-  users hit the block often.
-
 ### Virtualize lists
-
-### Move about info to custom about page
