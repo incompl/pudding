@@ -72,7 +72,7 @@ export const DARK_THEMES: AccentTheme[] = [
 // stays dark enough (L~38%, ~5:1 on white) to keep working as on-white text.
 // Tweak visually.
 export const LIGHT_THEMES: AccentTheme[] = [
-  { id: "emerald", name: "Emerald", accent: "#00a86b", accentDim: "#0a9c68" },
+  { id: "emerald", name: "Emerald", accent: "#00a86b", accentDim: "#007a4f" },
   { id: "sunstone", name: "Sunstone", accent: "#ff740a", accentDim: "#b25811" },
   { id: "amethyst", name: "Amethyst", accent: "#9c2af4", accentDim: "#701ab3" },
   { id: "sapphire", name: "Sapphire", accent: "#0a3dff", accentDim: "#1334ae" },
