@@ -37,12 +37,12 @@ export const DARK_THEMES: AccentTheme[] = [
 ];
 
 export const LIGHT_THEMES: AccentTheme[] = [
-  { id: "emerald", name: "Emerald", accent: "#00a86b", accentDim: "#007a4e" },
-  { id: "sunstone", name: "Sunstone", accent: "#ff740a", accentDim: "#c55a08" },
-  { id: "amethyst", name: "Amethyst", accent: "#a32bff", accentDim: "#701ab3" },
-  { id: "sapphire", name: "Sapphire", accent: "#0a3dff", accentDim: "#1334ae" },
+  { id: "apple", name: "Apple", accent: "#00a86b", accentDim: "#007a4e" },
+  { id: "apricot", name: "Apricot", accent: "#ff740a", accentDim: "#c55a08" },
+  { id: "grape", name: "Grape", accent: "#a32bff", accentDim: "#701ab3" },
+  { id: "raspberry", name: "Raspberry", accent: "#0a3dff", accentDim: "#1334ae" },
   { id: "coffee", name: "Coffee", accent: "#966428", accentDim: "#673018" },
-  { id: "ruby", name: "Ruby", accent: "#f61d52", accentDim: "#c31641" },
+  { id: "fruitpunch", name: "Fruit Punch", accent: "#f61d52", accentDim: "#c31641" },
 ];
 
 // The neutral background each mode paints (styles.css :root --bg for dark, the
@@ -56,7 +56,7 @@ export const MODE_BG: Record<ThemeMode, string> = {
 };
 
 const DEFAULT_DARK_ACCENT = "pistachio";
-const DEFAULT_LIGHT_ACCENT = "emerald";
+const DEFAULT_LIGHT_ACCENT = "apple";
 
 export const KEY_THEME_MODE = "themeMode";
 export const KEY_DARK_ACCENT = "darkAccent";
