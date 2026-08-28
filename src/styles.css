@@ -1,3 +1,11 @@
+/* The neutral palette (blacks / grays / whites) is the DARK mode, the default;
+   the LIGHT mode is the html[data-mode="light"] block below, which overrides only
+   these neutrals + color-scheme. It needs no icon rework: every icon is a CSS
+   mask tinted by these same vars (the stroke='%23fff' in the data-URIs is inert),
+   and every selection is an --accent color-mix, so both adapt to the mode for
+   free. --accent / --accent-dim here are the Pistachio fallback; src/theme.ts
+   overrides them at runtime per the selected accent theme (see applyTheme, which
+   also sets the data-mode this keys on). */
 :root {
   color-scheme: dark;
   --left-width: 280px;
@@ -12,6 +20,9 @@
   --text: #f1f1f1;
   --text-muted: #aaa;
   --text-dim: #888;
+  /* Dimmer still than --text-dim: the track-number gutters (Songs list, browse
+     tree, queue), which read quieter than muted body text. */
+  --text-faint: #666;
   --accent: #b5d17a;
   --accent-dim: #7e9152;
   --danger: #f87171;
@@ -45,6 +56,28 @@
      laid out so the glyph's bounding box is horizontally centered in the viewBox,
      so mask-size:contain lands it on the same column as the other gutter icons. */
   --eighth-note-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12.5 18V5'/%3E%3Cpath d='M12.5 5c3 .5 5 2.5 5 6'/%3E%3Ccircle cx='9.5' cy='18' r='3' fill='%23fff' stroke='none'/%3E%3C/svg%3E");
+}
+
+/* Light mode: overrides only the neutral layers (bg → surfaces → text) and
+   color-scheme (so native scrollbars, the select, and form controls render
+   light). The app background (body) is pure white; the Files/Streams panel sits
+   on it as a light gray. Surfaces get darker as they grow more interactive
+   (buttons/inputs sit grayer than the panel), inverting the dark scale where they
+   get lighter; raised is white so popovers read as lifted off the gray. Icons +
+   selections inherit from these, so nothing else is needed here. See the :root
+   note above. */
+html[data-mode="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --panel: #f6f6f6;
+  --surface-raised: #ffffff;
+  --surface: #ebebeb;
+  --surface-hover: #dcdcdc;
+  --text: #1c1c1e;
+  --text-muted: #55555b;
+  --text-dim: #78787e;
+  --text-faint: #9a9aa0;
+  --danger: #c81e1e;
 }
 
 html,
@@ -332,6 +365,16 @@ body.platform-mac #tabs {
   background: var(--surface-hover);
 }
 
+/* The dropdown card is white (--surface-raised), so the shared --surface-hover
+   (tuned to read against the gray panels) lands as a heavier-than-needed jump
+   here, and it's the ground for the hovered row's accent-dim subtitle. A lighter
+   gray softens the hover and gives that text more room. Light mode only — the
+   dark hover already sits fine on the dark card. */
+html[data-mode="light"] .search-result:hover,
+html[data-mode="light"] .search-result.active {
+  background: #e6e6e6;
+}
+
 .search-result .search-icon {
   flex: none;
   align-self: center;
@@ -421,6 +464,18 @@ body.platform-mac #tabs {
   /* A long playlist list scrolls rather than running off-screen. */
   max-height: 60vh;
   overflow-y: auto;
+}
+
+/* Light-mode elevation for the floating cards (search dropdown + context menus
+   and their flyouts). In dark mode a raised surface lifts by being LIGHTER than
+   the near-black bg; in light mode --surface-raised is the same white as --bg,
+   so there's no tonal step and the card only has the shadow — and a 0.4 black
+   shadow tuned for pure black reads as a muddy smear on white. So lift with an
+   edge instead: a hairline border plus a softer, tighter shadow. */
+html[data-mode="light"] #search-results,
+html[data-mode="light"] .context-menu {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
 }
 
 .context-menu-item {
@@ -825,7 +880,7 @@ body.platform-mac #tabs {
   align-items: center;
   font-variant-numeric: tabular-nums;
   /* Same muted gray as the Songs list and browse tree track numbers. */
-  color: #666;
+  color: var(--text-faint);
   font-size: 0.9em;
 }
 
@@ -2037,7 +2092,7 @@ ul {
   width: 1.375em;
   font-size: 0.8em;
   font-variant-numeric: tabular-nums;
-  color: #666;
+  color: var(--text-faint);
 }
 
 /* Match the Songs list's centered gutter: nudge every gutter glyph left (with an
@@ -2124,16 +2179,17 @@ ul {
 }
 
 /* Pressed: with no hover state to build on, the feedback lives on the triangle
-   itself. It dips inward (scale) and pops to full white — on the dark UI, going
-   brighter and smaller reads as a tangible push, where darkening would just
-   recede into the background. The centering translate is preserved alongside the
-   scale. Snaps back on release. */
+   itself. It dips inward (scale) and pops to the foreground color — near-white on
+   the dark UI, near-black on light — so it brightens (dark) or darkens (light)
+   against its backdrop; either way it reads as a tangible push, where matching the
+   backdrop would recede. The centering translate is preserved alongside the scale.
+   Snaps back on release. */
 .row-play:active {
   transform: translate(-50%, -50%) scale(0.82);
 }
 
 .row-play:active::before {
-  background-color: #fff;
+  background-color: var(--text);
 }
 
 /* On row hover the gutter number gives way to the play button. */
@@ -2304,8 +2360,118 @@ ul {
   outline-color: var(--danger);
 }
 
+/* The match-system toggle above the theme groups: a native checkbox + label,
+   tinted to the accent so it reads as part of the themed UI. */
+.theme-match-system {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  margin-bottom: 0.6em;
+  font-size: 0.9em;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.theme-match-system input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* The appearance picker: a Dark group stacked over a Light group, each a row of
+   preview cards. A card previews the accent on the mode's real black/white ground
+   (--card-bg), so both modes read truthfully side by side. Selecting one recolors
+   the app; see renderThemePicker in src/main.ts. */
+.theme-swatches {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9em;
+}
+
+.theme-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5em;
+  margin-bottom: 0.5em;
+  font-size: 0.75em;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.theme-group-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75em;
+}
+
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+/* The black/white ground the accent sits on — the "fuller preview". */
+.theme-card-preview {
+  width: 56px;
+  height: 40px;
+  border-radius: 10px;
+  box-sizing: border-box;
+  background: var(--card-bg);
+  border: 2px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The two accents as concentric circles: --card-accent-dim is the outer ring,
+   --card-accent the inner core, so the brighter primary reads as the center. */
+.theme-card-ring {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--card-accent-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.theme-card-core {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--card-accent);
+}
+
+/* Selection ring in the app's live accent, sat flush at the tile's edge. The
+   separation from the swatch's own black/white ground is made on the INSIDE: the
+   border (drawn inside the border-box) becomes a gap ring in the live appearance's
+   background color, so a selected dark tile under light mode shows accent → white →
+   black. Keying the outline to --accent (not --card-accent) keeps every ring the
+   same, reliably contrasty color — so a selected dark tile reads as clearly as a
+   light one. */
+.theme-card.active .theme-card-preview {
+  border-color: var(--bg);
+  outline: 2.5px solid var(--accent);
+  outline-offset: 0;
+}
+
+.theme-card.active {
+  color: var(--text);
+}
+
+.theme-card-label {
+  font-size: 0.8em;
+  letter-spacing: 0.02em;
+}
+
 #settings-panel .credit {
-  margin-top: 2em;
+  margin-top: 1em;
   font-size: 0.8em;
   color: var(--text-muted);
   opacity: 0.6;
@@ -2715,7 +2881,7 @@ ul {
   margin-right: 0.25em;
   font-variant-numeric: tabular-nums;
   /* Same muted gray as the browse tree's track numbers (.icon.track). */
-  color: #666;
+  color: var(--text-faint);
   font-size: 0.85em;
 }
 /* Look and feel live in the shared .row-play rules; this gutter only reveals the

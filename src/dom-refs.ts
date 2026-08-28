@@ -37,6 +37,8 @@ export let libraryRootsContainer: HTMLElement;
 export let libraryRootAddBtn: HTMLButtonElement;
 export let streamListPathInput: HTMLInputElement;
 export let streamListPathBrowseBtn: HTMLButtonElement;
+export let themeMatchSystemEl: HTMLInputElement;
+export let themeSwatchesEl: HTMLElement;
 export let miniplayerBtn: HTMLButtonElement;
 export let settingsBackBtn: HTMLButtonElement;
 export let playbackModesEl: HTMLElement;
@@ -93,6 +95,8 @@ export function bindDom(): void {
   libraryRootAddBtn = document.querySelector("#library-root-add") as HTMLButtonElement;
   streamListPathInput = document.querySelector("#stream-list-path") as HTMLInputElement;
   streamListPathBrowseBtn = document.querySelector("#stream-list-path-browse") as HTMLButtonElement;
+  themeMatchSystemEl = document.querySelector("#theme-match-system") as HTMLInputElement;
+  themeSwatchesEl = document.querySelector("#theme-swatches") as HTMLElement;
   miniplayerBtn = document.querySelector("#miniplayer-btn") as HTMLButtonElement;
   settingsBackBtn = document.querySelector("#settings-back-btn") as HTMLButtonElement;
   playbackModesEl = document.querySelector("#playback-modes") as HTMLElement;

@@ -205,6 +205,18 @@
               <button type="button" id="stream-list-path-browse">Choose…</button>
             </div>
           </div>
+          <div class="setting">
+            <label>Theme</label>
+            <label class="theme-match-system">
+              <input type="checkbox" id="theme-match-system" />
+              <span>Match system light / dark mode</span>
+            </label>
+            <!-- A Dark group and a Light group of preview cards, rendered by
+                 renderThemePicker in src/main.ts. Off: one card selected across
+                 both groups pins the mode. On: one per group, auto-swapping with
+                 the OS. -->
+            <div id="theme-swatches" class="theme-swatches"></div>
+          </div>
           <p class="credit">vibed by the best<br/><a href="https://incompl.com">incompl.com</a></p>
         </div>
       </section>

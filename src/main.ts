@@ -115,7 +115,8 @@ import {
   nowPlayingPanel,
   settingsPanel,
   splitterEl,
-
+  themeMatchSystemEl,
+  themeSwatchesEl,
 
   queueListEl,
   queueCloseBtn,
@@ -189,6 +190,18 @@ import {
   loadAllPlaylists,
 } from "./playlists";
 import { app } from "./state";
+import {
+  type ThemeMode,
+  MODE_BG,
+  accentIdFor,
+  effectiveMode,
+  loadThemeSettings,
+  setAccentFor,
+  setThemeMode,
+  setupTheme,
+  themeMode,
+  themesForMode,
+} from "./theme";
 
 const STORE_FILE = "settings.json";
 export const KEY_LIBRARY_ROOTS = "libraryRoots";
@@ -1574,6 +1587,17 @@ function setupSettings(): void {
       ?.addEventListener("click", () => { settingsOpen.value = true; });
   }
 
+  // Match-system checkbox: on = mode "system" (dark + light auto-swap with the
+  // OS); off pins the appearance to whichever mode is currently live.
+  themeMatchSystemEl.addEventListener("change", () => {
+    setThemeMode(themeMatchSystemEl.checked ? "system" : effectiveMode());
+  });
+  effect(() => {
+    themeMatchSystemEl.checked = themeMode.value === "system";
+  });
+  // The picker (both groups), rebuilt on any mode / OS-scheme / accent change.
+  effect(renderThemePicker);
+
   // External links must go to the OS browser, not navigate the webview.
   document.addEventListener("click", (e) => {
     const link = (e.target as Element).closest?.("a[href^='http']");
@@ -1581,6 +1605,57 @@ function setupSettings(): void {
     e.preventDefault();
     void openUrl(link.href);
   });
+}
+
+// Render the appearance picker: a Dark group and a Light group, each a row of
+// preview cards showing the accent on that mode's real black/white ground (see
+// the .theme-card CSS). Selection follows the match-system checkbox — when
+// matching, each group keeps its own selection (dark + light auto-swap with the
+// OS) and the live one is marked; when not, a single card is selected across both
+// groups and its group is the pinned mode. Reads themeMode + effectiveMode (the
+// OS scheme) + both accents, so the effect re-runs on any of them.
+function renderThemePicker(): void {
+  const isSystem = themeMode.value === "system";
+  const live = effectiveMode();
+  themeSwatchesEl.innerHTML = "";
+  for (const mode of ["dark", "light"] as const) {
+    const selectedId = isSystem || mode === live ? accentIdFor(mode) : null;
+    const head = h("div", { class: "theme-group-head" }, mode === "dark" ? "Dark" : "Light");
+    const row = h("div", { class: "theme-group-row" });
+    for (const t of themesForMode(mode)) {
+      const isActive = t.id === selectedId;
+      row.appendChild(
+        h(
+          "button",
+          {
+            class: "theme-card" + (isActive ? " active" : ""),
+            attrs: { type: "button", title: t.name, "aria-pressed": isActive },
+            style: {
+              "--card-bg": MODE_BG[mode],
+              "--card-accent": t.accent,
+              "--card-accent-dim": t.accentDim,
+            },
+            on: { click: () => selectTheme(mode, t.id) },
+          },
+          h(
+            "span",
+            { class: "theme-card-preview" },
+            h("span", { class: "theme-card-ring" }, h("span", { class: "theme-card-core" })),
+          ),
+          h("span", { class: "theme-card-label", text: t.name }),
+        ),
+      );
+    }
+    themeSwatchesEl.appendChild(h("div", { class: "theme-group" }, head, row));
+  }
+}
+
+// Clicking a card sets that mode's accent. When not matching system, it also pins
+// the appearance to that card's mode — so choosing a light card switches the app
+// to light without touching the checkbox.
+function selectTheme(mode: ThemeMode, id: string): void {
+  setAccentFor(mode, id);
+  if (themeMode.value !== "system") setThemeMode(mode);
 }
 
 function setupPlayerControls(): void {
@@ -2209,6 +2284,12 @@ async function init(): Promise<void> {
   const storedRepeat = await app.store.get<RepeatMode>(KEY_REPEAT);
   repeatMode.value =
     storedRepeat === "all" || storedRepeat === "one" ? storedRepeat : "off";
+
+  // Appearance: read the persisted mode + per-mode accents, then wire the apply
+  // effect + OS-scheme listener. applyTheme runs immediately (first effect pass),
+  // painting the saved theme before setupSettings renders the swatch row.
+  await loadThemeSettings();
+  setupTheme();
 
   // Keep the Playback-menu checkmarks in sync with the frontend's own state —
   // these effects fire on load (syncing the persisted values) and after any
