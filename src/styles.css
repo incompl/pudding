@@ -545,6 +545,33 @@ html[data-mode="light"] .context-menu {
   min-height: 0;
 }
 
+/* About shares the right pane with Settings, but centers its short content
+   (name/version + credit) the way now-playing-main does. */
+#about-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 1em;
+  text-align: center;
+}
+
+#about-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6em;
+}
+
+.about-version {
+  font-size: 1.1em;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
 #now-playing-main {
   flex: 1;
   display: flex;
@@ -1431,10 +1458,11 @@ html[data-mode="light"] .context-menu {
     height: 26px;
   }
 
-  /* Settings is unreachable in mini (its button is hidden), so force the
-     now-playing panel visible even if settings was open when the window
-     shrank. ID beats the .hidden class, so no !important war with the toggle. */
-  #settings-panel {
+  /* Settings/About are unreachable in mini (their button is hidden), so force
+     the now-playing panel visible even if one was open when the window shrank.
+     ID beats the .hidden class, so no !important war with the toggle. */
+  #settings-panel,
+  #about-panel {
     display: none !important;
   }
   #now-playing-panel {
@@ -2460,16 +2488,16 @@ ul {
   letter-spacing: 0.02em;
 }
 
-#settings-panel .credit {
-  margin-top: 1em;
+#about-panel .credit {
   font-size: 0.8em;
   color: var(--text-muted);
   opacity: 0.6;
   letter-spacing: 0.02em;
   text-align: center;
+  margin: 0;
 }
 
-#settings-panel .credit a {
+#about-panel .credit a {
   color: var(--accent);
   text-decoration: none;
 }

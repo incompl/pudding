@@ -126,6 +126,9 @@ export const currentStreamUrl = signal<string | null>(null);
 export const selectedStreamUrl = signal<string | null>(null);
 
 export const settingsOpen = signal(false);
+// The About panel shares the right pane with Settings (mutually exclusive: the
+// same Back button dismisses either). Opened from Pudding → About Pudding.
+export const aboutOpen = signal(false);
 export const activeTab = signal<"files" | "streams">("files");
 
 // The playing *source* as a navigable list: an ephemeral queue (Play

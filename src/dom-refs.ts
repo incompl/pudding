@@ -49,6 +49,8 @@ export let searchInput: HTMLInputElement;
 export let searchResultsEl: HTMLElement;
 export let nowPlayingPanel: HTMLElement;
 export let settingsPanel: HTMLElement;
+export let aboutPanel: HTMLElement;
+export let aboutVersionEl: HTMLElement;
 export let splitterEl: HTMLElement;
 export let queueTitleEl: HTMLElement;
 export let queueSubtitleEl: HTMLElement;
@@ -108,6 +110,8 @@ export function bindDom(): void {
   nowPlayingPanel = document.querySelector("#now-playing-panel") as HTMLElement;
   paneEditorView = document.querySelector("#pane-editor-view") as HTMLElement;
   settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
+  aboutPanel = document.querySelector("#about-panel") as HTMLElement;
+  aboutVersionEl = document.querySelector("#about-version") as HTMLElement;
   splitterEl = document.querySelector("#splitter") as HTMLElement;
   queueTitleEl = document.querySelector("#queue-title-text") as HTMLElement;
   queueSubtitleEl = document.querySelector("#queue-subtitle") as HTMLElement;

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import {
   getCurrentWindow,
@@ -49,6 +50,7 @@ import {
   currentStreamUrl,
   selectedStreamUrl,
   settingsOpen,
+  aboutOpen,
   activeTab,
   activeQueue,
   browsedPlaylist,
@@ -114,6 +116,8 @@ import {
   searchEl,
   nowPlayingPanel,
   settingsPanel,
+  aboutPanel,
+  aboutVersionEl,
   splitterEl,
   themeMatchSystemEl,
   themeSwatchesEl,
@@ -1575,9 +1579,19 @@ async function setupWindowSize(
 function setupSettings(): void {
   // Settings opens from the native application menu (Pudding → Settings…, ⌘,),
   // which emits "open-settings"; the topbar's old gear is now the mini-player
-  // toggle. The Back button in the panel returns to now-playing.
-  void listen("open-settings", () => { settingsOpen.value = true; });
-  settingsBackBtn.addEventListener("click", () => { settingsOpen.value = false; });
+  // toggle. About (Pudding → About Pudding) shares the pane and emits
+  // "open-about". Opening one closes the other; the single Back button dismisses
+  // whichever is up, returning to now-playing.
+  void listen("open-settings", () => { aboutOpen.value = false; settingsOpen.value = true; });
+  void listen("open-about", () => { settingsOpen.value = false; aboutOpen.value = true; });
+  settingsBackBtn.addEventListener("click", () => {
+    settingsOpen.value = false;
+    aboutOpen.value = false;
+  });
+
+  // The About panel's main line is "pudding <version>"; the version is the app
+  // version from tauri.conf.json, read via the Tauri app API.
+  void getVersion().then((v) => { aboutVersionEl.textContent = `pudding ${v}`; });
 
   // The get-started prompts' inline "settings" links (Files: no library root,
   // Streams: no stream list path) open the settings panel.
@@ -2105,23 +2119,29 @@ function setupEffects(): void {
   });
 
   effect(() => {
-    const open = settingsOpen.value;
-    settingsPanel.classList.toggle("hidden", !open);
-    nowPlayingPanel.classList.toggle("hidden", open);
-    miniplayerBtn.classList.toggle("hidden", open);
-    settingsBackBtn.classList.toggle("hidden", !open);
-    // Search targets the library/streams, not settings — hide it here too so the
-    // whole action cluster (search + mode toggles) clears out together rather
+    const settings = settingsOpen.value;
+    const about = aboutOpen.value;
+    // Settings and About are mutually exclusive faces of the right pane, both
+    // dismissed by the same Back button. Anything that yields the pane to a
+    // panel keys off whether *either* is open.
+    const panelOpen = settings || about;
+    settingsPanel.classList.toggle("hidden", !settings);
+    aboutPanel.classList.toggle("hidden", !about);
+    nowPlayingPanel.classList.toggle("hidden", panelOpen);
+    miniplayerBtn.classList.toggle("hidden", panelOpen);
+    settingsBackBtn.classList.toggle("hidden", !panelOpen);
+    // Search targets the library/streams, not these panels — hide it here too so
+    // the whole action cluster (search + mode toggles) clears out together rather
     // than leaving a lone search box beside the Back button.
-    searchEl.classList.toggle("hidden", open);
+    searchEl.classList.toggle("hidden", panelOpen);
   });
 
   // The playback-mode toggles only act on the files queue, but we keep them
   // visible in the streams view too: they take little space, do no harm there,
   // and leaving them put avoids shuffling the search box as tabs switch. Only
-  // settings hides them.
+  // the settings/about panels hide them.
   effect(() => {
-    playbackModesEl.classList.toggle("hidden", settingsOpen.value);
+    playbackModesEl.classList.toggle("hidden", settingsOpen.value || aboutOpen.value);
   });
 
   effect(() => {

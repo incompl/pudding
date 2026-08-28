@@ -16,7 +16,7 @@ use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileI
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{
-    AboutMetadataBuilder, CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem,
+    CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem,
     MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder,
 };
 use tauri::{AppHandle, Emitter, Manager, State, Wry};
@@ -1976,6 +1976,9 @@ pub fn run() {
                 "open-settings" => {
                     let _ = app.emit("open-settings", ());
                 }
+                "open-about" => {
+                    let _ = app.emit("open-about", ());
+                }
                 // Transport items. The frontend owns playback, so these just
                 // relay the intent; Previous/Next carry ⌘←/⌘→ accelerators, which
                 // also serve to surface the shortcuts in the menu.
@@ -2101,17 +2104,11 @@ pub fn run() {
                 deliver_open_file(&app.handle(), path);
             }
 
-            // The native macOS About panel only renders name/version/copyright
-            // and the credits string, so the developer name + URL go in credits
-            // (authors/website are still set for the Win/Linux about dialog).
-            let about = AboutMetadataBuilder::new()
-                .name(Some("Pudding"))
-                .version(Some(env!("CARGO_PKG_VERSION")))
-                .copyright(Some("© 2026 Greg Smith"))
-                .authors(Some(vec!["Greg Smith".into()]))
-                .website(Some("https://incompl.com"))
-                .website_label(Some("incompl.com"))
-                .build();
+            // About opens our own in-app About panel (name/version + credit) in
+            // the right pane, matching Settings, rather than the native macOS
+            // About dialog. Selecting it emits "open-about" for the frontend.
+            let about_item = MenuItemBuilder::with_id("open-about", "About Pudding")
+                .build(app)?;
 
             // App settings live under the standard macOS Preferences slot
             // (Pudding → Settings…, ⌘,). Selecting it emits "open-settings",
@@ -2121,7 +2118,7 @@ pub fn run() {
                 .build(app)?;
 
             let app_menu = SubmenuBuilder::new(app, "Pudding")
-                .about(Some(about))
+                .item(&about_item)
                 .separator()
                 .item(&settings_item)
                 .separator()
