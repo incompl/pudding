@@ -82,3 +82,5 @@ Remaining:
   users hit the block often.
 
 ### Virtualize lists
+
+### Move about info to custom about page

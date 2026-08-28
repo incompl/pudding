@@ -365,16 +365,6 @@ body.platform-mac #tabs {
   background: var(--surface-hover);
 }
 
-/* The dropdown card is white (--surface-raised), so the shared --surface-hover
-   (tuned to read against the gray panels) lands as a heavier-than-needed jump
-   here, and it's the ground for the hovered row's accent-dim subtitle. A lighter
-   gray softens the hover and gives that text more room. Light mode only — the
-   dark hover already sits fine on the dark card. */
-html[data-mode="light"] .search-result:hover,
-html[data-mode="light"] .search-result.active {
-  background: #e6e6e6;
-}
-
 .search-result .search-icon {
   flex: none;
   align-self: center;

@@ -27,57 +27,22 @@ export interface AccentTheme {
   accentDim: string; // --accent-dim (hovers, seek track, disabled, live pulse)
 }
 
-// The dark accent set. Pistachio + Grape share the original saturation/lightness
-// (accent ≈ HSL S49% L65%, dim ≈ S28% L45%), rotating only the hue — green ~79°,
-// purple ~275°. Dreamcicle is pushed brighter and more saturated than that base
-// (a creamy, vivid "dreamsicle" orange rather than a muted tan). Tweak visually.
 export const DARK_THEMES: AccentTheme[] = [
   { id: "pistachio", name: "Pistachio", accent: "#b5d17a", accentDim: "#7e9152" },
   { id: "dreamcicle", name: "Dreamcicle", accent: "#f5a966", accentDim: "#be7637" },
-  // Blackberry, Blueberry, and Strawberry were repunched (2026-08-27) to match
-  // the vividness of Pistachio/Dreamcicle/Banana — the earlier pale-pastel base
-  // read drab/grayish next to them. Each keeps its hue but is pushed to high
-  // saturation with a richer (more saturated) dim: Blackberry violet ~280°
-  // (accent ≈ S80% L68%, hue nudged toward magenta + saturation raised for more
-  // pop), Blueberry an azure ~207° (accent ≈ S95% L62%, saturation near max — a
-  // "pure" blue reads dark and slate, so leaning toward cyan is what makes it
-  // pop; dialed to just shy of crossing into teal), Strawberry
-  // berry-red ~352° (accent ≈ S80% L68%). Banana, like Dreamcicle, is a bright
-  // creamy yellow ~46°.
-  { id: "blackberry", name: "Blackberry", accent: "#c36cef", accentDim: "#8834b2" },
-  { id: "blueberry", name: "Blueberry", accent: "#42a7fa", accentDim: "#257bc1" },
+  { id: "blackberry", name: "Blackberry", accent: "#db6bf4", accentDim: "#a94fc0" },
+  { id: "blueberry", name: "Blueberry", accent: "#3ea9ff", accentDim: "#217fcb" },
   { id: "banana", name: "Banana", accent: "#f0d375", accentDim: "#b19843" },
-  { id: "strawberry", name: "Strawberry", accent: "#ef6c7e", accentDim: "#b23444" },
+  { id: "strawberry", name: "Strawberry", accent: "#ef6c7e", accentDim: "#c14858" },
 ];
 
-// The light accent set — its own gemstone-named themes, distinct from the dark
-// set. Recipe (repunched 2026-08-27 to match Ruby): Ruby's electric raspberry
-// (accent ≈ S92% L54%, dim the same hue dropped to ≈ S76% L38%) set the bar, and
-// the earlier themes read muted/dark beside it. Each now keeps its own hue but is
-// pushed to Ruby's punch — near-max saturation at a bright, vivid lightness for
-// --accent, paired with a same-hue darker --accent-dim (in light mode --accent-dim
-// is text-only: active search subtitle, link hover, playing-node subtitle, so it
-// stays deep enough to read crisply on white while remaining legibly *colored*).
-// --accent also doubles as on-white text (Back button, tab labels), and green
-// reads perceptually lighter, so Emerald sits notably darker than the others to
-// stay legible as text — that ~3:1 on-white contrast is its electric ceiling;
-// brighter greens stop reading as text on white. Sapphire is kept saturated by
-// holding lightness down (raising it lifts the red channel and washes it pastel).
-// Hues: Emerald ~158°, Sunstone orange ~26°, Amethyst
-// violet ~274°, Sapphire electric blue ~227°, Ruby raspberry ~345°. Coffee is the
-// exception — an "electric brown" just reads muddy, so it's two warm browns tuned
-// by eye. Unlike the others (which pair one hue light+dark), Coffee deliberately
-// SPLITS the two hues for a "brown and tan" read: a golden tan core/accent ~32°
-// against a deep red-chocolate ring/dim ~18°, ~14° apart instead of ~1°. Accent
-// stays dark enough (L~38%, ~5:1 on white) to keep working as on-white text.
-// Tweak visually.
 export const LIGHT_THEMES: AccentTheme[] = [
-  { id: "emerald", name: "Emerald", accent: "#00a86b", accentDim: "#007a4f" },
-  { id: "sunstone", name: "Sunstone", accent: "#ff740a", accentDim: "#b25811" },
-  { id: "amethyst", name: "Amethyst", accent: "#9c2af4", accentDim: "#701ab3" },
+  { id: "emerald", name: "Emerald", accent: "#00a86b", accentDim: "#007a4e" },
+  { id: "sunstone", name: "Sunstone", accent: "#ff740a", accentDim: "#c55a08" },
+  { id: "amethyst", name: "Amethyst", accent: "#a32bff", accentDim: "#701ab3" },
   { id: "sapphire", name: "Sapphire", accent: "#0a3dff", accentDim: "#1334ae" },
   { id: "coffee", name: "Coffee", accent: "#966428", accentDim: "#673018" },
-  { id: "ruby", name: "Ruby", accent: "#f61d52", accentDim: "#ab1741" },
+  { id: "ruby", name: "Ruby", accent: "#f61d52", accentDim: "#c31641" },
 ];
 
 // The neutral background each mode paints (styles.css :root --bg for dark, the
