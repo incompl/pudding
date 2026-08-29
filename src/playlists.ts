@@ -21,6 +21,7 @@ import {
   clearActiveQueue,
   isPlaylistSource,
   openPlaylistPath,
+  dismissRightPanel,
   app,
 } from "./state";
 import { refreshLibrary } from "./library";
@@ -160,6 +161,9 @@ export async function browsePlaylistPath(path: string): Promise<void> {
   // playlist whose files can't be resolved doesn't collapse to near-nothing.
   // Playback (playPlaylist / Add to queue) still filters missing.
   const tracks = playlistViewTracks(data);
+  // The read succeeded and we're committing to show the browse in the pane; a
+  // failed read above bails without a pane change, so it leaves any panel up.
+  dismissRightPanel();
   browsedPlaylist.value = {
     kind: "playlist",
     title: data.name,

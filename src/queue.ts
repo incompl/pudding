@@ -29,6 +29,7 @@ import {
   openActiveQueue,
   clearActiveQueue,
   showSourceList,
+  dismissRightPanel,
 } from "./state";
 import {
   queueListEl,
@@ -687,6 +688,9 @@ export function armQueueAtRest(tracks: SearchTrack[]): void {
 // so the appended rows are visible, rather than flashing a toast.
 export function addToQueue(tracks: SearchTrack[]): void {
   if (tracks.length === 0) return;
+  // Every add reveals the list face, so a queued-behind panel would hide the
+  // result — snap back to the pane.
+  dismissRightPanel();
   if (!activeQueue.value) {
     if (hasTrack.value && currentNodePath.value && !isStream.value) {
       seedQueueFromCurrent();

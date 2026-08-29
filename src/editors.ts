@@ -17,6 +17,7 @@ import {
   currentNodePath,
   browsedPlaylist,
   activeQueue,
+  dismissRightPanel,
 } from "./state";
 import { paneEditorView, queueTitleEl } from "./dom-refs";
 import { reloadNavView } from "./library-nav";
@@ -168,6 +169,9 @@ export function closePaneEditor(): void {
 
 // Mount `form` as the editor face and reveal it. `kind` tags which editor is up.
 export function openPaneEditor(kind: "metadata" | "stream", form: HTMLElement): void {
+  // The editor mounts as a face of the right pane, which a Settings/About panel
+  // would otherwise cover — reveal the pane so the editor is visible.
+  dismissRightPanel();
   paneEditorView.replaceChildren(form);
   paneEditor.value = kind;
 }

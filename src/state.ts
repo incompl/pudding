@@ -129,6 +129,18 @@ export const settingsOpen = signal(false);
 // The About panel shares the right pane with Settings (mutually exclusive: the
 // same Back button dismisses either). Opened from Pudding → About Pudding.
 export const aboutOpen = signal(false);
+
+// Snap the right pane back to Now Playing, dismissing whichever panel face
+// (Settings or About) is up. Called from the user gestures that change what the
+// pane would show — playing a track, manual skip, changing the queue, browsing a
+// playlist, opening an editor — so the result of the action is revealed instead
+// of staying hidden behind a panel. Deliberately NOT called on autoadvance (a
+// track ending into the next) or on shuffle/repeat toggles: those leave an open
+// panel up. Idempotent.
+export function dismissRightPanel(): void {
+  settingsOpen.value = false;
+  aboutOpen.value = false;
+}
 export const activeTab = signal<"files" | "streams">("files");
 
 // The playing *source* as a navigable list: an ephemeral queue (Play
