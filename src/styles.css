@@ -2688,7 +2688,6 @@ ul {
   margin-top: -0.1em;
   z-index: 1;
   background: var(--panel);
-  color: var(--text-muted);
   font: inherit;
   text-align: left;
   cursor: pointer;
