@@ -44,3 +44,9 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
   just keep it as a hard action outside undo).
 
 ### Virtualize lists
+
+### Search should no longer auto play
+
+### Replace context menu "play artist" and "play album" with "go to"
+
+### Doing anything that changes right panel should dismiss settings/about
