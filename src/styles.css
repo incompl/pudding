@@ -1980,6 +1980,15 @@ ul {
   transition: background 120ms ease;
 }
 
+/* Reveal (search "Go to folder") uses scrollIntoView({block:"start"}); this
+   keeps the folder row from parking UNDER the sticky Browse back-bar, which is
+   opaque and would otherwise cover it (showing the folder's tracks instead).
+   Sized to the bar's box (its 1.5em min-height + 0.5em vertical padding) so the
+   row lands flush just below it. Browse-only: #streams-list has no sticky bar. */
+#folder-tree .node-label {
+  scroll-margin-top: 2em;
+}
+
 #folder-tree .node-label:hover,
 #streams-list .node-label:hover {
   background: var(--surface);

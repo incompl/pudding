@@ -15,16 +15,17 @@ import { activeTab, app } from "./state";
 import { searchResultsEl, searchInput } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
 import {
-  openArtistQueue,
-  openAlbumQueue,
+  goToArtist,
+  goToAlbum,
+  goToFolder,
   persistActiveTab,
   libraryRootPaths,
   searchItemTrackProvider,
   addToPlaylistItem,
   debounce,
 } from "./main";
-import { playPlaylistPath } from "./playlists";
-import { playFolder, playSearchTrack, playStream } from "./playback";
+import { browsePlaylistPath } from "./playlists";
+import { playSearchTrack, playStream } from "./playback";
 
 function searchLabel(t: SearchTrack): { primary: string; secondary: string } {
   const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
@@ -61,21 +62,22 @@ export function setupSearch(): void {
 
   function choose(item: SearchItem): void {
     if (item.kind === "artist") {
-      void openArtistQueue(item.artist.name);
+      // Collection hits GO TO their detail view (switching to the Files tab and
+      // drilling) rather than playing — the navigator now has a place to land,
+      // and play happens from there. Leaf hits (a single file, a stream) have no
+      // detail view, so they still play.
+      goToArtist(item.artist.name);
     } else if (item.kind === "album") {
-      void openAlbumQueue(item.album.album, item.album.artist);
+      goToAlbum(item.album.album, item.album.artist);
     } else if (item.kind === "folder") {
-      // Play into the queue without touching the left panel — no tab switch or
-      // scroll, so a search never yanks you away from where you were browsing.
-      void playFolder(item.folder);
+      // Reveal the folder in the Browse tree (expand + scroll to it).
+      goToFolder(item.folder.path);
     } else if (item.kind === "file") {
       playSearchTrack(item.track);
     } else if (item.kind === "playlist") {
-      // Choosing a playlist plays it, consistent with every other search hit
-      // (there's no single/double-click split in search, so a choice is a play,
-      // not the tree's browse). It opens as the playing source and starts from
-      // the first track; preview-only browsing lives in the tree.
-      void playPlaylistPath(item.playlist.path);
+      // Open the playlist in the right pane — the same "go to" the navigator's
+      // single-click does — not play it (that's the double-click / Play menu).
+      void browsePlaylistPath(item.playlist.path);
     } else {
       activeTab.value = "streams";
       void persistActiveTab();

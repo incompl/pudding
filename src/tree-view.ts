@@ -296,10 +296,10 @@ function renderNode(
       ]);
     });
   } else {
-    // Right-click a track to jump to its artist or album as a queue page. Each
-    // item is only offered when that tag exists. An untagged track (common for
-    // OST rips named purely by filename) has neither, so fall back to "Play
-    // folder" on its containing folder — right-click always does something.
+    // Right-click a track to go to its artist or album detail view. Each item is
+    // only offered when that tag exists. An untagged track (common for OST rips
+    // named purely by filename) has neither, so fall back to "Play folder" on its
+    // containing folder — right-click always does something.
     label.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       // Finder-style: right-clicking a row outside the current selection makes it
@@ -312,7 +312,7 @@ function renderNode(
       const sel = selectedTracks();
       const items: ContextMenuItem[] = [];
       if (sel.length > 1) {
-        // Multi-select: the per-track navigation verbs (Play artist/album) don't
+        // Multi-select: the per-track navigation verbs (Go to artist/album) don't
         // apply to a heterogeneous set, so offer only the list-building verbs,
         // acting on every selected track. Count in the label confirms the scope.
         items.push({ label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) });
@@ -320,10 +320,10 @@ function renderNode(
         // revealItemInDir takes one path; reveal the first selected track.
         items.push(showInFinderItem(sel[0].path));
       } else {
-        // The Play verbs lead — the navigation verbs (Play artist / Play album)
-        // when their tags exist, else "Play folder" on the container for an
-        // untagged track (which has neither) so right-click always does something.
-        // "Add to queue" always comes last, matching the folder menu's order.
+        // The navigation verbs lead — Go to artist / Go to album when their tags
+        // exist, else "Play folder" on the container for an untagged track (which
+        // has neither) so right-click always does something. "Add to queue" always
+        // comes last, matching the folder menu's order.
         const nav = trackContextItems({
           artist: node.artist,
           album: node.album,
@@ -493,6 +493,56 @@ export function playSelectedRow(): boolean {
     return false;
   }
   return false;
+}
+
+// Whether `folderPath` is `target` or one of its ancestors — the descent test
+// for revealFolderInTree. Separator-agnostic (accepts both / and \) so it holds
+// on either platform without importing the path joiner.
+function isAncestorOrSelf(folderPath: string, target: string): boolean {
+  return (
+    target === folderPath ||
+    target.startsWith(folderPath + "/") ||
+    target.startsWith(folderPath + "\\")
+  );
+}
+
+// Reveal a folder in the Browse tree: expand every ancestor from the root down
+// (loading each lazily), expand the target itself so its contents show, then
+// scroll it into view. Backs the search hit's "Go to folder" — the caller has
+// already switched to the Files tab and entered the Browse lens (which un-hides
+// this tree). A path that isn't under the library resolves to nothing and just
+// leaves the tree where it was.
+export async function revealFolderInTree(path: string): Promise<void> {
+  const root = app.rootNode;
+  if (!root) return;
+  let node: TreeNode = root;
+  // Descend toward the target, loading + expanding each ancestor on the way.
+  while (node.path !== path) {
+    if (!node.loaded) await fetchChildren(node);
+    const next = node.children.find(
+      (c) => c.isFolder && isAncestorOrSelf(c.path, path),
+    );
+    if (!next) break; // not under the library, or a stale/removed folder
+    if (next.path !== path) next.expanded = true;
+    node = next;
+  }
+  // Expand the target so arriving shows its tracks, not just a collapsed row.
+  if (node.path === path) {
+    if (!node.loaded) await fetchChildren(node);
+    node.expanded = true;
+  }
+  renderTree();
+  // Defer a frame: switching to the Files tab un-hides this pane via a reactive
+  // effect that flushes after this call, and expanding the ancestors reflows the
+  // rows above the target — so the target's position isn't final until now.
+  // scroll-margin-top on the row (see styles.css) offsets block:"start" past the
+  // sticky Browse back-bar, so the folder row lands just below it rather than
+  // hidden behind it.
+  requestAnimationFrame(() => {
+    treeContainer
+      .querySelector<HTMLElement>(`.node-label[data-path="${CSS.escape(path)}"]`)
+      ?.scrollIntoView({ block: "start" });
+  });
 }
 
 export function renderTree(): void {

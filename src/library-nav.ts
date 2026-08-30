@@ -124,6 +124,23 @@ function enterLens(lens: Lens): void {
   render();
 }
 
+// Jump straight to a drill location from outside (the "Go to artist/album"
+// verbs on track menus and search hits). Rebuilds the stack from `steps` — the
+// same mechanism restoreLocation uses on launch — so the steps also set the back
+// trail: [Artists, artist] lands on the artist detail with Back → Artists. The
+// caller is responsible for making the Files tab active first.
+export function navigateTo(steps: NavStep[]): void {
+  restoreLocation(steps);
+  render();
+}
+
+// The current drill location (top of the stack), or null at the root menu. Lets
+// a track menu hide a "Go to artist/album" that would just re-open the view it's
+// already sitting in (the artist/album detail lists its own tracks).
+export function currentNavStep(): NavStep | null {
+  return stack.length === 0 ? null : (stack[stack.length - 1].step ?? null);
+}
+
 // ---- views -----------------------------------------------------------------
 
 // The lens's drill view. Browse's body is empty — render() un-hides the real

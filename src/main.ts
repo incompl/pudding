@@ -12,7 +12,14 @@ import { signal, computed, effect } from "@preact/signals-core";
 import { engine } from "./engine-glue";
 import { h } from "./dom";
 import { maybeStartE2eBridge } from "./e2e-bridge";
-import { initLibraryNav, popNavToRoot, renderNav, type NavStep } from "./library-nav";
+import {
+  initLibraryNav,
+  navigateTo,
+  currentNavStep,
+  popNavToRoot,
+  renderNav,
+  type NavStep,
+} from "./library-nav";
 import type {
   TrackMeta,
   TreeNode,
@@ -140,7 +147,7 @@ import {
   browseStreamListPath,
   refreshStreams,
 } from "./library";
-import { playSelectedRow } from "./tree-view";
+import { playSelectedRow, revealFolderInTree } from "./tree-view";
 import {
   closePaneEditor,
   editMetadataItem,
@@ -914,23 +921,50 @@ export function searchItemTrackProvider(item: SearchItem): TrackProvider | null 
   }
 }
 
+// The "Go to" verbs: switch to the Files tab and drill straight to an artist,
+// album, or folder. The library navigator now hosts artist and album detail
+// views (and the Browse folder tree), so a track's menu and search hits point
+// you AT the thing rather than playing it — playing then happens from the detail
+// view. Each makes the Files tab active (persisted) before navigating.
+function goToFilesTab(): void {
+  activeTab.value = "files";
+  void persistActiveTab();
+}
+
+export function goToArtist(name: string): void {
+  goToFilesTab();
+  navigateTo([{ t: "lens", lens: "artist" }, { t: "artist", name }]);
+}
+
+export function goToAlbum(album: string, albumArtist: string): void {
+  goToFilesTab();
+  navigateTo([{ t: "lens", lens: "album" }, { t: "album", album, albumArtist }]);
+}
+
+export function goToFolder(path: string): void {
+  goToFilesTab();
+  // Browse hosts the real folder tree; show it, then expand + scroll to the target.
+  navigateTo([{ t: "lens", lens: "browse" }]);
+  void revealFolderInTree(path);
+}
+
 export function trackContextItems(track: {
   artist: string | null;
   album: string | null;
   albumArtist: string | null;
 }): ContextMenuItem[] {
+  // Suppress the verb that would just re-open the detail view we're already in:
+  // the artist/album detail lists its own tracks, so "Go to" there is a no-op.
+  const here = currentNavStep();
   const items: ContextMenuItem[] = [];
-  if (track.artist) {
+  if (track.artist && !(here?.t === "artist" && here.name === track.artist)) {
     const artist = track.artist;
-    items.push({ label: "Play artist", action: () => void openArtistQueue(artist) });
+    items.push({ label: "Go to artist", action: () => goToArtist(artist) });
   }
-  if (track.album) {
+  if (track.album && !(here?.t === "album" && here.album === track.album)) {
     const album = track.album;
     const albumArtist = track.albumArtist ?? track.artist ?? "";
-    items.push({
-      label: "Play album",
-      action: () => void openAlbumQueue(album, albumArtist),
-    });
+    items.push({ label: "Go to album", action: () => goToAlbum(album, albumArtist) });
   }
   return items;
 }
