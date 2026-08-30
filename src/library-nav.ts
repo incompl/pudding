@@ -55,9 +55,9 @@ export interface LibraryNavDeps {
   listAllAlbums: () => Promise<SearchAlbum[]>;
   listAllPlaylists: () => Promise<PlaylistRef[]>;
   artistAlbums: (artist: string) => Promise<SearchAlbum[]>;
-  // Tracks by an artist that belong to no album — listed under the albums in the
-  // artist-detail view so loose singles aren't stranded.
-  artistAlbumlessTracks: (artist: string) => Promise<SearchTrack[]>;
+  // Every track by an artist, ordered album by album — backs the "Tracks" section
+  // of the artist-detail view (a flat list of the artist's whole catalog).
+  artistTracks: (artist: string) => Promise<SearchTrack[]>;
   albumTracks: (album: string, albumArtist: string) => Promise<SearchTrack[]>;
   renderLeafTrackList: (tracks: SearchTrack[], ctx: LeafListContext) => HTMLElement;
   // A playlist row: single-click opens it in the right pane (the editable target),
@@ -346,38 +346,38 @@ function artistsView(): View {
   };
 }
 
-// Artist detail: the albums that contain a track by this artist as drill rows,
-// followed by any albumless tracks by this artist as a playable leaf list — so an
-// artist's loose singles aren't stranded (artist_albums drops them). Opening an
-// album pushes the album detail (its tracks); right-click plays / queues the
-// album. The album carries its own album-artist key (from artist_albums), so a
-// compilation this artist merely appears on drills through correctly.
+// Artist detail: the artist's albums as drill rows under an "Albums" section
+// header, then every track by the artist as a flat playable leaf list under a
+// "Tracks" header. The section headers match the Files panel elsewhere. Opening an
+// album pushes the album detail (its tracks); right-click plays / queues the album.
+// The album carries its own album-artist key (from artist_albums), so a compilation
+// this artist merely appears on drills through correctly. The Tracks list is the
+// artist's whole catalog (in-album songs included), so it deliberately overlaps the
+// albums above — a scannable "play any song without drilling" view.
 function artistDetailView(name: string): View {
-  // One heterogeneous list so the shared loading / empty / error shell still
-  // applies: album drill rows first, then a single leaf list of loose tracks.
-  type Entry =
-    | { kind: "album"; album: SearchAlbum }
-    | { kind: "loose"; tracks: SearchTrack[] };
+  // Load albums and the flat track list together so the shared loading / empty /
+  // error shell still applies, then render each under its own section header.
+  type Detail = { albums: SearchAlbum[]; tracks: SearchTrack[] };
   return {
     title: name,
     step: { t: "artist", name },
     build: () =>
-      asyncListBody<Entry>({
+      asyncListBody<Detail>({
         load: async () => {
-          const [albums, loose] = await Promise.all([
+          const [albums, tracks] = await Promise.all([
             deps.artistAlbums(name),
-            deps.artistAlbumlessTracks(name),
+            deps.artistTracks(name),
           ]);
-          const entries: Entry[] = albums.map((album) => ({ kind: "album", album }));
-          if (loose.length) entries.push({ kind: "loose", tracks: loose });
-          return entries;
+          // Single-element list: the shell treats an empty array as "empty", so
+          // return nothing when the artist has neither albums nor tracks.
+          return albums.length || tracks.length ? [{ albums, tracks }] : [];
         },
         empty: "No tracks",
         errorLabel: "artist detail load failed",
-        fill: (entries, host) => {
-          for (const entry of entries) {
-            if (entry.kind === "album") {
-              const al = entry.album;
+        fill: ([detail], host) => {
+          if (detail.albums.length) {
+            host.appendChild(h("div", { class: "nav-section", text: "Albums" }));
+            for (const al of detail.albums) {
               host.appendChild(
                 drillRow({
                   icon: "album",
@@ -390,16 +390,16 @@ function artistDetailView(name: string): View {
                   onMenu: (x, y) => deps.showAlbumMenu(x, y, al.album, al.artist),
                 }),
               );
-            } else {
-              // Loose tracks fall below the albums as a plain leaf list; the row
-              // icons distinguish them, so no section label is needed.
-              host.appendChild(
-                deps.renderLeafTrackList(entry.tracks, {
-                  title: name,
-                  syntheticPath: `queue:artist-loose:${name}`,
-                }),
-              );
             }
+          }
+          if (detail.tracks.length) {
+            host.appendChild(h("div", { class: "nav-section", text: "Tracks" }));
+            host.appendChild(
+              deps.renderLeafTrackList(detail.tracks, {
+                title: name,
+                syntheticPath: `queue:artist:${name}`,
+              }),
+            );
           }
         },
       }),

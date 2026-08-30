@@ -2426,8 +2426,8 @@ async function init(): Promise<void> {
     listAllAlbums: () => invoke<SearchAlbum[]>("list_all_albums"),
     listAllPlaylists: loadAllPlaylists,
     artistAlbums: (artist) => invoke<SearchAlbum[]>("artist_albums", { artist }),
-    artistAlbumlessTracks: (artist) =>
-      invoke<SearchTrack[]>("artist_albumless_tracks", { artist }),
+    artistTracks: (artist) =>
+      invoke<SearchTrack[]>("artist_tracks", { artist }),
     albumTracks: (album, albumArtist) =>
       invoke<SearchTrack[]>("album_tracks", { album, albumArtist }),
     renderLeafTrackList,

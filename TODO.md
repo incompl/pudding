@@ -44,7 +44,3 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
   just keep it as a hard action outside undo).
 
 ### Virtualize lists
-
-### Search should no longer auto play
-
-### Artist page: show both albums and tracks
