@@ -92,7 +92,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
             { album: "Split", artist: "Various" },
           ]
         : [{ album: "Split", artist: "Various" }],
-    artistAlbumlessTracks: async () => [],
+    artistTracks: async () => [],
     albumTracks: async () => songs,
     libraryRootSet: () => true,
     renderLeafTrackList: (_tracks, ctx) => {
