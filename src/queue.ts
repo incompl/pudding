@@ -60,7 +60,6 @@ import {
   queueIsActivePool,
   trackCountSubtitle,
   addToPlaylistItem,
-  playQueue,
   toast,
   clearArt,
   UNTITLED_PLAYLIST_TITLE,
@@ -546,8 +545,9 @@ export function insertIntoActiveQueueAt(tracks: SearchTrack[], at: number): void
 // holds only what they put in it (playing a folder track still auto-continues under
 // the hood, but that never presents as a queue). Three verbs build and grow it, split
 // by whether a *real* queue already exists (noRealQueue): with none, the sole gesture
-// is "Create queue" — a fresh queue of exactly the selection, played from scratch,
-// dragging in nothing else. Once a queue exists, "Play next" inserts after the playing
+// is "Create queue" — a fresh queue of exactly the selection, at rest (it does not
+// auto-play; press play to start it from the top), dragging in nothing else. Once a
+// queue exists, "Play next" inserts after the playing
 // row and "Add to queue" appends to the tail; both are play-later, never interrupting
 // the audible track. addToQueue and playNext both funnel the no-real-queue case
 // through createQueue, so every caller — menus, keyboard, scripting — agrees.
@@ -640,7 +640,7 @@ function noRealQueue(): boolean {
 // play-later, never interrupting the audible track. With a real queue it appends to
 // its tail. With none (nothing playing, or a playlist as the pool — a playlist is
 // never a queue) there is nothing to append to, so it defers to createQueue: a fresh
-// queue of exactly these tracks, played from scratch. Routing the no-real-queue case
+// queue of exactly these tracks, at rest (no auto-play). Routing the no-real-queue case
 // here (rather than at each menu) keeps every caller — menus, keyboard, scripting —
 // consistent with the "Create queue" gesture.
 //
@@ -686,26 +686,59 @@ export function playNext(tracks: SearchTrack[]): void {
 }
 
 // "Create queue": the sole no-queue menu gesture. Builds a fresh queue of exactly
-// the selection and plays it — nothing else. Unlike addToQueue / playNext it never
-// seeds from the currently playing track, nor detaches a playing playlist into the
-// queue, so the new queue holds only what the user picked — no surprise row 1, no
-// inherited playlist tail ("extra stuff"). Whatever was playing is simply replaced:
-// a queue is an explicit thing you start, and this starts one from scratch. Once it
-// exists, the placement verbs (Play next / Add to queue) take over and reason about
-// what's playing. A played playlist left behind is untouched on disk — never detached,
-// just abandoned as the pool (playQueue installs a fresh adhoc pool).
+// the selection and shows it *at rest* — it does NOT auto-play. Unlike addToQueue /
+// playNext it never seeds from the currently playing track, nor detaches a playing
+// playlist into the queue, so the new queue holds only what the user picked — no
+// surprise row 1, no inherited playlist tail ("extra stuff").
+//
+// The queue is installed as a resting pool: the engine is silenced and holds no
+// track, so nothing sounds until the user presses play — which restarts the queue
+// from the top (the queueEnded branch of togglePlayPause), exactly as a queue
+// drained at its end does. Whatever was playing is stopped (this queue is now the
+// pool); a played playlist left behind is untouched on disk. Once the queue exists,
+// the placement verbs (Play next / Add to queue) take over.
 export function createQueue(tracks: SearchTrack[]): void {
   if (tracks.length === 0) return;
   dismissRightPanel();
-  playQueue(
-    {
-      kind: "playlist",
-      title: UNTITLED_PLAYLIST_TITLE,
-      subtitle: trackCountSubtitle(tracks),
-      tracks,
-    },
-    `queue:adhoc:${Date.now()}`,
-  );
+  // The engine pool is playable rows only (missing files stay in the view but never
+  // reach the engine), mirroring playQueue.
+  const playable = tracks.filter((t) => !t.missing);
+  if (playable.length === 0) return;
+  const queue: Queue = {
+    kind: "playlist",
+    title: UNTITLED_PLAYLIST_TITLE,
+    subtitle: trackCountSubtitle(tracks),
+    tracks,
+  };
+  // Non-reactive playback vars first, so the reactive writes below fire their
+  // effects against a fully installed context (as teardownPlaybackToEmpty does).
+  // A synthetic `queue:` parent makes queueIsActivePool() true and seeds the engine
+  // on the first play; queueEnded arms the resting-restart-from-top on that play.
+  app.currentParent = syntheticParent(`queue:adhoc:${Date.now()}`, queue.title, playable);
+  app.lastQueue = playable.map((t) => t.path);
+  app.lastIndex = 0;
+  app.pendingQueueIndex = null;
+  app.pendingResume = null;
+  app.shuffleBag = [];
+  app.queueEnded = true;
+  openActiveQueue(queue);
+  // A resting queue has no playhead: rows show, none highlighted, hero is empty.
+  queuePlayingIndex.value = null;
+  currentNodePath.value = null;
+  currentStreamUrl.value = null;
+  isStream.value = false;
+  currentTime.value = 0;
+  duration.value = 0;
+  hasTrack.value = false;
+  npTitle.value = "";
+  npArtist.value = null;
+  npAlbum.value = null;
+  clearArt();
+  // Show the queue list (the point of Create queue), not the empty hero, and drop
+  // any browse so the queue is what the list face reveals.
+  browsedPlaylist.value = null;
+  listFaceOpen.value = true;
+  void engine.stop();
 }
 
 // The queue verbs for a right-click menu, adaptive to whether a *real* queue exists.
