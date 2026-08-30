@@ -35,9 +35,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 
 ### Playback queue
 
-- Two verbs everywhere — "Play" replaces what's playing, "Add to queue" appends. Right-click any track, album, artist, or folder to add it
-- Queues are freely mixed: build one by hand from tracks across your whole library
-- Prev / next skip through the queue; the current row stays highlighted
+- Create and manage queues using context menus and drag-and-drop.
 
 ### Playlists
 
@@ -57,6 +55,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 
 ### Interface
 
+- Light and dark themes, each with a variety of flavors
 - Compact mini player mode (double click now playing)
 - Window size and position remembered separately for mini and normal modes
 - Keyboard shortcuts for playback, volume, and seeking (see below)
