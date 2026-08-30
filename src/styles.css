@@ -469,7 +469,7 @@ html[data-mode="light"] .context-menu {
 }
 
 .context-menu-item {
-  padding: 0.35em 0.9em;
+  padding: 0.2em 1em;
   color: var(--text);
   white-space: nowrap;
   cursor: pointer;
@@ -1978,6 +1978,15 @@ ul {
   padding: 0.2em 0.8em 0.2em 0.5em;
   cursor: pointer;
   transition: background 120ms ease;
+  /* Large-library scroll perf: skip layout/paint for rows outside the viewport
+     while keeping every row in the DOM — so native scroll/inertia, scrollIntoView
+     (reveal), and drag geometry are all unchanged. `auto` seeds the off-screen
+     placeholder height at 2em, then remembers each row's real measured height so
+     the scrollbar doesn't drift. Safe here because these rows carry no
+     boundary-straddling decoration (unlike the queue's drop-line ::after, which
+     paint containment would clip — see "Virtualize lists" in TODO.md). */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2em;
 }
 
 /* Reveal (search "Go to folder") uses scrollIntoView({block:"start"}); this
@@ -2871,6 +2880,11 @@ ul {
   padding: 0.2em 0.65em 0.2em 0.65em;
   cursor: pointer;
   transition: background 120ms ease;
+  /* Large-library scroll perf — see .node-label. A leaf track list can run to
+     every track in an album/artist; skip off-screen layout/paint while keeping
+     rows in the DOM. No drop-line here, so paint containment is safe. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2em;
 }
 .nav-track-row:hover {
   background: var(--surface);
