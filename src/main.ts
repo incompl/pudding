@@ -176,6 +176,7 @@ import {
 import {
   renderQueue,
   addToQueue,
+  queueMenuItems,
   nodeToTrack,
   closeQueue,
   fillRowAfterRemoval,
@@ -972,14 +973,19 @@ export function trackContextItems(track: {
 // Add a lazily-resolved set of tracks (artist/album query) to the queue, using
 // the same snapshot guard as addFolderToQueue so a scan that resolves after the
 // user has navigated away appends to the right destination or not at all.
-async function addProviderToQueue(getTracks: TrackProvider): Promise<void> {
+// `sink` is the terminal verb — addToQueue (default) or playNext — so "Add to
+// queue" and "Play next" share the snapshot guard.
+async function addProviderToQueue(
+  getTracks: TrackProvider,
+  sink: (tracks: SearchTrack[]) => void = addToQueue,
+): Promise<void> {
   const queueBefore = activeQueue.value;
   const pathBefore = currentNodePath.value;
   try {
     const tracks = await getTracks();
     if (activeQueue.value !== queueBefore) return;
     if (!queueBefore && currentNodePath.value !== pathBefore) return;
-    addToQueue(tracks);
+    sink(tracks);
   } catch (e) {
     console.error("addProviderToQueue failed", e);
   }
@@ -995,7 +1001,7 @@ function showArtistContextMenu(x: number, y: number, name: string): void {
     invoke<SearchTrack[]>("artist_tracks", { artist: name });
   showContextMenu(x, y, [
     { label: "Play", action: () => void openArtistQueue(name) },
-    { label: "Add to queue", action: () => void addProviderToQueue(getTracks) },
+    ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
   ]);
 }
@@ -1010,7 +1016,7 @@ function showAlbumContextMenu(
     invoke<SearchTrack[]>("album_tracks", { album, albumArtist });
   showContextMenu(x, y, [
     { label: "Play", action: () => void openAlbumQueue(album, albumArtist) },
-    { label: "Add to queue", action: () => void addProviderToQueue(getTracks) },
+    ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
   ]);
 }
@@ -1026,7 +1032,7 @@ function showPlaylistContextMenu(x: number, y: number, path: string): void {
     playlistPlayableTracks(await invoke<PlaylistData>("read_playlist", { path }));
   showContextMenu(x, y, [
     { label: "Play", action: () => void playPlaylistPath(path) },
-    { label: "Add to queue", action: () => void addProviderToQueue(getTracks) },
+    ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
   ]);
 }
@@ -1157,17 +1163,16 @@ export function renderLeafTrackList(
             const sel = navSel.resolveIn(tracks);
             if (sel.length > 1) {
               showContextMenu(e.clientX, e.clientY, [
-                { label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) },
+                ...queueMenuItems((sink) => sink(sel), sel.length),
                 addToPlaylistItem(() => sel),
                 showInFinderItem(sel[0].path),
               ]);
             } else {
-              // A plain click only selects here (unlike the tree), so the menu leads
-              // with an explicit Play; then the list-building verbs and the per-track
-              // navigation (Play artist / album when tagged), matching the tree order.
+              // Double-click plays the row, so the menu skips a redundant Play (as in
+              // the tree and queue menus): it leads with the list-building verbs, then
+              // the per-track navigation (Go to artist / album when tagged).
               showContextMenu(e.clientX, e.clientY, [
-                { label: "Play", action: () => playAt(t, i) },
-                { label: "Add to queue", action: () => addToQueue([t]) },
+                ...queueMenuItems((sink) => sink([t])),
                 addToPlaylistItem(() => [t]),
                 ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: null }),
                 editMetadataItem(t.path),

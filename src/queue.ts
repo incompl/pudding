@@ -6,7 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { h } from "./dom";
-import type { Queue, SearchTrack, SearchFolder, TreeNode } from "./types";
+import type { Queue, SearchTrack, SearchFolder, TreeNode, ContextMenuItem } from "./types";
 import {
   app,
   hasTrack,
@@ -226,7 +226,7 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
         const sel = selectedListTracks();
         if (sel.length > 1) {
           showContextMenu(e.clientX, e.clientY, [
-            { label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) },
+            ...queueMenuItems((sink) => sink(sel), sel.length),
             addToPlaylistItem(() => sel),
             {
               label: `Remove ${sel.length} from list`,
@@ -235,7 +235,7 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
           ]);
         } else {
           showContextMenu(e.clientX, e.clientY, [
-            { label: "Add to queue", action: () => addToQueue([t]) },
+            ...queueMenuItems((sink) => sink([t])),
             addToPlaylistItem(() => [t]),
             editMetadataItem(t.path),
           ]);
@@ -521,22 +521,36 @@ export function appendToActivePool(active: Queue, tracks: SearchTrack[]): void {
   if (isPool) reconcilePoolEdit(next, playingObj);
   if (active.sourcePath) void saveOpenPlaylist(active.sourcePath, active.title, next);
 }
-// --- Add to queue ---
+
+// Insert `tracks` into the active queue at view index `at`, reconciling the live
+// engine pool (gapless tail / shuffle bag) when the queue is what's playing.
+// Mirrors appendToActivePool but at a position — the insert behind "Play next",
+// which drops the tracks right after the playing row. Aimed at the active queue
+// regardless of what's browsed, so it never edits a merely-looked-at playlist.
+export function insertIntoActiveQueueAt(tracks: SearchTrack[], at: number): void {
+  const active = activeQueue.value;
+  if (!active || tracks.length === 0) return;
+  const isPool = queueIsActivePool();
+  const playingObj = isPool ? playingTrackObj(active) : null;
+  const next = active.tracks.slice();
+  next.splice(Math.max(0, Math.min(at, next.length)), 0, ...tracks);
+  // Bring the first inserted row into view on the coming re-render.
+  app.pendingQueueScrollIndex = at;
+  activeQueue.value = { ...active, tracks: next, subtitle: trackCountSubtitle(next) };
+  if (isPool) reconcilePoolEdit(next, playingObj);
+  if (active.sourcePath) void saveOpenPlaylist(active.sourcePath, active.title, next);
+}
+// --- Building the queue: Create queue / Play next / Add to queue ---
 //
-// The queue is explicit: it exists only once the user deliberately builds one,
-// and holds only what they put in it (playing a folder track still auto-continues
-// under the hood, but that never presents as a queue). There are exactly two
-// verbs: "Play X" (folder/album/artist) replaces and plays now, while
-// "Add to queue" only ever appends — play-later, never interrupting the audible
-// track. That symmetry is why a track has no "Play" menu item of its own (a
-// left-click already plays it) and no "start queue" verb: the sole way to build
-// an explicit queue by hand is to Add to queue.
-//
-// Adding when no queue exists yet: if a track is playing (implicit folder
-// continuation), seed a queue from just that one track — the song the user can
-// already hear, so row 1 is never a surprise — and append after it, severing the
-// folder tail so only explicitly-queued tracks follow (seedQueueFromCurrent). If
-// nothing is playing, the append starts a fresh queue that plays at once.
+// The queue is explicit: it exists only once the user deliberately builds one, and
+// holds only what they put in it (playing a folder track still auto-continues under
+// the hood, but that never presents as a queue). Three verbs build and grow it, split
+// by whether a *real* queue already exists (noRealQueue): with none, the sole gesture
+// is "Create queue" — a fresh queue of exactly the selection, played from scratch,
+// dragging in nothing else. Once a queue exists, "Play next" inserts after the playing
+// row and "Add to queue" appends to the tail; both are play-later, never interrupting
+// the audible track. addToQueue and playNext both funnel the no-real-queue case
+// through createQueue, so every caller — menus, keyboard, scripting — agrees.
 //
 // The visible queue and the engine's queue are kept in step: the engine plays a
 // flat path list, while the frontend resolves per-track metadata (row highlight,
@@ -614,133 +628,109 @@ export function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
   });
 }
 
-// Promotes the track currently playing (via implicit folder continuation) into a
-// one-row explicit queue, so a following append has a coherent row 1 and playback
-// continues uninterrupted. Only the audible track is captured — never the rest of
-// the folder — and the folder tail is severed (clearUpcoming) so nothing but the
-// explicit queue follows it. Metadata comes from the playing node when we can
-// find it, else the now-playing signals.
-export function seedQueueFromCurrent(): void {
-  const path = currentNodePath.value;
-  if (!path) return;
-  const cur = app.currentParent?.children.find((c) => c.path === path);
-  const track: SearchTrack = cur
-    ? nodeToTrack(cur)
-    : { path, title: npTitle.value || null, artist: npArtist.value, album: npAlbum.value };
-  const title = UNTITLED_PLAYLIST_TITLE;
-  app.currentParent = syntheticParent(`queue:current:${Date.now()}`, title, [track]);
-  app.lastQueue = [path];
-  app.lastIndex = 0;
-  // The audible track is now the queue's row 0 and keeps playing (no new engine
-  // play fires here), so highlight it directly rather than waiting on onAdvance.
-  queuePlayingIndex.value = 0;
-  app.shuffleBag = [];
-  // Straight play holds the whole folder in the engine for gapless auto-advance;
-  // drop that tail so the current track is the queue's last entry until the
-  // append extends it. (Per-track modes already hold only the current track.)
-  if (!shuffleMode.value && repeatMode.value !== "one") void engine.clearUpcoming();
-  openActiveQueue({
-    kind: "playlist",
-    title,
-    subtitle: trackCountSubtitle([track]),
-    tracks: [track],
-  });
-}
-
-// Build a queue from `tracks` as the active pool but at rest — no playhead, the
-// engine untouched — so "Add to queue" from silence keeps its play-later promise
-// instead of startling the user with playback. The queue rests exactly as a
-// drained one does (queueEnded set, currentNodePath/queuePlayingIndex null), so
-// the play button starts it from the top (see togglePlayPause).
-export function armQueueAtRest(tracks: SearchTrack[]): void {
-  const playable = tracks.filter((t) => !t.missing);
-  if (playable.length === 0) return;
-  app.currentParent = syntheticParent(
-    `queue:adhoc:${Date.now()}`,
-    UNTITLED_PLAYLIST_TITLE,
-    playable,
-  );
-  app.lastQueue = playable.map((t) => t.path);
-  app.lastIndex = 0;
-  app.queueEnded = true;
-  queuePlayingIndex.value = null;
-  currentNodePath.value = null;
-  app.shuffleBag = [];
-  browsedPlaylist.value = null;
-  openActiveQueue({
-    kind: "playlist",
-    title: UNTITLED_PLAYLIST_TITLE,
-    subtitle: trackCountSubtitle(tracks),
-    tracks,
-  });
-  listFaceOpen.value = true;
+// True when there's no *real* queue for the placement verbs to act on — either
+// nothing is the pool, or the pool is a playlist (a playlist is never a queue). In
+// this state the only queue gesture is to create one from scratch (createQueue).
+function noRealQueue(): boolean {
+  const q = activeQueue.value;
+  return q == null || isPlaylistSource(q);
 }
 
 // The single entry point behind "Add to queue". It only ever appends —
-// play-later, never interrupting the audible track. With a queue open it appends
-// to it. With none, it seeds a queue from the currently playing track first
-// (seedQueueFromCurrent) and appends after it; from silence it arms a fresh queue
-// at rest (armQueueAtRest) without playing, so the play button — not the add —
-// starts it. A live stream is the one exception: nothing can follow it, so the
-// add starts the queue now.
+// play-later, never interrupting the audible track. With a real queue it appends to
+// its tail. With none (nothing playing, or a playlist as the pool — a playlist is
+// never a queue) there is nothing to append to, so it defers to createQueue: a fresh
+// queue of exactly these tracks, played from scratch. Routing the no-real-queue case
+// here (rather than at each menu) keeps every caller — menus, keyboard, scripting —
+// consistent with the "Create queue" gesture.
 //
 // Feedback is the queue itself: every add reveals the list face (showSourceList)
 // so the appended rows are visible, rather than flashing a toast.
 export function addToQueue(tracks: SearchTrack[]): void {
   if (tracks.length === 0) return;
+  if (noRealQueue()) {
+    createQueue(tracks);
+    return;
+  }
   // Every add reveals the list face, so a queued-behind panel would hide the
   // result — snap back to the pane.
   dismissRightPanel();
-  if (!activeQueue.value) {
-    if (hasTrack.value && currentNodePath.value && !isStream.value) {
-      seedQueueFromCurrent();
-    } else if (!hasTrack.value) {
-      // True silence: honor "Add to queue" as play-later by arming the queue at
-      // rest rather than playing it now. It becomes the active pool with no
-      // playhead (like a drained queue); the play button starts it from the top.
-      armQueueAtRest(tracks);
-      return;
-    } else {
-      // A live stream (or a lone track with no queueable context) is playing:
-      // there's nothing for the queue to follow, so this add starts it now.
-      playQueue(
-        {
-          kind: "playlist",
-          title: UNTITLED_PLAYLIST_TITLE,
-          subtitle: trackCountSubtitle(tracks),
-          tracks,
-        },
-        `queue:adhoc:${Date.now()}`,
-      );
-      return;
-    }
-  }
-  // "Add to queue" is a queue verb, never a playlist edit: if the active pool is a
-  // playing playlist, adding to the queue detaches the pool from its .m3u8 first —
-  // this append and every later curation then stay in memory and the file on disk
-  // is left as it was. The queue and a playlist are never the same thing.
-  detachActivePoolFromPlaylist();
   appendTracksToActiveQueue(tracks);
   showSourceList();
 }
 
-// Sever the active pool from its backing playlist file so queue operations can't
-// modify it: it becomes a plain, ephemeral "Queue" (no sourcePath) holding the
-// same tracks. isPlaylistSource keys off sourcePath alone, so dropping it turns
-// off autosave, drops the tree's playing-playlist highlight, and retitles the
-// list/hero to "Queue" — all reactively. The engine, playing index, currentParent,
-// and the track objects are untouched (same synthetic pool, same rows), so
-// playback continues uninterrupted. A no-op unless the pool is a playlist source.
-export function detachActivePoolFromPlaylist(): void {
-  const q = activeQueue.value;
-  if (!isPlaylistSource(q)) return;
-  activeQueue.value = {
-    kind: q!.kind,
-    title: "Queue",
-    subtitle: q!.subtitle,
-    tracks: q!.tracks,
-    // sourcePath deliberately omitted — a queue is never a playlist file.
-  };
+// The single entry point behind "Play next". With a real queue it inserts the tracks
+// right after the currently playing row so they sound as soon as the current track
+// ends (with no playhead — a resting queue — at the top). With no real queue there's
+// no "next" to speak of, so it defers to createQueue exactly as addToQueue does.
+export function playNext(tracks: SearchTrack[]): void {
+  if (tracks.length === 0) return;
+  if (noRealQueue()) {
+    createQueue(tracks);
+    return;
+  }
+  dismissRightPanel();
+  const q = activeQueue.value!;
+  // Insert right after the playing row; with no playhead (queue at rest) at the top.
+  const playing = queuePlayingIndex.value;
+  const at = playing != null ? viewIndexOfPlayable(q.tracks, playing) + 1 : 0;
+  // Shuffle advances from the bag, not list order, so front-load the bag to make
+  // the inserts truly play next; reconcilePoolEdit keeps them (they join the new
+  // pool). Straight play needs no bag work — reconcilePoolEdit rebuilds the gapless
+  // tail from the new order, and the inserts now head it.
+  if (queueIsActivePool() && shuffleMode.value && playing != null) {
+    app.shuffleBag.unshift(...tracks.map((t) => t.path));
+  }
+  insertIntoActiveQueueAt(tracks, at);
+  showSourceList();
+}
+
+// "Create queue": the sole no-queue menu gesture. Builds a fresh queue of exactly
+// the selection and plays it — nothing else. Unlike addToQueue / playNext it never
+// seeds from the currently playing track, nor detaches a playing playlist into the
+// queue, so the new queue holds only what the user picked — no surprise row 1, no
+// inherited playlist tail ("extra stuff"). Whatever was playing is simply replaced:
+// a queue is an explicit thing you start, and this starts one from scratch. Once it
+// exists, the placement verbs (Play next / Add to queue) take over and reason about
+// what's playing. A played playlist left behind is untouched on disk — never detached,
+// just abandoned as the pool (playQueue installs a fresh adhoc pool).
+export function createQueue(tracks: SearchTrack[]): void {
+  if (tracks.length === 0) return;
+  dismissRightPanel();
+  playQueue(
+    {
+      kind: "playlist",
+      title: UNTITLED_PLAYLIST_TITLE,
+      subtitle: trackCountSubtitle(tracks),
+      tracks,
+    },
+    `queue:adhoc:${Date.now()}`,
+  );
+}
+
+// The queue verbs for a right-click menu, adaptive to whether a *real* queue exists.
+// "Play next" (insert after the playing row) and "Add to queue" (append) are only
+// offered for an actual, ephemeral queue — the one pool that is itself a queue. Every
+// other pool reads as the "no queue" case, where there's nothing to add *to* and the
+// sole gesture is "Create queue", which builds a fresh queue from just the selection:
+//   - No pool at all (a folder / single track / silence): no queue to place into.
+//   - A *playlist* is the pool: a playlist is never a queue, so it's the no-queue
+//     case too (noRealQueue) — one consistent, grokkable gesture. Once the queue
+//     exists the two distinct verbs return.
+// `run` is the call site's track plumbing: it resolves the target tracks (some sites
+// query them lazily) and hands them to whichever terminal verb the chosen item picks
+// — createQueue, playNext, or addToQueue. `count` (>1) pluralizes the labels.
+export function queueMenuItems(
+  run: (sink: (tracks: SearchTrack[]) => void) => void,
+  count = 1,
+): ContextMenuItem[] {
+  if (noRealQueue()) {
+    return [{ label: "Create queue", action: () => run(createQueue) }];
+  }
+  return [
+    { label: count > 1 ? `Play ${count} next` : "Play next", action: () => run(playNext) },
+    { label: count > 1 ? `Add ${count} to queue` : "Add to queue", action: () => run(addToQueue) },
+  ];
 }
 
 // "Close queue": always dismisses the explicit queue, but is a list action, not a
@@ -829,7 +819,12 @@ export function teardownPlaybackToEmpty(): void {
   void engine.stop();
 }
 
-export async function addFolderToQueue(folder: SearchFolder): Promise<void> {
+// `sink` is the terminal verb — addToQueue (default) for "Add to queue", playNext
+// for "Play next" — so both share the snapshot guard below.
+export async function addFolderToQueue(
+  folder: SearchFolder,
+  sink: (tracks: SearchTrack[]) => void = addToQueue,
+): Promise<void> {
   // Snapshot before the await; if queue or current track changes during the
   // scan the user navigated away — append to the wrong destination instead of
   // silently merging into whatever opened in the meantime.
@@ -839,7 +834,7 @@ export async function addFolderToQueue(folder: SearchFolder): Promise<void> {
     const tracks = await invoke<SearchTrack[]>("folder_tracks", { path: folder.path });
     if (activeQueue.value !== queueBefore) return;
     if (!queueBefore && currentNodePath.value !== pathBefore) return;
-    addToQueue(tracks);
+    sink(tracks);
   } catch (e) {
     console.error("folder_tracks failed", folder.path, e);
   }

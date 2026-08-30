@@ -175,14 +175,19 @@ export async function browsePlaylistPath(path: string): Promise<void> {
   addRecentPlaylist(data.path, data.name);
 }
 
-export async function addPlaylistToQueue(node: TreeNode): Promise<void> {
+// `sink` is the terminal verb — addToQueue (default) or playNext — so both share
+// the snapshot guard.
+export async function addPlaylistToQueue(
+  node: TreeNode,
+  sink: (tracks: SearchTrack[]) => void = addToQueue,
+): Promise<void> {
   const queueBefore = activeQueue.value;
   const pathBefore = currentNodePath.value;
   try {
     const data = await invoke<PlaylistData>("read_playlist", { path: node.path });
     if (activeQueue.value !== queueBefore) return;
     if (!queueBefore && currentNodePath.value !== pathBefore) return;
-    addToQueue(playlistPlayableTracks(data));
+    sink(playlistPlayableTracks(data));
   } catch (e) {
     console.error("read_playlist failed", node.path, e);
     toast("Playlist no longer available");

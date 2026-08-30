@@ -1,18 +1,3 @@
-### "Play Next" verb
-Every context menu only offers **Add to queue** (append to the tail): tree
-tracks (`src/main.ts:989`), folders (`src/main.ts:959`), queue rows
-(`src/main.ts:1191`), playlists (`src/main.ts:936`). Spotify and Apple Music
-both split this into **Play Next** (insert right after the current track) and
-**Add to Queue** (append). Today the only way to make something play next is to
-drag it up the list. This is the missing half of the "Play Next / Add to queue"
-pair in the original design.
-
-- Add a `playNext(tracks)` alongside `addToQueue` (`src/main.ts:2977`) that
-  inserts after the current row instead of at the tail — reuse the seed-from-
-  current path (`seedQueueFromCurrent`) and the engine sync in
-  `appendTracksToActiveQueue` (`src/main.ts:2885`), inserting at
-  `queuePlayingIndex + 1` rather than pushing.
-
 ### Restore queue + playback state on relaunch
 The active queue, current track, playhead position, and play/pause are all
 in-memory signals; quitting loses the whole queue and your place. Persisted keys

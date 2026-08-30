@@ -52,7 +52,7 @@ import {
 } from "./playlists";
 import { editMetadataItem } from "./editors";
 import { playFile, playFolder, playStream } from "./playback";
-import { addToQueue, addFolderToQueue, nodeToTrack } from "./queue";
+import { addFolderToQueue, nodeToTrack, queueMenuItems } from "./queue";
 
 // Child nodes for one directory listing. Display order comes entirely from
 // the backend: list_dir returns folders sorted by name and files sorted by
@@ -262,7 +262,7 @@ function renderNode(
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, [
         { label: "Play", action: () => void playPlaylist(node) },
-        { label: "Add to queue", action: () => void addPlaylistToQueue(node) },
+        ...queueMenuItems((sink) => void addPlaylistToQueue(node, sink)),
         addToPlaylistItem(async () =>
           playlistPlayableTracks(
             await invoke<PlaylistData>("read_playlist", { path: node.path }),
@@ -285,10 +285,9 @@ function renderNode(
             void playFolder({ path: node.path, name: node.name });
           },
         },
-        {
-          label: "Add to queue",
-          action: () => void addFolderToQueue({ path: node.path, name: node.name }),
-        },
+        ...queueMenuItems(
+          (sink) => void addFolderToQueue({ path: node.path, name: node.name }, sink),
+        ),
         addToPlaylistItem(() =>
           invoke<SearchTrack[]>("folder_tracks", { path: node.path }),
         ),
@@ -315,15 +314,15 @@ function renderNode(
         // Multi-select: the per-track navigation verbs (Go to artist/album) don't
         // apply to a heterogeneous set, so offer only the list-building verbs,
         // acting on every selected track. Count in the label confirms the scope.
-        items.push({ label: `Add ${sel.length} to queue`, action: () => addToQueue(sel) });
+        items.push(...queueMenuItems((sink) => sink(sel), sel.length));
         items.push(addToPlaylistItem(() => sel));
         // revealItemInDir takes one path; reveal the first selected track.
         items.push(showInFinderItem(sel[0].path));
       } else {
         // The navigation verbs lead — Go to artist / Go to album when their tags
         // exist, else "Play folder" on the container for an untagged track (which
-        // has neither) so right-click always does something. "Add to queue" always
-        // comes last, matching the folder menu's order.
+        // has neither) so right-click always does something. The list-building
+        // verbs (Play next / Add to queue) follow, matching the folder menu's order.
         const nav = trackContextItems({
           artist: node.artist,
           album: node.album,
@@ -336,7 +335,7 @@ function renderNode(
             action: () => void playFolder({ path: parent.path, name: parent.name }),
           });
         }
-        items.push({ label: "Add to queue", action: () => addToQueue([nodeToTrack(node)]) });
+        items.push(...queueMenuItems((sink) => sink([nodeToTrack(node)])));
         items.push(addToPlaylistItem(() => [nodeToTrack(node)]));
         items.push(editMetadataItem(node.path));
         items.push(showInFinderItem(node.path));
