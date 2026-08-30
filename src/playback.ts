@@ -546,6 +546,28 @@ export function playStream(stream: Stream): void {
   }
 }
 
+// Reflect an edit to a station into live playback state, so editing the stream
+// that's currently playing updates the now-playing hero at once (rather than only
+// after it's replayed). `oldUrl` identifies the pre-edit entry; `next` carries the
+// saved values. A no-op unless that station is the one playing. The URL identity
+// moves to the new value so the stream row stays highlighted after the list
+// refresh; the audio keeps playing the old connection (we don't reconnect on a
+// metadata edit). Selection follows the same way if the edited row was selected.
+export function applyStreamEdit(oldUrl: string, next: Stream): void {
+  if (selectedStreamUrl.value === oldUrl) selectedStreamUrl.value = next.url;
+  if (currentStreamUrl.value !== oldUrl) return;
+  currentStreamUrl.value = next.url;
+  app.currentStreamName = next.name;
+  // Refresh the station name on the title line, preserving any ICY song already
+  // showing below it (npStreamMeta) — this mirrors what onStreamMetadata does.
+  setNowPlaying(next.name, null, null);
+  if (next.image) {
+    void loadStreamArt(next.image);
+  } else {
+    clearArt();
+  }
+}
+
 // Plays a library file picked from the search dropdown. currentParent stays
 // null so there's no album auto-advance (a search hit isn't a folder context);
 // setting currentNodePath still lights up the row if that folder is expanded in

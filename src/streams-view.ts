@@ -18,7 +18,7 @@ import { attachStreamReorder } from "./drag-drop";
 import { buildInlineEditor, closePaneEditor, openPaneEditor } from "./editors";
 import { refreshStreams } from "./library";
 import { setEmpty } from "./main";
-import { playStream } from "./playback";
+import { playStream, applyStreamEdit } from "./playback";
 
 export function renderStreams(streams: Stream[]): void {
   streamsContainer.innerHTML = "";
@@ -169,18 +169,26 @@ function openEditStationEditor(stream: Stream): void {
     heading: `Editing ${stream.name}`,
     onCancel: closePaneEditor,
     onSubmit: async (values) => {
+      const next: Stream = {
+        name: values.name,
+        url: values.url,
+        image: values.image || undefined,
+      };
       try {
         await invoke("update_stream", {
           path: streamListPathInput.value,
           index,
-          name: values.name,
-          url: values.url,
-          image: values.image || null,
+          name: next.name,
+          url: next.url,
+          image: next.image ?? null,
         });
       } catch (e) {
         console.error("update_stream failed", e);
         return; // leave the form up so the user can correct and retry
       }
+      // If this is the station now playing, update the hero at once — otherwise
+      // the edited name/art wouldn't show until it was replayed.
+      applyStreamEdit(stream.url, next);
       closePaneEditor();
       await refreshStreams(streamListPathInput.value);
     },
