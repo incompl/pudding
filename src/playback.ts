@@ -212,6 +212,21 @@ export function refillShuffleBag(current: string | null): void {
   app.shuffleBag = shuffled(rest.length ? rest : pool);
 }
 
+// Drop the whole shuffle session — both the upcoming bag and the played-order
+// history — so a new play context can't step back (or forward) into stale tracks.
+// Called wherever playback switches context (a new file/folder/queue/stream), the
+// old direct `app.shuffleBag = []` reset promoted to also clear the back-history.
+export function resetShuffleState(): void {
+  app.shuffleBag = [];
+  app.shuffleHistory = [];
+}
+
+// Record the track we're leaving as the shuffle bag advances, so skipPrev can
+// return to it. Kept next to the advancement points that call it.
+function pushShuffleHistory(current: string | null): void {
+  if (current) app.shuffleHistory.push(current);
+}
+
 // Hand the engine a single track and remember it as the queue, so play-after-end
 // and the play button restart the right thing. UI (row highlight, now-playing,
 // art) follows from the engine's track-changed → onAdvance for album tracks;
@@ -310,8 +325,10 @@ export function handleEnded(): void {
       refillShuffleBag(current);
     }
     const next = app.shuffleBag.shift();
-    if (next) playSingle(next);
-    else stopAtQueueEnd();
+    if (next) {
+      pushShuffleHistory(current);
+      playSingle(next);
+    } else stopAtQueueEnd();
     return;
   }
 
@@ -352,7 +369,10 @@ export function skipNext(): void {
   if (shuffleMode.value) {
     if (app.shuffleBag.length === 0) refillShuffleBag(current);
     const next = app.shuffleBag.shift();
-    if (next) playSingle(next);
+    if (next) {
+      pushShuffleHistory(current);
+      playSingle(next);
+    }
     return;
   }
 
@@ -374,14 +394,30 @@ export function skipNext(): void {
 
 // Previous: within the first few seconds of a track it steps back a track,
 // otherwise it restarts the current one — the near-universal transport
-// convention. Shuffle keeps no back-history, so it just restarts.
+// convention. Under shuffle "back a track" means the track actually just heard:
+// pop the played-order history and return the current track to the front of the
+// bag so a following Next replays it (symmetric with the forward advance that
+// pushed it). An empty history (nothing heard yet this session) restarts instead.
 export function skipPrev(): void {
   if (isStream.value) return;
-  if (currentTime.value > 3 || shuffleMode.value) {
+  if (currentTime.value > 3) {
     void engine.seekTo(0);
     return;
   }
   const current = currentNodePath.value ?? app.lastQueue[app.lastIndex] ?? null;
+
+  if (shuffleMode.value) {
+    const prev = app.shuffleHistory.pop();
+    if (prev) {
+      if (current) app.shuffleBag.unshift(current);
+      dismissRightPanel();
+      playSingle(prev);
+    } else {
+      void engine.seekTo(0);
+    }
+    return;
+  }
+
   const pool = poolPaths();
   // Prefer the live row index in the queue pool so a duplicated track steps back
   // from the instance actually playing, not the first path match (see skipNext).
@@ -444,6 +480,9 @@ export function playFile(node: TreeNode, parent: TreeNode, startIndex?: number):
   void loadArt(node.path);
   const siblings = parent.children.filter((c) => !c.isFolder);
   const tracks = siblings.map((c) => c.path);
+  // A file click starts a fresh context, so no prior shuffle back-history carries
+  // over; the bag is (re)seeded per-branch below.
+  app.shuffleHistory = [];
   if (repeatMode.value === "one") {
     // Loop this track; the album never enters the queue.
     app.shuffleBag = [];
@@ -490,7 +529,7 @@ export function playStream(stream: Stream): void {
   duration.value = 0;
   app.queueEnded = false;
   app.lastQueue = [];
-  app.shuffleBag = [];
+  resetShuffleState();
   // Station name until the first ICY title arrives (or forever, for stations
   // that don't send titles).
   setNowPlaying(stream.name, null, null);
@@ -527,7 +566,7 @@ export function playSearchTrack(t: SearchTrack): void {
   app.queueEnded = false;
   app.lastQueue = [t.path];
   app.lastIndex = 0;
-  app.shuffleBag = [];
+  resetShuffleState();
   const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
   setNowPlaying(t.title ?? fallbackName, t.artist, t.album);
   void loadArt(t.path);

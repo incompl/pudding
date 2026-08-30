@@ -46,6 +46,7 @@ import { findNode } from "./library";
 import {
   syntheticParent,
   refillShuffleBag,
+  resetShuffleState,
   playSingle,
   playPool,
   poolPaths,
@@ -369,8 +370,11 @@ export function reconcilePoolEdit(newTracks: SearchTrack[], playingObj: SearchTr
     queuePlayingIndex.value = newPlayableIdx;
     app.lastIndex = newPlayableIdx;
     if (shuffleMode.value) {
-      // Drop any removed paths from the pending bag (dup-lossy, acceptable).
+      // Drop any removed paths from the pending bag and the played-order history
+      // (dup-lossy, acceptable) so neither advances into nor steps back to a row
+      // the edit deleted.
       app.shuffleBag = app.shuffleBag.filter((p) => poolPathsNew.includes(p));
+      app.shuffleHistory = app.shuffleHistory.filter((p) => poolPathsNew.includes(p));
     } else if (repeatMode.value !== "one" && autoadvanceEnabled()) {
       // Rebuild the gapless tail: drop the stale upcoming tracks, then re-append
       // the new order. Chained so the append can't race ahead of the clear.
@@ -421,7 +425,7 @@ export function advanceAfterRemovedPlaying(pool: string[], slot: number): void {
 export function stopAfterRemove(): void {
   queuePlayingIndex.value = null;
   currentNodePath.value = null;
-  app.shuffleBag = [];
+  resetShuffleState();
   void engine.stop();
 }
 
@@ -719,7 +723,7 @@ export function createQueue(tracks: SearchTrack[]): void {
   app.lastIndex = 0;
   app.pendingQueueIndex = null;
   app.pendingResume = null;
-  app.shuffleBag = [];
+  resetShuffleState();
   app.queueEnded = true;
   openActiveQueue(queue);
   // A resting queue has no playhead: rows show, none highlighted, hero is empty.
@@ -792,7 +796,7 @@ export function closeQueue(): void {
     // this track's end via handleEnded. The now-playing card and playback are
     // untouched.
     app.pendingQueueIndex = null;
-    app.shuffleBag = [];
+    resetShuffleState();
     if (!shuffleMode.value && repeatMode.value !== "one") void engine.clearUpcoming();
     // If the track's home folder is loaded in the tree, rebind playback to it
     // so Next/Prev walk the album (its siblings) and autoadvance flows on — the
@@ -835,7 +839,7 @@ export function teardownPlaybackToEmpty(): void {
   app.lastQueue = [];
   app.lastIndex = 0;
   app.pendingQueueIndex = null;
-  app.shuffleBag = [];
+  resetShuffleState();
   clearActiveQueue();
   queuePlayingIndex.value = null;
   listFaceOpen.value = false;

@@ -50,6 +50,11 @@ export interface AppState {
   pendingQueueIndex: number | null;
   queueEnded: boolean;
   shuffleBag: string[];
+  // The tracks already played this shuffle session, in the order they were heard
+  // (the current track is not on it — it's pushed only as playback leaves it).
+  // skipPrev pops this to return to the track you actually just heard, instead of
+  // restarting the current one. Cleared whenever a new play context begins.
+  shuffleHistory: string[];
   // Throttle tell for pushPlayback ticks.
   lastPlaybackPush: number;
   pendingQueueScrollIndex: number | null;
@@ -87,6 +92,7 @@ export const app: AppState = {
   pendingQueueIndex: null,
   queueEnded: false,
   shuffleBag: [],
+  shuffleHistory: [],
   lastPlaybackPush: 0,
   pendingQueueScrollIndex: null,
   recentPlaylists: [],

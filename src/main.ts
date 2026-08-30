@@ -160,7 +160,7 @@ import {
   poolPaths,
 
   refillShuffleBag,
-
+  resetShuffleState,
 
   syntheticParent,
   togglePlayPause,
@@ -1284,7 +1284,7 @@ async function openExternalFile(path: string): Promise<void> {
   app.queueEnded = false;
   app.lastQueue = [path];
   app.lastIndex = 0;
-  app.shuffleBag = [];
+  resetShuffleState();
   const fallback = path.split(/[\\/]/).pop() ?? path;
   setNowPlaying(meta.title ?? fallback, meta.artist, meta.album);
   void loadArt(path);
@@ -1559,7 +1559,9 @@ async function restorePlaybackSession(): Promise<void> {
 function toggleShuffle(): void {
   shuffleMode.value = !shuffleMode.value;
   // Seed the bag so a shuffle turned on mid-album has a full cycle ready;
-  // clear it when turning shuffle off.
+  // clear it when turning shuffle off. Either way a fresh shuffle session starts
+  // with no back-history (skipPrev falls back to restarting the current track).
+  app.shuffleHistory = [];
   if (shuffleMode.value) refillShuffleBag(currentNodePath.value);
   else app.shuffleBag = [];
   applyModeChange();
