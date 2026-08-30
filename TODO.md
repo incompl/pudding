@@ -1,13 +1,3 @@
-### Restore queue + playback state on relaunch
-The active queue, current track, playhead position, and play/pause are all
-in-memory signals; quitting loses the whole queue and your place. Persisted keys
-today are only volume / window / autoadvance / recent playlists / library root
-(`src/main.ts:16-32`). Spotify/Apple always resume the queue and position.
-
-- Persist `activeQueue`, current track path, and `currentTime` (debounced) to the
-  settings store; rehydrate on startup. Decide whether to auto-resume paused or
-  just restore the queue + playhead without playing.
-
 ### Shuffle back-history
 `skipPrev` under shuffle just restarts the current track (`src/main.ts:1798`); it
 can't return to the track you actually just heard. This is the shuffle behavior
@@ -29,3 +19,5 @@ point (a playlist is its file), so undo has to layer on top of it, not replace i
   just keep it as a hard action outside undo).
 
 ### Virtualize lists
+
+### Create queue should not play

@@ -73,7 +73,29 @@ async function startLibrary(): Promise<void> {
   if (track) playFile(track, first);
 }
 
+// Seed the engine from the restored pool and seek to the saved playhead. The play
+// is awaited before the seek so the two engine commands can't race: the Play must
+// establish the track the Seek then moves within.
+async function resumeAt(pool: string[], idx: number, time: number): Promise<void> {
+  await feedEngine(pool, idx);
+  if (time > 0.5) await engine.seekTo(time);
+}
+
 export function togglePlayPause(): void {
+  // A session was restored paused: the engine holds no track yet, so the first play
+  // press seeds it at the saved row and seeks to the saved position (rather than the
+  // no-op engine.togglePause() the loaded-track path below would hit).
+  if (app.pendingResume) {
+    const { time } = app.pendingResume;
+    app.pendingResume = null;
+    const pool = poolPaths();
+    if (pool.length === 0) return;
+    const idx = Math.min(app.lastIndex, pool.length - 1);
+    app.queueEnded = false;
+    if (queueIsActivePool()) app.pendingQueueIndex = idx;
+    void resumeAt(pool, idx, time);
+    return;
+  }
   // A queue resting with no playhead — drained at its end, or armed from silence
   // by "Add to queue" without auto-playing — starts from the top. This is checked
   // before the idle-play fallback so an armed queue (hasTrack still false, nothing
@@ -135,12 +157,26 @@ export function setVolume(v: number): void {
 
 export function seekBy(seconds: number): void {
   if (isStream.value) return;
+  // Before a restored session's first play, retarget where it will resume from
+  // instead of seeking the silent engine (see seekTo).
+  if (app.pendingResume) {
+    seekTo(app.pendingResume.time + seconds);
+    return;
+  }
   app.queueEnded = false;
   void engine.seekBy(seconds);
 }
 
 export function seekTo(seconds: number): void {
   if (isStream.value) return;
+  // The restored engine holds no track yet, so record the new playhead (and reflect
+  // it on the scrubber) rather than seeking silence; the first play resumes here.
+  if (app.pendingResume) {
+    const t = Math.max(0, seconds);
+    app.pendingResume = { time: t };
+    currentTime.value = t;
+    return;
+  }
   app.queueEnded = false;
   void engine.seekTo(seconds);
 }
@@ -181,6 +217,7 @@ export function refillShuffleBag(current: string | null): void {
 // art) follows from the engine's track-changed → onAdvance for album tracks;
 // for a lone search/external track it's already correct (same track).
 export function playSingle(path: string, queueIndex?: number): void {
+  app.pendingResume = null;
   app.queueEnded = false;
   app.lastQueue = [path];
   app.lastIndex = 0;
@@ -205,9 +242,10 @@ export function playSingle(path: string, queueIndex?: number): void {
 // it off, only the one track is handed over — the engine then drains after it and
 // handleEnded stops, giving "one track, then stop" without any engine change. The
 // full list still lives in lastQueue/poolPaths so a manual skip can move on.
-function feedEngine(list: string[], idx: number): void {
-  if (autoadvanceEnabled()) void engine.play(list, idx);
-  else void engine.play([list[idx]], 0);
+function feedEngine(list: string[], idx: number): Promise<void> {
+  // Any real hand-off to the engine supersedes a restored-but-unplayed session.
+  app.pendingResume = null;
+  return autoadvanceEnabled() ? engine.play(list, idx) : engine.play([list[idx]], 0);
 }
 
 // Hand the engine a pool starting at `idx` and remember it (the shared body of
@@ -433,6 +471,7 @@ export function playFile(node: TreeNode, parent: TreeNode, startIndex?: number):
 }
 
 export function playStream(stream: Stream): void {
+  app.pendingResume = null;
   dismissRightPanel();
   // A stream is lone playback: dismiss any open queue/playlist and land on the
   // hero (its own face, no nav bar). Null the highlight (streams emit no
@@ -473,6 +512,7 @@ export function playStream(stream: Stream): void {
 // setting currentNodePath still lights up the row if that folder is expanded in
 // the tree. The native engine opens the file directly — no prepare step needed.
 export function playSearchTrack(t: SearchTrack): void {
+  app.pendingResume = null;
   dismissRightPanel();
   // A lone search hit is lone playback: dismiss any open queue/playlist and land
   // on the hero. currentParent is null so onAdvance won't touch the highlight.

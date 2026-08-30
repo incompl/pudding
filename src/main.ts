@@ -246,6 +246,25 @@ const KEY_NAV_LOCATION = "navLocation";
 // user isn't bounced back to Files every start.
 const KEY_ACTIVE_TAB = "activeTab";
 
+// The playing queue + playhead, so quitting doesn't lose the queue and your place
+// (like Spotify/Apple). Only a queue that IS the audible pool is restorable; a
+// lone track / stream / drained-and-torn-down queue clears the key. Restored
+// paused — the first play press resumes at the saved position (see restorePlaybackSession).
+const KEY_PLAYBACK_SESSION = "playbackSession";
+
+// Position ticks fire ~20 Hz; cap the session write to at most one per this window
+// so the playhead survives a crash/quit without hammering the store during play.
+const SESSION_WRITE_INTERVAL_MS = 5000;
+
+// The shape saved under KEY_PLAYBACK_SESSION.
+interface PersistedSession {
+  queue: Queue; // full activeQueue data (kind, title, subtitle, tracks, sourcePath)
+  index: number; // the playing row, in the playable-pool index space (missing rows skipped)
+  path: string; // the playing track's path, for a sanity check against index
+  time: number; // playhead seconds
+  duration: number; // the track's duration, so the scrubber shows a full bar before play
+}
+
 // Below this logical (CSS-px) height the layout collapses to the mini player.
 // Mirrors the `max-height` breakpoint in styles.css — keep the two in sync.
 const MINI_MAX_HEIGHT = 480;
@@ -1253,6 +1272,7 @@ async function openExternalFile(path: string): Promise<void> {
   // Leaves currentParent null so the tree is untouched, no row is highlighted,
   // and album-advance is a no-op (single-track queue). Lone playback: dismiss
   // any open queue/playlist; null the highlight since this plays outside it.
+  app.pendingResume = null;
   resetToLonePlayback();
   queuePlayingIndex.value = null;
   app.currentParent = null;
@@ -1424,6 +1444,116 @@ const persistPlaybackModes = async (): Promise<void> => {
   await app.store.set(KEY_REPEAT, repeatMode.value);
   await app.store.save();
 };
+
+// --- Queue + playhead persistence (restore on relaunch) ---
+
+// performance.now() of the last session write, so schedulePersistSession can
+// throttle the flood of position-tick writes to one per SESSION_WRITE_INTERVAL_MS.
+let lastSessionWrite = 0;
+// Whether a non-null session is currently on disk, so we don't rewrite `null`
+// every few seconds during lone (non-queue) playback — one clear is enough.
+let sessionPersisted = false;
+
+// Snapshot the current playback into the store, or clear it. Only a queue that is
+// the audible pool restores; everything else (lone track, stream, torn-down queue)
+// clears the key so relaunch doesn't resurrect a queue that isn't playing.
+async function persistSessionNow(): Promise<void> {
+  lastSessionWrite = performance.now();
+  const q = activeQueue.value;
+  if (!q || !queueIsActivePool()) {
+    if (!sessionPersisted) return; // already clear — nothing to do
+    await app.store.set(KEY_PLAYBACK_SESSION, null);
+    await app.store.save();
+    sessionPersisted = false;
+    return;
+  }
+  const session: PersistedSession = {
+    queue: q,
+    index: queuePlayingIndex.value ?? 0,
+    path: currentNodePath.value ?? "",
+    time: currentTime.value,
+    duration: duration.value,
+  };
+  await app.store.set(KEY_PLAYBACK_SESSION, session);
+  await app.store.save();
+  sessionPersisted = true;
+}
+
+// Structural changes (new queue, row change, pause, teardown) pass immediate=true
+// to write at once; position ticks pass false and are throttled so continuous play
+// writes at most once per interval (a plain debounce would defer forever mid-play).
+function schedulePersistSession(immediate: boolean): void {
+  if (immediate) {
+    void persistSessionNow();
+    return;
+  }
+  if (performance.now() - lastSessionWrite >= SESSION_WRITE_INTERVAL_MS) {
+    void persistSessionNow();
+  }
+}
+
+// Register the effects that keep the saved session current. Called after
+// restorePlaybackSession so the effects' immediate first run re-saves the restored
+// state rather than a blank one clobbering it.
+function setupSessionPersistence(): void {
+  // New queue / row change / teardown → write immediately.
+  effect(() => {
+    void activeQueue.value;
+    void queuePlayingIndex.value;
+    schedulePersistSession(true);
+  });
+  // Playhead ticks → throttled write, so a crash/quit loses at most a few seconds.
+  effect(() => {
+    void currentTime.value;
+    schedulePersistSession(false);
+  });
+  // Capture the freshest position at each pause (the common quit-after-pause case).
+  effect(() => {
+    if (!isPlaying.value) schedulePersistSession(true);
+  });
+}
+
+// Rebuild the queue + playhead saved by the previous session, paused. The engine
+// holds no track yet — app.pendingResume arms the first play to seed it here and
+// seek to the saved position (togglePlayPause), so launch never blasts audio.
+async function restorePlaybackSession(): Promise<void> {
+  const s = await app.store.get<PersistedSession>(KEY_PLAYBACK_SESSION);
+  if (!s?.queue || !Array.isArray(s.queue.tracks)) return;
+  // The engine pool is playable rows only (missing files stay in the view but
+  // never reach the engine), mirroring playQueue/playQueueTrack.
+  const playable = s.queue.tracks.filter((t) => !t.missing);
+  if (playable.length === 0) return;
+  const idx = Math.min(Math.max(0, Math.trunc(s.index)), playable.length - 1);
+  const track = playable[idx];
+
+  // A synthetic queue: parent so queueIsActivePool() is true and the same pool
+  // seeds the engine on the first play. A real playlist reuses its file-keyed path.
+  const syntheticPath = s.queue.sourcePath
+    ? `queue:playlist:${s.queue.sourcePath}`
+    : "queue:restored";
+  app.currentParent = syntheticParent(syntheticPath, s.queue.title, playable);
+  openActiveQueue(s.queue);
+  currentNodePath.value = track.path;
+  queuePlayingIndex.value = idx;
+  app.lastQueue = playable.map((t) => t.path);
+  app.lastIndex = idx;
+  app.queueEnded = false;
+
+  const time = typeof s.time === "number" && s.time > 0 ? s.time : 0;
+  currentTime.value = time;
+  duration.value = typeof s.duration === "number" ? s.duration : track.duration ?? 0;
+  const fallback = track.path.split(/[\\/]/).pop() ?? track.path;
+  setNowPlaying(track.title ?? fallback, track.artist, track.album);
+  void loadArt(track.path);
+
+  // Open on the queue list (row highlighted), not the now-playing hero: the
+  // restored queue IS the point of restoring, and behind the hero's nav-bar flip
+  // it's easy to miss. Mirrors how an explicit Play verb reveals its list.
+  listFaceOpen.value = true;
+
+  sessionPersisted = true; // the key we just read is the on-disk state
+  app.pendingResume = { time };
+}
 
 // Shared by the toolbar button and the Playback menu so both take the same path.
 function toggleShuffle(): void {
@@ -2452,6 +2582,11 @@ async function init(): Promise<void> {
   setupSearch();
   setupPlayerControls();
   setupVolumeControl();
+  // Restore the previous session's queue + playhead (paused) BEFORE wiring the
+  // persistence effects, so their immediate first run re-saves the restored state
+  // instead of a blank one overwriting the saved session.
+  await restorePlaybackSession();
+  setupSessionPersistence();
   setupEffects();
 
   renderLibraryRootRows();

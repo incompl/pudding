@@ -65,6 +65,10 @@ export interface AppState {
   refreshDeferredWhileEditing: boolean;
   // A playlist file to reveal in the tree once the next refresh lands.
   pendingRevealPlaylistPath: string | null;
+  // Set at launch when a queue + playhead was restored from the previous session:
+  // the engine holds no track yet, so the first play press seeds it here and seeks
+  // to `time`. Cleared the moment any real playback starts (see feedEngine et al.).
+  pendingResume: { time: number } | null;
 }
 
 export const app: AppState = {
@@ -93,6 +97,7 @@ export const app: AppState = {
   inlineEditing: false,
   refreshDeferredWhileEditing: false,
   pendingRevealPlaylistPath: null,
+  pendingResume: null,
 };
 
 // --- Reactive state ---
