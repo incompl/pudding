@@ -5,6 +5,7 @@
 // (seed / arm / append / close / teardown) builds and dismantles the queue.
 
 import { invoke } from "@tauri-apps/api/core";
+import { signal } from "@preact/signals-core";
 import { h } from "./dom";
 import type { Queue, SearchTrack, SearchFolder, TreeNode, ContextMenuItem } from "./types";
 import {
@@ -263,6 +264,132 @@ export function curatedList(): Queue | null {
   return browsedPlaylist.value ?? activeQueue.value;
 }
 
+// --- Curation undo/redo ---
+//
+// A bounded per-list snapshot stack layered *over* autosave (a playlist is its file,
+// so undo can't replace the write — it re-issues an earlier one). Every curation
+// funnels through applyCuration, which snapshots the pre-edit track array before the
+// swap; ⌘Z re-applies the previous snapshot and ⌘⇧Z the undone one, both via
+// applyCurationCore so the re-apply reconciles playback and re-saves the file exactly
+// like a fresh edit — but *without* recording, so undo/redo walk one shared timeline.
+//
+// Stacks are keyed per list so ⌘Z acts on whatever list is on screen: a playlist by
+// its file path (history survives closing and reopening the browse), the ephemeral
+// queue by a lazily-stamped historyId (see Queue.historyId) that keeps one queue's
+// timeline distinct from the next's. Snapshots hold the track *objects* by reference
+// (cheap — no copies), preserving identity so a removed row's exact instance returns
+// and reconcilePoolEdit re-finds the playing track across an undo.
+const MAX_CURATION_UNDO = 100; // per list, snapshots (paths-by-reference, so light)
+const MAX_CURATION_LISTS = 64; // distinct lists remembered before evicting the oldest
+
+type CurationHistory = { undo: SearchTrack[][]; redo: SearchTrack[][] };
+const curationHistories = new Map<string, CurationHistory>();
+let curationIdSeq = 0;
+
+// Bumped after every history mutation (push / pop / forget) so a signal effect can
+// re-sync the Edit ▸ Undo/Redo menu state — the stacks themselves are plain Maps
+// that no signal tracks. Switching the curated list is already tracked (canUndo
+// reads the browsed/active-queue signals), so this only needs to cover in-place
+// stack growth and shrinkage.
+export const curationHistoryVersion = signal(0);
+function bumpCurationHistory(): void {
+  curationHistoryVersion.value++;
+}
+
+// The history-stack key for the list a curation targets, or null when there's no
+// list, or (for an ephemeral queue) none has been assigned yet — a queue with no
+// historyId has never been curated, so it has no history to read. Read-only; the
+// key is minted lazily by recordCurationSnapshot, the sole history *creator*.
+function curationKey(): string | null {
+  const list = curatedList();
+  if (!list) return null;
+  if (list.sourcePath) return `pl:${list.sourcePath}`;
+  return list.historyId ?? null;
+}
+
+// The history key for an edit that's about to record, minting an ephemeral queue's
+// historyId on first need. Carried forward by applyCurationCore's `{...list}`
+// spread, so every later edit of the same queue resolves the same key.
+function curationKeyForRecord(): string | null {
+  const list = curatedList();
+  if (!list) return null;
+  if (list.sourcePath) return `pl:${list.sourcePath}`;
+  if (!list.historyId) list.historyId = `q:${++curationIdSeq}:${Date.now()}`;
+  return list.historyId;
+}
+
+function historyFor(key: string): CurationHistory {
+  let h = curationHistories.get(key);
+  if (!h) {
+    h = { undo: [], redo: [] };
+    curationHistories.set(key, h);
+    // Bound the number of remembered lists: drop the oldest-touched when over.
+    if (curationHistories.size > MAX_CURATION_LISTS) {
+      const oldest = curationHistories.keys().next().value;
+      if (oldest !== undefined) curationHistories.delete(oldest);
+    }
+  }
+  return h;
+}
+
+// Snapshot the curated list before a user edit overwrites it, and fork the timeline
+// (drop the redo stack — a new edit invalidates any undone future). Bounded: the
+// oldest snapshot falls off the front.
+function recordCurationSnapshot(): void {
+  const list = curatedList();
+  const key = curationKeyForRecord();
+  if (!list || !key) return;
+  const h = historyFor(key);
+  h.undo.push(list.tracks.slice());
+  if (h.undo.length > MAX_CURATION_UNDO) h.undo.shift();
+  h.redo.length = 0;
+  bumpCurationHistory();
+}
+
+export function canUndoCuration(): boolean {
+  const key = curationKey();
+  return key != null && (curationHistories.get(key)?.undo.length ?? 0) > 0;
+}
+
+export function canRedoCuration(): boolean {
+  const key = curationKey();
+  return key != null && (curationHistories.get(key)?.redo.length ?? 0) > 0;
+}
+
+// ⌘Z: restore the curated list's previous snapshot, banking the current state for
+// redo. Returns whether anything was undone (a no-op when the stack is empty).
+export function undoCuration(): boolean {
+  const list = curatedList();
+  const key = curationKey();
+  if (!list || !key) return false;
+  const h = curationHistories.get(key);
+  if (!h || h.undo.length === 0) return false;
+  h.redo.push(list.tracks.slice());
+  applyCurationCore(h.undo.pop()!);
+  bumpCurationHistory();
+  return true;
+}
+
+// ⌘⇧Z: re-apply the most recently undone snapshot, banking the current state back
+// onto the undo stack.
+export function redoCuration(): boolean {
+  const list = curatedList();
+  const key = curationKey();
+  if (!list || !key) return false;
+  const h = curationHistories.get(key);
+  if (!h || h.redo.length === 0) return false;
+  h.undo.push(list.tracks.slice());
+  applyCurationCore(h.redo.pop()!);
+  bumpCurationHistory();
+  return true;
+}
+
+// Forget a playlist's undo history — its file was deleted, so a lingering snapshot
+// must not be able to re-save (resurrect) it on a later undo.
+export function forgetCurationHistory(sourcePath: string): void {
+  if (curationHistories.delete(`pl:${sourcePath}`)) bumpCurationHistory();
+}
+
 // Map a playable-pool index (queuePlayingIndex, which excludes missing rows) back
 // to its index in the full view array. Inverse of renderQueue's poolIdx walk.
 export function viewIndexOfPlayable(tracks: SearchTrack[], playableIdx: number): number {
@@ -297,8 +424,15 @@ export async function saveOpenPlaylist(path: string, name: string, tracks: Searc
 }
 
 // Apply a new view-array to the open list: swap the signal, reconcile playback when
-// it's the live pool, and autosave when it's a playlist file.
+// it's the live pool, and autosave when it's a playlist file. The user-facing entry
+// point — it records an undo snapshot of the pre-edit list first. Undo/redo re-enter
+// through applyCurationCore instead, so a re-applied snapshot doesn't itself record.
 export function applyCuration(newTracks: SearchTrack[]): void {
+  recordCurationSnapshot();
+  applyCurationCore(newTracks);
+}
+
+function applyCurationCore(newTracks: SearchTrack[]): void {
   const browsed = browsedPlaylist.value;
   const list = browsed ?? activeQueue.value;
   if (!list) return;

@@ -177,6 +177,11 @@ export function clearActiveQueue(): void {
 // it the source — moving it into `activeQueue` and clearing this.
 export const browsedPlaylist = signal<Queue | null>(null);
 
+// True while a text field (search, an inline rename, an editor) holds focus. Gates
+// the Edit ▸ Undo/Redo menu items off so their ⌘Z/⌘⇧Z accelerators don't preempt
+// the web view's own text undo while typing. Driven by document focus events.
+export const editingText = signal(false);
+
 // Which face fills the right pane: true = the list face (the queue or the open
 // playlist), false = the now-playing hero. Only meaningful when a list exists
 // (see paneView); the CSS falls back to the hero otherwise.

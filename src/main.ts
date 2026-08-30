@@ -61,6 +61,7 @@ import {
   activeTab,
   activeQueue,
   browsedPlaylist,
+  editingText,
   listFaceOpen,
   queuePlayingIndex,
   shuffleMode,
@@ -182,6 +183,11 @@ import {
   fillRowAfterRemoval,
   removeCuratedTracks,
   removeCuratedRow,
+  undoCuration,
+  redoCuration,
+  canUndoCuration,
+  canRedoCuration,
+  curationHistoryVersion,
 } from "./queue";
 import {
   KEY_RECENT_PLAYLISTS,
@@ -2525,6 +2531,44 @@ async function init(): Promise<void> {
     void activeQueue.value;
     void invoke("set_move_playlist_enabled", { enabled: openPlaylistPath() != null });
   });
+
+  // Keep Edit ▸ Undo / Redo enabled in step with what ⌘Z would do. Our custom items
+  // own ⌘Z / ⌘⇧Z (they replace the predefined ones), so they must be enabled both
+  // while a text field is focused — so the key reaches us to drive the field's own
+  // undo — and when a curation is undoable. Reads the history version (bumped on
+  // every push/pop) and, via canUndoCuration, the browsed/active-queue signals, so
+  // switching lists or editing either re-runs it.
+  effect(() => {
+    void curationHistoryVersion.value;
+    const typing = editingText.value;
+    void invoke("set_edit_undo_state", {
+      undo: typing || canUndoCuration(),
+      redo: typing || canRedoCuration(),
+    });
+  });
+
+  // Edit ▸ Undo / Redo (also ⌘Z / ⌘⇧Z, which the custom native items own). Routed by
+  // focus the way the macOS responder chain routes a native Undo: a focused text
+  // field gets its own editing undo (execCommand — the predefined selector that
+  // would otherwise supply it is gone); anything else gets curation undo.
+  await listen<string>("menu:edit", (event) => {
+    const redo = event.payload === "redo";
+    if (isTextInputTarget(document.activeElement)) {
+      document.execCommand(redo ? "redo" : "undo");
+    } else if (redo) {
+      redoCuration();
+    } else {
+      undoCuration();
+    }
+  });
+
+  // Track text-field focus so the effect above keeps ⌘Z enabled for text undo while
+  // typing. focusout lands on <body> (a non-text element) → false.
+  const refreshEditingText = () => {
+    editingText.value = isTextInputTarget(document.activeElement);
+  };
+  document.addEventListener("focusin", refreshEditingText);
+  document.addEventListener("focusout", refreshEditingText);
 
   // Playlist menu intents (New / Open… / Save / Move / Clear Recent), plus a
   // recent item carrying its own path.

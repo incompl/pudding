@@ -84,6 +84,17 @@ struct PlaylistMenu {
     recent: Submenu<Wry>,
 }
 
+// The Edit menu's Undo/Redo. One item each, owning ⌘Z / ⌘⇧Z, that the frontend
+// routes by focus (like the macOS responder chain does natively): editing text →
+// the web view's own text undo (document.execCommand), otherwise → *curation* undo
+// (playlist / queue reorder-remove-drag-in). Enabled whenever either applies
+// (set_edit_undo_state) — replacing the predefined .undo()/.redo(), whose selector
+// is what would otherwise power text undo, so the frontend must supply it instead.
+struct EditMenu {
+    undo: MenuItem<Wry>,
+    redo: MenuItem<Wry>,
+}
+
 // One entry the frontend hands set_recent_playlists to rebuild the Open Recent
 // submenu (most-recent first).
 #[derive(Deserialize)]
@@ -1394,6 +1405,16 @@ fn set_move_playlist_enabled(menu: State<PlaylistMenu>, enabled: bool) {
     let _ = menu.move_file.set_enabled(enabled);
 }
 
+// Enable/disable Edit ▸ Undo / Redo. The frontend calls this as its curation
+// history grows/shrinks and as focus enters/leaves a text field: each is enabled
+// when a field is focused (so ⌘Z reaches the frontend to drive text undo) or when
+// there's a curation to undo/redo.
+#[tauri::command]
+fn set_edit_undo_state(menu: State<EditMenu>, undo: bool, redo: bool) {
+    let _ = menu.undo.set_enabled(undo);
+    let _ = menu.redo.set_enabled(redo);
+}
+
 // Rebuild the Open Recent submenu from the frontend's persisted recents
 // (most-recent first). Each row's id carries its path (playlist-recent:<path>)
 // so the click handler can relay it; an empty list shows a disabled placeholder.
@@ -1979,6 +2000,14 @@ pub fn run() {
                 "open-about" => {
                     let _ = app.emit("open-about", ());
                 }
+                // Edit ▸ Undo / Redo relay to the frontend, which owns the curation
+                // history (playlist / queue reorder-remove-drag-in).
+                "edit-undo" => {
+                    let _ = app.emit("menu:edit", "undo");
+                }
+                "edit-redo" => {
+                    let _ = app.emit("menu:edit", "redo");
+                }
                 // Transport items. The frontend owns playback, so these just
                 // relay the intent; Previous/Next carry ⌘←/⌘→ accelerators, which
                 // also serve to surface the shortcuts in the menu.
@@ -2133,15 +2162,33 @@ pub fn run() {
 
             // Setting a custom menu replaces the default, so the Edit submenu is
             // re-added here — without it ⌘C/⌘V/⌘Z stop working in the webview.
+            // Undo/Redo are *ours* — custom items carrying ⌘Z/⌘⇧Z rather than the
+            // predefined .undo()/.redo() — because they must serve both curation undo
+            // and text undo, routed by focus in the frontend (see EditMenu). They
+            // start disabled; the frontend enables them (set_edit_undo_state) whenever
+            // a text field is focused or a curation is undoable. Cut/Copy/Paste/Select
+            // All stay predefined (their selectors still power the webview directly).
+            let edit_undo = MenuItemBuilder::with_id("edit-undo", "Undo")
+                .accelerator("CmdOrCtrl+Z")
+                .enabled(false)
+                .build(app)?;
+            let edit_redo = MenuItemBuilder::with_id("edit-redo", "Redo")
+                .accelerator("CmdOrCtrl+Shift+Z")
+                .enabled(false)
+                .build(app)?;
             let edit_menu = SubmenuBuilder::new(app, "Edit")
-                .undo()
-                .redo()
+                .item(&edit_undo)
+                .item(&edit_redo)
                 .separator()
                 .cut()
                 .copy()
                 .paste()
                 .select_all()
                 .build()?;
+            app.manage(EditMenu {
+                undo: edit_undo,
+                redo: edit_redo,
+            });
 
             // Playback menu, top to bottom: transport (Play/Pause, Previous,
             // Next); Shuffle + a Repeat submenu; Volume Up/Down + Mute; and a
@@ -2330,6 +2377,7 @@ pub fn run() {
             set_miniplayer_checked,
             set_save_playlist_enabled,
             set_move_playlist_enabled,
+            set_edit_undo_state,
             set_recent_playlists,
             audio_append,
             audio_stop,

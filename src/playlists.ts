@@ -32,6 +32,7 @@ import {
   insertCuratedTracks,
   appendToActivePool,
   teardownPlaybackToEmpty,
+  forgetCurationHistory,
 } from "./queue";
 import { editInline } from "./editors";
 import {
@@ -472,6 +473,9 @@ export async function deletePlaylistNode(node: TreeNode): Promise<void> {
     return;
   }
   removeRecentPlaylist(node.path);
+  // Drop any curation-undo history for the file — a lingering snapshot must not be
+  // able to re-save (resurrect) it on a later ⌘Z.
+  forgetCurationHistory(node.path);
   const active = activeQueue.value;
   const activeIsDeleted = isPlaylistSource(active) && active!.sourcePath === node.path;
   if (activeIsDeleted && queueIsActivePool()) {

@@ -128,6 +128,12 @@ export interface Queue {
   // OS menu act on the open playlist (Move Playlist File…). Absent for ephemeral
   // queues and other sources.
   sourcePath?: string;
+  // Curation-undo identity for an *ephemeral* queue (which has no sourcePath to key
+  // its history by). Stamped lazily on the first curation and carried forward by the
+  // `{...list}` spread every edit makes, so one queue's undo stack stays distinct
+  // from the next's. Playlists key their history by sourcePath instead. See
+  // curation history in queue.ts.
+  historyId?: string;
 }
 
 export interface ScanResult {
