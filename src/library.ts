@@ -237,10 +237,10 @@ export async function refreshLibrary(): Promise<void> {
         app.refreshDeferredWhileEditing = true;
         break;
       }
-      const filesTab = document.getElementById("tab-files");
-      const scrollTop = filesTab?.scrollTop ?? 0;
+      // renderTree reuses the live window (repaint in place), which keeps scrollTop
+      // and the measured row height — so a scan/watcher refresh no longer jumps the
+      // browsed tree to the top.
       renderTree();
-      if (filesTab) filesTab.scrollTop = scrollTop;
       // Follow a just-renamed playlist to its new alphabetical slot so the re-sort
       // reads as intentional rather than the row vanishing. Consumed once here.
       if (app.pendingRevealPlaylistPath) {

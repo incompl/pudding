@@ -1096,12 +1096,39 @@ function showPlaylistContextMenu(x: number, y: number, path: string): void {
 // painter can map its object-keyed Set back to rows by view index (mirrors how
 // the queue painter reads openListTracks()).
 
+// Whether a leaf list's tracks disagree about a field (artist / album) — i.e. is it
+// worth showing in the row suffix, or is it the same on every row and just noise?
+// Empty values don't count as a distinct value; short-circuits once two differ, so
+// a real varying list (Songs) is O(1) despite the whole-library size.
+function fieldVaries(
+  tracks: SearchTrack[],
+  get: (t: SearchTrack) => string | null,
+): boolean {
+  let seen: string | null = null;
+  for (const t of tracks) {
+    const v = get(t);
+    if (!v) continue;
+    if (seen === null) seen = v;
+    else if (v !== seen) return true;
+  }
+  return false;
+}
+
 export function renderLeafTrackList(
   tracks: SearchTrack[],
   ctx: LeafListContext,
 ): HTMLElement {
   app.navLeafTracks = tracks;
   const ul = h("div", { class: "nav-list" });
+
+  // Show a field in the dimmed suffix only when the list's tracks disagree about it
+  // (mirrors the browse tree's per-folder showArtist). A field that's the same on
+  // every row is noise repeated down the list, so drop it: an album view (one album,
+  // often one artist) collapses to bare titles, while a compilation still shows the
+  // varying artist; an artist's Tracks list drops the redundant artist and keeps the
+  // album. Songs — the whole library — varies on both, so it shows artist · album.
+  const showArtist = fieldVaries(tracks, (t) => t.artist);
+  const showAlbum = fieldVaries(tracks, (t) => t.album);
 
   // Play from `index` in context (cf. playTreeTrack): select the row so it stays
   // highlighted, drop the queue-row highlight, dismiss any queue/playlist chrome
@@ -1157,11 +1184,15 @@ export function renderLeafTrackList(
       }),
     );
 
-    const secondaryText = [t.artist, t.album].filter(Boolean).join(" · ");
-    // The secondary line is always present (empty when the track has no artist or
-    // album) so every row is the same two-line height — the uniform height the
-    // window positions rows by (row i at i * rowHeight). A rare metadata-less row
-    // reserves a blank second line rather than collapsing to a shorter row.
+    // Single line, left-aligned (matching the browse tree): the title, then the
+    // artist/album inline and dimmed after a separator. Every row is one line at
+    // any width, so the height never varies — the uniform height the window
+    // positions rows by (row i at i * rowHeight). The suffix is appended only when
+    // present, so a metadata-less row is just the bare title (still one-line height)
+    // rather than a reserved blank; the whole cell truncates with one ellipsis.
+    const secondaryText = [showArtist ? t.artist : null, showAlbum ? t.album : null]
+      .filter(Boolean)
+      .join(" · ");
     const cell = h(
       "span",
       { class: "nav-cell" },
@@ -1169,8 +1200,10 @@ export function renderLeafTrackList(
         class: "nav-primary",
         text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
       }),
-      h("span", { class: "nav-secondary", text: secondaryText }),
     );
+    if (secondaryText) {
+      cell.appendChild(h("span", { class: "nav-secondary", text: secondaryText }));
+    }
 
     const row = h(
       "div",

@@ -305,18 +305,17 @@ function asyncListBody<T>(opts: {
 }
 
 // A drill-down row (a lens, an artist, an album, or a playlist): a gutter icon, a
-// primary label, an optional secondary line, and a hover highlight. Left-click
+// primary label, an optional dimmed inline suffix, and a hover highlight. Left-click
 // drills / opens via `onOpen`; double-click plays via `onPlay` (playlists only);
 // right-click raises the injected context menu via `onMenu`.
 function drillRow(opts: {
   icon: IconKind;
   primary: string;
+  // An optional subtitle (e.g. an album's artist) shown inline after the primary,
+  // dimmed and after a separator (see .nav-secondary). Every row is a single line
+  // whether or not this is present, so the windowed lenses (Artists/Albums) keep the
+  // uniform row height they position by — no blank line needs reserving.
   secondary?: string;
-  // Always render the secondary line, blank when there's no subtitle, so every row
-  // in a list is the same (two-line) height. The windowed lenses (Artists/Albums)
-  // need that uniform height to place row i at i * rowHeight; a list where the
-  // subtitle only sometimes appears would otherwise have ragged row heights.
-  reserveSecondary?: boolean;
   onOpen: () => void;
   onPlay?: () => void;
   onMenu?: (x: number, y: number) => void;
@@ -325,8 +324,7 @@ function drillRow(opts: {
     "span",
     { class: "nav-cell" },
     h("span", { class: "nav-primary", text: opts.primary }),
-    (opts.secondary || opts.reserveSecondary) &&
-      h("span", { class: "nav-secondary", text: opts.secondary ?? "" }),
+    opts.secondary && h("span", { class: "nav-secondary", text: opts.secondary }),
   );
   const row = h(
     "div",
@@ -352,8 +350,9 @@ function drillRow(opts: {
 // because render()'s container.replaceChildren() had to tear down one .nav-row per
 // artist/album synchronously in the click handler. A screenful of nodes builds and
 // tears down cheaply on both sides. Rows must be uniform height (the window places
-// row i at i * rowHeight), so callers reserve the secondary line where it varies
-// (see drillRow's reserveSecondary). The artist/album *detail* views aren't
+// row i at i * rowHeight); the single-line drillRow is uniform by construction —
+// its optional subtitle sits inline, so a row with one is no taller than a row
+// without (see drillRow / .nav-secondary). The artist/album *detail* views aren't
 // windowed here — one artist's albums is a short list, and their Tracks section is
 // already a windowed leaf list, so windowing the small album section would only add
 // a second window fighting for the same scroll pane.
@@ -510,9 +509,6 @@ function albumsView(): View {
               icon: "album",
               primary: al.album,
               secondary: al.artist || undefined,
-              // Albums vary in whether they carry an album-artist subtitle; reserve
-              // the line so every row is the same height for windowing.
-              reserveSecondary: true,
               onOpen: () => push(albumDetailView(al.album, al.artist)),
               onMenu: (x, y) => deps.showAlbumMenu(x, y, al.album, al.artist),
             }),

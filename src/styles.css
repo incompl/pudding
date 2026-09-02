@@ -2094,21 +2094,32 @@ ul {
 
    1. No content-visibility. The window measures a probe row's real height to place
       every slot at i * rowHeight; content-visibility:auto would hand it the 2em
-      intrinsic-size placeholder instead of the true two-line height. Off-screen rows
+      intrinsic-size placeholder instead of the true row height. Off-screen rows
       aren't in the DOM here anyway, so there's nothing to skip.
-   2. Uniform two-line height. Every row is title-over-subline (the subline is a blank
-      line — a non-breaking space — for folders and untagged files), and both lines are
-      clamped to one line each so a long name can't wrap and desync the row math. */
+   2. Uniform single-line rows. The title and the (optional) inline artist share one
+      line that truncates with a single trailing ellipsis, so a long title pushes the
+      artist off the end and nothing wraps to desync the row math. The row is one line
+      at every width, so the measured height never changes — no re-probe, no jump. */
 #folder-tree .tree-window .node-label {
   content-visibility: visible;
   contain-intrinsic-size: auto;
 }
-#folder-tree .tree-window .primary,
-#folder-tree .tree-window .secondary {
-  display: block;
+#folder-tree .tree-window .label-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* The track's artist, inline after the title and dimmed, shown only when the
+   folder's artists vary (see renderTreeRow / showArtist). A dim middot separates it
+   from the title; it lives on ::before so the span's text stays the bare artist. */
+#folder-tree .tree-window .artist {
+  color: var(--text-dim);
+}
+#folder-tree .tree-window .artist::before {
+  content: " · ";
+}
+#folder-tree .tree-window .node-label.playing .artist {
+  color: var(--accent-dim);
 }
 
 /* The synthetic "(empty)" marker shown under an expanded folder with no children. */
@@ -2829,24 +2840,26 @@ ul {
   padding-bottom: 0.3em;
 }
 
+/* Single-line cell (matching the browse tree's .label-text): the primary label
+   and an optional dimmed suffix (artist / album) share one line that truncates
+   with a single trailing ellipsis, so a long title pushes the suffix off the end
+   and nothing wraps. One line at every width keeps every row a uniform height —
+   the height the windowed lenses (Artists/Albums) position rows by. */
 .nav-cell {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  line-height: 1.3;
-}
-.nav-primary {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The dimmed suffix, inline after the primary label and separated by a middot on
+   ::before (so the span's text stays the bare artist/album). Shown only when there
+   is a subtitle — see drillRow / renderLeafTrackList. */
 .nav-secondary {
-  font-size: 0.85em;
   color: var(--text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+.nav-secondary::before {
+  content: " · ";
 }
 
 /* Masked line-art gutter icons, tinted like the tree icons: muted at rest,

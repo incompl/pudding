@@ -427,7 +427,7 @@ export async function renameTreePlaylist(node: TreeNode, label: HTMLElement, raw
   // Optimistic in-place update: the node model and the row's own text, so the new
   // name shows immediately in the row's current position until the refresh re-sorts.
   node.name = name;
-  const textEl = label.querySelector(".label-text");
+  const textEl = label.querySelector(".label-text .title");
   if (textEl) textEl.textContent = name;
   // Keep any open copies (browsed / active queue) titled in agreement without a re-read.
   const retitle = (q: Queue | null): Queue | null =>

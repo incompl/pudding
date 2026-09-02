@@ -271,22 +271,22 @@ function renderTreeRow(row: TreeRow): HTMLElement {
       ),
     );
   }
-  // Every row is two lines for a uniform windowed height (see renderTreeRow's
-  // header): the title/name on top, the artist beneath (a de-emphasized second
-  // line, like a search result) for a tagged track — otherwise a blank second line
-  // (a non-breaking space, so folders and untagged files reserve the same height
-  // rather than collapsing to a shorter row and breaking the window's row math).
+  // Single line, left-aligned: the title, then the track's artist inline (dimmed,
+  // after a separator) — but only when the folder's tracks disagree about the artist
+  // (showArtist, computed per folder like before), so a single-artist album doesn't
+  // repeat the name on every row. The whole line truncates with one trailing ellipsis
+  // (see .label-text), so a long title pushes the artist off the end. Folders/untagged
+  // files render the bare title, which reads fine at one-line height.
   const primaryText = !node.isFolder && node.title ? node.title : displayLabel(node);
-  const secondaryText =
-    !node.isFolder && node.title && node.artist && showArtist ? node.artist : "";
-  label.appendChild(
-    h(
-      "span",
-      { class: "label-text" },
-      h("span", { class: "primary", text: primaryText }),
-      h("span", { class: "secondary", text: secondaryText || " " }),
-    ),
+  const text = h(
+    "span",
+    { class: "label-text" },
+    h("span", { class: "title", text: primaryText }),
   );
+  if (!node.isFolder && !node.isPlaylist && node.title && node.artist && showArtist) {
+    text.appendChild(h("span", { class: "artist", text: node.artist }));
+  }
+  label.appendChild(text);
   if (node.isPlaylist) {
     attachPlaylistClicks(label, node);
   } else {
@@ -657,7 +657,21 @@ export function renderTree(): void {
     treeStale = true;
     return;
   }
-  buildTree();
+  // Reuse the live window when one exists and the library still has content (a
+  // reconcile refresh from a scan/watcher event): re-flatten and repaint in place,
+  // which sets the spacer height synchronously (see windowed-list update) and keeps
+  // scrollTop. A full buildTree() would tear the window down and recreate it with a
+  // 0-height spacer — its height isn't set until the first paint a frame later — so
+  // the browser clamps scroll to 0 and the tree jumps to the top mid-browse.
+  //
+  // The window must still be mounted, not just non-null: refreshTree (roots changed,
+  // e.g. a folder was added) replaces treeContainer with a "Loading…" placeholder
+  // before calling us, detaching treeWin.el while the variable still points at it.
+  // Repainting that orphaned window would strand Browse on "Loading…" forever — so
+  // fall through to buildTree(), which re-mounts a fresh window in the container.
+  if (treeWin?.el.isConnected && app.rootNode && app.rootNode.children.length > 0)
+    refreshTreeRows();
+  else buildTree();
 }
 
 // Tell the tree whether the Browse lens is now the active view. Entering Browse
