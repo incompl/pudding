@@ -647,12 +647,16 @@ html[data-mode="light"] .context-menu {
   font-style: italic;
 }
 
-/* The artist / album lines link into the Files pane (see setupPlayerControls).
-   Same look at rest — an accent lights up on hover to signal it's clickable, the
-   inner marquee span inheriting the color. The album line takes the dimmer accent
-   so the hover matches its already-quieter (muted, italic) rest state. */
+/* The title / artist / album lines link into the Files pane (see
+   setupPlayerControls). Same look at rest — an accent lights up on hover to signal
+   it's clickable, the inner marquee span inheriting the color. The title reveals the
+   track in its playing context; the album line takes the dimmer accent so the hover
+   matches its already-quieter (muted, italic) rest state. */
 .np-link {
   cursor: pointer;
+}
+#now-playing-title.np-link:hover {
+  color: var(--accent);
 }
 #now-playing-artist.np-link:hover {
   color: var(--accent);
@@ -1525,14 +1529,17 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
     padding: 0;
   }
 
-  /* Mini hides the Files pane entirely, so the artist / album links have nowhere
-     to land — drop the affordance so they read as plain metadata, not a dead
-     click. Fall back to the I-beam (the lines opt into user-select: text, like
+  /* Mini hides the Files pane entirely, so the title / artist / album links have
+     nowhere to land — drop the affordance so they read as plain metadata, not a
+     dead click. Fall back to the I-beam (the lines opt into user-select: text, like
      the title, so "what's playing" stays copyable) and fold each hover back to
-     its own rest color (artist inherits --text, album stays --text-muted) — that
-     keeps them from promising a jump they can't deliver. */
+     its own rest color (title/artist inherit --text, album stays --text-muted) —
+     that keeps them from promising a jump they can't deliver. */
   .np-link {
     cursor: text;
+  }
+  #now-playing-title.np-link:hover {
+    color: inherit;
   }
   #now-playing-artist.np-link:hover {
     color: inherit;

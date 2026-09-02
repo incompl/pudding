@@ -564,6 +564,18 @@ export async function revealFolderInTree(path: string): Promise<void> {
   scrollTreeToPath(path);
 }
 
+// Reveal a *file* in the Browse tree: expand down to its containing folder (so the
+// track row exists in the flattened list), then scroll that track row to the top.
+// Backs the now-playing title's "reveal where this lives" fallback — a track played
+// from a plain queue / an ad-hoc pool / outside the library has no lens home, so we
+// land on the file itself in Browse. Like revealFolderInTree, a path outside the
+// library resolves to nothing and leaves the tree where it was.
+export async function revealFileInTree(filePath: string): Promise<void> {
+  const dir = filePath.replace(/[\\/][^\\/]*$/, "");
+  await revealFolderInTree(dir);
+  scrollTreeToPath(filePath);
+}
+
 // Scroll a tree row (by path) to the top of the pane. Returns the index found (or
 // -1). Shared by the search "Go to folder" reveal and the post-rename flash.
 function scrollTreeToPath(path: string): number {

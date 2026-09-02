@@ -154,7 +154,7 @@ import {
   browseStreamListPath,
   refreshStreams,
 } from "./library";
-import { playSelectedRow, revealFolderInTree, setBrowseActive } from "./tree-view";
+import { playSelectedRow, revealFolderInTree, revealFileInTree, setBrowseActive } from "./tree-view";
 import {
   closePaneEditor,
   editMetadataItem,
@@ -979,6 +979,47 @@ export function goToFolder(path: string): void {
   void revealFolderInTree(path);
 }
 
+// Clicking the now-playing title reveals the track in its *playing context* — the
+// pool autoadvance is walking (app.currentParent) — and scrolls to it, so the title
+// answers "where does this live / what am I playing from / what plays next" in one
+// tap, the same "go home to what's playing" the artist/album lines offer for their
+// grouping. The pool's synthetic path IS its canonical origin identity (these keys
+// mirror openAlbumQueue / the leaf lists' syntheticPath — see the syntheticParent
+// call sites), so we read the context straight off it rather than recording a
+// parallel breadcrumb that could drift from the actual pool:
+//   queue:album:<albumArtist>\0<album>  → the Albums lens' album detail
+//   queue:artist:<name>                 → the Artists lens' artist detail
+//   queue:songs                         → the Songs lens
+//   anything else (real folder pool, an explicit/ad-hoc/restored queue, or no pool
+//     at all for a search / OS-opened file) has no lens home, so we degenerate to
+//     revealing where the file lives — its folder in Browse. Either way we stash the
+//     path so the list that lands scrolls straight to the playing row.
+// Hidden for streams (no file) and when nothing's playing.
+export function revealNowPlaying(): void {
+  if (!hasTrack.value || isStream.value) return;
+  const path = currentNodePath.value;
+  const pool = app.currentParent?.path ?? "";
+  if (pool.startsWith("queue:album:")) {
+    const [albumArtist, album] = pool.slice("queue:album:".length).split("\0");
+    goToFilesTab();
+    app.pendingRevealPlayingPath = path;
+    navigateTo([{ t: "lens", lens: "album" }, { t: "album", album, albumArtist }]);
+  } else if (pool.startsWith("queue:artist:")) {
+    const name = pool.slice("queue:artist:".length);
+    goToFilesTab();
+    app.pendingRevealPlayingPath = path;
+    navigateTo([{ t: "lens", lens: "artist" }, { t: "artist", name }]);
+  } else if (pool === "queue:songs") {
+    goToFilesTab();
+    app.pendingRevealPlayingPath = path;
+    navigateTo([{ t: "lens", lens: "songs" }]);
+  } else if (path) {
+    goToFilesTab();
+    navigateTo([{ t: "lens", lens: "browse" }]);
+    void revealFileInTree(path);
+  }
+}
+
 export function trackContextItems(track: {
   artist: string | null;
   album: string | null;
@@ -1120,6 +1161,7 @@ export function renderLeafTrackList(
   ctx: LeafListContext,
 ): HTMLElement {
   app.navLeafTracks = tracks;
+  app.navLeafPoolPath = ctx.syntheticPath;
   const ul = h("div", { class: "nav-list" });
 
   // Show a field in the dimmed suffix only when the list's tracks disagree about it
@@ -1276,11 +1318,16 @@ export function renderLeafTrackList(
     if (navSel.signal.peek().has(t)) row.classList.add("selected");
     // The now-playing accent, applied at build time so a row scrolled into view is
     // already correct (the effect below repaints mounted rows as the track changes).
-    // Playing from a leaf list makes it the implicit pool (a synthetic queue:), which
-    // does set queuePlayingIndex — so the guard is `no *explicit* queue/playlist`
-    // (activeQueue null), not queuePlayingIndex. When an explicit queue owns the
-    // playhead its right-pane row carries the highlight, so the leaf copy stays plain.
-    if (activeQueue.peek() === null && currentNodePath.peek() === t.path) {
+    // Light the playing row only when this leaf list IS the live pool — its synthetic
+    // path equals currentParent's — so the accent tracks "you're looking at what's
+    // feeding playback." That covers lone play from the leaf (currentParent built from
+    // this ctx.syntheticPath) and an explicit Play album/artist of the same set, and
+    // stays dark when some other / reordered / ad-hoc pool owns the playhead even if
+    // the same track happens to appear in this list.
+    if (
+      app.currentParent?.path === ctx.syntheticPath &&
+      currentNodePath.peek() === t.path
+    ) {
       row.classList.add("playing");
     }
 
@@ -1303,6 +1350,17 @@ export function renderLeafTrackList(
   const win = windowedList({ count: tracks.length, renderRow: buildRow });
   win.el.classList.add("nav-window");
   ul.appendChild(win.el);
+  // Clicking the now-playing title parks the playing track's path here so the list
+  // it navigates to scrolls straight to it (the row already paints .playing via the
+  // currentNodePath match above). Consume it: scroll if this list actually holds the
+  // track, and clear it either way so a later, unrelated navigation doesn't inherit
+  // a stale reveal.
+  const revealPath = app.pendingRevealPlayingPath;
+  if (revealPath) {
+    app.pendingRevealPlayingPath = null;
+    const idx = tracks.findIndex((t) => t.path === revealPath);
+    if (idx >= 0) win.revealIndex(idx);
+  }
   return ul;
 }
 
@@ -1940,6 +1998,11 @@ function setupPlayerControls(): void {
   // track's home when you've wandered off browsing (see .np-link hover accent).
   // Hidden for streams / tagless tracks (the elements themselves are hidden), so
   // these only fire when there's a real artist/album to land on.
+  // The title line reveals the track in its playing context (the pool feeding
+  // autoadvance) — see revealNowPlaying for how the context is derived.
+  nowPlayingTitleEl.addEventListener("click", () => {
+    revealNowPlaying();
+  });
   nowPlayingArtistEl.addEventListener("click", () => {
     if (npArtist.value) goToArtist(npArtist.value);
   });
@@ -2392,19 +2455,20 @@ function setupEffects(): void {
   });
 
   // The navigator's leaf rows pick up the now-playing accent (+ the equalizer glyph):
-  // repaint mounted rows when the current track moves. Playing from a leaf list makes
-  // it the implicit pool (a synthetic queue:), which sets queuePlayingIndex — so the
-  // guard is "no *explicit* queue/playlist" (activeQueue null), not queuePlayingIndex.
-  // While an explicit queue/playlist owns the playhead its right-pane row carries the
-  // highlight, so these copies stay plain.
+  // repaint mounted rows when the current track moves. Light a row only when the leaf
+  // list on screen IS the live pool — its stashed synthetic path equals
+  // currentParent's — matching the build-time paint above (lone play from the leaf or
+  // an explicit Play album/artist of the same set light up; a foreign / reordered /
+  // ad-hoc pool leaves them plain). currentParent is non-reactive, but every pool
+  // change moves the track too, so the currentNodePath read keeps this in step.
   effect(() => {
     const path = currentNodePath.value;
-    const explicitQueue = activeQueue.value !== null;
+    const isLivePool = app.navLeafPoolPath === (app.currentParent?.path ?? null);
     document
       .querySelectorAll<HTMLElement>("#library-nav .nav-track-row")
       .forEach((el) => {
         const t = app.navLeafTracks[Number(el.dataset.rowIndex)];
-        el.classList.toggle("playing", !!t && !explicitQueue && t.path === path);
+        el.classList.toggle("playing", !!t && isLivePool && t.path === path);
       });
   });
 

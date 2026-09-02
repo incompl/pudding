@@ -67,6 +67,12 @@ export interface AppState {
   // The leaf list currently shown in the navigator (maps the nav selection back
   // to rows by view index).
   navLeafTracks: SearchTrack[];
+  // The synthetic pool path (ctx.syntheticPath) of that leaf list. The now-playing
+  // accent lights a leaf row when this equals the live pool (app.currentParent.path)
+  // — i.e. the list you're looking AT is the one feeding playback — covering both
+  // lone play from the leaf and an explicit Play album/artist of the same set. Null
+  // when no leaf list is shown.
+  navLeafPoolPath: string | null;
   // Library-refresh coalescing + edit-deferral flags.
   libraryRefreshing: boolean;
   libraryRefreshPending: boolean;
@@ -74,6 +80,12 @@ export interface AppState {
   refreshDeferredWhileEditing: boolean;
   // A playlist file to reveal in the tree once the next refresh lands.
   pendingRevealPlaylistPath: string | null;
+  // A playing track's path to scroll to the next time a leaf track list builds —
+  // set when the now-playing title is clicked to reveal the track in its playing
+  // context (see revealNowPlaying). Consumed (and cleared) by the first
+  // renderLeafTrackList that follows, so a navigation landing on the wrong list
+  // just drops it. Null when no reveal is pending.
+  pendingRevealPlayingPath: string | null;
   // Set at launch when a queue + playhead was restored from the previous session:
   // the engine holds no track yet, so the first play press seeds it here and seeks
   // to `time`. Cleared the moment any real playback starts (see feedEngine et al.).
@@ -103,11 +115,13 @@ export const app: AppState = {
   playlistIndex: [],
   playlistIndexLoaded: false,
   navLeafTracks: [],
+  navLeafPoolPath: null,
   libraryRefreshing: false,
   libraryRefreshPending: false,
   inlineEditing: false,
   refreshDeferredWhileEditing: false,
   pendingRevealPlaylistPath: null,
+  pendingRevealPlayingPath: null,
   pendingResume: null,
 };
 
