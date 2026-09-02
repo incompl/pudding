@@ -81,6 +81,14 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `⌘F` / `Ctrl+F` - focus search
 - `⌘S` - save the current queue as a playlist
 
+## Tips
+
+A few things that aren't obvious:
+
+- **Click the title in Now Playing** to jump to wherever the current track is playing from.
+- **Click the Files tab while it's already showing** to pop back to the top of the navigation hierarchy.
+- **Double-click the album art** to switch between the full window and the compact mini player.
+
 ## Tech stack
 
 - [Tauri](https://tauri.app/) 2 - desktop shell
