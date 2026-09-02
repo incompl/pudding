@@ -18,12 +18,14 @@ import {
   goToArtist,
   goToAlbum,
   goToFolder,
+  goToFile,
   persistActiveTab,
   libraryRootPaths,
   searchItemTrackProvider,
   addToPlaylistItem,
   debounce,
 } from "./main";
+import type { ContextMenuItem } from "./types";
 import { browsePlaylistPath } from "./playlists";
 import { playSearchTrack, playStream } from "./playback";
 
@@ -73,7 +75,10 @@ export function setupSearch(): void {
       // Reveal the folder in the Browse tree (expand + scroll to it).
       goToFolder(item.folder.path);
     } else if (item.kind === "file") {
-      playSearchTrack(item.track);
+      // A track hit SHOWS the track — reveal it in the Browse tree — rather than
+      // playing it, matching how the collection hits go to a detail view. Play is
+      // still one right-click away (see the row's context menu).
+      void goToFile(item.track.path);
     } else if (item.kind === "playlist") {
       // Open the playlist in the right pane — the same "go to" the navigator's
       // single-click does — not play it (that's the double-click / Play menu).
@@ -167,12 +172,27 @@ export function setupSearch(): void {
         text,
       );
       if (i === activeIndex) activeRow = row;
-      // Right-click a track-bearing hit to add it to a playlist.
+      // Right-click a track-bearing hit to add it to a playlist. File hits also
+      // carry Play here, since left-click now shows the track instead of playing it.
       const provider = searchItemTrackProvider(item);
       if (provider) {
         row.addEventListener("contextmenu", (e) => {
           e.preventDefault();
-          showContextMenu(e.clientX, e.clientY, [addToPlaylistItem(provider)]);
+          const menu: ContextMenuItem[] = [];
+          if (item.kind === "file") {
+            const track = item.track;
+            menu.push({
+              label: "Play",
+              action: () => {
+                playSearchTrack(track);
+                searchInput.value = "";
+                searchInput.blur();
+                close();
+              },
+            });
+          }
+          menu.push(addToPlaylistItem(provider));
+          showContextMenu(e.clientX, e.clientY, menu);
         });
       }
       searchResultsEl.appendChild(row);

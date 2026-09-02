@@ -154,7 +154,7 @@ import {
   browseStreamListPath,
   refreshStreams,
 } from "./library";
-import { playSelectedRow, revealFolderInTree, revealFileInTree, setBrowseActive } from "./tree-view";
+import { playSelectedRow, revealFolderInTree, revealFileInTree, revealTreeRow, setBrowseActive } from "./tree-view";
 import {
   closePaneEditor,
   editMetadataItem,
@@ -977,6 +977,18 @@ export function goToFolder(path: string): void {
   // Browse hosts the real folder tree; show it, then expand + scroll to the target.
   navigateTo([{ t: "lens", lens: "browse" }]);
   void revealFolderInTree(path);
+}
+
+// Reveal a single track hit in Browse — expand its containing folder, scroll to it,
+// and flash the row — instead of playing it. This is the search "show, don't play"
+// for leaf tracks, mirroring how a folder hit goes to the folder. Unlike the now-
+// playing reveal (where the playing row stays highlighted), a browsed-to track has
+// no persistent marker, so the flash is what says "here it is".
+export async function goToFile(path: string): Promise<void> {
+  goToFilesTab();
+  navigateTo([{ t: "lens", lens: "browse" }]);
+  await revealFileInTree(path);
+  revealTreeRow(path);
 }
 
 // Clicking the now-playing title reveals the track in its *playing context* — the

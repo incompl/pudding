@@ -30,7 +30,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 - Built to scale: snappy at 100,000 tracks and functional to 500,000 — every long list (Songs, folder tree, queue, playlists) is windowed so only the on-screen rows exist in the DOM, opened lens views are cached, and the whole-library sort is served from a covering index
 - Live library watching: add or edit files on disk and the app updates itself
 - Search across title, artist, album, and filename — or match a folder and play it as an album
-- Artist and album search results, or a track's right-click menu, open a queue of every matching track in the right pane
+- Search results show rather than play: artist, album, folder, and playlist hits open their view, and a track hit reveals itself in the folder tree — right-click any track hit to Play it or add it to a playlist
 - Embedded album art, and disc/track-number-aware sorting
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
 
