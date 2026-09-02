@@ -964,19 +964,28 @@ function goToFilesTab(): void {
 
 export function goToArtist(name: string): void {
   goToFilesTab();
-  navigateTo([{ t: "lens", lens: "artist" }, { t: "artist", name }]);
+  // flashTitle: the detail view has no persistent marker for where you landed, so
+  // pulse its Back-bar title as the "here it is" cue — the album/artist analogue of
+  // the tree-row flash a browsed-to track gets (see goToFile).
+  navigateTo([{ t: "lens", lens: "artist" }, { t: "artist", name }], {
+    flashTitle: true,
+  });
 }
 
 export function goToAlbum(album: string, albumArtist: string): void {
   goToFilesTab();
-  navigateTo([{ t: "lens", lens: "album" }, { t: "album", album, albumArtist }]);
+  navigateTo([{ t: "lens", lens: "album" }, { t: "album", album, albumArtist }], {
+    flashTitle: true,
+  });
 }
 
-export function goToFolder(path: string): void {
+export async function goToFolder(path: string): Promise<void> {
   goToFilesTab();
-  // Browse hosts the real folder tree; show it, then expand + scroll to the target.
+  // Browse hosts the real folder tree; show it, then expand + scroll to the target
+  // and flash the row — the same "here it is" a track hit gets (see goToFile).
   navigateTo([{ t: "lens", lens: "browse" }]);
-  void revealFolderInTree(path);
+  await revealFolderInTree(path);
+  revealTreeRow(path);
 }
 
 // Reveal a single track hit in Browse — expand its containing folder, scroll to it,

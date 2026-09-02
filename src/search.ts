@@ -73,7 +73,7 @@ export function setupSearch(): void {
       goToAlbum(item.album.album, item.album.artist);
     } else if (item.kind === "folder") {
       // Reveal the folder in the Browse tree (expand + scroll to it).
-      goToFolder(item.folder.path);
+      void goToFolder(item.folder.path);
     } else if (item.kind === "file") {
       // A track hit SHOWS the track — reveal it in the Browse tree — rather than
       // playing it, matching how the collection hits go to a detail view. Play is

@@ -110,6 +110,12 @@ let folderTree: HTMLElement;
 let createBtn: HTMLElement;
 let filesEmpty: HTMLElement;
 const stack: View[] = [];
+// Set for a single navigateTo when the caller wants the landing detail's Back-bar
+// title to flash — the "here it is" cue for album/artist search hits, which (unlike
+// a browsed-to track) have no persistent row highlight to say where you arrived.
+// Consumed and cleared by the next render() so unrelated renders (push/back) don't
+// re-flash a stale title.
+let pendingFlashTitle = false;
 
 function list(): HTMLElement {
   return h("div", { class: "nav-list" });
@@ -179,8 +185,9 @@ function enterLens(lens: Lens): void {
 // same mechanism restoreLocation uses on launch — so the steps also set the back
 // trail: [Artists, artist] lands on the artist detail with Back → Artists. The
 // caller is responsible for making the Files tab active first.
-export function navigateTo(steps: NavStep[]): void {
+export function navigateTo(steps: NavStep[], opts?: { flashTitle?: boolean }): void {
   restoreLocation(steps);
+  pendingFlashTitle = opts?.flashTitle ?? false;
   render();
 }
 
@@ -638,6 +645,11 @@ function render(): void {
     return;
   }
 
+  // Consume the one-shot flash request up front so it fires for this render only,
+  // whatever branch we take below (including the early root return that has no header).
+  const flashTitle = pendingFlashTitle;
+  pendingFlashTitle = false;
+
   const atRoot = stack.length === 0;
   const top = atRoot ? null : stack[stack.length - 1];
   const inBrowse = top?.lens === "browse";
@@ -652,13 +664,23 @@ function render(): void {
   if (!atRoot && top) {
     // iPod-style: the bar carries the current location (not the word "Back") and
     // the whole strip is the up-one-level control.
+    const title = h("span", { class: "nav-back-title", text: top.title });
     const header = h(
       "button",
       { class: "nav-back", attrs: { type: "button" }, on: { click: back } },
       h("span", { class: "nav-back-chev", text: "‹" }),
-      h("span", { class: "nav-back-title", text: top.title }),
+      title,
     );
     container.appendChild(header);
+    // One-shot flash to mark where a search hit landed (see pendingFlashTitle). Washes
+    // the whole Back bar; the class is dropped on animationend so a later re-render of
+    // the same view is clean.
+    if (flashTitle) {
+      header.classList.add("flash");
+      header.addEventListener("animationend", () => header.classList.remove("flash"), {
+        once: true,
+      });
+    }
   }
 
   const view = atRoot ? rootMenuView() : top!;

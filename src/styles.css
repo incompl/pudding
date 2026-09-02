@@ -2114,6 +2114,12 @@ ul {
   animation: row-flash 900ms ease-out;
 }
 
+/* The same one-shot accent wash across the whole Back bar, marking where an
+   album/artist search hit landed (see navigateTo's flashTitle). */
+.nav-back.flash {
+  animation: row-flash 900ms ease-out;
+}
+
 @keyframes row-flash {
   from {
     background: color-mix(in srgb, var(--accent) 35%, transparent);
