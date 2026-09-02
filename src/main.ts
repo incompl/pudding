@@ -2000,13 +2000,16 @@ function setupPlayerControls(): void {
   // these only fire when there's a real artist/album to land on.
   // The title line reveals the track in its playing context (the pool feeding
   // autoadvance) — see revealNowPlaying for how the context is derived.
-  nowPlayingTitleEl.addEventListener("click", () => {
+  // Listeners hang on the inner marquee span, not the full-width block, so a
+  // click in the empty space beside the text is absorbed rather than firing the
+  // link (the .np-link hover accent is scoped to the same span).
+  nowPlayingTitleInner.addEventListener("click", () => {
     revealNowPlaying();
   });
-  nowPlayingArtistEl.addEventListener("click", () => {
+  nowPlayingArtistInner.addEventListener("click", () => {
     if (npArtist.value) goToArtist(npArtist.value);
   });
-  nowPlayingAlbumEl.addEventListener("click", () => {
+  nowPlayingAlbumInner.addEventListener("click", () => {
     if (npAlbum.value) goToAlbum(npAlbum.value, npAlbumArtist.value ?? npArtist.value ?? "");
   });
 

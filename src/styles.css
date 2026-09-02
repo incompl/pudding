@@ -649,19 +649,21 @@ html[data-mode="light"] .context-menu {
 
 /* The title / artist / album lines link into the Files pane (see
    setupPlayerControls). Same look at rest — an accent lights up on hover to signal
-   it's clickable, the inner marquee span inheriting the color. The title reveals the
-   track in its playing context; the album line takes the dimmer accent so the hover
-   matches its already-quieter (muted, italic) rest state. */
-.np-link {
+   it's clickable. The affordance (and click target, see setupPlayerControls) is
+   scoped to the inner marquee span, not the full-width block, so hovering or
+   clicking the empty space beside the text doesn't light it up or fire. The title
+   reveals the track in its playing context; the album line takes the dimmer accent
+   so the hover matches its already-quieter (muted, italic) rest state. */
+.np-link .marquee-inner {
   cursor: pointer;
 }
-#now-playing-title.np-link:hover {
+#now-playing-title.np-link .marquee-inner:hover {
   color: var(--accent);
 }
-#now-playing-artist.np-link:hover {
+#now-playing-artist.np-link .marquee-inner:hover {
   color: var(--accent);
 }
-#now-playing-album.np-link:hover {
+#now-playing-album.np-link .marquee-inner:hover {
   color: var(--accent-dim);
 }
 
@@ -1535,16 +1537,16 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
      the title, so "what's playing" stays copyable) and fold each hover back to
      its own rest color (title/artist inherit --text, album stays --text-muted) —
      that keeps them from promising a jump they can't deliver. */
-  .np-link {
+  .np-link .marquee-inner {
     cursor: text;
   }
-  #now-playing-title.np-link:hover {
+  #now-playing-title.np-link .marquee-inner:hover {
     color: inherit;
   }
-  #now-playing-artist.np-link:hover {
+  #now-playing-artist.np-link .marquee-inner:hover {
     color: inherit;
   }
-  #now-playing-album.np-link:hover {
+  #now-playing-album.np-link .marquee-inner:hover {
     color: var(--text-muted);
   }
 
