@@ -360,7 +360,12 @@ body.platform-mac #tabs {
   cursor: pointer;
 }
 
-.search-result:hover,
+/* Hover is gated behind :not(.kbd-nav): while the list is driven by typing or the
+   arrow keys, a row sitting under a stationary cursor must not look hovered just
+   because it rendered there. The kbd-nav flag is cleared on the next real
+   mousemove, so hover comes back the instant the pointer is actually used. The
+   keyboard-selected .active row stays styled throughout. */
+#search-results:not(.kbd-nav) .search-result:hover,
 .search-result.active {
   background: var(--surface-hover);
 }
@@ -382,7 +387,7 @@ body.platform-mac #tabs {
   top: 2px;
 }
 
-.search-result:hover .search-icon,
+#search-results:not(.kbd-nav) .search-result:hover .search-icon,
 .search-result.active .search-icon {
   background-color: var(--accent);
 }
@@ -414,7 +419,7 @@ body.platform-mac #tabs {
   text-overflow: ellipsis;
 }
 
-.search-result:hover .primary,
+#search-results:not(.kbd-nav) .search-result:hover .primary,
 .search-result.active .primary {
   color: var(--accent);
 }
@@ -429,7 +434,7 @@ body.platform-mac #tabs {
 
 /* On the highlighted row the metadata line takes a dimmed accent green, tying
    it to the accent title above without competing with it. */
-.search-result:hover .secondary,
+#search-results:not(.kbd-nav) .search-result:hover .secondary,
 .search-result.active .secondary {
   color: var(--accent-dim);
 }

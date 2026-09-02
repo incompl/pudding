@@ -198,8 +198,19 @@ export function setupSearch(): void {
       searchResultsEl.appendChild(row);
     });
     searchResultsEl.classList.remove("hidden");
+    // Suppress :hover until the pointer is actually used: a fresh render (new
+    // query results, or an arrow-key move) must not light up whichever row now
+    // sits under a stationary cursor. Cleared on the next real mousemove below.
+    searchResultsEl.classList.add("kbd-nav");
     if (activeRow) (activeRow as HTMLElement).scrollIntoView({ block: "nearest" });
   }
+
+  // A genuine pointer movement re-enables hover styling. scrollIntoView() can
+  // shift rows under the cursor without a mousemove, so this only fires on real
+  // input — exactly when hover should take over from the keyboard selection.
+  searchResultsEl.addEventListener("mousemove", () => {
+    searchResultsEl.classList.remove("kbd-nav");
+  });
 
   const runSearch = debounce(async (raw: string) => {
     const token = ++queryToken;
