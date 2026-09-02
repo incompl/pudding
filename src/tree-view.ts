@@ -4,7 +4,7 @@
 // lives in library.ts.
 
 import { invoke } from "@tauri-apps/api/core";
-import { h } from "./dom";
+import { h, eqBars } from "./dom";
 import type {
   TreeNode,
   DirListing,
@@ -256,6 +256,9 @@ function renderTreeRow(row: TreeRow): HTMLElement {
           text:
             parent !== app.rootNode && node.track != null ? String(node.track) : "",
         }),
+        // The playing-row equalizer glyph, hidden until this row owns the playhead
+        // (CSS keys off .node-label.playing) and swapped for the play button on hover.
+        eqBars(),
         // The button plays directly and swallows the click so the row's
         // select-on-click doesn't also fire.
         h("button", {

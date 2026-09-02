@@ -6,7 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { signal } from "@preact/signals-core";
-import { h } from "./dom";
+import { h, eqBars } from "./dom";
 import type { Queue, SearchTrack, SearchFolder, TreeNode, ContextMenuItem } from "./types";
 import {
   app,
@@ -182,6 +182,9 @@ function buildQueueRow(
       if (isSource) playQueueTrack(rowPoolIdx);
       else commitBrowsedPlaylist(rowPoolIdx);
     };
+    // The playing-row equalizer glyph, hidden until this row owns the playhead
+    // (CSS keys off .queue-row.playing) and swapped for the play button on hover.
+    num.appendChild(eqBars());
     // Hover play button in the gutter, mirroring the tree's track rows. Swallows
     // the click so the row's select-on-click doesn't also fire.
     num.appendChild(

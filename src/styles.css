@@ -952,6 +952,18 @@ html[data-mode="light"] .context-menu {
   color: var(--accent);
 }
 
+/* The playing queue row swaps its number for the equalizer glyph at rest; on hover
+   the glyph gives way to the play button (same as the number does). */
+.queue-row.playing .queue-num-text {
+  visibility: hidden;
+}
+.queue-row.playing .eq-bars {
+  display: flex;
+}
+.queue-row.playing:hover .eq-bars {
+  display: none;
+}
+
 /* Multi-select background, matching the tree's .selected row. The .playing accent
    text still shows through on top. */
 .queue-row.selected {
@@ -2270,6 +2282,79 @@ ul {
   background-color: var(--text);
 }
 
+/* The animated "now playing" equalizer glyph shared by every track gutter (tree,
+   queue, nav leaf list). It sits absolutely centered in the gutter column, exactly
+   where the number and the hover play button do, so the three trade places in one
+   spot. Hidden by default; each gutter reveals it on its own .playing row (and hides
+   it again on hover, where the play button takes over). Three bars bounce on their
+   own staggered timers for an organic, non-synchronized wave. */
+.eq-bars {
+  display: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  align-items: flex-end;
+  justify-content: center;
+  gap: 0.11em;
+  width: 1em;
+  height: 0.8em;
+  /* Decorative and behind the (also-absolute) play button; never eat a click. */
+  pointer-events: none;
+}
+.eq-bars > span {
+  flex: none;
+  width: 0.16em;
+  height: 100%;
+  background-color: var(--accent);
+  border-radius: 1px;
+  /* Bottom-anchored scaleY so the bar grows up from the baseline (cheaper to
+     animate than height — stays on the compositor). */
+  transform-origin: bottom;
+  animation: eq-bounce 0.85s ease-in-out infinite;
+}
+/* Distinct durations + offsets so the three bars never march in lockstep. */
+.eq-bars > span:nth-child(1) {
+  animation-duration: 0.72s;
+}
+.eq-bars > span:nth-child(2) {
+  animation-duration: 1.04s;
+  animation-delay: -0.5s;
+}
+.eq-bars > span:nth-child(3) {
+  animation-duration: 0.86s;
+  animation-delay: -0.2s;
+}
+@keyframes eq-bounce {
+  0%,
+  100% {
+    transform: scaleY(0.22);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+/* Paused playback freezes the bars mid-wave (matching the transport's paused
+   state), rather than leaving them dancing over stopped audio. */
+body.playback-paused .eq-bars > span {
+  animation-play-state: paused;
+}
+/* Users who ask for less motion get a static level meter instead of the bounce. */
+@media (prefers-reduced-motion: reduce) {
+  .eq-bars > span {
+    animation: none;
+  }
+  .eq-bars > span:nth-child(1) {
+    transform: scaleY(0.5);
+  }
+  .eq-bars > span:nth-child(2) {
+    transform: scaleY(1);
+  }
+  .eq-bars > span:nth-child(3) {
+    transform: scaleY(0.65);
+  }
+}
+
 /* On row hover the gutter number gives way to the play button. */
 .node-label:hover .icon.track .track-num {
   visibility: hidden;
@@ -2379,6 +2464,18 @@ ul {
 /* The playing track's number takes the accent, matching the row highlight. */
 .node-label.playing .icon.track {
   color: var(--accent);
+}
+
+/* The playing tree row swaps its number for the equalizer glyph at rest; on hover
+   the glyph gives way to the play button (same as the number does). */
+.node-label.playing .icon.track .track-num {
+  visibility: hidden;
+}
+.node-label.playing .icon.track .eq-bars {
+  display: flex;
+}
+.node-label.playing:hover .icon.track .eq-bars {
+  display: none;
 }
 
 /* A playlist playing from the tree tints its glyph to match, the way the track
@@ -2982,6 +3079,25 @@ ul {
 }
 .nav-track-row:hover .nav-num .row-play::before {
   background-color: var(--accent);
+}
+
+/* The playing leaf row picks up the accent (title + gutter), matching the tree and
+   queue rows. */
+.nav-track-row.playing .nav-primary,
+.nav-track-row.playing .nav-num {
+  color: var(--accent);
+}
+
+/* ...and swaps its number for the equalizer glyph at rest; on hover the glyph gives
+   way to the play button (same as the number does). */
+.nav-track-row.playing .nav-num-text {
+  visibility: hidden;
+}
+.nav-track-row.playing .eq-bars {
+  display: flex;
+}
+.nav-track-row.playing:hover .eq-bars {
+  display: none;
 }
 
 /* Multi-select background, matching the queue's .selected row. */

@@ -10,7 +10,7 @@ import { load } from "@tauri-apps/plugin-store";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect } from "@preact/signals-core";
 import { engine } from "./engine-glue";
-import { h } from "./dom";
+import { h, eqBars } from "./dom";
 import { windowedList } from "./windowed-list";
 import { maybeStartE2eBridge } from "./e2e-bridge";
 import { bootProfileStart, bootStep, bootProfileReport } from "./perf";
@@ -1172,6 +1172,9 @@ export function renderLeafTrackList(
       "span",
       { class: "nav-num" },
       numText,
+      // The playing-row equalizer glyph, hidden until this row is the one playing
+      // (CSS keys off .nav-track-row.playing) and swapped for the play button on hover.
+      eqBars(),
       h("button", {
         class: "row-play",
         attrs: { type: "button", "aria-label": "Play" },
@@ -1268,6 +1271,15 @@ export function renderLeafTrackList(
       cell,
     );
     if (navSel.signal.peek().has(t)) row.classList.add("selected");
+    // The now-playing accent, applied at build time so a row scrolled into view is
+    // already correct (the effect below repaints mounted rows as the track changes).
+    // Playing from a leaf list makes it the implicit pool (a synthetic queue:), which
+    // does set queuePlayingIndex — so the guard is `no *explicit* queue/playlist`
+    // (activeQueue null), not queuePlayingIndex. When an explicit queue owns the
+    // playhead its right-pane row carries the highlight, so the leaf copy stays plain.
+    if (activeQueue.peek() === null && currentNodePath.peek() === t.path) {
+      row.classList.add("playing");
+    }
 
     return row;
   };
@@ -2145,6 +2157,9 @@ function setupEffects(): void {
   effect(() => {
     playPauseBtn.textContent = isPlaying.value ? "⏸" : "▶";
     playPauseBtn.setAttribute("aria-label", isPlaying.value ? "Pause" : "Play");
+    // Freeze the playing-row equalizer bars while paused (CSS pins their animation
+    // off body.playback-paused), matching the paused transport state.
+    document.body.classList.toggle("playback-paused", !isPlaying.value);
   });
   effect(() => {
     // Idle, the play button doesn't go dead — it "starts the library" by playing
@@ -2357,6 +2372,23 @@ function setupEffects(): void {
       .forEach((el) => {
         const t = app.navLeafTracks[Number(el.dataset.rowIndex)];
         el.classList.toggle("selected", !!t && sel.has(t));
+      });
+  });
+
+  // The navigator's leaf rows pick up the now-playing accent (+ the equalizer glyph):
+  // repaint mounted rows when the current track moves. Playing from a leaf list makes
+  // it the implicit pool (a synthetic queue:), which sets queuePlayingIndex — so the
+  // guard is "no *explicit* queue/playlist" (activeQueue null), not queuePlayingIndex.
+  // While an explicit queue/playlist owns the playhead its right-pane row carries the
+  // highlight, so these copies stay plain.
+  effect(() => {
+    const path = currentNodePath.value;
+    const explicitQueue = activeQueue.value !== null;
+    document
+      .querySelectorAll<HTMLElement>("#library-nav .nav-track-row")
+      .forEach((el) => {
+        const t = app.navLeafTracks[Number(el.dataset.rowIndex)];
+        el.classList.toggle("playing", !!t && !explicitQueue && t.path === path);
       });
   });
 
