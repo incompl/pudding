@@ -1951,7 +1951,7 @@ async fn search_albums(query: String, db: State<'_, DbHandle>) -> Result<Vec<Alb
         let sql = format!(
             "SELECT album, {expr} AS album_artist FROM tracks
              WHERE album IS NOT NULL AND album <> '' AND album LIKE ?1 ESCAPE '\\'
-             GROUP BY album, album_artist
+             GROUP BY album, {expr}
              ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE
              LIMIT 50",
             expr = ALBUM_ARTIST_EXPR
@@ -2144,7 +2144,7 @@ async fn list_all_albums(db: State<'_, DbHandle>) -> Result<Vec<AlbumResult>, St
         let sql = format!(
             "SELECT album, {expr} AS album_artist FROM tracks
              WHERE album IS NOT NULL AND album <> ''
-             GROUP BY album, album_artist
+             GROUP BY album, {expr}
              ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE",
             expr = ALBUM_ARTIST_EXPR
         );
@@ -2180,7 +2180,7 @@ async fn artist_albums(
         let sql = format!(
             "SELECT album, {expr} AS album_artist FROM tracks
              WHERE artist = ?1 AND album IS NOT NULL AND album <> ''
-             GROUP BY album, album_artist
+             GROUP BY album, {expr}
              ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE",
             expr = ALBUM_ARTIST_EXPR
         );
