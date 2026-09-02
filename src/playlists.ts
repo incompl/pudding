@@ -60,6 +60,7 @@ export function playlistPlayableTracks(data: PlaylistData): SearchTrack[] {
       title: t.title,
       artist: t.artist,
       album: t.album,
+      albumArtist: t.albumArtist,
       duration: t.duration,
     }));
 }
@@ -75,6 +76,7 @@ export function playlistViewTracks(data: PlaylistData): SearchTrack[] {
     title: t.title,
     artist: t.artist,
     album: t.album,
+    albumArtist: t.albumArtist,
     missing: t.missing,
     duration: t.duration,
   }));

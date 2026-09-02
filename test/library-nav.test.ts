@@ -49,6 +49,9 @@ interface Fixture {
   createBtn: FakeEl;
   calls: Call[];
   leafCtx: LeafListContext[];
+  // The track lists handed to each renderLeafTrackList call, in order — so a test
+  // can assert what per-track metadata (e.g. albumArtist) survived into a leaf list.
+  leafTracks: SearchTrack[][];
   // The most recent location the navigator persisted (render's choke point).
   saved: { steps: NavStep[] };
   deps: LibraryNavDeps;
@@ -65,12 +68,15 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
 
   const calls: Call[] = [];
   const leafCtx: LeafListContext[] = [];
+  const leafTracks: SearchTrack[][] = [];
   const saved: { steps: NavStep[] } = { steps: [] };
   const rec = (name: string) => (...args: unknown[]) => void calls.push({ name, args });
 
   const songs: SearchTrack[] = [
-    { path: "/m/a1.m4a", title: "A1", artist: "Alice", album: "Debut" },
-    { path: "/m/z1.m4a", title: "Z1", artist: "Zoe", album: "Split" },
+    { path: "/m/a1.m4a", title: "A1", artist: "Alice", album: "Debut", albumArtist: null },
+    // A compilation track: its album artist ("Various") differs from the track
+    // artist, the case the go-to-album fix threads through end to end.
+    { path: "/m/z1.m4a", title: "Z1", artist: "Zoe", album: "Split", albumArtist: "Various" },
   ];
   const artists: SearchArtist[] = [{ name: "Alice" }, { name: "Zoe" }];
   const albums: SearchAlbum[] = [
@@ -95,8 +101,9 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     artistTracks: async () => [],
     albumTracks: async () => songs,
     libraryRootSet: () => true,
-    renderLeafTrackList: (_tracks, ctx) => {
+    renderLeafTrackList: (tracks, ctx) => {
       leafCtx.push(ctx);
+      leafTracks.push(tracks);
       return doc.createElement("div") as unknown as HTMLElement;
     },
     openPlaylist: rec("openPlaylist"),
@@ -110,7 +117,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
   };
 
   initLibraryNav(deps, initial);
-  return { container, folderTree, createBtn, calls, leafCtx, saved, deps };
+  return { container, folderTree, createBtn, calls, leafCtx, leafTracks, saved, deps };
 }
 
 // Find a nav-row by its primary label, searching the whole rendered subtree.
@@ -241,7 +248,7 @@ test("artist detail hides the album-artist secondary only when it differs", asyn
 });
 
 test("album detail builds the exact openAlbumQueue synthetic pool path", async () => {
-  const { container, leafCtx } = setup();
+  const { container, leafCtx, leafTracks } = setup();
   rowByLabel(container, "Albums").fire("click");
   await flush();
   rowByLabel(container, "Split").fire("click"); // albumArtist "Various"
@@ -253,6 +260,13 @@ test("album detail builds the exact openAlbumQueue synthetic pool path", async (
   // here silently forks the pool identity from Play album.
   assert.equal(ctx.syntheticPath, "queue:album:Various\0Split");
   assert.equal(ctx.title, "Split");
+  // The compilation's raw album artist must ride along on the leaf tracks, so a
+  // later "go to album" from the now-playing line resolves the right key rather
+  // than falling back to the (differing) track artist. See the go-to-album fix.
+  const tracks = leafTracks.at(-1);
+  const split = tracks?.find((t) => t.album === "Split");
+  assert.ok(split, "album detail leaf list is missing the compilation track");
+  assert.equal(split.albumArtist, "Various");
   popNavToRoot();
 });
 
@@ -265,7 +279,7 @@ test("an async list bails when a navigation detached its host before load resolv
 
   rowByLabel(container, "Songs").fire("click"); // Songs body mounts, load pending
   popNavToRoot(); // navigate away — replaceChildren detaches the Songs host
-  resolveSongs([{ path: "/m/a1.m4a", title: "A1", artist: "Alice", album: "Debut" }]);
+  resolveSongs([{ path: "/m/a1.m4a", title: "A1", artist: "Alice", album: "Debut", albumArtist: null }]);
   await flush();
 
   // The guard (host.isConnected) must skip fill: rendering into a detached host is
@@ -278,7 +292,7 @@ test("a lens list is memoized: re-opening Songs reuses the cache, invalidation r
   const fixture = setup({
     listAllSongs: async () => {
       loads++;
-      return [{ path: "/m/a1.m4a", title: "A1", artist: "Alice", album: "Debut" }];
+      return [{ path: "/m/a1.m4a", title: "A1", artist: "Alice", album: "Debut", albumArtist: null }];
     },
   });
   const { container } = fixture;

@@ -69,6 +69,11 @@ export interface SearchTrack {
   title: string | null;
   artist: string | null;
   album: string | null;
+  // Raw ALBUMARTIST tag (nullable), mirroring FileEntry/TreeNode; combined as
+  // albumArtist ?? artist to form the album grouping key for "go to album" from
+  // the now-playing line and the row menu. Threaded end to end so a compilation
+  // (album artist ≠ track artist) resolves to the right album detail.
+  albumArtist: string | null;
   // The file's metadata track number, carried only where a within-album ordinal
   // is meaningful (album_tracks) so the gutter can show the real number like the
   // browse tree; null for flat lists (Songs, search), which show a positional

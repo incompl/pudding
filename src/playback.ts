@@ -610,7 +610,7 @@ export function playSearchTrack(t: SearchTrack): void {
   app.lastIndex = 0;
   resetShuffleState();
   const fallbackName = t.path.split(/[\\/]/).pop() ?? t.path;
-  setNowPlaying(t.title ?? fallbackName, t.artist, t.album);
+  setNowPlaying(t.title ?? fallbackName, t.artist, t.album, t.albumArtist);
   void loadArt(t.path);
   void engine.play([t.path], 0);
 }
@@ -652,7 +652,10 @@ export function syntheticParent(
       title: t.title,
       artist: t.artist,
       album: t.album,
-      albumArtist: null,
+      // Carry the track's raw album-artist so the playing sibling node feeds the
+      // right album key into setNowPlaying via engine-glue onAdvance — the fix for
+      // compilations landing on the wrong album from the now-playing line.
+      albumArtist: t.albumArtist ?? null,
       disc: null,
       track: null,
       isFolder: false,

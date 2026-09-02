@@ -193,6 +193,13 @@ struct SearchResult {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    // The raw ALBUMARTIST tag (nullable) — carried per-track so "go to album" from
+    // the now-playing line and the row menu resolves a compilation's album by its
+    // real album artist. Combined as albumArtist ?? artist at the use site, matching
+    // ALBUM_ARTIST_EXPR / FileEntry.albumArtist. Not ALBUM_ARTIST_EXPR here: the raw
+    // column keeps the frontend convention (fall back to artist only when displaying).
+    #[serde(rename = "albumArtist")]
+    album_artist: Option<String>,
     // The file's metadata track number, populated only where a within-album
     // ordinal is meaningful (album_tracks). Left None for flat lists (the Songs
     // view, search results) whose gutter shows a positional index instead. The
@@ -204,12 +211,14 @@ struct SearchResult {
 }
 
 // Columnar wire row for the whole-library Songs list: (path, title, artist, album,
-// duration). Serialized as a positional JSON array so the field names aren't repeated
-// once per row — at the library-scale target that key repetition is a large share of
-// the IPC + JSON.parse cost. The frontend re-keys it into a SearchTrack (track is
-// always null for this flat list). See list_all_songs.
+// album_artist, duration). Serialized as a positional JSON array so the field names
+// aren't repeated once per row — at the library-scale target that key repetition is a
+// large share of the IPC + JSON.parse cost. The frontend re-keys it into a SearchTrack
+// (track is always null for this flat list). The tuple order must match the SELECT and
+// the frontend re-key in lockstep. See list_all_songs.
 type SongRow = (
     String,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -1744,7 +1753,7 @@ async fn search_tracks(
 
         let mut stmt = conn
             .prepare(
-                "SELECT path, title, artist, album, duration FROM tracks
+                "SELECT path, title, artist, album, album_artist, duration FROM tracks
                  WHERE title LIKE ?1 ESCAPE '\\'
                     OR artist LIKE ?1 ESCAPE '\\'
                     OR album LIKE ?1 ESCAPE '\\'
@@ -1762,10 +1771,11 @@ async fn search_tracks(
                     title: row.get(1)?,
                     artist: row.get(2)?,
                     album: row.get(3)?,
+                    album_artist: row.get(4)?,
                     // Flat/positional list: the gutter shows a row index, not a
                     // within-album ordinal, so no metadata track number is carried.
                     track: None,
-                    duration: row.get(4)?,
+                    duration: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1856,7 +1866,7 @@ async fn folder_tracks(path: String, db: State<'_, DbHandle>) -> Result<Vec<Sear
 
         let mut stmt = conn
             .prepare(
-                "SELECT path, title, artist, album, duration FROM tracks
+                "SELECT path, title, artist, album, album_artist, duration FROM tracks
                  WHERE path LIKE ?1 ESCAPE '\\'
                  ORDER BY album IS NULL, album COLLATE NOCASE,
                           disc, track, path COLLATE NOCASE",
@@ -1869,10 +1879,11 @@ async fn folder_tracks(path: String, db: State<'_, DbHandle>) -> Result<Vec<Sear
                     title: row.get(1)?,
                     artist: row.get(2)?,
                     album: row.get(3)?,
+                    album_artist: row.get(4)?,
                     // Flat/positional list: the gutter shows a row index, not a
                     // within-album ordinal, so no metadata track number is carried.
                     track: None,
-                    duration: row.get(4)?,
+                    duration: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1973,7 +1984,7 @@ async fn artist_tracks(
     db.read(move |conn| {
         let mut stmt = conn
             .prepare(
-                "SELECT path, title, artist, album, duration FROM tracks
+                "SELECT path, title, artist, album, album_artist, duration FROM tracks
                  WHERE artist = ?1
                  ORDER BY album IS NULL, album COLLATE NOCASE,
                           disc, track, path COLLATE NOCASE",
@@ -1986,10 +1997,11 @@ async fn artist_tracks(
                     title: row.get(1)?,
                     artist: row.get(2)?,
                     album: row.get(3)?,
+                    album_artist: row.get(4)?,
                     // Flat/positional list: the gutter shows a row index, not a
                     // within-album ordinal, so no metadata track number is carried.
                     track: None,
-                    duration: row.get(4)?,
+                    duration: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2014,7 +2026,7 @@ async fn album_tracks(
 ) -> Result<Vec<SearchResult>, String> {
     db.read(move |conn| {
         let sql = format!(
-            "SELECT path, title, artist, album, track, duration FROM tracks
+            "SELECT path, title, artist, album, album_artist, track, duration FROM tracks
              WHERE album = ?1 AND {expr} = ?2
              ORDER BY disc, track, path COLLATE NOCASE",
             expr = ALBUM_ARTIST_EXPR
@@ -2027,8 +2039,9 @@ async fn album_tracks(
                     title: row.get(1)?,
                     artist: row.get(2)?,
                     album: row.get(3)?,
-                    track: row.get(4)?,
-                    duration: row.get(5)?,
+                    album_artist: row.get(4)?,
+                    track: row.get(5)?,
+                    duration: row.get(6)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2056,7 +2069,7 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
         let t0 = std::time::Instant::now();
         let mut stmt = conn
             .prepare(
-                "SELECT path, title, artist, album, duration FROM tracks
+                "SELECT path, title, artist, album, album_artist, duration FROM tracks
                  ORDER BY artist IS NULL, artist COLLATE NOCASE,
                           album COLLATE NOCASE, disc, track,
                           title COLLATE NOCASE",
@@ -2074,6 +2087,7 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -2213,6 +2227,9 @@ async fn artist_albumless_tracks(
                     title: row.get(1)?,
                     artist: row.get(2)?,
                     album: row.get(3)?,
+                    // Albumless by definition — no album to navigate to, so no
+                    // album-artist key to carry.
+                    album_artist: None,
                     // Flat list: the gutter shows a row index, not a within-album
                     // ordinal, so no metadata track number is carried.
                     track: None,

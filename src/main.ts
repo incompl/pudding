@@ -1251,7 +1251,7 @@ export function renderLeafTrackList(
               showContextMenu(e.clientX, e.clientY, [
                 ...queueMenuItems((sink) => sink([t])),
                 addToPlaylistItem(() => [t]),
-                ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: null }),
+                ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: t.albumArtist }),
                 editMetadataItem(t.path),
                 showInFinderItem(t.path),
               ]);
@@ -2733,19 +2733,28 @@ async function init(): Promise<void> {
     listAllSongs: () =>
       perfTimed("list_all_songs", async () => {
         // Columnar wire format (see the Rust SongRow): rows arrive as positional
-        // [path, title, artist, album, duration] tuples, not keyed objects, so the
-        // JSON doesn't repeat the field names once per row (a large share of the
-        // payload + parse cost at the scale target). Re-key here at the boundary;
-        // the rest of the app still works in SearchTrack objects. track is always
-        // null for this flat list (the gutter shows a positional index).
-        type SongRow = [string, string | null, string | null, string | null, number | null];
+        // [path, title, artist, album, albumArtist, duration] tuples, not keyed
+        // objects, so the JSON doesn't repeat the field names once per row (a large
+        // share of the payload + parse cost at the scale target). The tuple order
+        // must match the Rust SongRow SELECT in lockstep. Re-key here at the
+        // boundary; the rest of the app still works in SearchTrack objects. track is
+        // always null for this flat list (the gutter shows a positional index).
+        type SongRow = [
+          string,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          number | null,
+        ];
         const rows = await invoke<SongRow[]>("list_all_songs");
         return rows.map(
-          ([path, title, artist, album, duration]): SearchTrack => ({
+          ([path, title, artist, album, albumArtist, duration]): SearchTrack => ({
             path,
             title,
             artist,
             album,
+            albumArtist,
             duration,
             track: null,
           }),
@@ -3024,7 +3033,7 @@ async function init(): Promise<void> {
       addToQueue: (arg) => {
         const a = arg as { paths: string[] };
         addToQueue(
-          a.paths.map((path) => ({ path, title: null, artist: null, album: null })),
+          a.paths.map((path) => ({ path, title: null, artist: null, album: null, albumArtist: null })),
         );
       },
       // Play a saved playlist file from disk through the real read+play path, so
@@ -3049,6 +3058,7 @@ async function init(): Promise<void> {
           title: null,
           artist: null,
           album: null,
+          albumArtist: null,
         }));
         return addTracksToPlaylist(a.path, () => tracks);
       },
@@ -3069,6 +3079,7 @@ async function init(): Promise<void> {
           title: null,
           artist: null,
           album: null,
+          albumArtist: null,
         }));
         playQueue(
           {

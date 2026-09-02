@@ -802,7 +802,7 @@ export function trackToNode(t: SearchTrack): TreeNode {
 }
 
 export function nodeToTrack(n: TreeNode): SearchTrack {
-  return { path: n.path, title: n.title, artist: n.artist, album: n.album };
+  return { path: n.path, title: n.title, artist: n.artist, album: n.album, albumArtist: n.albumArtist };
 }
 
 export function appendTracksToActiveQueue(tracks: SearchTrack[]): void {
