@@ -13,6 +13,7 @@ import {
   npTitle,
   npArtist,
   npAlbum,
+  npAlbumArtist,
   npStreamMeta,
   currentNodePath,
   currentStreamUrl,
@@ -47,11 +48,16 @@ export function setNowPlaying(
   title: string,
   artist: string | null,
   album: string | null,
+  // The album-artist grouping key for "go to album" from the now-playing line.
+  // Defaults to the track artist (matching album_tracks' albumArtist ?? artist),
+  // so callers without a distinct ALBUMARTIST tag still resolve the right album.
+  albumArtist: string | null = artist,
 ): void {
   hasTrack.value = true;
   npTitle.value = title;
   npArtist.value = artist;
   npAlbum.value = album;
+  npAlbumArtist.value = albumArtist;
 }
 
 // Idle play, cold start: "start the library" by playing the first song. For a
@@ -490,7 +496,7 @@ export function playFile(node: TreeNode, parent: TreeNode, startIndex?: number):
   currentTime.value = 0;
   duration.value = 0;
   app.queueEnded = false;
-  setNowPlaying(node.title ?? node.name, node.artist, node.album);
+  setNowPlaying(node.title ?? node.name, node.artist, node.album, node.albumArtist);
   void loadArt(node.path);
   const siblings = parent.children.filter((c) => !c.isFolder);
   const tracks = siblings.map((c) => c.path);

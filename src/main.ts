@@ -50,6 +50,7 @@ import {
   npTitle,
   npArtist,
   npAlbum,
+  npAlbumArtist,
   npArt,
   npStreamMeta,
   isStream,
@@ -1930,6 +1931,19 @@ function setupPlayerControls(): void {
   playPauseBtn.addEventListener("click", togglePlayPause);
   prevBtn.addEventListener("click", skipPrev);
   nextBtn.addEventListener("click", skipNext);
+
+  // The now-playing artist / album lines double as links into the Files pane:
+  // click to drill straight to that artist's or album's detail view, the same
+  // "Go to" the track context menu offers — a one-tap way back to the playing
+  // track's home when you've wandered off browsing (see .np-link hover accent).
+  // Hidden for streams / tagless tracks (the elements themselves are hidden), so
+  // these only fire when there's a real artist/album to land on.
+  nowPlayingArtistEl.addEventListener("click", () => {
+    if (npArtist.value) goToArtist(npArtist.value);
+  });
+  nowPlayingAlbumEl.addEventListener("click", () => {
+    if (npAlbum.value) goToAlbum(npAlbum.value, npAlbumArtist.value ?? npArtist.value ?? "");
+  });
 
   document.addEventListener("keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;

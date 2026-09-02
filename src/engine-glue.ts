@@ -49,7 +49,7 @@ export const engine = new GaplessEngine({
       queuePlayingIndex.value = null;
     }
     app.pendingQueueIndex = null;
-    setNowPlaying(node.title ?? node.name, node.artist, node.album);
+    setNowPlaying(node.title ?? node.name, node.artist, node.album, node.albumArtist);
     void loadArt(node.path);
   },
   onTime: (t) => { currentTime.value = t; nowPlayingPositionTick(t); },

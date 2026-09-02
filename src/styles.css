@@ -647,6 +647,20 @@ html[data-mode="light"] .context-menu {
   font-style: italic;
 }
 
+/* The artist / album lines link into the Files pane (see setupPlayerControls).
+   Same look at rest — an accent lights up on hover to signal it's clickable, the
+   inner marquee span inheriting the color. The album line takes the dimmer accent
+   so the hover matches its already-quieter (muted, italic) rest state. */
+.np-link {
+  cursor: pointer;
+}
+#now-playing-artist.np-link:hover {
+  color: var(--accent);
+}
+#now-playing-album.np-link:hover {
+  color: var(--accent-dim);
+}
+
 /* Hangs below the station name without participating in the centered column,
    so ICY metadata can arrive — and wrap to multiple lines — without moving
    anything else. */
@@ -1509,6 +1523,22 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
     text-align: left;
     gap: 0.75em;
     padding: 0;
+  }
+
+  /* Mini hides the Files pane entirely, so the artist / album links have nowhere
+     to land — drop the affordance so they read as plain metadata, not a dead
+     click. Fall back to the I-beam (the lines opt into user-select: text, like
+     the title, so "what's playing" stays copyable) and fold each hover back to
+     its own rest color (artist inherits --text, album stays --text-muted) — that
+     keeps them from promising a jump they can't deliver. */
+  .np-link {
+    cursor: text;
+  }
+  #now-playing-artist.np-link:hover {
+    color: inherit;
+  }
+  #now-playing-album.np-link:hover {
+    color: var(--text-muted);
   }
 
   /* No art: the bar is only text, so center it (title/artist included). The

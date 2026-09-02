@@ -19,6 +19,7 @@ import {
   npTitle,
   npArtist,
   npAlbum,
+  npAlbumArtist,
   queuePlayingIndex,
   activeQueue,
   browsedPlaylist,
@@ -958,6 +959,7 @@ export function createQueue(tracks: SearchTrack[]): void {
   npTitle.value = "";
   npArtist.value = null;
   npAlbum.value = null;
+  npAlbumArtist.value = null;
   clearArt();
   // Show the queue list (the point of Create queue), not the empty hero, and drop
   // any browse so the queue is what the list face reveals.
@@ -1073,6 +1075,7 @@ export function teardownPlaybackToEmpty(): void {
   npTitle.value = "";
   npArtist.value = null;
   npAlbum.value = null;
+  npAlbumArtist.value = null;
   clearArt();
   void engine.stop();
 }

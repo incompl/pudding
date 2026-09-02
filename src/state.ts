@@ -117,6 +117,11 @@ export const hasTrack = signal(false);
 export const npTitle = signal("");
 export const npArtist = signal<string | null>(null);
 export const npAlbum = signal<string | null>(null);
+// The playing track's album-artist grouping key (albumArtist ?? artist), stashed
+// so clicking the now-playing album line can drill to the right album detail —
+// matching how the backend's album_tracks groups. Null for streams / external
+// files with no album context.
+export const npAlbumArtist = signal<string | null>(null);
 export const npArt = signal<string | null>(null);
 // ICY now-playing (song + artist) shown under the station name during
 // streams. Null until the first title arrives (or forever, for stations that
