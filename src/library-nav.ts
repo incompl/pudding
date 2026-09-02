@@ -395,6 +395,10 @@ function songsView(): View {
             deps.renderLeafTrackList(tracks, {
               title: "Songs",
               syntheticPath: "queue:songs",
+              // Songs is the flat "just play a track" list — if you're here you've
+              // already passed over the Albums lens, so drop the per-row album and
+              // show only title · artist, keeping the rows uncluttered.
+              hideAlbum: true,
             }),
           );
         },

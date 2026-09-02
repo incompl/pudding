@@ -342,8 +342,9 @@ export interface LeafListContext {
   // picks a context.
   syntheticPath: string;
   // Suppress the album in each row's dimmed suffix even when it varies. The artist
-  // detail view sets this: its Tracks list is ordered album by album (so the album
-  // repeats in runs) and its Albums section already enumerates them, so the per-row
-  // album is redundant noise there. Default (unset) keeps the fieldVaries rule.
+  // detail view sets this (its Tracks list is ordered album by album, so the album
+  // repeats in runs, and its Albums section already enumerates them); the Songs lens
+  // sets it too, to stay a lean title · artist list once you've skipped Albums.
+  // Default (unset) keeps the fieldVaries rule.
   hideAlbum?: boolean;
 }

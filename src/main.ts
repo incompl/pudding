@@ -1126,9 +1126,10 @@ export function renderLeafTrackList(
   // (mirrors the browse tree's per-folder showArtist). A field that's the same on
   // every row is noise repeated down the list, so drop it: an album view (one album,
   // often one artist) collapses to bare titles, while a compilation still shows the
-  // varying artist. Songs — the whole library — varies on both, so it shows
-  // artist · album. The artist detail view drops the artist (constant) and also
-  // forces the album off via ctx.hideAlbum (see LeafListContext), leaving bare titles.
+  // varying artist. Songs — the whole library — varies on both, but forces the album
+  // off via ctx.hideAlbum to stay an uncluttered title · artist list, so it shows just
+  // the artist. The artist detail view likewise forces the album off (see
+  // LeafListContext) and additionally drops the artist as constant, leaving bare titles.
   const showArtist = fieldVaries(tracks, (t) => t.artist);
   const showAlbum = !ctx.hideAlbum && fieldVaries(tracks, (t) => t.album);
 
