@@ -2870,11 +2870,17 @@ body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
   font: inherit;
   text-align: left;
   cursor: pointer;
+  /* Recede at rest: dim gray label *and* chevron so the bar reads as chrome, not
+     as the first row of the list. It only lifts to full text + accent on hover. */
+  color: var(--text-dim);
   transition: background 120ms ease, color 120ms ease;
 }
 .nav-back:hover {
   background: var(--surface);
   color: var(--text);
+}
+.nav-back:hover .nav-back-chev {
+  color: var(--accent);
 }
 .nav-back-chev {
   flex: none;
@@ -2892,7 +2898,8 @@ body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
      "Browse" text. Purely optical — affects nothing else in the bar. */
   position: relative;
   top: -0.05em;
-  color: var(--accent);
+  /* Inherit the bar's dim gray at rest; .nav-back:hover flips it to --accent. */
+  color: inherit;
   margin-left: -0.2em;
   margin-right: 0.2em;
 }
