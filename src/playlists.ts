@@ -215,16 +215,19 @@ export async function refreshPlaylistIndex(): Promise<void> {
   const roots = libraryRootPaths();
   if (roots.length === 0) {
     app.playlistIndex = [];
+    app.playlistIndexLoaded = true;
     refreshNavPlaylists();
     return;
   }
   try {
     // list_all_playlists is keyed to one root (it walks that tree), so scan each
-    // configured folder and merge into a single index.
+    // configured folder and merge into a single index. The command is async on the
+    // Rust side (spawn_blocking) so this full-tree walk never blocks the UI thread.
     const perRoot = await Promise.all(
       roots.map((root) => invoke<PlaylistRef[]>("list_all_playlists", { root })),
     );
     app.playlistIndex = perRoot.flat();
+    app.playlistIndexLoaded = true;
   } catch (e) {
     console.error("list_all_playlists failed", e);
   }
@@ -566,15 +569,4 @@ export async function addTracksToPlaylist(path: string, getTracks: TrackProvider
   toast(`Added to "${data.name}"`);
 }
 
-// Loads the root menu's playlist section. list_all_playlists is keyed to one
-// library folder (it walks that tree), so scan each and merge; yields nothing
-// until a library folder is set.
-export async function loadAllPlaylists(): Promise<PlaylistRef[]> {
-  const roots = libraryRootPaths();
-  if (roots.length === 0) return [];
-  const perRoot = await Promise.all(
-    roots.map((root) => invoke<PlaylistRef[]>("list_all_playlists", { root })),
-  );
-  return perRoot.flat();
-}
 

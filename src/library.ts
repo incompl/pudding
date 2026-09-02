@@ -22,8 +22,9 @@ import {
   libraryRootsContainer,
   streamListPathInput,
 } from "./dom-refs";
-import { nodesFromListing, renderTree } from "./tree-view";
+import { nodesFromListing, renderTree, revealTreeRow } from "./tree-view";
 import { renderStreams } from "./streams-view";
+import { bootStep } from "./perf";
 import {
   setEmpty,
   queueIsActivePool,
@@ -83,9 +84,13 @@ export async function refreshTree(roots: string[]): Promise<void> {
   const nodes = await Promise.all(
     roots.map(async (root) => {
       try {
-        const listing = await invoke<DirListing>("list_dir", { path: root });
+        const listing = await bootStep("  list_dir(invoke)", () =>
+          invoke<DirListing>("list_dir", { path: root }),
+        );
         const name = roots.length === 1 ? root : basename(root);
-        return makeRootFolderNode(root, name, listing);
+        return await bootStep("  makeRootFolderNode", () =>
+          makeRootFolderNode(root, name, listing),
+        );
       } catch (e) {
         console.error("list_dir failed for", root, e);
         app.invalidLibraryRoots.add(root);
@@ -116,7 +121,7 @@ export async function refreshTree(roots: string[]): Promise<void> {
     };
   }
   libraryHasContent.value = app.rootNode.children.length > 0;
-  renderTree();
+  await bootStep("  renderTree", () => renderTree());
 }
 
 // Re-lists every folder the user has opened, merging the fresh listing into the
@@ -180,22 +185,6 @@ export function findNode(
 // that row into view and flashes it, so following it to its new sorted slot reads
 // as deliberate. Cleared once consumed.
 
-// Scroll a tree row (by file path) into view and briefly flash it. Used to follow
-// a renamed playlist to its re-sorted position. No-op if the row isn't present.
-function revealTreeRow(path: string): void {
-  const label = treeContainer.querySelector<HTMLElement>(
-    `.node-label[data-path="${CSS.escape(path)}"]`,
-  );
-  if (!label) return;
-  label.scrollIntoView({ block: "nearest" });
-  label.classList.remove("flash");
-  // Reflow so re-adding the class restarts the animation even on a back-to-back reveal.
-  void label.offsetWidth;
-  label.classList.add("flash");
-  label.addEventListener("animationend", () => label.classList.remove("flash"), {
-    once: true,
-  });
-}
 
 // Serialized + coalesced: scans can emit "library-scanned" repeatedly, and two
 // overlapping reconciles would both mutate node.children and both renderTree
@@ -280,12 +269,14 @@ export async function refreshStreams(streamListPath: string): Promise<void> {
   }
   setEmpty(streamsContainer, "Loading…", "loading");
   try {
-    const streams = await invoke<Stream[]>("read_stream_list", { path: streamListPath });
+    const streams = await bootStep("  read_stream_list(invoke)", () =>
+      invoke<Stream[]>("read_stream_list", { path: streamListPath }),
+    );
     app.allStreams = streams;
     streamListPathValid.value = true;
     // Only a valid local file is appendable; a remote list is read-only.
     streamListWritable.value = !isRemoteStreamList(streamListPath);
-    renderStreams(streams);
+    await bootStep("  renderStreams", () => renderStreams(streams));
   } catch (e) {
     console.error("read_stream_list failed for", streamListPath, e);
     app.allStreams = [];
@@ -300,8 +291,18 @@ export async function refreshStreams(streamListPath: string): Promise<void> {
 // duplicates are dropped so the array stays clean. Passing [] tears every
 // watcher down and returns the Files panel to its get-started prompt.
 export async function setLibraryRoots(paths: string[]): Promise<void> {
+  // Trailing separators stripped so a folder typed with or without a slash is one
+  // root, and matches the key the backend stamps each track with (normalize_root).
   const seen = new Set<string>();
-  app.libraryRoots = paths.map((p) => p.trim()).filter((p) => p && !seen.has(p) && seen.add(p));
+  const cleaned = paths
+    .map((p) => p.trim().replace(/\/+$/, ""))
+    .filter((p) => p && !seen.has(p) && seen.add(p));
+  // Drop any root nested inside another kept root: a track under it would otherwise
+  // belong to two roots, making its owning-root attribution (and thus which scan
+  // reconciles it) ambiguous. The ancestor wins; its scan already covers the subtree.
+  app.libraryRoots = cleaned.filter(
+    (p) => !cleaned.some((q) => q !== p && p.startsWith(q + "/")),
+  );
   await app.store.set(KEY_LIBRARY_ROOTS, app.libraryRoots);
   await app.store.save();
   renderLibraryRootRows();

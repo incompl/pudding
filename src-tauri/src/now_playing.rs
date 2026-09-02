@@ -215,7 +215,11 @@ mod imp {
             if snap.duration > 0.0 {
                 set_num(&info, MPMediaItemPropertyPlaybackDuration, snap.duration);
             }
-            set_num(&info, MPNowPlayingInfoPropertyElapsedPlaybackTime, snap.elapsed);
+            set_num(
+                &info,
+                MPNowPlayingInfoPropertyElapsedPlaybackTime,
+                snap.elapsed,
+            );
             set_num(&info, MPNowPlayingInfoPropertyPlaybackRate, snap.rate);
 
             if let Some(bytes) = &snap.art {
@@ -244,11 +248,7 @@ mod imp {
         info.setObject_forKey(&v, k);
     }
 
-    unsafe fn set_num(
-        info: &NSMutableDictionary<NSString, AnyObject>,
-        key: &NSString,
-        value: f64,
-    ) {
+    unsafe fn set_num(info: &NSMutableDictionary<NSString, AnyObject>, key: &NSString, value: f64) {
         let v = NSNumber::numberWithDouble(value);
         let k = ProtocolObject::from_ref(key);
         info.setObject_forKey(&v, k);

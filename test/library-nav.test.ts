@@ -33,6 +33,7 @@ import {
   initLibraryNav,
   popNavToRoot,
   refreshNavPlaylists,
+  invalidateNavListCache,
   type LibraryNavDeps,
   type NavStep,
 } from "../src/library-nav.ts";
@@ -58,7 +59,6 @@ interface Fixture {
 function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture {
   const doc = installFakeDom();
   const container = doc.registerRoot("library-nav");
-  doc.registerRoot("lens-footer");
   const folderTree = doc.registerRoot("folder-tree");
   const createBtn = doc.registerRoot("create-playlist-btn");
   doc.registerRoot("files-empty");
@@ -83,7 +83,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     listAllSongs: async () => songs,
     listAllArtists: async () => artists,
     listAllAlbums: async () => albums,
-    listAllPlaylists: async () => playlists,
+    playlistIndex: () => ({ loaded: true, items: playlists }),
     // Alice appears on her own "Debut" and on the "Various"-credited "Split".
     artistAlbums: async (artist) =>
       artist === "Alice"
@@ -105,6 +105,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     showAlbumMenu: rec("showAlbumMenu"),
     showPlaylistMenu: rec("showPlaylistMenu"),
     persistLocation: (steps) => void (saved.steps = steps),
+    setBrowseActive: () => {},
     ...over,
   };
 
@@ -127,11 +128,19 @@ const hasBackHeader = (container: FakeEl) => container.queryAll("nav-back").leng
 
 beforeEach(() => {
   // A fresh document per test; setup() installs it. popNavToRoot resets the
-  // module's navigation stack so state can't leak between tests.
+  // module's navigation stack so state can't leak between tests. Likewise drop the
+  // memoized lens lists, or a prior test's cached loader would satisfy this test's
+  // open and its fresh loader would never run.
   installFakeDom();
+  invalidateNavListCache();
+  // The Artists/Albums lenses window their rows (see windowDrillRows), which needs
+  // measured row heights the fake DOM has no layout to provide. Flip the same
+  // escape hatch renderLeafTrackList uses so those lenses render every row eagerly,
+  // letting the tests assert on real drill rows.
+  (globalThis as { __noWindowing?: boolean }).__noWindowing = true;
 });
 
-test("root menu lists the four lenses, then the async-loaded playlists", async () => {
+test("root menu lists the four lenses, then the cached playlist index", async () => {
   const { container, createBtn, folderTree } = setup();
   // The four lenses render synchronously; playlists arrive after the load.
   assert.deepEqual(labels(container).slice(0, 4), ["Browse", "Songs", "Artists", "Albums"]);
@@ -264,17 +273,48 @@ test("an async list bails when a navigation detached its host before load resolv
   assert.equal(leafCtx.length, 0, "fill ran against a detached host");
 });
 
+test("a lens list is memoized: re-opening Songs reuses the cache, invalidation reloads", async () => {
+  let loads = 0;
+  const fixture = setup({
+    listAllSongs: async () => {
+      loads++;
+      return [{ path: "/m/a1.m4a", title: "A1", artist: "Alice", album: "Debut" }];
+    },
+  });
+  const { container } = fixture;
+
+  // First open pays the load.
+  rowByLabel(container, "Songs").fire("click");
+  await flush();
+  assert.equal(loads, 1, "first open loads from the backend");
+
+  // Leave and re-open: the resolved list is served from the cache, no reload.
+  popNavToRoot();
+  rowByLabel(container, "Songs").fire("click");
+  await flush();
+  assert.equal(loads, 1, "repeat open is served from the cache");
+
+  // A scan / edit drops the cache, so the next open re-fetches fresh membership.
+  invalidateNavListCache();
+  popNavToRoot();
+  rowByLabel(container, "Songs").fire("click");
+  await flush();
+  assert.equal(loads, 2, "invalidation forces a reload on the next open");
+
+  popNavToRoot(); // leave the shared module stack at root for the next test
+});
+
 test("refreshNavPlaylists reloads at the root, but is a no-op while drilled", async () => {
   let loads = 0;
   const fixture = setup({
-    listAllPlaylists: async () => {
+    playlistIndex: () => {
       loads++;
-      return [{ name: "Roadtrip", path: "/pl/roadtrip.m3u8" }];
+      return { loaded: true, items: [{ name: "Roadtrip", path: "/pl/roadtrip.m3u8" }] };
     },
   });
   const { container } = fixture;
   await flush();
-  assert.equal(loads, 1, "root menu loads playlists once on init");
+  assert.equal(loads, 1, "root menu reads the playlist index once on init");
 
   // Drilled into a lens: the playlist list isn't shown, so a refresh must not
   // re-render (and re-load) it.
@@ -282,13 +322,13 @@ test("refreshNavPlaylists reloads at the root, but is a no-op while drilled", as
   await flush();
   refreshNavPlaylists();
   await flush();
-  assert.equal(loads, 1, "refresh while drilled should not reload playlists");
+  assert.equal(loads, 1, "refresh while drilled should not re-read playlists");
 
-  // Back at the root, a refresh re-renders and re-loads.
+  // Back at the root, a refresh re-renders and re-reads the index.
   popNavToRoot();
   refreshNavPlaylists();
   await flush();
-  assert.equal(loads, 3, "back-to-root render (2) + explicit refresh (3) each reload");
+  assert.equal(loads, 3, "back-to-root render (2) + explicit refresh (3) each re-read");
 });
 
 test("persists the current place on every navigation (root, lens, deep drill)", async () => {

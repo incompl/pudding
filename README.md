@@ -27,6 +27,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 - Point it at one or more folders: no import step, your files browsed as they are
 - Four lenses on the same library, switched from the Files pane: Browse the real folder tree, or view it flat as Songs, Artists, or Albums — the last three drill iPod-style (artist → album → tracks) and remember your place across restarts
 - Fast SQLite metadata cache, scanned in the background
+- Built to scale: snappy at 100,000 tracks and functional to 500,000 — every long list (Songs, folder tree, queue, playlists) is windowed so only the on-screen rows exist in the DOM, opened lens views are cached, and the whole-library sort is served from a covering index
 - Live library watching: add or edit files on disk and the app updates itself
 - Search across title, artist, album, and filename — or match a folder and play it as an album
 - Artist and album search results, or a track's right-click menu, open a queue of every matching track in the right pane

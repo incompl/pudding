@@ -60,6 +60,10 @@ export interface AppState {
   pendingQueueScrollIndex: number | null;
   recentPlaylists: RecentPlaylist[];
   playlistIndex: PlaylistRef[];
+  // Whether the playlist index has completed its first build (distinguishes a
+  // genuinely empty library from "not walked yet" so the navigator can show a
+  // "Loading…" line until the initial walk lands rather than a false "No playlists").
+  playlistIndexLoaded: boolean;
   // The leaf list currently shown in the navigator (maps the nav selection back
   // to rows by view index).
   navLeafTracks: SearchTrack[];
@@ -97,6 +101,7 @@ export const app: AppState = {
   pendingQueueScrollIndex: null,
   recentPlaylists: [],
   playlistIndex: [],
+  playlistIndexLoaded: false,
   navLeafTracks: [],
   libraryRefreshing: false,
   libraryRefreshPending: false,

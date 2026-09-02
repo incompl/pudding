@@ -157,18 +157,28 @@ function updateDropTarget(x: number, y: number): number | null {
   const d = activeDrag;
   if (!d) return null;
   const rows = Array.from(d.listEl.querySelectorAll<HTMLElement>(d.rowSelector));
+  // The queue list is windowed, so only a slice of its rows is mounted: an insert
+  // index must come from each row's own view index (data-row-index) and the total
+  // row count on the list, not from the mounted rows' positions. Non-windowed lists
+  // (streams) mount every row in order, so indexOf / rows.length are exact for them.
+  const windowed = d.rowSelector === "li.queue-row";
   const el = document.elementFromPoint(x, y) as HTMLElement | null;
   const row = el?.closest(d.rowSelector) as HTMLElement | null;
   if (row && d.listEl.contains(row)) {
     const rect = row.getBoundingClientRect();
     const before = y < rect.top + rect.height / 2;
     row.classList.add(before ? "drop-before" : "drop-after");
-    return rows.indexOf(row) + (before ? 0 : 1);
+    const viewIdx =
+      windowed && row.dataset.rowIndex != null ? Number(row.dataset.rowIndex) : rows.indexOf(row);
+    return viewIdx + (before ? 0 : 1);
   }
   // Off the rows: an insert at the end while still within the list box, else cancel.
   const box = d.listEl.getBoundingClientRect();
   const inside = x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
-  return inside ? rows.length : null;
+  if (!inside) return null;
+  return windowed && d.listEl.dataset.rowCount != null
+    ? Number(d.listEl.dataset.rowCount)
+    : rows.length;
 }
 
 function clearDropMarkers(): void {

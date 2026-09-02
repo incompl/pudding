@@ -16,8 +16,8 @@ use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileI
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{
-    CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem,
-    MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder,
+    CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder,
+    PredefinedMenuItem, Submenu, SubmenuBuilder,
 };
 use tauri::{AppHandle, Emitter, Manager, State, Wry};
 use tauri_plugin_log::{Target, TargetKind};
@@ -36,7 +36,15 @@ const DEFAULT_STREAM_LIST_FILE: &str = "streams.m3u8";
 pub const USER_AGENT: &str = concat!("pudding/", env!("CARGO_PKG_VERSION"));
 
 struct DbHandle {
+    // The single writer connection. SQLite allows one writer at a time, so scan
+    // inserts and write_tags updates serialize through this mutex — correct, and
+    // WAL keeps that write from blocking readers.
     conn: Arc<Mutex<Connection>>,
+    // Pool of read-only connections for the query commands. Reads run off the UI
+    // thread (spawn_blocking) each on their own connection instead of contending on
+    // the writer mutex, so concurrent reads (e.g. the two library roots listed at
+    // startup) run in parallel and never wait on a background scan. See ReadPool.
+    readers: Arc<ReadPool>,
     path: PathBuf,
 }
 
@@ -170,6 +178,15 @@ struct ScanResult {
     error: Option<String>,
 }
 
+// Progress for the scan status footer. `total` is the whole audio-file count (known
+// up front, after the walk); `done` is how many have been reconciled so far. Emitted
+// as "scan-started" (done 0) then periodically as "scan-progress" during indexing.
+#[derive(Serialize, Clone)]
+struct ScanProgress {
+    done: usize,
+    total: usize,
+}
+
 #[derive(Serialize)]
 struct SearchResult {
     path: String,
@@ -185,6 +202,19 @@ struct SearchResult {
     // the runtime shown beside the track count; individual rows don't display it.
     duration: Option<f64>,
 }
+
+// Columnar wire row for the whole-library Songs list: (path, title, artist, album,
+// duration). Serialized as a positional JSON array so the field names aren't repeated
+// once per row — at the library-scale target that key repetition is a large share of
+// the IPC + JSON.parse cost. The frontend re-keys it into a SearchTrack (track is
+// always null for this flat list). See list_all_songs.
+type SongRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+);
 
 #[derive(Serialize)]
 struct FolderResult {
@@ -230,7 +260,7 @@ struct Tags {
 
 // The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
 // and the next startup will drop and recreate it.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 // WAL lets the scan's write transaction run without blocking concurrent reads
 // (list_dir, get_metadata) on the main connection.
@@ -241,6 +271,74 @@ fn open_connection(path: &std::path::Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+// A read-only connection for the pool. The database is already in WAL mode (set
+// once on the writer connection in setup and persisted in the file header), so a
+// reader needs only the matching busy_timeout; query_only makes an accidental
+// write on a pooled reader fail loudly instead of contending with the writer.
+fn open_read_connection(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_millis(5000))?;
+    conn.execute_batch("PRAGMA query_only = true;")?;
+    Ok(conn)
+}
+
+// A small pool of read-only SQLite connections, checked out per blocking read task
+// and returned afterward. WAL permits unlimited concurrent readers, so this is what
+// lets off-thread reads actually run in parallel instead of serializing on the
+// single writer mutex. The idle list is capped so a burst of concurrent reads can't
+// leave an unbounded number of connections open forever.
+struct ReadPool {
+    path: PathBuf,
+    idle: Mutex<Vec<Connection>>,
+}
+
+impl ReadPool {
+    fn new(path: PathBuf) -> Self {
+        ReadPool {
+            path,
+            idle: Mutex::new(Vec::new()),
+        }
+    }
+
+    // Run `f` with a pooled read connection, opening a fresh one when none is idle
+    // and returning it to the pool afterward (up to the cap). Poisoned locks are
+    // recovered rather than propagated, matching the writer mutex's handling. Must
+    // be called from a blocking context, never the UI thread.
+    fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+        let pooled = {
+            let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+            idle.pop()
+        };
+        let conn = match pooled {
+            Some(c) => c,
+            None => open_read_connection(&self.path).map_err(|e| e.to_string())?,
+        };
+        let out = f(&conn);
+        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        if idle.len() < 8 {
+            idle.push(conn);
+        }
+        out
+    }
+}
+
+impl DbHandle {
+    // Run a read query off the UI thread on a pooled connection. The freeze fix in
+    // one place: a synchronous #[tauri::command] fn runs on the main/WKWebView
+    // thread, so any DB read there blocks the UI; this hops onto a blocking thread
+    // and hands the closure a pooled reader.
+    async fn read<T, F>(&self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&Connection) -> Result<T, String> + Send + 'static,
+        T: Send + 'static,
+    {
+        let readers = self.readers.clone();
+        tauri::async_runtime::spawn_blocking(move || readers.with(f))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+}
+
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version != SCHEMA_VERSION {
@@ -249,6 +347,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tracks (
             path TEXT PRIMARY KEY,
+            root TEXT NOT NULL,
             mtime INTEGER NOT NULL,
             size INTEGER NOT NULL,
             title TEXT,
@@ -258,6 +357,33 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             disc INTEGER,
             track INTEGER,
             duration REAL
+        );",
+    )?;
+    // Each cached track carries its owning library root (the folder that was scanned
+    // to produce it). Reconcile and prune filter on it — `root = ?` / `root NOT IN (…)`
+    // — so scoping a delete to one library folder is a column match rather than a
+    // path-prefix reconstruction the caller has to remember. Indexed so those deletes
+    // don't scan the whole table.
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tracks_root ON tracks(root);")?;
+    // Covering index for the whole-library Songs list. Its column list mirrors that
+    // query's ORDER BY exactly — including the leading `artist IS NULL` *expression*
+    // (untagged tracks sort last) and the NOCASE collations — so SQLite reads the
+    // rows pre-sorted instead of sorting all N on every open. path + duration are
+    // appended so every SELECTed column lives in the index: the query is served
+    // entirely from it, with no per-row table lookup. Cost: the index roughly
+    // duplicates the table (path strings dominate) and is maintained on every scan
+    // insert — a read-speed-for-write-cost/disk trade we accept since opens are
+    // user-facing and scans are background. See list_all_songs.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_songs_sort ON tracks(
+            (artist IS NULL),
+            artist COLLATE NOCASE,
+            album COLLATE NOCASE,
+            disc,
+            track,
+            title COLLATE NOCASE,
+            path,
+            duration
         );",
     )?;
     if version != SCHEMA_VERSION {
@@ -286,10 +412,7 @@ fn read_tags(path: &std::path::Path) -> Tags {
         (secs > 0.0).then_some(secs)
     };
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
-        return Tags {
-            duration,
-            ..empty
-        };
+        return Tags { duration, ..empty };
     };
     let norm = |v: Option<std::borrow::Cow<'_, str>>| {
         v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -337,10 +460,27 @@ fn walk_audio(root: &std::path::Path, out: &mut Vec<PathBuf>, visited: &mut Hash
     }
 }
 
-fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
+// The canonical string a root is stored under in tracks.root (and compared against
+// when pruning). Trailing separators are stripped so the same folder typed with or
+// without a slash resolves to one key. The frontend commits roots in this same form
+// (see setLibraryRoots), so both sides agree without further coordination.
+fn normalize_root(s: &str) -> String {
+    s.strip_suffix(std::path::MAIN_SEPARATOR)
+        .unwrap_or(s)
+        .to_string()
+}
+
+fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), String> {
+    let root_key = normalize_root(&root.to_string_lossy());
     let mut files = Vec::new();
     let mut visited = HashSet::new();
     walk_audio(&root, &mut files, &mut visited);
+
+    // Total is known now (the walk is complete), so the footer can show a determinate
+    // bar. Emitted for every scan, including instant watcher rescans; the frontend
+    // debounces the reveal so a sub-second pass never actually paints.
+    let total = files.len();
+    let _ = app.emit("scan-started", ScanProgress { done: 0, total });
 
     let mut conn =
         open_connection(&db_path).map_err(|e| format!("open scan connection failed: {}", e))?;
@@ -356,7 +496,12 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
     tx.execute("DELETE FROM scan_current", [])
         .map_err(|e| format!("clear temp table failed: {}", e))?;
 
-    for file in &files {
+    for (i, file) in files.iter().enumerate() {
+        // Throttle progress emits to one every 512 files: cheap for the frontend and
+        // fine-grained enough to animate smoothly even over a 200k first scan.
+        if i % 512 == 0 {
+            let _ = app.emit("scan-progress", ScanProgress { done: i, total });
+        }
         let Ok(meta) = file.metadata() else { continue };
         let mtime = meta
             .modified()
@@ -388,9 +533,10 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
 
         let tags = read_tags(file);
         let _ = tx.execute(
-            "INSERT INTO tracks (path, mtime, size, title, artist, album, album_artist, disc, track, duration)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO tracks (path, root, mtime, size, title, artist, album, album_artist, disc, track, duration)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(path) DO UPDATE SET
+                 root = excluded.root,
                  mtime = excluded.mtime,
                  size = excluded.size,
                  title = excluded.title,
@@ -402,6 +548,7 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
                  duration = excluded.duration",
             params![
                 path_str,
+                root_key,
                 mtime,
                 size,
                 tags.title,
@@ -415,11 +562,14 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
         );
     }
 
-    // Remove every row not in this scan. This both drops files that disappeared under
-    // the current root and clears orphans left behind by a previous library root.
+    // Remove rows for files that vanished from *this* root. A scan only walks one
+    // library folder (rescan_libraries and the watcher both drive scans one root at a
+    // time), so scan_current holds just this root's files — the delete is scoped to
+    // this root's rows so it can't touch any other library root. Pruning of roots the
+    // user removed from the library is handled separately (see prune_library_roots).
     tx.execute(
-        "DELETE FROM tracks WHERE path NOT IN (SELECT path FROM scan_current)",
-        [],
+        "DELETE FROM tracks WHERE root = ?1 AND path NOT IN (SELECT path FROM scan_current)",
+        [&root_key],
     )
     .map_err(|e| format!("delete missing failed: {}", e))?;
 
@@ -429,11 +579,12 @@ fn run_scan(root: PathBuf, db_path: PathBuf) -> Result<(), String> {
 
 struct ScanCoalesce {
     running: bool,
-    // While a scan runs, holds the most recent (root, db_path) for exactly one
-    // follow-up pass. A burst of watcher flushes during a long scan collapses
-    // into a single extra scan rather than a thread (and full library walk) per
-    // flush, and a library-root change mid-scan is still honored.
-    pending: Option<(PathBuf, PathBuf)>,
+    // Distinct roots requested while a scan runs, each drained as one follow-up pass.
+    // A burst of watcher flushes for the *same* root during a long scan collapses to a
+    // single extra scan (dedup on insert) rather than a thread + full walk per flush —
+    // but requests for *different* roots are all kept, so a rescan of several library
+    // folders can never drop one by overwriting a single slot.
+    pending: Vec<PathBuf>,
 }
 
 // Mutex guards only the bools/Option above for very short critical sections;
@@ -444,7 +595,7 @@ fn scan_coalesce() -> &'static Mutex<ScanCoalesce> {
     C.get_or_init(|| {
         Mutex::new(ScanCoalesce {
             running: false,
-            pending: None,
+            pending: Vec::new(),
         })
     })
 }
@@ -458,22 +609,23 @@ fn request_scan(root: PathBuf, db_path: PathBuf, app: AppHandle) {
     {
         let mut c = scan_coalesce().lock().unwrap_or_else(|e| e.into_inner());
         if c.running {
-            c.pending = Some((root, db_path));
+            // Dedup: a burst for one root folds into a single follow-up, but distinct
+            // roots each stay queued. db_path is invariant (always the one DB), so the
+            // running thread's captured copy serves every drained root.
+            if !c.pending.contains(&root) {
+                c.pending.push(root);
+            }
             return;
         }
         c.running = true;
     }
     std::thread::spawn(move || {
         let mut root = root;
-        let mut db_path = db_path;
         loop {
             scan_and_emit(root.clone(), db_path.clone(), app.clone());
             let mut c = scan_coalesce().lock().unwrap_or_else(|e| e.into_inner());
-            match c.pending.take() {
-                Some((r, d)) => {
-                    root = r;
-                    db_path = d;
-                }
+            match c.pending.pop() {
+                Some(next) => root = next,
                 None => {
                     c.running = false;
                     return;
@@ -484,7 +636,7 @@ fn request_scan(root: PathBuf, db_path: PathBuf, app: AppHandle) {
 }
 
 fn scan_and_emit(root: PathBuf, db_path: PathBuf, app: AppHandle) {
-    let payload = match run_scan(root, db_path) {
+    let payload = match run_scan(root, db_path, &app) {
         Ok(()) => ScanResult {
             ok: true,
             error: None,
@@ -548,85 +700,86 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
 }
 
 #[tauri::command]
-fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
-    let entries = std::fs::read_dir(&path).map_err(|e| e.to_string())?;
+async fn list_dir(path: String, db: State<'_, DbHandle>) -> Result<DirListing, String> {
+    db.read(move |conn| {
+        let entries = std::fs::read_dir(&path).map_err(|e| e.to_string())?;
 
-    let mut folders: Vec<String> = Vec::new();
-    let mut file_names: Vec<String> = Vec::new();
-    let mut playlists: Vec<PlaylistListing> = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let entry_path = entry.path();
-        // Follow symlinks so a link to a dir/file shows up under its true type.
-        // Broken links and permission errors are skipped silently.
-        let Ok(meta) = std::fs::metadata(&entry_path) else {
-            continue;
-        };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if meta.is_dir() {
-            folders.push(name);
-        } else if meta.is_file() && is_audio_path(&name) {
-            file_names.push(name);
-        } else if meta.is_file() && playlist::is_playlist_path(&name) {
-            // Playlists stay out of the audio-tag path (no tag scan, own icon
-            // and click action); the display name comes from the file.
-            playlists.push(PlaylistListing {
-                name: playlist::display_name(&entry_path),
-                file: name,
+        let mut folders: Vec<String> = Vec::new();
+        let mut file_names: Vec<String> = Vec::new();
+        let mut playlists: Vec<PlaylistListing> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Prefer the dirent's file type — readdir already carries it, so no
+            // extra syscall. Only fall back to a full metadata() (a stat per entry
+            // that follows symlinks) when the entry IS a symlink or the type wasn't
+            // available, so a big directory of plain files costs one readdir instead
+            // of N stats. Broken links / permission errors are skipped silently.
+            let (is_dir, is_file) = match entry.file_type() {
+                Ok(ft) if !ft.is_symlink() => (ft.is_dir(), ft.is_file()),
+                _ => match std::fs::metadata(entry.path()) {
+                    Ok(m) => (m.is_dir(), m.is_file()),
+                    Err(_) => continue,
+                },
+            };
+            if is_dir {
+                folders.push(name);
+            } else if is_file && is_audio_path(&name) {
+                file_names.push(name);
+            } else if is_file && playlist::is_playlist_path(&name) {
+                // Playlists stay out of the audio-tag path (no tag scan, own icon
+                // and click action); the display name comes from the file.
+                playlists.push(PlaylistListing {
+                    name: playlist::display_name(&entry.path()),
+                    file: name,
+                });
+            }
+        }
+        folders.sort_by_key(|s| s.to_lowercase());
+        // Playlists sort after all tracks, alphabetically by display name.
+        playlists.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        let fulls: Vec<String> = file_names.iter().map(|n| join_path(&path, n)).collect();
+        let meta_map = fetch_meta(conn, &fulls)?;
+        let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
+        for (name, full) in file_names.into_iter().zip(fulls.into_iter()) {
+            // The browse tree doesn't show per-track runtime, so the duration column
+            // fetch_meta now returns is ignored here.
+            let (title, artist, album, album_artist, disc, track, _duration) = meta_map
+                .get(&full)
+                .cloned()
+                .unwrap_or((None, None, None, None, None, None, None));
+            files.push(FileEntry {
+                name,
+                title,
+                artist,
+                album,
+                album_artist,
+                disc,
+                track,
             });
         }
-    }
-    folders.sort_by_key(|s| s.to_lowercase());
-    // Playlists sort after all tracks, alphabetically by display name.
-    playlists.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    let fulls: Vec<String> = file_names.iter().map(|n| join_path(&path, n)).collect();
-    let meta_map = {
-        // Recover a poisoned lock rather than propagate it: the Connection is
-        // still valid after a panic that didn't corrupt an open transaction, and
-        // wedging every future DB read for the session is worse than the rare
-        // inconsistency. Mirrors scan_coalesce's poison handling.
-        let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-        fetch_meta(&conn, &fulls)?
-    };
-    let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
-    for (name, full) in file_names.into_iter().zip(fulls.into_iter()) {
-        // The browse tree doesn't show per-track runtime, so the duration column
-        // fetch_meta now returns is ignored here.
-        let (title, artist, album, album_artist, disc, track, _duration) = meta_map
-            .get(&full)
-            .cloned()
-            .unwrap_or((None, None, None, None, None, None, None));
-        files.push(FileEntry {
-            name,
-            title,
-            artist,
-            album,
-            album_artist,
-            disc,
-            track,
+        // Sort by (disc, track, name). Missing disc is treated as disc 1; missing track
+        // sorts after numbered tracks within the same disc. sort_by_cached_key computes
+        // each key — including the one lowercased-name allocation — exactly once per
+        // element, instead of re-lowercasing both sides of every comparison (O(n log n)
+        // allocations). That matters for very large flat folders.
+        files.sort_by_cached_key(|f| {
+            (
+                f.disc.unwrap_or(1),
+                f.track.unwrap_or(u32::MAX),
+                f.name.to_lowercase(),
+            )
         });
-    }
 
-    // Sort by (disc, track, name). Missing disc is treated as disc 1; missing track sorts
-    // after numbered tracks within the same disc.
-    files.sort_by(|a, b| {
-        let ad = a.disc.unwrap_or(1);
-        let bd = b.disc.unwrap_or(1);
-        ad.cmp(&bd)
-            .then_with(|| {
-                a.track
-                    .unwrap_or(u32::MAX)
-                    .cmp(&b.track.unwrap_or(u32::MAX))
-            })
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-
-    Ok(DirListing {
-        folders,
-        files,
-        playlists,
+        Ok(DirListing {
+            folders,
+            files,
+            playlists,
+        })
     })
+    .await
 }
 
 // The stream list is an extended M3U (.m3u8) file: each stream is a URL,
@@ -635,22 +788,30 @@ fn list_dir(path: String, db: State<DbHandle>) -> Result<DirListing, String> {
 // http(s) URL (remote stream lists are fetched here rather than in the webview,
 // which the CSP blocks).
 #[tauri::command]
-fn read_stream_list(path: String) -> Result<Vec<Stream>, String> {
-    let contents = if path.starts_with("http://") || path.starts_with("https://") {
-        ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(15))
-            .user_agent(USER_AGENT)
-            .build()
-            .get(&path)
-            .call()
-            .map_err(|e| e.to_string())?
-            .into_string()
-            .map_err(|e| e.to_string())?
-    } else {
-        std::fs::read_to_string(&path).map_err(|e| e.to_string())?
-    };
-    parse_m3u_stream_list(&contents)
-        .ok_or_else(|| "not an M3U stream list (no #EXTM3U header or stream URLs)".to_string())
+async fn read_stream_list(path: String) -> Result<Vec<Stream>, String> {
+    // A remote stream list is fetched with a blocking 15s-timeout HTTP GET; a local
+    // one is read from disk. Both are blocking I/O, so they run on a blocking thread
+    // — a slow or dead host must never freeze the UI thread, which (were this sync)
+    // it would for up to the full timeout on startup.
+    tauri::async_runtime::spawn_blocking(move || {
+        let contents = if path.starts_with("http://") || path.starts_with("https://") {
+            ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(15))
+                .user_agent(USER_AGENT)
+                .build()
+                .get(&path)
+                .call()
+                .map_err(|e| e.to_string())?
+                .into_string()
+                .map_err(|e| e.to_string())?
+        } else {
+            std::fs::read_to_string(&path).map_err(|e| e.to_string())?
+        };
+        parse_m3u_stream_list(&contents)
+            .ok_or_else(|| "not an M3U stream list (no #EXTM3U header or stream URLs)".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // Resolve the default stream list path, creating an empty (header-only) file on
@@ -669,7 +830,9 @@ fn ensure_default_stream_list(app: &AppHandle) -> Result<PathBuf, String> {
 
 #[tauri::command]
 fn default_stream_list_path(app: AppHandle) -> Result<String, String> {
-    Ok(ensure_default_stream_list(&app)?.to_string_lossy().into_owned())
+    Ok(ensure_default_stream_list(&app)?
+        .to_string_lossy()
+        .into_owned())
 }
 
 // A stream list on disk is only editable when it's a local file — a remote
@@ -735,7 +898,12 @@ fn stream_spans(lines: &[&str]) -> Vec<(Option<usize>, usize)> {
 
 // Append a station to a local stream list (.m3u8).
 #[tauri::command]
-fn add_stream(path: String, name: String, url: String, image: Option<String>) -> Result<(), String> {
+fn add_stream(
+    path: String,
+    name: String,
+    url: String,
+    image: Option<String>,
+) -> Result<(), String> {
     reject_remote_list(&path)?;
     let url = clean_stream_url(&url)?;
     // Start from the existing file (or a fresh header if it's missing/empty),
@@ -809,7 +977,10 @@ fn move_stream(path: String, from: usize, to: usize) -> Result<(), String> {
     }
     // Each station's block runs from its start (#EXTINF or URL) up to the next
     // station's start; the last runs to end of file.
-    let starts: Vec<usize> = spans.iter().map(|&(extinf, url)| extinf.unwrap_or(url)).collect();
+    let starts: Vec<usize> = spans
+        .iter()
+        .map(|&(extinf, url)| extinf.unwrap_or(url))
+        .collect();
     let block = |i: usize| -> (usize, usize) {
         (starts[i], starts.get(i + 1).copied().unwrap_or(lines.len()))
     };
@@ -930,12 +1101,39 @@ fn m3u_fallback_name(url: &str) -> &str {
 
 #[tauri::command]
 fn rescan_libraries(paths: Vec<String>, db: State<DbHandle>, app: AppHandle) {
+    // Drop cached tracks that no longer belong to any configured root. run_scan now
+    // prunes only within the root it walked, so a root the user removed from the
+    // library leaves its tracks behind unless we sweep them here, where the full
+    // (post-change) root set is known.
+    prune_library_roots(&paths, &db.path);
     for path in paths {
         if path.is_empty() {
             continue;
         }
         request_scan(PathBuf::from(path), db.path.clone(), app.clone());
     }
+}
+
+// Delete every cached track whose owning root is not in `roots`. Called on a
+// library-roots change (rescan_libraries) so removing a folder purges its tracks;
+// an empty root set clears the whole cache. Best-effort: a failure here just leaves
+// stale rows that the next roots change or a table-shape bump will clear.
+fn prune_library_roots(roots: &[String], db_path: &Path) {
+    let Ok(conn) = open_connection(db_path) else {
+        return;
+    };
+    let keys: Vec<String> = roots
+        .iter()
+        .filter(|r| !r.is_empty())
+        .map(|r| normalize_root(r))
+        .collect();
+    let sql = if keys.is_empty() {
+        "DELETE FROM tracks".to_string()
+    } else {
+        let placeholders = vec!["?"; keys.len()].join(", ");
+        format!("DELETE FROM tracks WHERE root NOT IN ({})", placeholders)
+    };
+    let _ = conn.execute(&sql, params_from_iter(keys));
 }
 
 // Starts (or replaces) recursive watchers on the library roots — one debouncer
@@ -1047,7 +1245,10 @@ fn get_stream_image(image: String) -> Option<String> {
             return None;
         }
         let bytes = std::fs::read(&path).ok()?;
-        (bytes, image_mime_from_ext(&path.to_string_lossy()).to_string())
+        (
+            bytes,
+            image_mime_from_ext(&path.to_string_lossy()).to_string(),
+        )
     } else {
         log::warn!("stream image is not an http(s) or file URL: {image}");
         return None;
@@ -1213,7 +1414,7 @@ fn read_file_tags(path: String) -> Result<FileEntry, String> {
 // (lofty rewrites the file in place, which would corrupt an in-progress decode),
 // so this command assumes the file is not being played.
 #[tauri::command]
-fn write_tags(
+async fn write_tags(
     path: String,
     title: Option<String>,
     artist: Option<String>,
@@ -1221,97 +1422,114 @@ fn write_tags(
     album: Option<String>,
     disc: Option<u32>,
     track: Option<u32>,
-    db: State<DbHandle>,
+    db: State<'_, DbHandle>,
 ) -> Result<FileEntry, String> {
-    let p = PathBuf::from(&path);
-    let mut tagged = lofty::read_from_path(&p).map_err(|e| format!("read failed: {}", e))?;
+    // lofty read/save is blocking file I/O and the cache UPDATE takes the writer
+    // mutex, so run the whole thing off the UI thread.
+    let write_conn = db.conn.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = PathBuf::from(&path);
+        let mut tagged = lofty::read_from_path(&p).map_err(|e| format!("read failed: {}", e))?;
 
-    // Untagged files have no tag to mutate; give them one of the container's
-    // native type (ID3v2 for MP3, MP4 atoms for m4a, Vorbis comments for FLAC…).
-    if tagged.primary_tag_mut().is_none() {
-        let tag_type = tagged.primary_tag_type();
-        tagged.insert_tag(lofty::tag::Tag::new(tag_type));
-    }
-    let tag = tagged
-        .primary_tag_mut()
-        .expect("primary tag present (inserted above when absent)");
-
-    // Trim, and treat empty as "clear" — symmetric with read_tags' norm().
-    let norm = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let title = norm(title);
-    let artist = norm(artist);
-    let album = norm(album);
-    let album_artist = norm(album_artist);
-
-    match &title {
-        Some(v) => tag.set_title(v.clone()),
-        None => tag.remove_title(),
-    }
-    match &artist {
-        Some(v) => tag.set_artist(v.clone()),
-        None => tag.remove_artist(),
-    }
-    match &album {
-        Some(v) => tag.set_album(v.clone()),
-        None => tag.remove_album(),
-    }
-    // No Accessor shortcut for album artist (see read_tags): set/clear by key.
-    match &album_artist {
-        Some(v) => {
-            tag.insert_text(lofty::tag::ItemKey::AlbumArtist, v.clone());
+        // Untagged files have no tag to mutate; give them one of the container's
+        // native type (ID3v2 for MP3, MP4 atoms for m4a, Vorbis comments for FLAC…).
+        if tagged.primary_tag_mut().is_none() {
+            let tag_type = tagged.primary_tag_type();
+            tagged.insert_tag(lofty::tag::Tag::new(tag_type));
         }
-        None => tag.remove_key(&lofty::tag::ItemKey::AlbumArtist),
-    }
-    match disc {
-        Some(d) => tag.set_disk(d),
-        None => tag.remove_disk(),
-    }
-    match track {
-        Some(t) => tag.set_track(t),
-        None => tag.remove_track(),
-    }
+        let tag = tagged
+            .primary_tag_mut()
+            .expect("primary tag present (inserted above when absent)");
 
-    tagged
-        .save_to_path(&p, lofty::config::WriteOptions::default())
-        .map_err(|e| format!("save failed: {}", e))?;
+        // Trim, and treat empty as "clear" — symmetric with read_tags' norm().
+        let norm = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let title = norm(title);
+        let artist = norm(artist);
+        let album = norm(album);
+        let album_artist = norm(album_artist);
 
-    // Re-stat after the write so the cached mtime/size match the file lofty just
-    // rewrote. The incremental scan skips rows whose mtime+size are unchanged, so
-    // recording the post-write values makes the watcher's self-write event a
-    // no-op instead of a redundant re-read.
-    let (mtime, size) = std::fs::metadata(&p)
-        .map(|m| {
-            let mtime = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            (mtime, m.len() as i64)
+        match &title {
+            Some(v) => tag.set_title(v.clone()),
+            None => tag.remove_title(),
+        }
+        match &artist {
+            Some(v) => tag.set_artist(v.clone()),
+            None => tag.remove_artist(),
+        }
+        match &album {
+            Some(v) => tag.set_album(v.clone()),
+            None => tag.remove_album(),
+        }
+        // No Accessor shortcut for album artist (see read_tags): set/clear by key.
+        match &album_artist {
+            Some(v) => {
+                tag.insert_text(lofty::tag::ItemKey::AlbumArtist, v.clone());
+            }
+            None => tag.remove_key(&lofty::tag::ItemKey::AlbumArtist),
+        }
+        match disc {
+            Some(d) => tag.set_disk(d),
+            None => tag.remove_disk(),
+        }
+        match track {
+            Some(t) => tag.set_track(t),
+            None => tag.remove_track(),
+        }
+
+        tagged
+            .save_to_path(&p, lofty::config::WriteOptions::default())
+            .map_err(|e| format!("save failed: {}", e))?;
+
+        // Re-stat after the write so the cached mtime/size match the file lofty just
+        // rewrote. The incremental scan skips rows whose mtime+size are unchanged, so
+        // recording the post-write values makes the watcher's self-write event a
+        // no-op instead of a redundant re-read.
+        let (mtime, size) = std::fs::metadata(&p)
+            .map(|m| {
+                let mtime = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                (mtime, m.len() as i64)
+            })
+            .unwrap_or((0, 0));
+
+        {
+            let conn = write_conn.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = conn.execute(
+                "UPDATE tracks SET mtime = ?2, size = ?3, title = ?4, artist = ?5,
+                     album = ?6, album_artist = ?7, disc = ?8, track = ?9 WHERE path = ?1",
+                params![
+                    path,
+                    mtime,
+                    size,
+                    title,
+                    artist,
+                    album,
+                    album_artist,
+                    disc,
+                    track
+                ],
+            );
+        }
+
+        Ok(FileEntry {
+            name: p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            title,
+            artist,
+            album,
+            album_artist,
+            disc,
+            track,
         })
-        .unwrap_or((0, 0));
-
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let _ = conn.execute(
-            "UPDATE tracks SET mtime = ?2, size = ?3, title = ?4, artist = ?5,
-                 album = ?6, album_artist = ?7, disc = ?8, track = ?9 WHERE path = ?1",
-            params![path, mtime, size, title, artist, album, album_artist, disc, track],
-        );
-    }
-
-    Ok(FileEntry {
-        name: p
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        title,
-        artist,
-        album,
-        album_artist,
-        disc,
-        track,
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // === Audio playback commands ===
@@ -1513,46 +1731,51 @@ fn escape_like(s: &str) -> String {
 // finds a literal '%'. Capped so a one-character query can't return the whole
 // library into the dropdown.
 #[tauri::command]
-fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
-    let like = format!("%{}%", escape_like(q));
+async fn search_tracks(
+    query: String,
+    db: State<'_, DbHandle>,
+) -> Result<Vec<SearchResult>, String> {
+    db.read(move |conn| {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let like = format!("%{}%", escape_like(q));
 
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, title, artist, album, duration FROM tracks
-             WHERE title LIKE ?1 ESCAPE '\\'
-                OR artist LIKE ?1 ESCAPE '\\'
-                OR album LIKE ?1 ESCAPE '\\'
-                OR path LIKE ?1 ESCAPE '\\'
-             ORDER BY artist IS NULL, artist COLLATE NOCASE,
-                      album COLLATE NOCASE, disc, track,
-                      title COLLATE NOCASE
-             LIMIT 50",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&like], |row| {
-            Ok(SearchResult {
-                path: row.get(0)?,
-                title: row.get(1)?,
-                artist: row.get(2)?,
-                album: row.get(3)?,
-                // Flat/positional list: the gutter shows a row index, not a
-                // within-album ordinal, so no metadata track number is carried.
-                track: None,
-                duration: row.get(4)?,
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, title, artist, album, duration FROM tracks
+                 WHERE title LIKE ?1 ESCAPE '\\'
+                    OR artist LIKE ?1 ESCAPE '\\'
+                    OR album LIKE ?1 ESCAPE '\\'
+                    OR path LIKE ?1 ESCAPE '\\'
+                 ORDER BY artist IS NULL, artist COLLATE NOCASE,
+                          album COLLATE NOCASE, disc, track,
+                          title COLLATE NOCASE
+                 LIMIT 50",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&like], |row| {
+                Ok(SearchResult {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    // Flat/positional list: the gutter shows a row index, not a
+                    // within-album ordinal, so no metadata track number is carried.
+                    track: None,
+                    duration: row.get(4)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // Folders whose name (any path segment above a track) contains the query.
@@ -1562,53 +1785,58 @@ fn search_tracks(query: String, db: State<DbHandle>) -> Result<Vec<SearchResult>
 // matches is kept once. Matches search_tracks' literal (escaped) substring
 // semantics and cap.
 #[tauri::command]
-fn search_folders(query: String, db: State<DbHandle>) -> Result<Vec<FolderResult>, String> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
-    let needle = q.to_lowercase();
-    // A folder name only matches if the query is a substring of the full path,
-    // so pre-filter in SQL to avoid walking every track on each keystroke.
-    let like = format!("%{}%", escape_like(q));
+async fn search_folders(
+    query: String,
+    db: State<'_, DbHandle>,
+) -> Result<Vec<FolderResult>, String> {
+    db.read(move |conn| {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let needle = q.to_lowercase();
+        // A folder name only matches if the query is a substring of the full path,
+        // so pre-filter in SQL to avoid walking every track on each keystroke.
+        let like = format!("%{}%", escape_like(q));
 
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn
-        .prepare("SELECT path FROM tracks WHERE path LIKE ?1 ESCAPE '\\'")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&like], |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT path FROM tracks WHERE path LIKE ?1 ESCAPE '\\'")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&like], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
 
-    let mut seen = HashSet::new();
-    let mut out: Vec<FolderResult> = Vec::new();
-    for r in rows {
-        let path = r.map_err(|e| e.to_string())?;
-        // Each '/' (past a leading one) closes an ancestor directory; the final
-        // component is the file itself and is skipped by only looking at slices
-        // ending at a separator.
-        for (i, ch) in path.char_indices() {
-            if ch != '/' || i == 0 {
-                continue;
-            }
-            let dir = &path[..i];
-            let name = dir.rsplit('/').next().unwrap_or(dir);
-            if name.to_lowercase().contains(&needle) && seen.insert(dir.to_string()) {
-                out.push(FolderResult {
-                    path: dir.to_string(),
-                    name: name.to_string(),
-                });
+        let mut seen = HashSet::new();
+        let mut out: Vec<FolderResult> = Vec::new();
+        for r in rows {
+            let path = r.map_err(|e| e.to_string())?;
+            // Each '/' (past a leading one) closes an ancestor directory; the final
+            // component is the file itself and is skipped by only looking at slices
+            // ending at a separator.
+            for (i, ch) in path.char_indices() {
+                if ch != '/' || i == 0 {
+                    continue;
+                }
+                let dir = &path[..i];
+                let name = dir.rsplit('/').next().unwrap_or(dir);
+                if name.to_lowercase().contains(&needle) && seen.insert(dir.to_string()) {
+                    out.push(FolderResult {
+                        path: dir.to_string(),
+                        name: name.to_string(),
+                    });
+                }
             }
         }
-    }
-    out.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.path.cmp(&b.path))
-    });
-    out.truncate(50);
-    Ok(out)
+        out.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        out.truncate(50);
+        Ok(out)
+    })
+    .await
 }
 
 // Every cached track under a folder (recursively), ordered for playback:
@@ -1616,43 +1844,45 @@ fn search_folders(query: String, db: State<DbHandle>) -> Result<Vec<FolderResult
 // and an artist folder plays album by album. Backs the "play a folder from
 // search" action.
 #[tauri::command]
-fn folder_tracks(path: String, db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
-    // Trailing slash so `/a/b` matches `/a/b/…` but not a sibling `/a/bc/…`.
-    let prefix = if path.ends_with('/') {
-        path.clone()
-    } else {
-        format!("{}/", path)
-    };
-    let like = format!("{}%", escape_like(&prefix));
+async fn folder_tracks(path: String, db: State<'_, DbHandle>) -> Result<Vec<SearchResult>, String> {
+    db.read(move |conn| {
+        // Trailing slash so `/a/b` matches `/a/b/…` but not a sibling `/a/bc/…`.
+        let prefix = if path.ends_with('/') {
+            path.clone()
+        } else {
+            format!("{}/", path)
+        };
+        let like = format!("{}%", escape_like(&prefix));
 
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, title, artist, album, duration FROM tracks
-             WHERE path LIKE ?1 ESCAPE '\\'
-             ORDER BY album IS NULL, album COLLATE NOCASE,
-                      disc, track, path COLLATE NOCASE",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&like], |row| {
-            Ok(SearchResult {
-                path: row.get(0)?,
-                title: row.get(1)?,
-                artist: row.get(2)?,
-                album: row.get(3)?,
-                // Flat/positional list: the gutter shows a row index, not a
-                // within-album ordinal, so no metadata track number is carried.
-                track: None,
-                duration: row.get(4)?,
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, title, artist, album, duration FROM tracks
+                 WHERE path LIKE ?1 ESCAPE '\\'
+                 ORDER BY album IS NULL, album COLLATE NOCASE,
+                          disc, track, path COLLATE NOCASE",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&like], |row| {
+                Ok(SearchResult {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    // Flat/positional list: the gutter shows a row index, not a
+                    // within-album ordinal, so no metadata track number is carried.
+                    track: None,
+                    duration: row.get(4)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // The album grouping key, matching how mainstream players identify an album:
@@ -1664,100 +1894,112 @@ const ALBUM_ARTIST_EXPR: &str = "COALESCE(NULLIF(album_artist, ''), artist, '')"
 // Distinct artists whose name contains the query. Backs the "artist" rows in
 // search; choosing one opens an immutable queue of every track by that artist.
 #[tauri::command]
-fn search_artists(query: String, db: State<DbHandle>) -> Result<Vec<ArtistResult>, String> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
-    let like = format!("%{}%", escape_like(q));
+async fn search_artists(
+    query: String,
+    db: State<'_, DbHandle>,
+) -> Result<Vec<ArtistResult>, String> {
+    db.read(move |conn| {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let like = format!("%{}%", escape_like(q));
 
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT artist FROM tracks
-             WHERE artist IS NOT NULL AND artist <> '' AND artist LIKE ?1 ESCAPE '\\'
-             ORDER BY artist COLLATE NOCASE
-             LIMIT 50",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&like], |row| Ok(ArtistResult { name: row.get(0)? }))
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT artist FROM tracks
+                 WHERE artist IS NOT NULL AND artist <> '' AND artist LIKE ?1 ESCAPE '\\'
+                 ORDER BY artist COLLATE NOCASE
+                 LIMIT 50",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&like], |row| Ok(ArtistResult { name: row.get(0)? }))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // Distinct (album, album-artist) pairs whose album name contains the query.
 // Choosing one opens an immutable queue of the album's tracks in disc/track
 // order.
 #[tauri::command]
-fn search_albums(query: String, db: State<DbHandle>) -> Result<Vec<AlbumResult>, String> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
-    let like = format!("%{}%", escape_like(q));
+async fn search_albums(query: String, db: State<'_, DbHandle>) -> Result<Vec<AlbumResult>, String> {
+    db.read(move |conn| {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let like = format!("%{}%", escape_like(q));
 
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let sql = format!(
-        "SELECT album, {expr} AS album_artist FROM tracks
-         WHERE album IS NOT NULL AND album <> '' AND album LIKE ?1 ESCAPE '\\'
-         GROUP BY album, album_artist
-         ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE
-         LIMIT 50",
-        expr = ALBUM_ARTIST_EXPR
-    );
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&like], |row| {
-            Ok(AlbumResult {
-                album: row.get(0)?,
-                artist: row.get(1)?,
+        let sql = format!(
+            "SELECT album, {expr} AS album_artist FROM tracks
+             WHERE album IS NOT NULL AND album <> '' AND album LIKE ?1 ESCAPE '\\'
+             GROUP BY album, album_artist
+             ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE
+             LIMIT 50",
+            expr = ALBUM_ARTIST_EXPR
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&like], |row| {
+                Ok(AlbumResult {
+                    album: row.get(0)?,
+                    artist: row.get(1)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // Every track by an artist, ordered album by album (then disc/track) for
 // playback. Backs the artist queue page.
 #[tauri::command]
-fn artist_tracks(artist: String, db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, title, artist, album, duration FROM tracks
-             WHERE artist = ?1
-             ORDER BY album IS NULL, album COLLATE NOCASE,
-                      disc, track, path COLLATE NOCASE",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&artist], |row| {
-            Ok(SearchResult {
-                path: row.get(0)?,
-                title: row.get(1)?,
-                artist: row.get(2)?,
-                album: row.get(3)?,
-                // Flat/positional list: the gutter shows a row index, not a
-                // within-album ordinal, so no metadata track number is carried.
-                track: None,
-                duration: row.get(4)?,
+async fn artist_tracks(
+    artist: String,
+    db: State<'_, DbHandle>,
+) -> Result<Vec<SearchResult>, String> {
+    db.read(move |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, title, artist, album, duration FROM tracks
+                 WHERE artist = ?1
+                 ORDER BY album IS NULL, album COLLATE NOCASE,
+                          disc, track, path COLLATE NOCASE",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&artist], |row| {
+                Ok(SearchResult {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    // Flat/positional list: the gutter shows a row index, not a
+                    // within-album ordinal, so no metadata track number is carried.
+                    track: None,
+                    duration: row.get(4)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // Every track on an album (identified by name + album artist), in disc/track
@@ -1765,36 +2007,38 @@ fn artist_tracks(artist: String, db: State<DbHandle>) -> Result<Vec<SearchResult
 // albumArtist ?? artist for a track row, or the value from a search album row.
 // Backs the album queue page.
 #[tauri::command]
-fn album_tracks(
+async fn album_tracks(
     album: String,
     album_artist: String,
-    db: State<DbHandle>,
+    db: State<'_, DbHandle>,
 ) -> Result<Vec<SearchResult>, String> {
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let sql = format!(
-        "SELECT path, title, artist, album, track, duration FROM tracks
-         WHERE album = ?1 AND {expr} = ?2
-         ORDER BY disc, track, path COLLATE NOCASE",
-        expr = ALBUM_ARTIST_EXPR
-    );
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![album, album_artist], |row| {
-            Ok(SearchResult {
-                path: row.get(0)?,
-                title: row.get(1)?,
-                artist: row.get(2)?,
-                album: row.get(3)?,
-                track: row.get(4)?,
-                duration: row.get(5)?,
+    db.read(move |conn| {
+        let sql = format!(
+            "SELECT path, title, artist, album, track, duration FROM tracks
+             WHERE album = ?1 AND {expr} = ?2
+             ORDER BY disc, track, path COLLATE NOCASE",
+            expr = ALBUM_ARTIST_EXPR
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![album, album_artist], |row| {
+                Ok(SearchResult {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    track: row.get(4)?,
+                    duration: row.get(5)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // The whole library as a flat track list, in the same album-by-album order the
@@ -1803,58 +2047,75 @@ fn album_tracks(
 // cached track (the view virtualizes for scale; see plan.md Phase 7). Reuses
 // SearchResult so no new frontend plumbing.
 #[tauri::command]
-fn list_all_songs(db: State<DbHandle>) -> Result<Vec<SearchResult>, String> {
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, title, artist, album, duration FROM tracks
-             ORDER BY artist IS NULL, artist COLLATE NOCASE,
-                      album COLLATE NOCASE, disc, track,
-                      title COLLATE NOCASE",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(SearchResult {
-                path: row.get(0)?,
-                title: row.get(1)?,
-                artist: row.get(2)?,
-                album: row.get(3)?,
-                // Flat/positional list: the gutter shows a row index, not a
-                // within-album ordinal, so no metadata track number is carried.
-                track: None,
-                duration: row.get(4)?,
+async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String> {
+    db.read(move |conn| {
+        // Debug: PUDDING_PERF=1 logs the pure query+collect time (excludes the IPC
+        // serialize + JS parse the frontend's __perfLog measures) so the two can be
+        // compared to see where the Songs-open pause actually lives.
+        let perf = std::env::var("PUDDING_PERF").is_ok();
+        let t0 = std::time::Instant::now();
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, title, artist, album, duration FROM tracks
+                 ORDER BY artist IS NULL, artist COLLATE NOCASE,
+                          album COLLATE NOCASE, disc, track,
+                          title COLLATE NOCASE",
+            )
+            .map_err(|e| e.to_string())?;
+        // Columnar/tuple rows (see SongRow): the whole-library list is large enough
+        // at the scale target that repeating the JSON field names per row dominates
+        // the IPC + parse cost, so ship positional tuples and let the frontend
+        // re-key them.
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        if perf {
+            eprintln!(
+                "[perf] list_all_songs query+collect: {:.1}ms ({} rows)",
+                t0.elapsed().as_secs_f64() * 1000.0,
+                out.len()
+            );
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // Every distinct artist in the library, alphabetized. Unfiltered twin of
 // search_artists with the LIKE and LIMIT removed; reuses ArtistResult. Backs the
 // Artists browse list; drilling in reuses artist_tracks.
 #[tauri::command]
-fn list_all_artists(db: State<DbHandle>) -> Result<Vec<ArtistResult>, String> {
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT artist FROM tracks
-             WHERE artist IS NOT NULL AND artist <> ''
-             ORDER BY artist COLLATE NOCASE",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| Ok(ArtistResult { name: row.get(0)? }))
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+async fn list_all_artists(db: State<'_, DbHandle>) -> Result<Vec<ArtistResult>, String> {
+    db.read(move |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT artist FROM tracks
+                 WHERE artist IS NOT NULL AND artist <> ''
+                 ORDER BY artist COLLATE NOCASE",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok(ArtistResult { name: row.get(0)? }))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // Every distinct (album, album-artist) pair in the library, alphabetized.
@@ -1864,29 +2125,31 @@ fn list_all_artists(db: State<DbHandle>) -> Result<Vec<ArtistResult>, String> {
 // groups under its track artist, not a blank bucket. Backs the Albums browse
 // list.
 #[tauri::command]
-fn list_all_albums(db: State<DbHandle>) -> Result<Vec<AlbumResult>, String> {
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let sql = format!(
-        "SELECT album, {expr} AS album_artist FROM tracks
-         WHERE album IS NOT NULL AND album <> ''
-         GROUP BY album, album_artist
-         ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE",
-        expr = ALBUM_ARTIST_EXPR
-    );
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(AlbumResult {
-                album: row.get(0)?,
-                artist: row.get(1)?,
+async fn list_all_albums(db: State<'_, DbHandle>) -> Result<Vec<AlbumResult>, String> {
+    db.read(move |conn| {
+        let sql = format!(
+            "SELECT album, {expr} AS album_artist FROM tracks
+             WHERE album IS NOT NULL AND album <> ''
+             GROUP BY album, album_artist
+             ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE",
+            expr = ALBUM_ARTIST_EXPR
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AlbumResult {
+                    album: row.get(0)?,
+                    artist: row.get(1)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // Distinct albums that contain a track by this artist, carrying the album-artist
@@ -1895,29 +2158,34 @@ fn list_all_albums(db: State<DbHandle>) -> Result<Vec<AlbumResult>, String> {
 // artist. Reuses AlbumResult. Backs the artist-detail (albums) view of the
 // Artists browse lens; filtering on the *track* artist mirrors artist_tracks.
 #[tauri::command]
-fn artist_albums(artist: String, db: State<DbHandle>) -> Result<Vec<AlbumResult>, String> {
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let sql = format!(
-        "SELECT album, {expr} AS album_artist FROM tracks
-         WHERE artist = ?1 AND album IS NOT NULL AND album <> ''
-         GROUP BY album, album_artist
-         ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE",
-        expr = ALBUM_ARTIST_EXPR
-    );
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&artist], |row| {
-            Ok(AlbumResult {
-                album: row.get(0)?,
-                artist: row.get(1)?,
+async fn artist_albums(
+    artist: String,
+    db: State<'_, DbHandle>,
+) -> Result<Vec<AlbumResult>, String> {
+    db.read(move |conn| {
+        let sql = format!(
+            "SELECT album, {expr} AS album_artist FROM tracks
+             WHERE artist = ?1 AND album IS NOT NULL AND album <> ''
+             GROUP BY album, album_artist
+             ORDER BY album COLLATE NOCASE, album_artist COLLATE NOCASE",
+            expr = ALBUM_ARTIST_EXPR
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&artist], |row| {
+                Ok(AlbumResult {
+                    album: row.get(0)?,
+                    artist: row.get(1)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // Tracks by this artist that belong to no album (empty/NULL album tag) — the
@@ -1926,37 +2194,39 @@ fn artist_albums(artist: String, db: State<DbHandle>) -> Result<Vec<AlbumResult>
 // on the *track* artist mirrors artist_albums; ordered by title for a stable,
 // readable list. Reuses SearchResult.
 #[tauri::command]
-fn artist_albumless_tracks(
+async fn artist_albumless_tracks(
     artist: String,
-    db: State<DbHandle>,
+    db: State<'_, DbHandle>,
 ) -> Result<Vec<SearchResult>, String> {
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, title, artist, album, duration FROM tracks
-             WHERE artist = ?1 AND (album IS NULL OR album = '')
-             ORDER BY title COLLATE NOCASE, path COLLATE NOCASE",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([&artist], |row| {
-            Ok(SearchResult {
-                path: row.get(0)?,
-                title: row.get(1)?,
-                artist: row.get(2)?,
-                album: row.get(3)?,
-                // Flat list: the gutter shows a row index, not a within-album
-                // ordinal, so no metadata track number is carried.
-                track: None,
-                duration: row.get(4)?,
+    db.read(move |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, title, artist, album, duration FROM tracks
+                 WHERE artist = ?1 AND (album IS NULL OR album = '')
+                 ORDER BY title COLLATE NOCASE, path COLLATE NOCASE",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&artist], |row| {
+                Ok(SearchResult {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    // Flat list: the gutter shows a row index, not a within-album
+                    // ordinal, so no metadata track number is carried.
+                    track: None,
+                    duration: row.get(4)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2100,6 +2370,7 @@ pub fn run() {
             init_schema(&conn)?;
             app.manage(DbHandle {
                 conn: Arc::new(Mutex::new(conn)),
+                readers: Arc::new(ReadPool::new(db_path.clone())),
                 path: db_path,
             });
             app.manage(WatcherState {
@@ -2136,8 +2407,7 @@ pub fn run() {
             // About opens our own in-app About panel (name/version + credit) in
             // the right pane, matching Settings, rather than the native macOS
             // About dialog. Selecting it emits "open-about" for the frontend.
-            let about_item = MenuItemBuilder::with_id("open-about", "About Pudding")
-                .build(app)?;
+            let about_item = MenuItemBuilder::with_id("open-about", "About Pudding").build(app)?;
 
             // App settings live under the standard macOS Preferences slot
             // (Pudding → Settings…, ⌘,). Selecting it emits "open-settings",
@@ -2205,25 +2475,24 @@ pub fn run() {
             // value at startup and after each change (set_*_checked). Autoadvance
             // lives only here (a set-once preference); the rest also have toolbar
             // controls.
-            let play_pause = MenuItemBuilder::with_id("transport-playpause", "Play / Pause")
-                .build(app)?;
+            let play_pause =
+                MenuItemBuilder::with_id("transport-playpause", "Play / Pause").build(app)?;
             let previous = MenuItemBuilder::with_id("transport-prev", "Previous")
                 .accelerator("CmdOrCtrl+Left")
                 .build(app)?;
             let next = MenuItemBuilder::with_id("transport-next", "Next")
                 .accelerator("CmdOrCtrl+Right")
                 .build(app)?;
-            let autoadvance =
-                CheckMenuItemBuilder::with_id("autoadvance", "Autoadvance")
-                    .checked(true)
-                    .build(app)?;
+            let autoadvance = CheckMenuItemBuilder::with_id("autoadvance", "Autoadvance")
+                .checked(true)
+                .build(app)?;
             // Shuffle / Repeat / Volume / Mute mirror the toolbar controls; the
             // frontend owns the state and re-syncs these checkmarks after any
             // change (set_shuffle_checked / set_repeat_checked / set_mute_checked).
             // Repeat is three radio-style items (only one checked); Volume nudges
             // and Mute have bare-key toolbar equivalents, so no accelerators here.
-            let shuffle = CheckMenuItemBuilder::with_id("playback-shuffle", "Shuffle")
-                .build(app)?;
+            let shuffle =
+                CheckMenuItemBuilder::with_id("playback-shuffle", "Shuffle").build(app)?;
             let repeat_off = CheckMenuItemBuilder::with_id("repeat-off", "Off")
                 .checked(true)
                 .build(app)?;
@@ -2500,7 +2769,13 @@ mod tests {
         let p = path.to_string_lossy().into_owned();
 
         // First add seeds the header on a missing file.
-        add_stream(p.clone(), "  Jazz24  ".into(), " https://ex.am/jazz ".into(), None).unwrap();
+        add_stream(
+            p.clone(),
+            "  Jazz24  ".into(),
+            " https://ex.am/jazz ".into(),
+            None,
+        )
+        .unwrap();
         // Second add carries art and lands on its own line after the first.
         add_stream(
             p.clone(),
@@ -2521,7 +2796,13 @@ mod tests {
 
         // A remote list has no local path to append to, and a scheme-less URL is
         // rejected before anything is written.
-        assert!(add_stream("https://ex.am/list.m3u8".into(), "x".into(), "y".into(), None).is_err());
+        assert!(add_stream(
+            "https://ex.am/list.m3u8".into(),
+            "x".into(),
+            "y".into(),
+            None
+        )
+        .is_err());
         assert!(add_stream(p.clone(), "x".into(), "not-a-url".into(), None).is_err());
 
         let _ = std::fs::remove_file(&path);
@@ -2554,7 +2835,9 @@ mod tests {
         assert_eq!(streams[0].image.as_deref(), Some("file:///art/x.png"));
         // The second entry and its #EXTVLCOPT are untouched.
         assert_eq!(streams[1].name, "Named");
-        assert!(std::fs::read_to_string(&path).unwrap().contains("#EXTVLCOPT:network-caching=1000"));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("#EXTVLCOPT:network-caching=1000"));
 
         // Deleting index 1 takes its #EXTINF, its #EXTVLCOPT, and its URL, leaving
         // only the first station.
@@ -2596,8 +2879,7 @@ mod tests {
 
         // Move A (now index 1) to the end (to == len).
         move_stream(p.clone(), 1, 3).unwrap();
-        let streams =
-            parse_m3u_stream_list(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let streams = parse_m3u_stream_list(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             ["B", "C", "A"],

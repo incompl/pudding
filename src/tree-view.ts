@@ -53,6 +53,24 @@ import {
 import { editMetadataItem } from "./editors";
 import { playFile, playFolder, playStream } from "./playback";
 import { addFolderToQueue, nodeToTrack, queueMenuItems } from "./queue";
+import { windowedList, type WindowedList } from "./windowed-list";
+
+// One flattened, currently-visible row of the tree: a node plus the context the
+// row renderer needs (its parent, its indent depth, and whether tracks in this
+// folder should show their artist subline). Expanding a folder splices its
+// children in after it; collapsing removes them — see flattenVisible. Windowing
+// the tree means rendering a slice of this linear array, not the nested <ul> DOM.
+interface TreeRow {
+  node: TreeNode;
+  parent: TreeNode;
+  depth: number;
+  showArtist: boolean;
+  // A synthetic "(empty)" marker shown under an expanded folder with no children
+  // (there's no child node to hang it on, so it's its own row).
+  empty?: boolean;
+}
+// Per-depth indent, matching the old nested-<ul> padding-left (see #folder-tree ul).
+const INDENT_EM = 1.6;
 
 // Child nodes for one directory listing. Display order comes entirely from
 // the backend: list_dir returns folders sorted by name and files sorted by
@@ -129,23 +147,6 @@ export async function fetchChildren(node: TreeNode): Promise<void> {
   }
 }
 
-async function loadChildren(node: TreeNode, li: HTMLLIElement): Promise<void> {
-  if (node.loaded || !node.isFolder) return;
-  const childUl = h(
-    "ul",
-    {},
-    h("li", { class: "loading-state", text: "Loading…" }),
-  );
-  li.appendChild(childUl);
-  try {
-    await fetchChildren(node);
-  } finally {
-    childUl.remove();
-  }
-}
-
-
-
 // Whether a track's artist is worth showing in a given folder. Suppressed only
 // when it's pure repetition: a multi-track album whose tagged tracks all share
 // one artist (the folder header already carries it). Shown when the artists vary
@@ -163,17 +164,50 @@ function folderArtistsVary(children: TreeNode[]): boolean {
   return tagged === 1;
 }
 
-function renderNode(
-  node: TreeNode,
-  parent: TreeNode,
-  showArtist = true,
-): HTMLLIElement {
-  const li = h("li");
+// Build the currently-visible rows as a flat, linear array: walk the tree, and for
+// every expanded+loaded folder splice its children in right after it (recursively).
+// Collapsed / unloaded folders contribute only their own row. This is what the
+// window renders a slice of — so a 200k-file folder costs a screenful of DOM, not
+// 200k nodes. showArtist is computed once per parent (folderArtistsVary); the top
+// level keeps the historical default of showing the artist.
+function flattenVisible(): TreeRow[] {
+  const rows: TreeRow[] = [];
+  const walk = (parent: TreeNode, depth: number, showArtist: boolean): void => {
+    for (const child of parent.children) {
+      rows.push({ node: child, parent, depth, showArtist });
+      if (child.isFolder && child.expanded && child.loaded) {
+        if (child.children.length === 0) {
+          rows.push({ node: child, parent, depth: depth + 1, showArtist, empty: true });
+        } else {
+          walk(child, depth + 1, folderArtistsVary(child.children));
+        }
+      }
+    }
+  };
+  if (app.rootNode) walk(app.rootNode, 0, true);
+  return rows;
+}
+
+// Build one flat tree row (a `.node-label`) for the windowed list. Unlike the old
+// nested renderer it never recurses — flattenVisible already laid out the children
+// as their own rows — and it always renders a two-line cell (primary + a secondary
+// that's a blank line when there's no artist) so every row is the uniform height
+// the window positions rows by. Indentation, which the nested <ul> padding used to
+// give, is applied here as a left margin from the row's depth.
+function renderTreeRow(row: TreeRow): HTMLElement {
+  const { node, parent, depth, showArtist } = row;
+  if (row.empty) {
+    const marker = h("span", { class: "node-label tree-empty", text: "(empty)" });
+    marker.style.marginLeft = `${depth * INDENT_EM}em`;
+    return marker;
+  }
   // Every row carries its path so the playing-highlight effect can find it.
   // The tree row skips the accent while a queue/playlist owns the playhead — the
   // now-playing highlight belongs to the context playing the track, not to every
   // copy of the same file (see the highlight effect and queueIsActivePool).
   const label = h("span", { class: "node-label", data: { path: node.path } });
+  // Indent by depth — the flat window has no nested <ul> to carry the old padding.
+  if (depth > 0) label.style.marginLeft = `${depth * INDENT_EM}em`;
   // Mirror the highlight effect's basis: a live queue row means a queue owns the
   // playhead, so the tree's copy of its track stays plain and the playlist's own
   // row carries the accent instead. Keeps a mid-playback re-render in agreement.
@@ -237,23 +271,26 @@ function renderNode(
       ),
     );
   }
-  // A tagged track reads as two lines — title over a de-emphasized artist —
-  // like a search result. Folders and untagged files keep a single plain line.
-  const text =
-    !node.isFolder && node.title
-      ? h(
-          "span",
-          { class: "label-text" },
-          h("span", { class: "primary", text: node.title }),
-          node.artist && showArtist &&
-            h("span", { class: "secondary", text: node.artist }),
-        )
-      : h("span", { class: "label-text", text: displayLabel(node) });
-  label.appendChild(text);
+  // Every row is two lines for a uniform windowed height (see renderTreeRow's
+  // header): the title/name on top, the artist beneath (a de-emphasized second
+  // line, like a search result) for a tagged track — otherwise a blank second line
+  // (a non-breaking space, so folders and untagged files reserve the same height
+  // rather than collapsing to a shorter row and breaking the window's row math).
+  const primaryText = !node.isFolder && node.title ? node.title : displayLabel(node);
+  const secondaryText =
+    !node.isFolder && node.title && node.artist && showArtist ? node.artist : "";
+  label.appendChild(
+    h(
+      "span",
+      { class: "label-text" },
+      h("span", { class: "primary", text: primaryText }),
+      h("span", { class: "secondary", text: secondaryText || " " }),
+    ),
+  );
   if (node.isPlaylist) {
     attachPlaylistClicks(label, node);
   } else {
-    label.addEventListener("click", (e) => onNodeClick(node, parent, li, e));
+    label.addEventListener("click", (e) => onNodeClick(node, e));
   }
   // Right-click a playlist to play it, add its tracks to the queue, or curate it
   // (Rename rewrites the #PLAYLIST: directive; Delete removes the file).
@@ -359,33 +396,18 @@ function renderNode(
     // hover play button, now that a plain click only selects.
     label.addEventListener("dblclick", () => playTreeTrack(node, parent));
   }
-  li.appendChild(label);
-
-  if (node.isFolder && node.expanded) {
-    const childUl = h("ul");
-    if (node.children.length === 0) {
-      childUl.appendChild(h("li", { class: "empty-state", text: "(empty)" }));
-    } else {
-      const showArtist = folderArtistsVary(node.children);
-      for (const child of node.children) {
-        childUl.appendChild(renderNode(child, node, showArtist));
-      }
-    }
-    li.appendChild(childUl);
-  }
-  return li;
+  // A folder's children are their own flattened rows (see flattenVisible), so the
+  // row is just the label — no nested <ul> to build here.
+  return label;
 }
 
-async function onNodeClick(
-  node: TreeNode,
-  parent: TreeNode,
-  li: HTMLLIElement,
-  e?: MouseEvent,
-): Promise<void> {
+async function onNodeClick(node: TreeNode, e?: MouseEvent): Promise<void> {
   if (node.isFolder) {
-    if (!node.loaded) await loadChildren(node, li);
+    // Load lazily on first open, then toggle and re-window: expanding splices this
+    // folder's children into the flat row list, collapsing removes them.
+    if (!node.loaded) await fetchChildren(node);
     node.expanded = !node.expanded;
-    li.replaceWith(renderNode(node, parent));
+    refreshTreeRows();
     return;
   }
   app.lastSelectionPane = "tree";
@@ -530,30 +552,117 @@ export async function revealFolderInTree(path: string): Promise<void> {
     if (!node.loaded) await fetchChildren(node);
     node.expanded = true;
   }
-  renderTree();
-  // Defer a frame: switching to the Files tab un-hides this pane via a reactive
-  // effect that flushes after this call, and expanding the ancestors reflows the
-  // rows above the target — so the target's position isn't final until now.
-  // scroll-margin-top on the row (see styles.css) offsets block:"start" past the
-  // sticky Browse back-bar, so the folder row lands just below it rather than
-  // hidden behind it.
-  requestAnimationFrame(() => {
-    treeContainer
-      .querySelector<HTMLElement>(`.node-label[data-path="${CSS.escape(path)}"]`)
-      ?.scrollIntoView({ block: "start" });
-  });
+  // Rebuild with the ancestors expanded, then scroll the target's row to the top
+  // (offset past the sticky Browse back-bar). The row may be far off-screen and
+  // unmounted, so scroll by its index in the flattened list, not by finding a DOM
+  // node — the window mounts it once the scroll lands there (scrollToIndex waits
+  // for the first measure if the tree was only just un-hidden).
+  buildTree();
+  scrollTreeToPath(path);
 }
 
-export function renderTree(): void {
+// Scroll a tree row (by path) to the top of the pane. Returns the index found (or
+// -1). Shared by the search "Go to folder" reveal and the post-rename flash.
+function scrollTreeToPath(path: string): number {
+  const idx = treeRows.findIndex((r) => !r.empty && r.node.path === path);
+  if (idx >= 0) treeWin?.scrollToIndex(idx, stickyMargin());
+  return idx;
+}
+
+// Scroll a tree row into view (by file path) and briefly flash it — used to follow
+// a just-renamed playlist to its new sorted slot. The row mounts a frame or two
+// after the scroll lands, so poll briefly for its label before flashing.
+export function revealTreeRow(path: string): void {
+  if (scrollTreeToPath(path) < 0) return;
+  let tries = 0;
+  const flash = (): void => {
+    const label = treeContainer.querySelector<HTMLElement>(
+      `.node-label[data-path="${CSS.escape(path)}"]`,
+    );
+    if (!label) {
+      if (tries++ < 15) requestAnimationFrame(flash);
+      return;
+    }
+    label.classList.remove("flash");
+    void label.offsetWidth; // restart the animation if it was mid-flight
+    label.classList.add("flash");
+    label.addEventListener("animationend", () => label.classList.remove("flash"), {
+      once: true,
+    });
+  };
+  requestAnimationFrame(flash);
+}
+
+// The Browse folder tree is costly to build for a large library, yet it's hidden
+// unless the Browse lens is the active view — and most sessions live in Songs and
+// never open Browse. So defer the DOM build: when Browse isn't active, renderTree()
+// just flags the tree stale and returns, sparing the startup + scan-complete freeze.
+// library-nav's render() calls setBrowseActive() when the lens changes; entering
+// Browse with a stale tree builds it once. The node *model* (app.rootNode) is kept
+// current by refreshTree/reconcile regardless — only the DOM paint waits.
+let browseActive = false;
+let treeStale = false;
+// The flattened visible rows the window renders a slice of, and the window handle.
+// Kept at module scope so expand/collapse (refreshTreeRows) and reveal can update
+// the window in place — resizing + repainting without a teardown flash.
+let treeRows: TreeRow[] = [];
+let treeWin: WindowedList | null = null;
+
+function buildTree(): void {
+  treeStale = false;
   treeContainer.innerHTML = "";
+  treeWin = null;
+  treeRows = [];
   if (!app.rootNode) return;
   if (app.rootNode.children.length === 0) {
     setEmpty(treeContainer, "Library is empty");
     return;
   }
-  const ul = h("ul");
-  for (const child of app.rootNode.children) {
-    ul.appendChild(renderNode(child, app.rootNode));
+  treeRows = flattenVisible();
+  // Window the rows: only the on-screen slice is mounted over a full-height spacer,
+  // so a huge (esp. flat) folder costs a screenful of DOM instead of one node per
+  // file. `count` is a function so expand/collapse can re-window in place via
+  // treeWin.update() (see refreshTreeRows). Reactive highlight/selection effects
+  // query mounted rows by data-path and no-op on the absent ones — a row applies
+  // its own state at build time when it scrolls in, so it's already correct.
+  treeWin = windowedList({
+    count: () => treeRows.length,
+    renderRow: (i) => renderTreeRow(treeRows[i]),
+  });
+  treeWin.el.classList.add("tree-window");
+  treeContainer.appendChild(treeWin.el);
+}
+
+// Re-flatten after an expand/collapse and repaint the window in place (no teardown,
+// so scroll position and the measured row height survive). Falls back to a full
+// build if the window doesn't exist yet.
+function refreshTreeRows(): void {
+  if (!treeWin) {
+    buildTree();
+    return;
   }
-  treeContainer.appendChild(ul);
+  treeRows = flattenVisible();
+  treeWin.update();
+}
+
+// Pixels to leave above a revealed row so it clears the sticky Browse back-bar
+// (2em, matching the row's old scroll-margin-top). Read from the pane's font size
+// so it tracks the app zoom.
+function stickyMargin(): number {
+  return 2 * (parseFloat(getComputedStyle(treeContainer).fontSize) || 16);
+}
+
+export function renderTree(): void {
+  if (!browseActive) {
+    treeStale = true;
+    return;
+  }
+  buildTree();
+}
+
+// Tell the tree whether the Browse lens is now the active view. Entering Browse
+// with a deferred (stale) tree builds it now — the paint we skipped while hidden.
+export function setBrowseActive(active: boolean): void {
+  browseActive = active;
+  if (active && treeStale) buildTree();
 }

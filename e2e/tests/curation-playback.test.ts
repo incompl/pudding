@@ -203,8 +203,11 @@ test("shuffle: removing the playing row keeps playback alive", async () => {
   // removed-row branch shifts the shuffle bag without filtering it against the
   // shrunken pool (the survived-row branch does filter). So assert only the
   // invariant that must hold: the edit is reflected and playback never stopped.
+  // The list is windowed (rows sit inside a spacer container, not as direct
+  // children of #queue-list), so read the rendered row count off data-row-count,
+  // which renderQueue stamps on every rebuild.
   await d.waitFor(
-    async () => Number(await d.prop("#queue-list", "childElementCount")) === 2,
+    async () => (await d.attr("#queue-list", "data-row-count")) === "2",
     { message: "removed row never left the list" },
   );
   assert.equal((await d.probe()).isPlaying, true);

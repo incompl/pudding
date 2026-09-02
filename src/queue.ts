@@ -40,6 +40,7 @@ import {
   queueRenameBtn,
 } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
+import { windowedList, type WindowedList } from "./windowed-list";
 import { attachRowReorder } from "./drag-drop";
 import { engine } from "./engine-glue";
 import { editMetadataItem } from "./editors";
@@ -78,13 +79,187 @@ import {
 // consumes it so the re-render lands on the new row rather than the default
 // scroll-to-playing (which sits earlier, and would otherwise hide the addition).
 
+// The live window over the queue rows, and the (queue, isSource) it was built for.
+// A play-advance re-enters renderQueue with the *same* queue object and only needs
+// the playing highlight repainted + the playing row kept in view; tearing down and
+// rebuilding the window there would lose the scroll position, so we detect that case
+// and skip the rebuild (see renderQueue).
+let queueWin: WindowedList | null = null;
+let renderedQueue: Queue | null = null;
+let renderedIsSource = false;
+
+// view index → playable-pool index (queuePlayingIndex space, which excludes missing
+// rows), or -1 for a missing row. Lets a row map its playing highlight and click
+// back to its pool position without re-walking the list per row.
+function buildViewToPool(tracks: SearchTrack[]): number[] {
+  const map: number[] = [];
+  let pool = 0;
+  for (const t of tracks) {
+    map.push(t.missing ? -1 : pool);
+    if (!t.missing) pool++;
+  }
+  return map;
+}
+
+// Build one queue row (view index `i`), fresh, the way the window (re)mounts it as
+// it scrolls. Reads the playing/selected state live at build time so a row scrolled
+// into view after an advance or a cmd-click is already correct without waiting for a
+// painter effect. `viewToPool` maps this row to its playable-pool index.
+function buildQueueRow(
+  queue: Queue,
+  isSource: boolean,
+  viewToPool: number[],
+  i: number,
+): HTMLElement {
+  const t = queue.tracks[i];
+  const rowPoolIdx = viewToPool[i];
+  // A browsed playlist isn't the pool, so nothing in it is "playing".
+  const playing = isSource ? queuePlayingIndex.peek() : null;
+  const isPlaying = rowPoolIdx === playing;
+  // The playing row keeps its index and just recolors to the accent (like the
+  // tree's track rows), rather than swapping in a glyph. The number and the
+  // hover play button share this one gutter cell (see CSS), so the button
+  // lands exactly where the number was.
+  const label = String(i + 1);
+  const num = h(
+    "span",
+    { class: "queue-num" },
+    h("span", {
+      class: "queue-num-text",
+      text: label,
+      // 4+ digit numbers shrink to the 3-digit width so they stay centered
+      // without overflowing (same rule as the Songs list — tabular digits are
+      // equal width, so N digits fit 3 digits' width at scale 3/N).
+      style: label.length > 3 ? { "font-size": `${3 / label.length}em` } : {},
+    }),
+  );
+  // A missing playlist row is shown but can't be played: dim it, label it, and
+  // skip the click handler so it reads as unavailable rather than dropped.
+  const secondaryText = t.missing ? "Missing file" : (t.artist ?? t.album ?? "");
+  // Always render the secondary line — a non-breaking space when there's no
+  // subtitle — so every row is the same two-line height. The window places row i
+  // at i * rowHeight (measured from one probe row), so a row that collapsed to a
+  // single line would desync the geometry for the whole list.
+  const text = h(
+    "span",
+    { class: "queue-text" },
+    h("span", {
+      class: "queue-primary",
+      text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
+    }),
+    h("span", { class: "queue-secondary", text: secondaryText || " " }),
+  );
+  // Row remove (curation): strips this row from the list (and file, if a
+  // playlist). Stops propagation so it never counts as a play/commit click.
+  const remove = h("button", {
+    class: "queue-remove",
+    text: "✕",
+    attrs: { type: "button", title: "Remove from list", "aria-label": "Remove from list" },
+    on: {
+      click: (e) => {
+        e.stopPropagation();
+        removeCuratedRow(i);
+      },
+    },
+  });
+  // The view index, so the reactive selection effect (and the drag-drop drop-index
+  // math) can map back to the full list without relying on a unique path (duplicates
+  // share one) — essential once the list is windowed and only a slice is mounted.
+  const li = h("li", { class: "queue-row", data: { rowIndex: i } }, num, text, remove);
+  if (isPlaying) li.classList.add("playing");
+  // Multi-select background, reapplied on remount like .playing (the list selection
+  // effect keeps it live between remounts as the window scrolls).
+  if (!t.missing && queueSel.signal.peek().has(t)) li.classList.add("selected");
+  if (t.missing) {
+    li.classList.add("missing");
+  } else {
+    // Select-and-play, shared by the hover play button and a double-click. The
+    // played row stays selected (matching the tree and Apple Music). Source
+    // list: jump the pool to this row. Browsed playlist: commit it — play the
+    // playlist from that track, making it the source.
+    const playRow = () => {
+      queueSel.single(t);
+      if (isSource) playQueueTrack(rowPoolIdx);
+      else commitBrowsedPlaylist(rowPoolIdx);
+    };
+    // Hover play button in the gutter, mirroring the tree's track rows. Swallows
+    // the click so the row's select-on-click doesn't also fire.
+    num.appendChild(
+      h("button", {
+        class: "row-play",
+        attrs: { type: "button", "aria-label": "Play" },
+        on: {
+          click: (e) => {
+            e.stopPropagation();
+            playRow();
+          },
+        },
+      }),
+    );
+    li.addEventListener("click", (e) => {
+      app.lastSelectionPane = "list";
+      // Cmd/Ctrl- and Shift-click build a selection; a plain click selects just
+      // this row (and anchors a following Shift-range here). Play is the hover
+      // button or a double-click, matching the tree.
+      if (e.metaKey || e.ctrlKey) {
+        queueSel.toggle(t);
+        return;
+      }
+      if (e.shiftKey) {
+        queueSel.rangeTo(t, openListTracks());
+        return;
+      }
+      queueSel.single(t);
+    });
+    li.addEventListener("dblclick", playRow);
+  }
+  // Right-click a playable row to queue it, add it to a playlist, or (multi)
+  // remove it (a missing row has no real file to copy, so it's skipped).
+  // "Add to queue" leads, matching the tree track/folder menus.
+  if (!t.missing) {
+    li.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      // Finder-style: right-clicking a row outside the selection makes it the
+      // selection; inside a multi-selection it's kept. The verbs act on it.
+      if (!queueSel.signal.peek().has(t)) queueSel.single(t);
+      const sel = selectedListTracks();
+      if (sel.length > 1) {
+        showContextMenu(e.clientX, e.clientY, [
+          ...queueMenuItems((sink) => sink(sel), sel.length),
+          addToPlaylistItem(() => sel),
+          {
+            label: `Remove ${sel.length} from list`,
+            action: () => removeCuratedTracks(sel),
+          },
+        ]);
+      } else {
+        showContextMenu(e.clientX, e.clientY, [
+          ...queueMenuItems((sink) => sink([t])),
+          addToPlaylistItem(() => [t]),
+          editMetadataItem(t.path),
+        ]);
+      }
+    });
+  }
+  attachRowReorder(li, t);
+  return li;
+}
+
 // Renders the list face. `isSource` is true when the list is the playing
 // source (the queue, or a played playlist) and false when it's a playlist being
 // browsed while something else plays — a browse carries no playing-row highlight
 // and its rows *commit* (play the playlist) rather than jumping the pool.
+//
+// The rows are windowed (src/windowed-list.ts): only the on-screen slice is mounted
+// over a full-height spacer, so a queue/playlist of any length costs a screenful of
+// DOM instead of a node per track. Native scroll is untouched (the spacer sizes the
+// real #queue-list scroll pane). Per-row listeners are re-created on each remount
+// (cheap at a screenful) rather than delegated — same trade the leaf lists make.
 export function renderQueue(queue: Queue | null, isSource: boolean): void {
   if (!queue) {
-    queueListEl.innerHTML = "";
+    queueListEl.replaceChildren();
+    queueWin = null;
+    renderedQueue = null;
     return;
   }
   const isPlaylist = isPlaylistSource(queue);
@@ -101,153 +276,62 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
   queueRenameBtn.classList.toggle("hidden", !isPlaylist);
   queueTitleEl.parentElement?.classList.toggle("renamable", isPlaylist);
 
-  // A browsed playlist isn't the pool, so nothing in it is "playing".
-  const playing = isSource ? queuePlayingIndex.value : null;
-  // A pending append target wins over the playing row for this render only, and
-  // only when we're actually showing the queue it was appended to (a browsed
-  // playlist has its own, unrelated rows).
-  const scrollTo = isSource ? app.pendingQueueScrollIndex : null;
+  const viewToPool = buildViewToPool(queue.tracks);
+
+  // A pending append/insert target wins over the playing row for the reveal, once
+  // (and only when we're showing the queue it targeted — a browsed playlist has its
+  // own, unrelated rows, so it never steals a queue append's scroll).
+  const pending = isSource ? app.pendingQueueScrollIndex : null;
   app.pendingQueueScrollIndex = null;
-  queueListEl.innerHTML = "";
-  let activeRow: HTMLElement | null = null;
-  let scrollRow: HTMLElement | null = null;
-  // `playing` (queuePlayingIndex) indexes the *playable* pool, which excludes
-  // missing rows; the view keeps them (marked, unplayable). Walk a parallel pool
-  // index so the right row highlights and a click maps back to its pool position.
-  let poolIdx = 0;
-  queue.tracks.forEach((t, i) => {
-    const rowPoolIdx = t.missing ? -1 : poolIdx;
-    if (!t.missing) poolIdx++;
-    const isPlaying = rowPoolIdx === playing;
-    // The playing row keeps its index and just recolors to the accent (like the
-    // tree's track rows), rather than swapping in a glyph. The number and the
-    // hover play button share this one gutter cell (see CSS), so the button
-    // lands exactly where the number was.
-    const label = String(i + 1);
-    const num = h(
-      "span",
-      { class: "queue-num" },
-      h("span", {
-        class: "queue-num-text",
-        text: label,
-        // 4+ digit numbers shrink to the 3-digit width so they stay centered
-        // without overflowing (same rule as the Songs list — tabular digits are
-        // equal width, so N digits fit 3 digits' width at scale 3/N).
-        style: label.length > 3 ? { "font-size": `${3 / label.length}em` } : {},
-      }),
-    );
-    // A missing playlist row is shown but can't be played: dim it, label it, and
-    // skip the click handler so it reads as unavailable rather than dropped.
-    const secondaryText = t.missing ? "Missing file" : (t.artist ?? t.album ?? "");
-    const text = h(
-      "span",
-      { class: "queue-text" },
-      h("span", {
-        class: "queue-primary",
-        text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
-      }),
-      secondaryText && h("span", { class: "queue-secondary", text: secondaryText }),
-    );
-    // Row remove (curation): strips this row from the list (and file, if a
-    // playlist). Stops propagation so it never counts as a play/commit click.
-    const remove = h("button", {
-      class: "queue-remove",
-      text: "✕",
-      attrs: { type: "button", title: "Remove from list", "aria-label": "Remove from list" },
-      on: {
-        click: (e) => {
-          e.stopPropagation();
-          removeCuratedRow(i);
-        },
-      },
+  const playIdx = isSource ? queuePlayingIndex.peek() : null;
+  const playingView = playIdx != null ? viewIndexOfPlayable(queue.tracks, playIdx) : -1;
+  const revealTo = pending ?? (playingView >= 0 ? playingView : null);
+
+  // Same list object as the last paint — a play-advance or a selection change, not a
+  // content edit (every curation swaps in a new Queue object). Repaint the playing
+  // highlight on the mounted rows and keep the playing row in view, without tearing
+  // down the window (which would lose the scroll position and reflash the slice).
+  if (
+    queue === renderedQueue &&
+    isSource === renderedIsSource &&
+    queueWin &&
+    queueListEl.contains(queueWin.el)
+  ) {
+    queueListEl.querySelectorAll<HTMLElement>("li.queue-row").forEach((li) => {
+      li.classList.toggle("playing", viewToPool[Number(li.dataset.rowIndex)] === playIdx);
     });
-    // The view index, so the reactive selection effect can map its object-keyed
-    // set back to rows without a unique path (duplicates share one).
-    const li = h("li", { class: "queue-row", data: { rowIndex: i } }, num, text, remove);
-    if (isPlaying) {
-      li.classList.add("playing");
-      activeRow = li;
-    }
-    // Multi-select background, reapplied on rebuild like .playing (the list
-    // selection effect keeps it live between rebuilds).
-    if (!t.missing && queueSel.signal.peek().has(t)) li.classList.add("selected");
-    if (i === scrollTo) scrollRow = li;
-    if (t.missing) {
-      li.classList.add("missing");
-    } else {
-      // Select-and-play, shared by the hover play button and a double-click. The
-      // played row stays selected (matching the tree and Apple Music). Source
-      // list: jump the pool to this row. Browsed playlist: commit it — play the
-      // playlist from that track, making it the source.
-      const playRow = () => {
-        queueSel.single(t);
-        if (isSource) playQueueTrack(rowPoolIdx);
-        else commitBrowsedPlaylist(rowPoolIdx);
-      };
-      // Hover play button in the gutter, mirroring the tree's track rows. Swallows
-      // the click so the row's select-on-click doesn't also fire.
-      num.appendChild(
-        h("button", {
-          class: "row-play",
-          attrs: { type: "button", "aria-label": "Play" },
-          on: {
-            click: (e) => {
-              e.stopPropagation();
-              playRow();
-            },
-          },
-        }),
-      );
-      li.addEventListener("click", (e) => {
-        app.lastSelectionPane = "list";
-        // Cmd/Ctrl- and Shift-click build a selection; a plain click selects just
-        // this row (and anchors a following Shift-range here). Play is the hover
-        // button or a double-click, matching the tree.
-        if (e.metaKey || e.ctrlKey) {
-          queueSel.toggle(t);
-          return;
-        }
-        if (e.shiftKey) {
-          queueSel.rangeTo(t, openListTracks());
-          return;
-        }
-        queueSel.single(t);
-      });
-      li.addEventListener("dblclick", playRow);
-    }
-    // Right-click a playable row to queue it, add it to a playlist, or (multi)
-    // remove it (a missing row has no real file to copy, so it's skipped).
-    // "Add to queue" leads, matching the tree track/folder menus.
-    if (!t.missing) {
-      li.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        // Finder-style: right-clicking a row outside the selection makes it the
-        // selection; inside a multi-selection it's kept. The verbs act on it.
-        if (!queueSel.signal.peek().has(t)) queueSel.single(t);
-        const sel = selectedListTracks();
-        if (sel.length > 1) {
-          showContextMenu(e.clientX, e.clientY, [
-            ...queueMenuItems((sink) => sink(sel), sel.length),
-            addToPlaylistItem(() => sel),
-            {
-              label: `Remove ${sel.length} from list`,
-              action: () => removeCuratedTracks(sel),
-            },
-          ]);
-        } else {
-          showContextMenu(e.clientX, e.clientY, [
-            ...queueMenuItems((sink) => sink([t])),
-            addToPlaylistItem(() => [t]),
-            editMetadataItem(t.path),
-          ]);
-        }
-      });
-    }
-    attachRowReorder(li, t);
-    queueListEl.appendChild(li);
-  });
-  const target = (scrollRow ?? activeRow) as HTMLElement | null;
-  if (target) target.scrollIntoView({ block: "nearest" });
+    if (revealTo != null) queueWin.revealIndex(revealTo);
+    return;
+  }
+
+  renderedQueue = queue;
+  renderedIsSource = isSource;
+  // Row count, so the drag-drop drop-index math can resolve an insert-at-the-end
+  // without every row being mounted (updateDropTarget reads it).
+  queueListEl.dataset.rowCount = String(queue.tracks.length);
+  queueListEl.replaceChildren();
+
+  const buildRow = (i: number): HTMLElement =>
+    buildQueueRow(queue, isSource, viewToPool, i);
+
+  // Debug/e2e escape hatch: render every row eagerly (no measured-layout windowing)
+  // so fake-DOM tests can assert on real rows. Mirrors renderLeafTrackList.
+  if ((globalThis as { __noWindowing?: boolean }).__noWindowing) {
+    queueWin = null;
+    for (let i = 0; i < queue.tracks.length; i++) queueListEl.appendChild(buildRow(i));
+    const row = revealTo != null ? (queueListEl.children[revealTo] as HTMLElement | undefined) : undefined;
+    if (row && typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "nearest" });
+    return;
+  }
+
+  const win = windowedList({ count: queue.tracks.length, renderRow: buildRow });
+  queueWin = win;
+  queueListEl.appendChild(win.el);
+  // Mount the first slice synchronously (the pane is visible here), so the rows
+  // exist on this same tick — no one-frame blank flash, and a click synthesized
+  // straight after a render (curation, tests) finds its row.
+  win.flush();
+  if (revealTo != null) win.revealIndex(revealTo);
 }
 // --- Curation (phase 3): reorder / remove / drag-in on the open list ---
 //

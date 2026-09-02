@@ -11,13 +11,17 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect } from "@preact/signals-core";
 import { engine } from "./engine-glue";
 import { h } from "./dom";
+import { windowedList } from "./windowed-list";
 import { maybeStartE2eBridge } from "./e2e-bridge";
+import { bootProfileStart, bootStep, bootProfileReport } from "./perf";
 import {
   initLibraryNav,
   navigateTo,
   currentNavStep,
   popNavToRoot,
   renderNav,
+  refreshNavViewAfterScan,
+  invalidateNavListCache,
   type NavStep,
 } from "./library-nav";
 import type {
@@ -30,6 +34,7 @@ import type {
   SearchItem,
   Queue,
   ScanResult,
+  ScanProgress,
   RepeatMode,
   TrackSelection,
   ContextMenuItem,
@@ -148,7 +153,7 @@ import {
   browseStreamListPath,
   refreshStreams,
 } from "./library";
-import { playSelectedRow, revealFolderInTree } from "./tree-view";
+import { playSelectedRow, revealFolderInTree, setBrowseActive } from "./tree-view";
 import {
   closePaneEditor,
   editMetadataItem,
@@ -205,7 +210,6 @@ import {
   menuMovePlaylist,
   newPlaylistWithTracks,
   addTracksToPlaylist,
-  loadAllPlaylists,
 } from "./playlists";
 import { app } from "./state";
 import {
@@ -401,12 +405,12 @@ export function libraryRootPaths(): string[] {
 // set exists solely as the anchor and does nothing the click itself didn't, so
 // it isn't drawn. The track context-menu verbs (Add to queue / Add to playlist)
 // act on the whole selection when non-empty. Reactive so a `.selected` row
-// highlight tracks it (see the selection effect and renderNode).
+// highlight tracks it (see the selection effect and renderTreeRow).
 // The pivot a Shift-click ranges from — the last track any click touched
 // (including a plain play-click, so click A then Shift-click B selects A..B).
 
 // Track nodes in render order. `visibleOnly` descends into expanded folders alone
-// (matching what renderNode paints) for Shift-range selection; false walks every
+// (matching what renderTreeRow paints) for Shift-range selection; false walks every
 // loaded folder so a selection survives a folder collapse. Folders and playlists
 // are skipped — only files are selectable.
 function collectTrackNodes(visibleOnly: boolean): TreeNode[] {
@@ -1112,7 +1116,12 @@ export function renderLeafTrackList(
     playFile(parent.children[index], parent, index);
   };
 
-  tracks.forEach((t, i) => {
+  // One row, built fresh whenever the window (re)mounts it. Rows carry no state the
+  // window can't rebuild — the selected highlight is read from navSel at build time
+  // (and re-toggled live by the selection painter effect), so a scrolled-in row is
+  // already correct without waiting for the effect to run.
+  const buildRow = (i: number): HTMLElement => {
+    const t = tracks[i];
     // Album track lists carry the file's metadata track number (matching the
     // browse tree), so show it; flat lists (Songs) leave it null and fall back to
     // the positional row index. A metadata number of 0 is treated as absent.
@@ -1125,7 +1134,9 @@ export function renderLeafTrackList(
       // footprint, so shrink them to the 3-digit width (tabular digits are equal
       // width, so N digits fit 3 digits' width at scale 3/N). Self-limiting: the
       // number never grows past the 3-digit footprint, it just gets smaller, and
-      // that only bites at track counts (10k+, 100k+) real libraries never reach.
+      // it only shrinks past 999 — well inside the 100k-snappy / 500k-functional
+      // library target (see TODO's "Library scale target"), where 6-digit gutters
+      // are real.
       style: label.length > 3 ? { "font-size": `${3 / label.length}em` } : {},
     });
     // Number gutter that gives way to a hover play button, matching the queue and
@@ -1147,6 +1158,10 @@ export function renderLeafTrackList(
     );
 
     const secondaryText = [t.artist, t.album].filter(Boolean).join(" · ");
+    // The secondary line is always present (empty when the track has no artist or
+    // album) so every row is the same two-line height — the uniform height the
+    // window positions rows by (row i at i * rowHeight). A rare metadata-less row
+    // reserves a blank second line rather than collapsing to a shorter row.
     const cell = h(
       "span",
       { class: "nav-cell" },
@@ -1154,7 +1169,7 @@ export function renderLeafTrackList(
         class: "nav-primary",
         text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
       }),
-      secondaryText && h("span", { class: "nav-secondary", text: secondaryText }),
+      h("span", { class: "nav-secondary", text: secondaryText }),
     );
 
     const row = h(
@@ -1221,8 +1236,25 @@ export function renderLeafTrackList(
     );
     if (navSel.signal.peek().has(t)) row.classList.add("selected");
 
-    ul.appendChild(row);
-  });
+    return row;
+  };
+
+  // Debug escape hatch for A/B perf comparison: set `__noWindowing = true` in the
+  // devtools console and re-enter a list to render every row eagerly (the pre-
+  // windowing path — all N nodes in the DOM). Off by default; never set in normal use.
+  if ((globalThis as { __noWindowing?: boolean }).__noWindowing) {
+    for (let i = 0; i < tracks.length; i++) ul.appendChild(buildRow(i));
+    return ul;
+  }
+
+  // Window the rows: only the on-screen slice is mounted over a full-height spacer,
+  // so a whole-library Songs list costs a screenful of DOM instead of one node per
+  // track. Native scroll/inertia are unchanged (real scroll pane, full height). The
+  // selection painter and drag-out still work per mounted row; there's no reorder,
+  // scroll-to-playing, or keyboard row-indexing on these lists to rework.
+  const win = windowedList({ count: tracks.length, renderRow: buildRow });
+  win.el.classList.add("nav-window");
+  ul.appendChild(win.el);
   return ul;
 }
 
@@ -2092,7 +2124,9 @@ function setupEffects(): void {
     // Streams have no track to step between, so hide prev/next entirely (like
     // the seek row) rather than leave dead chrome. Otherwise prev is live
     // whenever play is (it restarts or steps back), and next disables at the
-    // genuine end of the line so a dead press reads as unavailable.
+    // genuine end of the line so a dead press reads as unavailable. hasNextTrack
+    // reads the pool via poolPaths, which subscribes to the activeQueue signal
+    // for a live queue — so this re-runs when a drag-in grows the pool ahead.
     prevBtn.classList.toggle("hidden", isStream.value);
     nextBtn.classList.toggle("hidden", isStream.value);
     prevBtn.disabled = !hasTrack.value;
@@ -2184,7 +2218,7 @@ function setupEffects(): void {
   });
 
   // Paint the multi-select background reactively, so cmd/shift-click updates the
-  // tree without a full re-render (renderNode reapplies it on any rebuild).
+  // tree without a full re-render (renderTreeRow reapplies it on any rebuild).
   effect(() => {
     const sel = treeSelection.value;
     document
@@ -2218,8 +2252,6 @@ function setupEffects(): void {
     });
     document.getElementById("tab-files")?.classList.toggle("hidden", tab !== "files");
     document.getElementById("tab-streams")?.classList.toggle("hidden", tab !== "streams");
-    // The lens tab bar belongs to Files only.
-    document.getElementById("lens-footer")?.classList.toggle("hidden", tab !== "files");
   });
 
   // Until a library folder is configured, the whole Files panel is a get-started
@@ -2345,6 +2377,10 @@ function setupEffects(): void {
 // --- Init ---
 
 async function init(): Promise<void> {
+  // Boot profiler (off unless `localStorage.puddingBootPerf = "1"`): arm the
+  // long-task observer before any work so the first-paint freeze is captured.
+  bootProfileStart();
+
   if (navigator.userAgent.includes("Mac")) {
     document.body.classList.add("platform-mac");
   }
@@ -2382,7 +2418,7 @@ async function init(): Promise<void> {
   const expandBtn = document.querySelector("#expand-btn") as HTMLButtonElement;
   expandBtn.addEventListener("click", () => void toggleMiniPlayer());
 
-  bindDom();
+  await bootStep("bindDom", () => bindDom());
   navBarBtnEl.addEventListener("click", toggleNavFace);
   navBarAltBtnEl.addEventListener("click", showSourceList);
   // Double-click the bar's text (not the button) toggles the mini player, like
@@ -2440,7 +2476,9 @@ async function init(): Promise<void> {
   // targets the end of the list — that case is resolved by updateDropTarget's
   // hit-test against the list box, so no container drop listener is needed.
 
-  app.store = await load(STORE_FILE, { defaults: {}, autoSave: false });
+  app.store = await bootStep("load-store", () =>
+    load(STORE_FILE, { defaults: {}, autoSave: false }),
+  );
 
   app.libraryRoots = (await app.store.get<string[]>(KEY_LIBRARY_ROOTS)) ?? [];
   // First run (key never set): adopt the default stream list the backend seeds
@@ -2598,14 +2636,48 @@ async function init(): Promise<void> {
   });
 
   setupTabs();
+  // Debug perf timing for the whole-library loaders: set `__perfLog = true` in the
+  // devtools console, then open a lens. Logs how long invoke+IPC+JSON.parse took and
+  // the row count — i.e. the pre-render pause, which windowing does not address.
+  const perfTimed = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
+    if (!(globalThis as { __perfLog?: boolean }).__perfLog) return run();
+    const t0 = performance.now();
+    const out = await run();
+    const n = Array.isArray(out) ? out.length : "";
+    console.log(`[perf] ${label}: ${(performance.now() - t0).toFixed(1)}ms (${n} rows)`);
+    return out;
+  };
   // Inject the leaf-list builder + backend loaders the navigator needs; keeping
   // them as deps (rather than a value import back into this entry module) avoids a
   // circular import while letting the navigator reuse the shared row behavior.
-  initLibraryNav({
-    listAllSongs: () => invoke<SearchTrack[]>("list_all_songs"),
+  void bootStep("init-nav", () => initLibraryNav({
+    listAllSongs: () =>
+      perfTimed("list_all_songs", async () => {
+        // Columnar wire format (see the Rust SongRow): rows arrive as positional
+        // [path, title, artist, album, duration] tuples, not keyed objects, so the
+        // JSON doesn't repeat the field names once per row (a large share of the
+        // payload + parse cost at the scale target). Re-key here at the boundary;
+        // the rest of the app still works in SearchTrack objects. track is always
+        // null for this flat list (the gutter shows a positional index).
+        type SongRow = [string, string | null, string | null, string | null, number | null];
+        const rows = await invoke<SongRow[]>("list_all_songs");
+        return rows.map(
+          ([path, title, artist, album, duration]): SearchTrack => ({
+            path,
+            title,
+            artist,
+            album,
+            duration,
+            track: null,
+          }),
+        );
+      }),
     listAllArtists: () => invoke<SearchArtist[]>("list_all_artists"),
     listAllAlbums: () => invoke<SearchAlbum[]>("list_all_albums"),
-    listAllPlaylists: loadAllPlaylists,
+    playlistIndex: () => ({
+      loaded: app.playlistIndexLoaded,
+      items: app.playlistIndex,
+    }),
     artistAlbums: (artist) => invoke<SearchAlbum[]>("artist_albums", { artist }),
     artistTracks: (artist) =>
       invoke<SearchTrack[]>("artist_tracks", { artist }),
@@ -2620,7 +2692,8 @@ async function init(): Promise<void> {
     showPlaylistMenu: showPlaylistContextMenu,
     persistLocation: persistNavLocation,
     libraryRootSet: () => libraryRootSet.value,
-  }, navLocation);
+    setBrowseActive,
+  }, navLocation));
   setupPlaybackModes();
   await setupWindowSize(appWindow);
   setupSplitter(splitterWidth);
@@ -2631,9 +2704,9 @@ async function init(): Promise<void> {
   // Restore the previous session's queue + playhead (paused) BEFORE wiring the
   // persistence effects, so their immediate first run re-saves the restored state
   // instead of a blank one overwriting the saved session.
-  await restorePlaybackSession();
+  await bootStep("restore-session", () => restorePlaybackSession());
   setupSessionPersistence();
-  setupEffects();
+  await bootStep("setup-effects", () => setupEffects());
 
   renderLibraryRootRows();
   streamListPathInput.value = streamListPath;
@@ -2653,12 +2726,73 @@ async function init(): Promise<void> {
     void setStreamListPath(streamListPathInput.value.trim());
   });
 
+  // Scan-status footer: reveals a thin determinate bar + count at the bottom of the
+  // left pane, but only for scans that outlive a short debounce — routine watcher
+  // rescans (a tag edit, a single added file) finish in well under it and never
+  // paint, so the footer stays collapsed and the UI quiet.
+  const scanStatus = (() => {
+    const root = document.getElementById("scan-status")!;
+    const fill = document.getElementById("scan-status-fill")!;
+    const label = document.getElementById("scan-status-label")!;
+    const REVEAL_DELAY_MS = 300;
+    let revealTimer: number | null = null;
+
+    const render = (done: number, total: number): void => {
+      label.textContent =
+        done > 0
+          ? `Scanning… ${done.toLocaleString()} of ${total.toLocaleString()}`
+          : "Scanning…";
+      fill.style.width = total > 0 ? `${(done / total) * 100}%` : "0%";
+    };
+
+    return {
+      start(total: number): void {
+        render(0, total);
+        // Arm the reveal once; a scan already onscreen (a coalesced follow-up pass)
+        // keeps its bar rather than restarting the timer.
+        if (revealTimer === null && !root.classList.contains("scanning")) {
+          revealTimer = window.setTimeout(() => {
+            revealTimer = null;
+            root.classList.add("scanning");
+          }, REVEAL_DELAY_MS);
+        }
+      },
+      progress(done: number, total: number): void {
+        render(done, total);
+      },
+      done(): void {
+        if (revealTimer !== null) {
+          clearTimeout(revealTimer);
+          revealTimer = null;
+        }
+        root.classList.remove("scanning");
+      },
+    };
+  })();
+
+  await listen<ScanProgress>("scan-started", (event) => {
+    scanStatus.start(event.payload.total);
+  });
+  await listen<ScanProgress>("scan-progress", (event) => {
+    scanStatus.progress(event.payload.done, event.payload.total);
+  });
+
   await listen<ScanResult>("library-scanned", (event) => {
+    scanStatus.done();
     if (!event.payload.ok) {
       console.error("library scan failed:", event.payload.error);
       return;
     }
     void refreshLibrary();
+    // The scan changed what's on disk, so the memoized lens lists are stale. Drop
+    // them unconditionally — even while an inline edit blocks the view refresh below,
+    // the cache must not outlive the data it mirrors, or a later open serves stale
+    // rows.
+    invalidateNavListCache();
+    // Also refresh the open navigator lens/detail view so new/changed tracks show
+    // without leaving and re-entering. Skip while an inline edit is open — like
+    // refreshLibrary, a rebuild would tear out the edit input.
+    if (!app.inlineEditing) refreshNavViewAfterScan();
   });
 
   await listen<string>("open-file", (event) => {
@@ -2710,9 +2844,13 @@ async function init(): Promise<void> {
     openAssociatedFile(pendingOpen);
   }
 
-  await refreshTree(app.libraryRoots);
+  await bootStep("refresh-tree", () => refreshTree(app.libraryRoots));
   void refreshPlaylistIndex();
-  await refreshStreams(streamListPath);
+  await bootStep("refresh-streams", () => refreshStreams(streamListPath));
+
+  // Flush the boot report once init's synchronous work is done. Deferred inside
+  // (setTimeout) so post-init paint/layout freezes are captured too.
+  bootProfileReport();
 
   if (app.libraryRoots.length) {
     void invoke("rescan_libraries", { paths: app.libraryRoots });
@@ -2774,8 +2912,10 @@ async function init(): Promise<void> {
       // order and dispatches a genuine modifier-carrying MouseEvent.
       listClick: (arg) => {
         const a = arg as { index: number; meta?: boolean; shift?: boolean };
-        const rows = queueListEl.querySelectorAll<HTMLElement>("li.queue-row");
-        const el = rows[a.index];
+        // The queue is windowed, so only a slice is mounted: resolve the row by its
+        // view index (data-row-index), not its position in the mounted slice.
+        const rows = Array.from(queueListEl.querySelectorAll<HTMLElement>("li.queue-row"));
+        const el = rows.find((r) => Number(r.dataset.rowIndex) === a.index) ?? rows[a.index];
         if (!el) throw new Error(`no queue row at index: ${a.index}`);
         el.dispatchEvent(
           new MouseEvent("click", {
@@ -2872,19 +3012,23 @@ async function init(): Promise<void> {
         const rows = Array.from(
           queueListEl.querySelectorAll<HTMLElement>("li.queue-row"),
         );
-        const src = rows[a.from];
+        // Windowed list: resolve rows by view index (data-row-index), and read the
+        // full row count from the list (not the mounted slice) for the end case.
+        const byIndex = (i: number) => rows.find((r) => Number(r.dataset.rowIndex) === i);
+        const total = Number(queueListEl.dataset.rowCount ?? rows.length);
+        const src = byIndex(a.from) ?? rows[a.from];
         if (!src) return;
         const s = src.getBoundingClientRect();
         const sx = s.left + s.width / 2;
         const sy = s.top + s.height / 2;
         let tx: number;
         let ty: number;
-        if (a.to >= rows.length) {
-          const last = rows[rows.length - 1].getBoundingClientRect();
+        if (a.to >= total) {
+          const last = (byIndex(total - 1) ?? rows[rows.length - 1]).getBoundingClientRect();
           tx = last.left + last.width / 2;
           ty = last.bottom + 4; // empty area past the last row -> insert at end
         } else {
-          const t = rows[a.to].getBoundingClientRect();
+          const t = (byIndex(a.to) ?? rows[a.to]).getBoundingClientRect();
           tx = t.left + t.width / 2;
           ty = t.top + t.height * 0.25; // top half -> insert before row `to`
         }

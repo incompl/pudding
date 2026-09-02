@@ -22,6 +22,7 @@ import {
   duration,
   volume,
   queuePlayingIndex,
+  activeQueue,
   repeatMode,
   shuffleMode,
   resetToLonePlayback,
@@ -185,6 +186,15 @@ export function seekTo(seconds: number): void {
 // the folder's tracks in listing order; a search hit or external file has no
 // album context, so the pool is just that single track.
 export function poolPaths(): string[] {
+  // The active queue is the one pool that mutates while it plays (drag-in,
+  // reorder, remove), and its truth is the activeQueue signal — read it directly
+  // so reactive consumers (the Next button) re-evaluate on edits and never read a
+  // stale value. currentParent.children is a non-reactive mirror that curation
+  // rebuilds *after* the signal fires, so trusting it here lags one edit behind.
+  if (queueIsActivePool()) {
+    const q = activeQueue.value;
+    return q ? q.tracks.filter((t) => !t.missing).map((t) => t.path) : [];
+  }
   if (app.currentParent) {
     return app.currentParent.children.filter((c) => !c.isFolder).map((c) => c.path);
   }

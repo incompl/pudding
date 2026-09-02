@@ -105,10 +105,14 @@
             <span>Add stream</span>
           </button>
         </div>
-        <!-- Lens tab bar: a fixed footer of the left pane (Files only), holding
-             the browse-mode icons. Rendered by src/library-nav.ts; visibility
-             tracks the active tab in main.ts. -->
-        <div id="lens-footer"></div>
+        <!-- Library-scan progress: a fixed footer of the left pane, collapsed to
+             zero height at rest and revealing a thin determinate bar + count only
+             while a scan is in flight. Driven by the scan-started/scan-progress/
+             library-scanned events in src/main.ts. -->
+        <div id="scan-status">
+          <div id="scan-status-track"><div id="scan-status-fill"></div></div>
+          <span id="scan-status-label"></span>
+        </div>
       </section>
       <div id="splitter" role="separator" aria-orientation="vertical"></div>
       <section id="right">

@@ -141,6 +141,14 @@ export interface ScanResult {
   error: string | null;
 }
 
+// Progress for the scan-status footer: `total` is the full audio-file count (known
+// once the walk finishes), `done` how many have been reconciled. Carried by the
+// "scan-started" (done 0) and "scan-progress" events.
+export interface ScanProgress {
+  done: number;
+  total: number;
+}
+
 export type RepeatMode = "off" | "all" | "one";
 
 // --- Row multi-select model (queue list + navigator leaf list) ---

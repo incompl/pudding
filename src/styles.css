@@ -2088,6 +2088,37 @@ ul {
   color: var(--accent-dim);
 }
 
+/* Windowed folder tree (see windowedList / tree-view buildTree): the visible rows
+   are flattened to a linear array and only the on-screen slice is mounted, absolutely
+   placed over a full-height spacer. Two consequences for the rows:
+
+   1. No content-visibility. The window measures a probe row's real height to place
+      every slot at i * rowHeight; content-visibility:auto would hand it the 2em
+      intrinsic-size placeholder instead of the true two-line height. Off-screen rows
+      aren't in the DOM here anyway, so there's nothing to skip.
+   2. Uniform two-line height. Every row is title-over-subline (the subline is a blank
+      line — a non-breaking space — for folders and untagged files), and both lines are
+      clamped to one line each so a long name can't wrap and desync the row math. */
+#folder-tree .tree-window .node-label {
+  content-visibility: visible;
+  contain-intrinsic-size: auto;
+}
+#folder-tree .tree-window .primary,
+#folder-tree .tree-window .secondary {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The synthetic "(empty)" marker shown under an expanded folder with no children. */
+#folder-tree .tree-empty {
+  color: var(--text-dim);
+  font-style: italic;
+  cursor: default;
+  padding: 0.2em 0.8em 0.2em 0.5em;
+}
+
 /* Masked line-art icon, tinted by background-color like the search dropdown.
    The ID-scoped base rule only carries layout + mask geometry (never
    background-color or mask-image), so the modifier classes below decide the ink
@@ -2603,65 +2634,42 @@ ul {
    of the Files pane. The six browse modes live here as small pills; the pane
    below always shows the active lens's content. Pinned like the back bar so it
    stays put as the list scrolls under it. */
-/* The lens tab bar sits in a fixed footer at the bottom of the left pane (a
-   flex-none sibling of the scroll panes), so it never scrolls and the pane's
-   content starts flush at the top. No divider — it reads as part of the panel. */
-#lens-footer {
+/* Library-scan progress sits in a fixed footer at the bottom of the left pane (a
+   flex-none sibling of the scroll panes), so it never scrolls. Collapsed to zero
+   height at rest — no chrome when idle — and animates open only while a scan is in
+   flight (the .scanning class, toggled after a debounce so quick watcher rescans
+   don't flicker it). Reads as part of the panel: no divider, panel background. */
+#scan-status {
   flex: none;
+  height: 0;
+  overflow: hidden;
   background: var(--panel);
+  transition: height 140ms ease;
 }
-#lens-footer.hidden {
-  display: none;
+#scan-status.scanning {
+  height: 1.5em;
 }
-.nav-lens-strip {
-  display: flex;
-  align-items: center;
-  /* Spread the icons across the pane width rather than clustering them at the
-     left — the gap between pills grows to fill, edges hug the pane insets. But
-     only up to max-width: past that the strip stops widening and stays
-     left-aligned, so on a wide pane the icons don't drift absurdly far apart.
-     (Tune the single 27em value to taste.) */
-  justify-content: space-between;
-  max-width: 27em;
-  gap: 0.15em;
-  padding: 0.35em 0.6em 0.4em 0.5em;
-}
-/* Icon-only pills: a square tap target holding one masked glyph. The label is
-   carried by the title/aria tooltip, not shown inline — that's the whole point
-   of shrinking the strip to icons. */
-.nav-lens {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 1.9em;
-  height: 1.9em;
-  border: none;
-  background: transparent;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 120ms ease;
-}
-.nav-lens .nav-icon {
-  /* Neutralize the row-icon box: here it's a centered glyph, not a gutter. */
-  width: 1.15em;
-  height: 1.15em;
-  mask-size: contain;
-  -webkit-mask-size: contain;
-}
-.nav-lens:hover {
+/* A 2px determinate bar across the top edge of the footer: total is known up front
+   (the whole file list is walked before indexing), so the fill maps done/total. */
+#scan-status-track {
+  height: 2px;
   background: var(--surface);
 }
-.nav-lens:hover .nav-icon {
-  background-color: var(--text);
+#scan-status-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 120ms linear;
 }
-/* Selected: no fill — just tint the glyph accent so the active mode reads by
-   color alone, keeping the strip quiet. */
-.nav-lens.active {
-  background: transparent;
-}
-.nav-lens.active .nav-icon,
-.nav-lens.active:hover .nav-icon {
-  background-color: var(--accent);
+#scan-status-label {
+  display: block;
+  padding: 0.3em 0.6em 0 0.6em;
+  font-size: 0.78em;
+  line-height: 1.2;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Back bar: a thin pinned strip shown only when drilled in; tapping it pops one
@@ -2758,6 +2766,18 @@ ul {
   padding: 0.8em 0.8em 0.8em 0.5em;
   color: var(--text-dim);
   font-size: 0.9em;
+}
+
+/* Loading / empty placeholder inside a nav list (e.g. Playlists). Borrows the
+   .nav-row rhythm — same height, same font, and a left padding that lands the
+   text where a row's icon gutter starts — so it lines up with the playlist rows
+   it stands in for, just dimmed and non-interactive. */
+.nav-placeholder-row {
+  display: flex;
+  align-items: center;
+  min-height: 1.5em;
+  padding: 0.2em 0 0.2em 0.4em;
+  color: var(--text-dim);
 }
 
 /* Root-menu section label (e.g. "Playlists") between the library lenses and the
@@ -2880,11 +2900,11 @@ ul {
   padding: 0.2em 0.65em 0.2em 0.65em;
   cursor: pointer;
   transition: background 120ms ease;
-  /* Large-library scroll perf — see .node-label. A leaf track list can run to
-     every track in an album/artist; skip off-screen layout/paint while keeping
-     rows in the DOM. No drop-line here, so paint containment is safe. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 2em;
+  /* No content-visibility here: these leaf lists are windowed (see windowedList /
+     renderLeafTrackList), so off-screen rows aren't in the DOM at all — there's
+     nothing to skip, and the window pins each mounted row to a fixed height. The
+     folder tree and Streams list (.node-label) still lean on content-visibility;
+     they aren't windowed yet. */
 }
 .nav-track-row:hover {
   background: var(--surface);
@@ -2896,6 +2916,15 @@ ul {
 #library-nav .nav-track-row:last-child {
   margin-bottom: -0.1em;
   padding-bottom: 0.3em;
+}
+/* Windowed leaf lists (Songs etc.) mount only the on-screen slice, so their DOM
+   "last-child" is an arbitrary row in the middle of the list, not the last track.
+   The bottom-hug tweak above must not land on it — every windowed row keeps the
+   base footprint so all slots are the uniform height the window positions by. The
+   full-height spacer already carries the last track to the panel's bottom edge. */
+#library-nav .nav-window .nav-track-row:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0.2em;
 }
 
 /* Number and hover play button share one gutter cell (grid, both at 1/1) so the

@@ -21,6 +21,7 @@ import type {
   LeafListContext,
 } from "./types";
 import { h } from "./dom";
+import { windowedList } from "./windowed-list";
 
 type IconKind = "browse" | "songs" | "playlist" | "artist" | "album";
 
@@ -53,7 +54,12 @@ export interface LibraryNavDeps {
   listAllSongs: () => Promise<SearchTrack[]>;
   listAllArtists: () => Promise<SearchArtist[]>;
   listAllAlbums: () => Promise<SearchAlbum[]>;
-  listAllPlaylists: () => Promise<PlaylistRef[]>;
+  // The current playlist index, read synchronously from the in-memory cache
+  // (app.playlistIndex) — NOT a per-render filesystem walk. `loaded` is false until
+  // the first walk lands so the root menu can show "Loading…" rather than a false
+  // "No playlists yet". refreshNavPlaylists() re-renders the root when the cache
+  // updates (fs watcher / our own writes), keeping this in step.
+  playlistIndex: () => { loaded: boolean; items: PlaylistRef[] };
   artistAlbums: (artist: string) => Promise<SearchAlbum[]>;
   // Every track by an artist, ordered album by album — backs the "Tracks" section
   // of the artist-detail view (a flat list of the artist's whole catalog).
@@ -78,6 +84,10 @@ export interface LibraryNavDeps {
   // get-started prompt (#files-empty) instead of the lens springboard; main.ts
   // re-renders (renderNav) whenever this flips.
   libraryRootSet: () => boolean;
+  // Tell the Browse folder tree whether it's the active lens. The tree defers its
+  // (costly) DOM build while hidden, so entering Browse flushes any pending build.
+  // Injected rather than imported so this module never pulls in tree-view/main.
+  setBrowseActive: (active: boolean) => void;
 }
 
 let deps: LibraryNavDeps;
@@ -96,7 +106,6 @@ interface View {
 }
 
 let container: HTMLElement;
-let footer: HTMLElement;
 let folderTree: HTMLElement;
 let createBtn: HTMLElement;
 let filesEmpty: HTMLElement;
@@ -104,6 +113,47 @@ const stack: View[] = [];
 
 function list(): HTMLElement {
   return h("div", { class: "nav-list" });
+}
+
+// ---- lens list cache -------------------------------------------------------
+
+// Memoize the resolved lens lists (Songs / Artists / Albums and the artist/album
+// detail loads) so repeat opens are instant: the O(N) whole-library loads
+// (list_all_songs et al.) only pay their invoke + IPC + parse cost once per scan.
+// First open is unchanged (a cache miss), and the full resolved array is preserved
+// verbatim — playing a leaf row still builds its pool from the whole list, so the
+// playback-pool model is untouched.
+//
+// We cache the Promise, not the resolved array, so concurrent opens of the same
+// lens share one in-flight load, and a resolved entry replays with no visible
+// "Loading…" flash (asyncListBody's host is still connected on the next microtask).
+// Playlists are deliberately absent — they aren't a lens and have their own
+// refreshNavPlaylists cache path.
+//
+// Correctness hinges on invalidation covering BOTH ways the library changes under
+// us, or a stale list flashes: background scans (library-scanned → main.ts calls
+// invalidateNavListCache) and explicit metadata edits (editors.ts → reloadNavView).
+// See invalidateNavListCache.
+const listCache = new Map<string, Promise<unknown>>();
+
+function cached<T>(key: string, load: () => Promise<T[]>): Promise<T[]> {
+  const hit = listCache.get(key) as Promise<T[]> | undefined;
+  if (hit) return hit;
+  const p = load().catch((e) => {
+    // Don't cache failures — a transient load error shouldn't stick until the next
+    // scan/edit; drop the entry so the next open retries.
+    listCache.delete(key);
+    throw e;
+  });
+  listCache.set(key, p);
+  return p;
+}
+
+// Drop every memoized lens list. Called whenever the library changes on disk (scan)
+// or via an edit, so the next open re-fetches. Clearing wholesale is intentional: a
+// scan can touch any lens, and the lists are cheap to rebuild lazily on next open.
+export function invalidateNavListCache(): void {
+  listCache.clear();
 }
 
 // ---- navigation entry points -----------------------------------------------
@@ -188,37 +238,31 @@ function rootMenuBody(): HTMLElement {
 
   host.appendChild(h("div", { class: "nav-section", text: "Playlists" }));
 
-  // Playlists load asynchronously; show a placeholder line and swap in the rows.
+  // Playlist rows are built synchronously from the in-memory index (no per-render
+  // filesystem walk — that walk froze the UI for ~1s on large libraries). The cache
+  // is kept fresh by refreshPlaylistIndex (fs watcher + our own writes), which calls
+  // refreshNavPlaylists() to re-render this root when it changes. Until the first
+  // walk lands, show "Loading…" rather than a false "No playlists yet".
   const plHost = list();
-  const loading = h("div", { class: "nav-coming-soon", text: "Loading…" });
-  plHost.appendChild(loading);
+  const { loaded, items } = deps.playlistIndex();
+  if (!loaded) {
+    plHost.appendChild(h("div", { class: "nav-placeholder-row", text: "Loading…" }));
+  } else if (items.length === 0) {
+    plHost.appendChild(h("div", { class: "nav-placeholder-row", text: "No playlists yet" }));
+  } else {
+    for (const p of items) {
+      plHost.appendChild(
+        drillRow({
+          icon: "playlist",
+          primary: p.name,
+          onOpen: () => deps.openPlaylist(p.path),
+          onPlay: () => deps.playPlaylist(p.path),
+          onMenu: (x, y) => deps.showPlaylistMenu(x, y, p.path),
+        }),
+      );
+    }
+  }
   host.appendChild(plHost);
-  deps
-    .listAllPlaylists()
-    .then((playlists) => {
-      plHost.replaceChildren();
-      if (playlists.length === 0) {
-        plHost.appendChild(
-          h("div", { class: "nav-coming-soon", text: "No playlists yet" }),
-        );
-        return;
-      }
-      for (const p of playlists) {
-        plHost.appendChild(
-          drillRow({
-            icon: "playlist",
-            primary: p.name,
-            onOpen: () => deps.openPlaylist(p.path),
-            onPlay: () => deps.playPlaylist(p.path),
-            onMenu: (x, y) => deps.showPlaylistMenu(x, y, p.path),
-          }),
-        );
-      }
-    })
-    .catch((e) => {
-      console.error("list_all_playlists failed", e);
-      loading.textContent = "Couldn't load playlists";
-    });
   return host;
 }
 
@@ -268,6 +312,11 @@ function drillRow(opts: {
   icon: IconKind;
   primary: string;
   secondary?: string;
+  // Always render the secondary line, blank when there's no subtitle, so every row
+  // in a list is the same (two-line) height. The windowed lenses (Artists/Albums)
+  // need that uniform height to place row i at i * rowHeight; a list where the
+  // subtitle only sometimes appears would otherwise have ragged row heights.
+  reserveSecondary?: boolean;
   onOpen: () => void;
   onPlay?: () => void;
   onMenu?: (x: number, y: number) => void;
@@ -276,7 +325,8 @@ function drillRow(opts: {
     "span",
     { class: "nav-cell" },
     h("span", { class: "nav-primary", text: opts.primary }),
-    opts.secondary && h("span", { class: "nav-secondary", text: opts.secondary }),
+    (opts.secondary || opts.reserveSecondary) &&
+      h("span", { class: "nav-secondary", text: opts.secondary ?? "" }),
   );
   const row = h(
     "div",
@@ -295,16 +345,50 @@ function drillRow(opts: {
   return row;
 }
 
+// Window a whole-library drill list (Artists / Albums) the way renderLeafTrackList
+// windows Songs: mount only the on-screen row slice over a full-height spacer. The
+// asymmetry this fixes — entering was "instant" (the eager per-item build ran
+// behind asyncListBody's "Loading…" line, read as loading) but Back froze for ~1s,
+// because render()'s container.replaceChildren() had to tear down one .nav-row per
+// artist/album synchronously in the click handler. A screenful of nodes builds and
+// tears down cheaply on both sides. Rows must be uniform height (the window places
+// row i at i * rowHeight), so callers reserve the secondary line where it varies
+// (see drillRow's reserveSecondary). The artist/album *detail* views aren't
+// windowed here — one artist's albums is a short list, and their Tracks section is
+// already a windowed leaf list, so windowing the small album section would only add
+// a second window fighting for the same scroll pane.
+function windowDrillRows<T>(
+  items: T[],
+  host: HTMLElement,
+  makeRow: (item: T) => HTMLElement,
+): void {
+  // Same debug/test escape hatch renderLeafTrackList uses: render every row eagerly
+  // when `__noWindowing` is set. The fake-DOM unit tests set it so they can assert on
+  // real drill rows without faking layout (windowing needs measured row heights);
+  // the console A/B toggle uses it to compare against the pre-windowing path.
+  if ((globalThis as { __noWindowing?: boolean }).__noWindowing) {
+    for (const item of items) host.appendChild(makeRow(item));
+    return;
+  }
+
+  const win = windowedList({
+    count: items.length,
+    renderRow: (i) => makeRow(items[i]),
+  });
+  win.el.classList.add("nav-window");
+  host.appendChild(win.el);
+}
+
 // Songs: the whole library as one flat, playable list through the shared leaf-row
 // builder. Each row plays the list as a queue from that track (see
-// renderLeafTrackList's play semantics). Virtualization for very large libraries is
-// deferred to Phase 7.
+// renderLeafTrackList's play semantics). The list is windowed (renderLeafTrackList
+// mounts only the on-screen row slice), so the whole library stays cheap to scroll.
 function songsView(): View {
   return {
     title: "Songs",
     build: () =>
       asyncListBody<SearchTrack>({
-        load: deps.listAllSongs,
+        load: () => cached("songs", deps.listAllSongs),
         empty: "No songs in the library",
         errorLabel: "list_all_songs failed",
         fill: (tracks, host) => {
@@ -321,26 +405,26 @@ function songsView(): View {
 
 // Artists: the library's distinct artists as drill rows. Opening one pushes the
 // artist detail (their albums); right-click plays / queues the whole artist through
-// the injected menu.
+// the injected menu. Windowed (see windowDrillRows) so a whole-library artist list
+// stays a screenful of DOM — building and, crucially, tearing down on Back are both
+// cheap.
 function artistsView(): View {
   return {
     title: "Artists",
     build: () =>
       asyncListBody<SearchArtist>({
-        load: deps.listAllArtists,
+        load: () => cached("artists", deps.listAllArtists),
         empty: "No artists in the library",
         errorLabel: "list_all_artists failed",
         fill: (artists, host) => {
-          for (const a of artists) {
-            host.appendChild(
-              drillRow({
-                icon: "artist",
-                primary: a.name,
-                onOpen: () => push(artistDetailView(a.name)),
-                onMenu: (x, y) => deps.showArtistMenu(x, y, a.name),
-              }),
-            );
-          }
+          windowDrillRows(artists, host, (a) =>
+            drillRow({
+              icon: "artist",
+              primary: a.name,
+              onOpen: () => push(artistDetailView(a.name)),
+              onMenu: (x, y) => deps.showArtistMenu(x, y, a.name),
+            }),
+          );
         },
       }),
   };
@@ -365,8 +449,8 @@ function artistDetailView(name: string): View {
       asyncListBody<Detail>({
         load: async () => {
           const [albums, tracks] = await Promise.all([
-            deps.artistAlbums(name),
-            deps.artistTracks(name),
+            cached(`artistAlbums\0${name}`, () => deps.artistAlbums(name)),
+            cached(`artistTracks\0${name}`, () => deps.artistTracks(name)),
           ]);
           // Single-element list: the shell treats an empty array as "empty", so
           // return nothing when the artist has neither albums nor tracks.
@@ -409,27 +493,30 @@ function artistDetailView(name: string): View {
 // Albums: the library's distinct albums as drill rows, each grouped by
 // ALBUM_ARTIST_EXPR so its album-artist key matches album_tracks / openAlbumQueue.
 // Opening one pushes the same album detail the Artists lens uses (albumDetailView);
-// right-click plays / queues the whole album through the injected menu.
+// right-click plays / queues the whole album through the injected menu. Windowed
+// like the Artists lens (see windowDrillRows); rows reserve the album-artist line so
+// they stay uniform height for the window.
 function albumsView(): View {
   return {
     title: "Albums",
     build: () =>
       asyncListBody<SearchAlbum>({
-        load: deps.listAllAlbums,
+        load: () => cached("albums", deps.listAllAlbums),
         empty: "No albums in the library",
         errorLabel: "list_all_albums failed",
         fill: (albums, host) => {
-          for (const al of albums) {
-            host.appendChild(
-              drillRow({
-                icon: "album",
-                primary: al.album,
-                secondary: al.artist || undefined,
-                onOpen: () => push(albumDetailView(al.album, al.artist)),
-                onMenu: (x, y) => deps.showAlbumMenu(x, y, al.album, al.artist),
-              }),
-            );
-          }
+          windowDrillRows(albums, host, (al) =>
+            drillRow({
+              icon: "album",
+              primary: al.album,
+              secondary: al.artist || undefined,
+              // Albums vary in whether they carry an album-artist subtitle; reserve
+              // the line so every row is the same height for windowing.
+              reserveSecondary: true,
+              onOpen: () => push(albumDetailView(al.album, al.artist)),
+              onMenu: (x, y) => deps.showAlbumMenu(x, y, al.album, al.artist),
+            }),
+          );
         },
       }),
   };
@@ -445,7 +532,10 @@ function albumDetailView(album: string, albumArtist: string): View {
     step: { t: "album", album, albumArtist },
     build: () =>
       asyncListBody<SearchTrack>({
-        load: () => deps.albumTracks(album, albumArtist),
+        load: () =>
+          cached(`albumTracks\0${albumArtist}\0${album}`, () =>
+            deps.albumTracks(album, albumArtist),
+          ),
         empty: "No tracks",
         errorLabel: "album_tracks failed",
         fill: (tracks, host) => {
@@ -494,12 +584,44 @@ export function renderNav(): void {
 // the list's contents changed. A no-op-ish refresh at the root (Browse/tree self-
 // refresh by other means) but harmless.
 export function reloadNavView(): void {
+  // An edit rewrote tags, so every memoized lens list is potentially stale (a track
+  // may have moved artist/album, or its title changed). Drop the cache before
+  // re-rendering so the rebuilt view re-fetches fresh membership.
+  invalidateNavListCache();
   render();
+}
+
+// A background library scan finished and changed what's on disk: reflect it in the
+// open lens/detail view so the user doesn't have to leave and re-enter to see new
+// tracks. The Browse tree refreshes itself (refreshLibrary → renderTree), so skip it
+// here. Unlike reloadNavView (an explicit edit, where a scroll reset reads as
+// intentional), this is an unprompted background event, so the scroll position is
+// preserved — a scan completing shouldn't yank the user back to the top. The current
+// view reloads asynchronously and its windowed leaf list sizes its full-height spacer
+// a frame later, so the restore is retried briefly until the content is tall enough
+// to hold the saved offset (we can't hook the async fill from out here).
+export function refreshNavViewAfterScan(): void {
+  const top = stack[stack.length - 1];
+  if (top?.lens === "browse") return;
+  const scroller = document.getElementById("tab-files") as HTMLElement | null;
+  const savedTop = scroller?.scrollTop ?? 0;
+  render();
+  if (!scroller || savedTop <= 0) return;
+  let tries = 0;
+  const restore = (): void => {
+    if (!scroller.isConnected) return;
+    const max = scroller.scrollHeight - scroller.clientHeight;
+    scroller.scrollTop = Math.min(savedTop, max);
+    // Keep chasing while the list is still shorter than the saved offset (its rows
+    // are still loading / the spacer isn't sized yet); bounded so a genuinely
+    // shorter list doesn't spin forever.
+    if (max < savedTop && tries++ < 60) requestAnimationFrame(restore);
+  };
+  requestAnimationFrame(restore);
 }
 
 function render(): void {
   container.replaceChildren();
-  footer.replaceChildren();
 
   // No library folder yet: the whole panel is a get-started prompt. Every lens
   // and the folder tree would be dead ends, so hide them and bail before the
@@ -517,8 +639,10 @@ function render(): void {
   const inBrowse = top?.lens === "browse";
 
   // The real folder tree belongs to the Browse lens; the create-playlist button
-  // lives with the root menu's Playlists section.
+  // lives with the root menu's Playlists section. Entering Browse also flushes any
+  // tree DOM build deferred while it was hidden (see tree-view's renderTree).
   folderTree.classList.toggle("hidden", !inBrowse);
+  deps.setBrowseActive(inBrowse);
   createBtn.classList.toggle("hidden", !atRoot);
 
   if (!atRoot && top) {
@@ -568,7 +692,6 @@ function restoreLocation(steps: NavStep[]): void {
 export function initLibraryNav(d: LibraryNavDeps, initial?: NavStep[]): void {
   deps = d;
   container = document.getElementById("library-nav") as HTMLElement;
-  footer = document.getElementById("lens-footer") as HTMLElement;
   folderTree = document.getElementById("folder-tree") as HTMLElement;
   createBtn = document.getElementById("create-playlist-btn") as HTMLElement;
   filesEmpty = document.getElementById("files-empty") as HTMLElement;

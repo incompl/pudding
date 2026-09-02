@@ -245,19 +245,21 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                 .to_string();
             let missing = !Path::new(&e.path).exists();
             match meta_map.get(&e.path).cloned() {
-                Some((title, artist, album, album_artist, disc, track, duration)) => PlaylistTrack {
-                    path: e.path,
-                    name: basename,
-                    title,
-                    artist,
-                    album,
-                    album_artist,
-                    disc,
-                    track,
-                    in_library: true,
-                    missing,
-                    duration,
-                },
+                Some((title, artist, album, album_artist, disc, track, duration)) => {
+                    PlaylistTrack {
+                        path: e.path,
+                        name: basename,
+                        title,
+                        artist,
+                        album,
+                        album_artist,
+                        disc,
+                        track,
+                        in_library: true,
+                        missing,
+                        duration,
+                    }
+                }
                 None => PlaylistTrack {
                     // Out-of-library: no DB metadata; show the `#EXTINF` title
                     // if any, else the frontend falls back to the filename.
@@ -278,7 +280,9 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
         .collect();
 
     Ok(PlaylistData {
-        name: name.filter(|n| !n.is_empty()).unwrap_or_else(|| stem_name(&path)),
+        name: name
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| stem_name(&path)),
         path,
         tracks,
     })
@@ -287,7 +291,12 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
 // Serialize a playlist to extended-M3U text (UTF-8). Paths under the playlist's
 // directory are written relative; others absolute. `#EXTINF` carries the DB
 // display for portability, with the cached runtime in seconds (−1 if unknown).
-fn serialize(path: &str, name: &str, tracks: &[String], conn: &Connection) -> Result<String, String> {
+fn serialize(
+    path: &str,
+    name: &str,
+    tracks: &[String],
+    conn: &Connection,
+) -> Result<String, String> {
     let base_dir = playlist_base_dir(path);
     let meta_map = fetch_meta(conn, tracks)?;
 
@@ -417,11 +426,7 @@ fn move_playlist_inner(old_path: &str, new_path: &str, conn: &Connection) -> Res
 // read→map→write in the frontend would drop them. The name never touches the
 // filename, so the file path is stable.
 #[tauri::command]
-pub fn rename_playlist(
-    path: String,
-    name: String,
-    db: State<DbHandle>,
-) -> Result<(), String> {
+pub fn rename_playlist(path: String, name: String, db: State<DbHandle>) -> Result<(), String> {
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let content = decode_bytes(&bytes);
     let base_dir = playlist_base_dir(&path);
@@ -447,13 +452,25 @@ pub fn delete_playlist(path: String) -> Result<(), String> {
 
 // Index every `.m3u/.m3u8` under the library root for the Add-to-playlist menu
 // and searchable playlists: path + display name (directive or filename stem).
+//
+// This walks the entire library tree (read_dir + metadata on every entry), which
+// on a large library is 500ms–1s. It's `async` + `spawn_blocking` for one reason:
+// a synchronous #[tauri::command] runs on the main (UI) thread that WKWebView
+// paints on, so the walk would freeze the window for its whole duration. Moving
+// the blocking FS work onto a worker thread keeps the UI responsive; the frontend
+// also caches the result (see refreshPlaylistIndex) so the walk runs on library
+// changes, not on every navigation back to the Files index.
 #[tauri::command]
-pub fn list_all_playlists(root: String) -> Result<Vec<PlaylistRef>, String> {
-    let mut out: Vec<PlaylistRef> = Vec::new();
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    collect_playlists(Path::new(&root), &mut out, &mut visited);
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    Ok(out)
+pub async fn list_all_playlists(root: String) -> Result<Vec<PlaylistRef>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out: Vec<PlaylistRef> = Vec::new();
+        let mut visited: HashSet<PathBuf> = HashSet::new();
+        collect_playlists(Path::new(&root), &mut out, &mut visited);
+        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 fn collect_playlists(dir: &Path, out: &mut Vec<PlaylistRef>, visited: &mut HashSet<PathBuf>) {
@@ -489,8 +506,7 @@ fn collect_playlists(dir: &Path, out: &mut Vec<PlaylistRef>, visited: &mut HashS
 // Display name for a playlist file: the `#PLAYLIST:` directive, else the
 // filename stem. Used by the tree (list_dir) and the index.
 pub fn display_name(path: &Path) -> String {
-    read_playlist_name(path)
-        .unwrap_or_else(|| stem_name(&path.to_string_lossy()))
+    read_playlist_name(path).unwrap_or_else(|| stem_name(&path.to_string_lossy()))
 }
 
 // A cached `#PLAYLIST:` lookup, keyed by file identity so an unchanged playlist is
@@ -548,14 +564,17 @@ fn read_playlist_name(path: &Path) -> Option<String> {
     // Miss: decode outside the lock, then record. A concurrent miss on the same
     // file just re-reads harmlessly and stores the same value.
     let name = parse_playlist_name(path);
-    name_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(
-        path.to_path_buf(),
-        NameCacheEntry {
-            mtime,
-            len,
-            name: name.clone(),
-        },
-    );
+    name_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            path.to_path_buf(),
+            NameCacheEntry {
+                mtime,
+                len,
+                name: name.clone(),
+            },
+        );
     name
 }
 
@@ -685,8 +704,16 @@ mod tests {
         std::fs::write(&old, "#EXTM3U\n#PLAYLIST:Keep Me\n/abs/a.mp3\n").unwrap();
 
         let old_s = old.to_str().unwrap().to_string();
-        let new_s = root.join(".").join("list.m3u").to_str().unwrap().to_string();
-        assert_ne!(old_s, new_s, "paths must differ lexically to exercise the bug");
+        let new_s = root
+            .join(".")
+            .join("list.m3u")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(
+            old_s, new_s,
+            "paths must differ lexically to exercise the bug"
+        );
 
         move_playlist_inner(&old_s, &new_s, &empty_db()).unwrap();
 
@@ -709,16 +736,13 @@ mod tests {
         let new = root.join("new.m3u");
         std::fs::write(&old, "#EXTM3U\n#PLAYLIST:Mover\n/abs/a.mp3\n").unwrap();
 
-        move_playlist_inner(
-            old.to_str().unwrap(),
-            new.to_str().unwrap(),
-            &empty_db(),
-        )
-        .unwrap();
+        move_playlist_inner(old.to_str().unwrap(), new.to_str().unwrap(), &empty_db()).unwrap();
 
         assert!(!old.exists(), "source not removed after real move");
         assert!(new.exists(), "destination not written");
-        assert!(std::fs::read_to_string(&new).unwrap().contains("#PLAYLIST:Mover"));
+        assert!(std::fs::read_to_string(&new)
+            .unwrap()
+            .contains("#PLAYLIST:Mover"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
