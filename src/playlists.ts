@@ -148,7 +148,28 @@ export async function browsePlaylist(node: TreeNode): Promise<void> {
 // Browse a playlist by file path (tree single-click, OS Open…, Open Recent).
 // Reads and shows it as the open playlist without changing playback, and
 // records it as recent.
-export async function browsePlaylistPath(path: string): Promise<void> {
+// Flash the list-face title once, marking where a playlist search hit landed — the
+// right-pane analogue of the Back-bar title flash for album/artist hits (see
+// navigateTo's flashTitle). Washes just the title (not the track-count subtitle). The
+// header is static DOM filled by renderQueue's effect, so defer past the reactive
+// render before adding the class.
+function flashPlaylistHeader(): void {
+  requestAnimationFrame(() => {
+    const title = document.getElementById("queue-title");
+    if (!title) return;
+    title.classList.remove("flash");
+    void title.offsetWidth; // restart the animation if it was mid-flight
+    title.classList.add("flash");
+    title.addEventListener("animationend", () => title.classList.remove("flash"), {
+      once: true,
+    });
+  });
+}
+
+export async function browsePlaylistPath(
+  path: string,
+  opts?: { flash?: boolean },
+): Promise<void> {
   let data: PlaylistData;
   try {
     data = await invoke<PlaylistData>("read_playlist", { path });
@@ -176,6 +197,7 @@ export async function browsePlaylistPath(path: string): Promise<void> {
   };
   listFaceOpen.value = true;
   addRecentPlaylist(data.path, data.name);
+  if (opts?.flash) flashPlaylistHeader();
 }
 
 // `sink` is the terminal verb — addToQueue (default) or playNext — so both share

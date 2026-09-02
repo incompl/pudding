@@ -82,7 +82,8 @@ export function setupSearch(): void {
     } else if (item.kind === "playlist") {
       // Open the playlist in the right pane — the same "go to" the navigator's
       // single-click does — not play it (that's the double-click / Play menu).
-      void browsePlaylistPath(item.playlist.path);
+      // Flash the header to mark where the hit landed, matching album/artist hits.
+      void browsePlaylistPath(item.playlist.path, { flash: true });
     } else {
       activeTab.value = "streams";
       void persistActiveTab();

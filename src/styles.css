@@ -832,6 +832,9 @@ html[data-mode="light"] .context-menu {
 
 #queue-header-text {
   min-width: 0;
+  /* Fill the row so the title's one-shot search flash washes the full width (the
+     Clear button, when shown, still sits at the right edge). */
+  flex: 1;
 }
 
 /* Clear: tears down the ephemeral queue, pushed to the header's right edge.
@@ -2118,6 +2121,17 @@ ul {
    album/artist search hit landed (see navigateTo's flashTitle). */
 .nav-back.flash {
   animation: row-flash 900ms ease-out;
+}
+
+/* And across the list-face title row (its full width, but not the track-count
+   subtitle below), marking where a playlist search hit landed (see
+   flashPlaylistHeader). Padding is offset by an equal negative margin so the wash
+   insets slightly without shifting the title text or its rename button. */
+#queue-title.flash {
+  animation: row-flash 900ms ease-out;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: -2px -4px;
 }
 
 @keyframes row-flash {
