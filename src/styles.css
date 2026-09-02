@@ -953,11 +953,13 @@ html[data-mode="light"] .context-menu {
 }
 
 /* The playing queue row swaps its number for the equalizer glyph at rest; on hover
-   the glyph gives way to the play button (same as the number does). */
-.queue-row.playing .queue-num-text {
+   the glyph gives way to the play button (same as the number does). Gated on active
+   playback so a paused row shows its number back, not a frozen glyph (Apple Music /
+   Spotify behavior — see body.playback-paused below). */
+body:not(.playback-paused) .queue-row.playing .queue-num-text {
   visibility: hidden;
 }
-.queue-row.playing .eq-bars {
+body:not(.playback-paused) .queue-row.playing .eq-bars {
   display: flex;
 }
 .queue-row.playing:hover .eq-bars {
@@ -2334,11 +2336,9 @@ ul {
     transform: scaleY(1);
   }
 }
-/* Paused playback freezes the bars mid-wave (matching the transport's paused
-   state), rather than leaving them dancing over stopped audio. */
-body.playback-paused .eq-bars > span {
-  animation-play-state: paused;
-}
+/* While paused the glyph is hidden entirely and each gutter falls back to its track
+   number (see the body:not(.playback-paused) reveal rules above), matching Apple
+   Music / Spotify — the bars only ever appear over audio that's actually playing. */
 /* Users who ask for less motion get a static level meter instead of the bounce. */
 @media (prefers-reduced-motion: reduce) {
   .eq-bars > span {
@@ -2467,11 +2467,12 @@ body.playback-paused .eq-bars > span {
 }
 
 /* The playing tree row swaps its number for the equalizer glyph at rest; on hover
-   the glyph gives way to the play button (same as the number does). */
-.node-label.playing .icon.track .track-num {
+   the glyph gives way to the play button (same as the number does). Gated on active
+   playback so a paused row shows its number back, not a frozen glyph. */
+body:not(.playback-paused) .node-label.playing .icon.track .track-num {
   visibility: hidden;
 }
-.node-label.playing .icon.track .eq-bars {
+body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
   display: flex;
 }
 .node-label.playing:hover .icon.track .eq-bars {
@@ -3089,11 +3090,12 @@ body.playback-paused .eq-bars > span {
 }
 
 /* ...and swaps its number for the equalizer glyph at rest; on hover the glyph gives
-   way to the play button (same as the number does). */
-.nav-track-row.playing .nav-num-text {
+   way to the play button (same as the number does). Gated on active playback so a
+   paused row shows its number back, not a frozen glyph. */
+body:not(.playback-paused) .nav-track-row.playing .nav-num-text {
   visibility: hidden;
 }
-.nav-track-row.playing .eq-bars {
+body:not(.playback-paused) .nav-track-row.playing .eq-bars {
   display: flex;
 }
 .nav-track-row.playing:hover .eq-bars {
