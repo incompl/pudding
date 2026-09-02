@@ -481,6 +481,10 @@ function artistDetailView(name: string): View {
               deps.renderLeafTrackList(detail.tracks, {
                 title: name,
                 syntheticPath: `queue:artist:${name}`,
+                // The album is redundant here: the Albums section above enumerates
+                // them and this list is ordered album by album, so the tag would
+                // just repeat in runs. Leave bare titles.
+                hideAlbum: true,
               }),
             );
           }
