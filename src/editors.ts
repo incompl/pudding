@@ -71,21 +71,25 @@ export function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
     attrs: { type: "submit" },
     text: opts.submitLabel,
   });
-  // Optional note above the buttons, shown only while `blocked` holds (e.g.
-  // "Can't save while this track is playing"). Present in the DOM from the start
-  // so toggling it doesn't reflow the actions row.
-  let noteEl: HTMLElement | null = null;
-  if (opts.blocked && opts.blockedNote) {
-    noteEl = h("div", {
-      class: "inline-editor-note hidden",
-      text: opts.blockedNote,
-    });
-    form.appendChild(noteEl);
-  }
-
   form.appendChild(
     h("div", { class: "inline-editor-actions" }, cancelBtn, submitBtn),
   );
+
+  // Optional note below the buttons, shown only while `blocked` holds (e.g.
+  // "Can't save while this track is playing"). It sits under the disabled Save
+  // so it reads as the answer to "why didn't that work?". A lock glyph marks it
+  // as an expected constraint rather than an error. Present in the DOM from the
+  // start so toggling it doesn't reflow the actions row.
+  let noteEl: HTMLElement | null = null;
+  if (opts.blocked && opts.blockedNote) {
+    noteEl = h(
+      "div",
+      { class: "inline-editor-note hidden" },
+      h("span", { class: "inline-editor-note-icon" }),
+      h("span", { text: opts.blockedNote }),
+    );
+    form.appendChild(noteEl);
+  }
 
   const required = opts.fields.filter((f) => f.required).map((f) => f.key);
   const syncEnabled = (): void => {
