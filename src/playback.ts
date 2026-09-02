@@ -193,7 +193,11 @@ export function poolPaths(): string[] {
   // rebuilds *after* the signal fires, so trusting it here lags one edit behind.
   if (queueIsActivePool()) {
     const q = activeQueue.value;
-    return q ? q.tracks.filter((t) => !t.missing).map((t) => t.path) : [];
+    if (q) return q.tracks.filter((t) => !t.missing).map((t) => t.path);
+    // Lens playback (Songs/Albums/Artists rows) borrows a `queue:` synthetic
+    // parent for pool identity but sets no activeQueue signal. Its children are
+    // the whole (static, no-missing) lens list, so fall through to currentParent
+    // below rather than reporting an empty pool (which would disable Next).
   }
   if (app.currentParent) {
     return app.currentParent.children.filter((c) => !c.isFolder).map((c) => c.path);
