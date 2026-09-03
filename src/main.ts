@@ -2978,7 +2978,12 @@ async function init(): Promise<void> {
   // player. Not a drag region, so this never conflicts with the topbar's
   // double-click-to-maximize.
   const nowPlayingMainEl = document.querySelector("#now-playing-main") as HTMLElement;
-  nowPlayingMainEl.addEventListener("dblclick", () => void toggleMiniPlayer());
+  nowPlayingMainEl.addEventListener("dblclick", (e) => {
+    // The overlay buttons (view toggle, full screen) sit atop the hero, so
+    // double-clicking one has its own effect — don't also toggle the mini player.
+    if ((e.target as HTMLElement).closest("button")) return;
+    void toggleMiniPlayer();
+  });
   // Same gesture in the queue view, but only in the empty space around the
   // rows — double-clicking a row is reserved for playing it.
   const queueViewEl = document.querySelector("#queue-view") as HTMLElement;
