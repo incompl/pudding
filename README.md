@@ -76,7 +76,10 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 ## Keyboard shortcuts
 
 - `Space` - play / pause
-- `↑` / `↓` - volume up / down (10%)
+- `↑` / `↓` - move the selection up / down the list
+- `Enter` - play the selected row
+- `Esc` - clear the selection
+- `⌘↑` / `⌘↓` (or `+` / `-`) - volume up / down (10%)
 - `←` / `→` - seek back / forward 10s (files only)
 - `⌘F` / `Ctrl+F` - focus search
 - `⌘S` - save the current queue as a playlist

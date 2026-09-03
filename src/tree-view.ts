@@ -227,9 +227,12 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   if (node.isPlaylist && browsedPlaylist.peek()?.sourcePath === node.path) {
     label.classList.add("open");
   }
-  // Multi-select background, reapplied on re-render like the highlight classes
-  // above (the selection effect keeps it live). Only tracks are selectable.
-  if (!node.isFolder && !node.isPlaylist && treeSelection.peek().has(node.path)) {
+  // Selection background, reapplied on re-render like the highlight classes above
+  // (the selection effect keeps it live). Mouse selection only ever holds tracks,
+  // but the keyboard cursor (moveTreeSelection) can rest on a folder or playlist,
+  // so paint any selected path — otherwise a folder cursor would lose its
+  // highlight when the window remounts it on scroll.
+  if (treeSelection.peek().has(node.path)) {
     label.classList.add("selected");
   }
   // Folders show an open/closed folder. A track's slot carries its tagged track
@@ -519,6 +522,51 @@ export function playSelectedRow(): boolean {
   return false;
 }
 
+// The Browse-tree arm of the shared left-pane keyboard cursor (see activeKbdList
+// in main.ts). Walks the flattened visible rows, skipping the synthetic "(empty)"
+// markers, and single-selects the landed row — folders and playlists included, so
+// the cursor can rest anywhere you can click. Keeps the row on screen (honouring
+// the sticky Back header's margin) and marks the tree pane so Enter commits here.
+// With nothing selected, ↓ lands on the first row and ↑ on the last.
+export function moveTreeSelection(delta: 1 | -1): void {
+  if (treeRows.length === 0) return;
+  const sel = treeSelection.peek();
+  const anchor = app.selectionAnchor;
+  const curPath = anchor && sel.has(anchor) ? anchor : sel.size === 1 ? [...sel][0] : null;
+  let i = curPath != null ? treeRows.findIndex((r) => r.node.path === curPath) : -1;
+  if (i < 0) i = delta > 0 ? -1 : treeRows.length;
+  do {
+    i += delta;
+  } while (i >= 0 && i < treeRows.length && treeRows[i].empty);
+  if (i < 0 || i >= treeRows.length) return;
+  app.lastSelectionPane = "tree";
+  selectTreeSingle(treeRows[i].node.path);
+  treeWin?.revealIndex(i, stickyMargin());
+}
+
+// Enter on the tree's selected row: expand/collapse a folder, play a track, or
+// play a playlist — the keyboard mirror of what a double-click (or, for folders, a
+// single click) does. Returns true when it acted, so Enter can preventDefault.
+export function activateTreeSelected(): boolean {
+  const sel = treeSelection.peek();
+  const anchor = app.selectionAnchor;
+  const path = anchor && sel.has(anchor) ? anchor : sel.size === 1 ? [...sel][0] : null;
+  if (path == null) return false;
+  const row = treeRows.find((r) => r.node.path === path && !r.empty);
+  if (!row) return false;
+  const { node, parent } = row;
+  if (node.isFolder) {
+    void onNodeClick(node); // toggles expand/collapse (loads children lazily)
+    return true;
+  }
+  if (node.isPlaylist) {
+    void playPlaylist(node);
+    return true;
+  }
+  playTreeTrack(node, parent);
+  return true;
+}
+
 // Whether `folderPath` is `target` or one of its ancestors — the descent test
 // for revealFolderInTree. Separator-agnostic (accepts both / and \) so it holds
 // on either platform without importing the path joiner.
@@ -694,4 +742,11 @@ export function renderTree(): void {
 export function setBrowseActive(active: boolean): void {
   browseActive = active;
   if (active && treeStale) buildTree();
+}
+
+// Whether the Browse lens (the real folder tree) is the current Files-tab view, so
+// the shared keyboard cursor knows the tree — not the springboard navigator — is
+// the left pane's active list.
+export function isBrowseActive(): boolean {
+  return browseActive;
 }

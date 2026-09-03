@@ -88,6 +88,14 @@ export interface LibraryNavDeps {
   // (costly) DOM build while hidden, so entering Browse flushes any pending build.
   // Injected rather than imported so this module never pulls in tree-view/main.
   setBrowseActive: (active: boolean) => void;
+  // Mark the navigator as the surface the keyboard should drive (app.lastSelectionPane
+  // = "nav"), so bare ↑/↓ walk this pane after a click or drill here. Injected to keep
+  // this module free of the app-state import.
+  markNavFocused: () => void;
+  // Drop the leaf-list (navSel) selection — Esc's other half, alongside clearing the
+  // `.kbd-cursor`. Returns whether anything was selected. Injected because navSel
+  // lives in main.ts.
+  clearNavSelection: () => boolean;
 }
 
 let deps: LibraryNavDeps;
@@ -116,6 +124,97 @@ const stack: View[] = [];
 // Consumed and cleared by the next render() so unrelated renders (push/back) don't
 // re-flash a stale title.
 let pendingFlashTitle = false;
+
+// ---- keyboard cursor -------------------------------------------------------
+//
+// The navigator's arm of the shared left-pane cursor (see activeKbdList in
+// main.ts): bare ↑/↓ walk the current view's rows and Enter activates one (drill
+// into a lens/artist/album, open/play a playlist, or play a track). Each view
+// registers its navigable list as it builds — synchronously for the root menu,
+// from the async `fill` for the lenses. Two highlight styles, by whether the row
+// type already has a selection model:
+//   - Leaf track lists reuse navSel (their existing `.selected`), so Enter plays
+//     the selected row and the highlight survives a windowed remount for free.
+//   - Drill / lens / playlist rows have no selection model, so they carry a
+//     dedicated `.kbd-cursor` class tracked by navCursor (a row's data-nav-index).
+interface NavKbd {
+  count: number;
+  // The current cursor row, or -1 when none is focused yet.
+  index: () => number;
+  // Highlight + scroll row i into view (no activation).
+  focus: (i: number) => void;
+  // Enter on row i.
+  activate: (i: number) => void;
+}
+let navKbd: NavKbd | null = null;
+// Cursor row for the `.kbd-cursor` (drill/lens/playlist) lists; unused by leaf
+// lists, which track their cursor through navSel instead.
+let navCursor = -1;
+
+// Registered by a view's row builder as it lays out its navigable rows. Resets the
+// cursor — a freshly (re)built list starts unfocused. Exported so main.ts's shared
+// leaf-row builder (renderLeafTrackList) can register its navSel-backed list too.
+export function registerNavList(kbd: NavKbd | null): void {
+  navKbd = kbd;
+  navCursor = -1;
+}
+
+// Paint the `.kbd-cursor` highlight on the row whose data-nav-index is the cursor,
+// clearing any prior one. Windowed rows also apply it at build time (see
+// isNavCursorRow) so a scrolled-in cursor row is already correct.
+function paintNavCursor(): void {
+  container
+    .querySelectorAll(".kbd-cursor")
+    .forEach((el) => el.classList.remove("kbd-cursor"));
+  if (navCursor < 0) return;
+  container
+    .querySelector(`[data-nav-index="${navCursor}"]`)
+    ?.classList.add("kbd-cursor");
+}
+
+// Whether row i is the current keyboard cursor — for windowed drill builders to
+// re-apply `.kbd-cursor` when the window mounts the row on scroll.
+function isNavCursorRow(i: number): boolean {
+  return i === navCursor;
+}
+
+// Move the navigator cursor by one row (clamped at the ends). With nothing focused,
+// ↓ lands on the first row and ↑ on the last. A no-op while the view has no list
+// yet (still loading) or is empty.
+export function navMove(delta: 1 | -1): void {
+  if (!navKbd || navKbd.count === 0) return;
+  let i = navKbd.index();
+  if (i < 0) i = delta > 0 ? -1 : navKbd.count;
+  i += delta;
+  if (i < 0 || i >= navKbd.count) return;
+  deps.markNavFocused();
+  navKbd.focus(i);
+}
+
+// Enter on the navigator's focused row. Returns true when it acted.
+export function navActivate(): boolean {
+  if (!navKbd) return false;
+  const i = navKbd.index();
+  if (i < 0) return false;
+  navKbd.activate(i);
+  return true;
+}
+
+// Esc: drop the navigator's keyboard highlight (both the `.kbd-cursor` and any
+// navSel leaf selection). Returns whether anything was actually cleared, so Esc
+// only swallows the keypress when it had a highlight to drop.
+export function navClearCursor(): boolean {
+  const had = navCursor >= 0;
+  navCursor = -1;
+  paintNavCursor();
+  return deps.clearNavSelection() || had;
+}
+
+// Whether the navigator currently has a navigable list (so main.ts's resolver can
+// fall back to another surface when it doesn't).
+export function navHasList(): boolean {
+  return !!navKbd && navKbd.count > 0;
+}
 
 function list(): HTMLElement {
   return h("div", { class: "nav-list" });
@@ -233,13 +332,25 @@ function rootMenuView(): View {
 
 function rootMenuBody(): HTMLElement {
   const host = list();
+  // The root menu isn't windowed, so its rows all stay mounted — collect them in
+  // display order (lenses, then playlists) as one keyboard list, tagging each with
+  // its data-nav-index and its Enter action.
+  const activations: (() => void)[] = [];
+  const addNavRow = (row: HTMLElement, activate: () => void): HTMLElement => {
+    row.setAttribute("data-nav-index", String(activations.length));
+    activations.push(activate);
+    return row;
+  };
   for (const lens of DRILL_LENSES) {
     host.appendChild(
-      drillRow({
-        icon: lens,
-        primary: LENS_LABEL[lens],
-        onOpen: () => enterLens(lens),
-      }),
+      addNavRow(
+        drillRow({
+          icon: lens,
+          primary: LENS_LABEL[lens],
+          onOpen: () => enterLens(lens),
+        }),
+        () => enterLens(lens),
+      ),
     );
   }
 
@@ -259,17 +370,32 @@ function rootMenuBody(): HTMLElement {
   } else {
     for (const p of items) {
       plHost.appendChild(
-        drillRow({
-          icon: "playlist",
-          primary: p.name,
-          onOpen: () => deps.openPlaylist(p.path),
-          onPlay: () => deps.playPlaylist(p.path),
-          onMenu: (x, y) => deps.showPlaylistMenu(x, y, p.path),
-        }),
+        addNavRow(
+          drillRow({
+            icon: "playlist",
+            primary: p.name,
+            onOpen: () => deps.openPlaylist(p.path),
+            onPlay: () => deps.playPlaylist(p.path),
+            onMenu: (x, y) => deps.showPlaylistMenu(x, y, p.path),
+          }),
+          () => deps.openPlaylist(p.path),
+        ),
       );
     }
   }
   host.appendChild(plHost);
+  registerNavList({
+    count: activations.length,
+    index: () => navCursor,
+    focus: (i) => {
+      navCursor = i;
+      paintNavCursor();
+      host
+        .querySelector(`[data-nav-index="${i}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    },
+    activate: (i) => activations[i](),
+  });
   return host;
 }
 
@@ -339,7 +465,12 @@ function drillRow(opts: {
     h("span", { class: `nav-icon nav-${opts.icon}` }),
     cell,
   );
-  row.addEventListener("click", opts.onOpen);
+  row.addEventListener("click", () => {
+    // A click here is also a keyboard-focus of the navigator, so subsequent ↑/↓
+    // walk this pane (and the drill it opens) rather than the right-pane queue.
+    deps.markNavFocused();
+    opts.onOpen();
+  });
   if (opts.onPlay) row.addEventListener("dblclick", opts.onPlay);
   if (opts.onMenu) {
     row.addEventListener("contextmenu", (e) => {
@@ -367,22 +498,50 @@ function windowDrillRows<T>(
   items: T[],
   host: HTMLElement,
   makeRow: (item: T) => HTMLElement,
+  activate: (item: T) => void,
 ): void {
+  // Tag row i as keyboard-navigable and light it if it's the current cursor (a
+  // window remount on scroll rebuilds the row, so this re-applies then too).
+  const build = (i: number): HTMLElement => {
+    const el = makeRow(items[i]);
+    el.setAttribute("data-nav-index", String(i));
+    if (isNavCursorRow(i)) el.classList.add("kbd-cursor");
+    return el;
+  };
   // Same debug/test escape hatch renderLeafTrackList uses: render every row eagerly
   // when `__noWindowing` is set. The fake-DOM unit tests set it so they can assert on
   // real drill rows without faking layout (windowing needs measured row heights);
   // the console A/B toggle uses it to compare against the pre-windowing path.
   if ((globalThis as { __noWindowing?: boolean }).__noWindowing) {
-    for (const item of items) host.appendChild(makeRow(item));
+    for (let i = 0; i < items.length; i++) host.appendChild(build(i));
+    registerNavList({
+      count: items.length,
+      index: () => navCursor,
+      focus: (i) => {
+        navCursor = i;
+        paintNavCursor();
+        host
+          .querySelector(`[data-nav-index="${i}"]`)
+          ?.scrollIntoView({ block: "nearest" });
+      },
+      activate: (i) => activate(items[i]),
+    });
     return;
   }
 
-  const win = windowedList({
-    count: items.length,
-    renderRow: (i) => makeRow(items[i]),
-  });
+  const win = windowedList({ count: items.length, renderRow: build });
   win.el.classList.add("nav-window");
   host.appendChild(win.el);
+  registerNavList({
+    count: items.length,
+    index: () => navCursor,
+    focus: (i) => {
+      navCursor = i;
+      paintNavCursor();
+      win.revealIndex(i);
+    },
+    activate: (i) => activate(items[i]),
+  });
 }
 
 // Songs: the whole library as one flat, playable list through the shared leaf-row
@@ -427,13 +586,17 @@ function artistsView(): View {
         empty: "No artists in the library",
         errorLabel: "list_all_artists failed",
         fill: (artists, host) => {
-          windowDrillRows(artists, host, (a) =>
-            drillRow({
-              icon: "artist",
-              primary: a.name,
-              onOpen: () => push(artistDetailView(a.name)),
-              onMenu: (x, y) => deps.showArtistMenu(x, y, a.name),
-            }),
+          windowDrillRows(
+            artists,
+            host,
+            (a) =>
+              drillRow({
+                icon: "artist",
+                primary: a.name,
+                onOpen: () => push(artistDetailView(a.name)),
+                onMenu: (x, y) => deps.showArtistMenu(x, y, a.name),
+              }),
+            (a) => push(artistDetailView(a.name)),
           );
         },
       }),
@@ -519,14 +682,18 @@ function albumsView(): View {
         empty: "No albums in the library",
         errorLabel: "list_all_albums failed",
         fill: (albums, host) => {
-          windowDrillRows(albums, host, (al) =>
-            drillRow({
-              icon: "album",
-              primary: al.album,
-              secondary: al.artist || undefined,
-              onOpen: () => push(albumDetailView(al.album, al.artist)),
-              onMenu: (x, y) => deps.showAlbumMenu(x, y, al.album, al.artist),
-            }),
+          windowDrillRows(
+            albums,
+            host,
+            (al) =>
+              drillRow({
+                icon: "album",
+                primary: al.album,
+                secondary: al.artist || undefined,
+                onOpen: () => push(albumDetailView(al.album, al.artist)),
+                onMenu: (x, y) => deps.showAlbumMenu(x, y, al.album, al.artist),
+              }),
+            (al) => push(albumDetailView(al.album, al.artist)),
           );
         },
       }),
@@ -633,6 +800,10 @@ export function refreshNavViewAfterScan(): void {
 
 function render(): void {
   container.replaceChildren();
+  // A fresh view starts with no keyboard list; each view's row builder re-registers
+  // one (synchronously for the root menu, from the async fill for the lenses). Clears
+  // here so a still-loading or empty view doesn't inherit the previous list.
+  registerNavList(null);
 
   // No library folder yet: the whole panel is a get-started prompt. Every lens
   // and the folder tree would be dead ends, so hide them and bail before the

@@ -113,6 +113,8 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     showPlaylistMenu: rec("showPlaylistMenu"),
     persistLocation: (steps) => void (saved.steps = steps),
     setBrowseActive: () => {},
+    markNavFocused: () => {},
+    clearNavSelection: () => false,
     ...over,
   };
 

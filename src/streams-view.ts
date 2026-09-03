@@ -91,6 +91,31 @@ export function renderStreams(streams: Stream[]): void {
   streamsContainer.appendChild(ul);
 }
 
+// Keyboard navigation for the stream list — the Streams-tab arm of the shared
+// left-pane cursor (see activeKbdList in main.ts). The visible list is the whole
+// station list (search filters the dropdown, not this list), so we walk
+// app.allStreams directly. Moves the single selection, keeps the row on screen,
+// and marks the stream pane so Enter (playSelectedRow) commits it. With nothing
+// selected yet, ↓ lands on the first station and ↑ on the last.
+export function moveStreamSelection(delta: 1 | -1): void {
+  const streams = app.allStreams;
+  if (streams.length === 0) return;
+  const cur = streams.findIndex((s) => s.url === selectedStreamUrl.value);
+  let i = cur >= 0 ? cur : delta > 0 ? -1 : streams.length;
+  i += delta;
+  if (i < 0 || i >= streams.length) return;
+  app.lastSelectionPane = "stream";
+  selectedStreamUrl.value = streams[i].url;
+  streamsContainer
+    .querySelector(`.node-label[data-stream-url="${CSS.escape(streams[i].url)}"]`)
+    ?.scrollIntoView({ block: "nearest" });
+}
+
+// Esc in the stream pane drops the highlight (and Enter's target with it).
+export function clearStreamSelection(): void {
+  selectedStreamUrl.value = null;
+}
+
 // Pick a local image file and hand back its file:// URL (the portable form
 // get_stream_image reads), or null if the dialog was dismissed. A user can also
 // just type/paste an http(s) URL into the field instead of browsing.

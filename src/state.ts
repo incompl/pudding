@@ -36,8 +36,9 @@ export interface AppState {
   invalidLibraryRoots: Set<string>;
   // File-tree multi-select Shift-range pivot (path of the last click).
   selectionAnchor: string | null;
-  // Which pane last committed a selection, so cross-pane clears stay coordinated.
-  lastSelectionPane: "tree" | "list" | "stream" | null;
+  // Which pane last committed a selection, so cross-pane clears stay coordinated and
+  // the keyboard cursor (activeKbdList) knows which surface bare ↑/↓ should drive.
+  lastSelectionPane: "tree" | "list" | "stream" | "nav" | null;
   allStreams: Stream[];
   currentStreamName: string | null;
   // The synthetic/real parent whose children form the audible pool.

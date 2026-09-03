@@ -20,6 +20,13 @@ function contextMenusContain(target: Node): boolean {
   return contextMenus.some((m) => m.contains(target));
 }
 
+// Whether a context menu is currently open. Lets the global Escape handler defer
+// to the menu's own Esc-dismiss (below) rather than also clearing a selection —
+// so one Esc closes the menu, a second clears the highlight.
+export function contextMenuOpen(): boolean {
+  return contextMenus.length > 0;
+}
+
 // Close every flyout deeper than `depth`, leaving that menu and its ancestors up.
 function closeSubmenusBelow(depth: number): void {
   while (contextMenus.length > depth + 1) {

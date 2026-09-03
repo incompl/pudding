@@ -3205,4 +3205,15 @@ body:not(.playback-paused) .nav-track-row.playing .eq-bars {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
+/* The keyboard cursor on a drill / lens / playlist row. Those rows have no mouse
+   selection model of their own (they navigate on click), so ↑/↓ mark the focused
+   one with this class — the same accent wash a selected track row gets, so the
+   keyboard focus reads identically whichever nav row type it lands on. */
+.nav-row.kbd-cursor {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.nav-row.kbd-cursor:hover {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
 /* ===================== END library navigator ===================== */

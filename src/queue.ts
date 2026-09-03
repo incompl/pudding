@@ -337,6 +337,15 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
   win.flush();
   if (revealTo != null) win.revealIndex(revealTo);
 }
+// Scroll a row of the open list (queue or browsed playlist) into view by its
+// view index — the equivalent of scrollIntoView({ block: "nearest" }). Backs
+// keyboard list navigation, whose selection move must keep the focused row on
+// screen (the selection-paint effect only repaints mounted rows). A no-op when
+// the list is torn down (queueWin null).
+export function revealQueueRow(viewIndex: number): void {
+  queueWin?.revealIndex(viewIndex);
+}
+
 // --- Curation (phase 3): reorder / remove / drag-in on the open list ---
 //
 // Edits act on the list currently shown — a browsed playlist if one is open, else

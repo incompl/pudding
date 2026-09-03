@@ -22,6 +22,10 @@ import {
   renderNav,
   refreshNavViewAfterScan,
   invalidateNavListCache,
+  registerNavList,
+  navMove,
+  navActivate,
+  navClearCursor,
   type NavStep,
 } from "./library-nav";
 import type {
@@ -141,7 +145,7 @@ import {
 
   toastEl,
 } from "./dom-refs";
-import { showContextMenu } from "./context-menu";
+import { showContextMenu, contextMenuOpen } from "./context-menu";
 import { startTrackDrag } from "./drag-drop";
 import { setupSearch } from "./search";
 import {
@@ -154,13 +158,26 @@ import {
   browseStreamListPath,
   refreshStreams,
 } from "./library";
-import { playSelectedRow, revealFolderInTree, revealFileInTree, revealTreeRow, setBrowseActive } from "./tree-view";
+import {
+  playSelectedRow,
+  moveTreeSelection,
+  activateTreeSelected,
+  isBrowseActive,
+  revealFolderInTree,
+  revealFileInTree,
+  revealTreeRow,
+  setBrowseActive,
+} from "./tree-view";
 import {
   closePaneEditor,
   editMetadataItem,
   startTitleEdit,
 } from "./editors";
-import { openAddStationEditor } from "./streams-view";
+import {
+  openAddStationEditor,
+  moveStreamSelection,
+  clearStreamSelection,
+} from "./streams-view";
 import {
   setNowPlaying,
   playFile,
@@ -182,6 +199,7 @@ import {
 } from "./playback";
 import {
   renderQueue,
+  revealQueueRow,
   addToQueue,
   queueMenuItems,
   nodeToTrack,
@@ -450,7 +468,10 @@ function clearTreeSelection(): void {
 // among themselves (see queueSel / navSel). Called by every tree selecting action.
 function clearRowSelections(): void {
   queueSel.clear();
-  navSel.clear();
+  // navClearCursor drops both the navigator's leaf (navSel) selection and any
+  // drill-row `.kbd-cursor`, so a keyboard cursor there doesn't linger once the
+  // tree becomes the selected surface.
+  navClearCursor();
 }
 
 // Plain click: select just this row and anchor a following Shift-range here.
@@ -559,7 +580,10 @@ function makeTrackSelection(onSelect: () => void = () => {}): TrackSelection {
 // surface is ever selected. The forward refs resolve at call time (both consts
 // exist before any click fires). clearTreeSelection covers the third surface.
 export const queueSel: TrackSelection = makeTrackSelection(() => {
-  navSel.clear();
+  // navClearCursor drops the navigator's leaf selection *and* any drill-row
+  // `.kbd-cursor`, so the queue becoming the selected surface leaves no stale
+  // keyboard highlight in the navigator.
+  navClearCursor();
   clearTreeSelection();
 });
 const navSel: TrackSelection = makeTrackSelection(() => {
@@ -1283,9 +1307,9 @@ export function renderLeafTrackList(
         data: { rowIndex: i },
         on: {
           click: (e) => {
-            // Note: lastSelectionPane is left untouched — the navigator is a distinct
-            // surface from the right-pane list, and keyboard Enter-to-play for it is
-            // deferred (see plan.md Phase 1's "keyboard back shortcut is still TBD").
+            // A click focuses the navigator for the keyboard: ↑/↓ then walk this
+            // leaf list and Enter plays the selected row (see activeKbdList).
+            app.lastSelectionPane = "nav";
             if (e.metaKey || e.ctrlKey) {
               navSel.toggle(t);
               return;
@@ -1355,11 +1379,37 @@ export function renderLeafTrackList(
     return row;
   };
 
+  // Register this leaf list as the navigator's keyboard list: ↑/↓ move the navSel
+  // single-selection (its existing `.selected` highlight, so it survives a windowed
+  // remount) and Enter plays the focused row. The cursor index is read from navSel
+  // so a click and the keyboard share one selection. `reveal` differs per render
+  // path (windowed vs eager) — passed in below.
+  const registerLeafKbd = (reveal: (i: number) => void): void =>
+    registerNavList({
+      count: tracks.length,
+      index: () => {
+        const sel = navSel.signal.peek();
+        const anchor = navSel.anchor();
+        const cur =
+          anchor && sel.has(anchor) ? anchor : sel.size === 1 ? [...sel][0] : null;
+        return cur ? tracks.indexOf(cur) : -1;
+      },
+      focus: (i) => {
+        app.lastSelectionPane = "nav";
+        navSel.single(tracks[i]);
+        reveal(i);
+      },
+      activate: (i) => playAt(tracks[i], i),
+    });
+
   // Debug escape hatch for A/B perf comparison: set `__noWindowing = true` in the
   // devtools console and re-enter a list to render every row eagerly (the pre-
   // windowing path — all N nodes in the DOM). Off by default; never set in normal use.
   if ((globalThis as { __noWindowing?: boolean }).__noWindowing) {
     for (let i = 0; i < tracks.length; i++) ul.appendChild(buildRow(i));
+    registerLeafKbd((i) =>
+      (ul.children[i] as HTMLElement | undefined)?.scrollIntoView({ block: "nearest" }),
+    );
     return ul;
   }
 
@@ -1371,6 +1421,7 @@ export function renderLeafTrackList(
   const win = windowedList({ count: tracks.length, renderRow: buildRow });
   win.el.classList.add("nav-window");
   ul.appendChild(win.el);
+  registerLeafKbd((i) => win.revealIndex(i));
   // Clicking the now-playing title parks the playing track's path here so the list
   // it navigates to scrolls straight to it (the row already paints .playing via the
   // currentNodePath match above). Consume it: scroll if this list actually holds the
@@ -2008,6 +2059,99 @@ function selectTheme(mode: ThemeMode, id: string): void {
   if (themeMode.value !== "system") setThemeMode(mode);
 }
 
+// Walk the open list (queue or browsed playlist) by one row with the arrow keys.
+// The navigable set is the playable rows — missing files are skipped, mirroring
+// what a click/Enter can actually commit. With no list selection yet, ↓ lands on
+// the first row and ↑ on the last (the natural "step into the list" from a fresh
+// focus). Selection clamps at the ends rather than wrapping. Keeps the focused
+// row on screen so it stays visible through a long list.
+function moveListSelection(delta: 1 | -1): void {
+  const list = openListTracks();
+  if (list.length === 0) return;
+  const sel = queueSel.signal.peek();
+  const anchor = queueSel.anchor();
+  const current =
+    anchor && sel.has(anchor) ? anchor : sel.size === 1 ? [...sel][0] : null;
+  // Where we step from: the focused row, or one past the near end so the first
+  // step lands on the first (↓) / last (↑) row.
+  let i = current ? list.indexOf(current) : delta > 0 ? -1 : list.length;
+  do {
+    i += delta;
+  } while (i >= 0 && i < list.length && list[i].missing);
+  if (i < 0 || i >= list.length) return; // already at the playable end
+  queueSel.single(list[i]);
+  app.lastSelectionPane = "list";
+  revealQueueRow(i);
+}
+
+// The surface bare ↑/↓ (and Enter/Esc) drive. The right-pane queue is a persistent
+// surface always on screen, so if the user last acted there it keeps the keyboard
+// until they touch another pane. Otherwise arrows drive the left pane's *currently
+// visible* list — the stream list (Streams tab), or the Browse tree / springboard
+// navigator (Files tab). Deriving the left surface from what's on screen (rather
+// than a stored pane) keeps arrows on the right list as the user drills Browse ↔
+// the navigator, whose click may have left lastSelectionPane on the other one.
+type KbdSurface = "list" | "tree" | "nav" | "stream";
+
+function activeKbdSurface(): KbdSurface {
+  if (app.lastSelectionPane === "list") return "list";
+  if (activeTab.value === "streams") return "stream";
+  return isBrowseActive() ? "tree" : "nav";
+}
+
+// ↑/↓: step the active surface's selection by one row.
+function moveKbdSelection(delta: 1 | -1): void {
+  switch (activeKbdSurface()) {
+    case "list":
+      moveListSelection(delta);
+      break;
+    case "tree":
+      moveTreeSelection(delta);
+      break;
+    case "nav":
+      navMove(delta);
+      break;
+    case "stream":
+      moveStreamSelection(delta);
+      break;
+  }
+}
+
+// Enter: commit the active surface's selection (play a track/station, open a
+// playlist, drill a lens/album/artist, or expand a folder). Returns whether it acted.
+function activateKbdSelection(): boolean {
+  switch (activeKbdSurface()) {
+    case "nav":
+      return navActivate();
+    case "tree":
+      return activateTreeSelected();
+    default:
+      // list + stream both resolve through the pane-keyed playSelectedRow.
+      return playSelectedRow();
+  }
+}
+
+// Esc: drop the active surface's highlight. Returns whether there was one to drop
+// (so Esc only swallows the key when it cleared something).
+function clearKbdSelection(): boolean {
+  switch (activeKbdSurface()) {
+    case "list":
+      if (queueSel.signal.peek().size === 0) return false;
+      queueSel.clear();
+      return true;
+    case "tree":
+      if (treeSelection.peek().size === 0) return false;
+      clearTreeSelection();
+      return true;
+    case "nav":
+      return navClearCursor();
+    case "stream":
+      if (selectedStreamUrl.peek() == null) return false;
+      clearStreamSelection();
+      return true;
+  }
+}
+
 function setupPlayerControls(): void {
   playPauseBtn.addEventListener("click", togglePlayPause);
   prevBtn.addEventListener("click", skipPrev);
@@ -2035,8 +2179,34 @@ function setupPlayerControls(): void {
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (isTextInputTarget(e.target)) return;
+
+    // Volume rides a modifier now (matching Apple Music's ⌘↑/⌘↓), freeing bare
+    // ↑/↓ to walk the list. Any other modified key isn't ours — return without
+    // preventDefault so ⌘F (search), ⌘S (save), the ⌘1–6 view switch, etc. still
+    // reach their own handlers.
+    if (e.metaKey || e.ctrlKey || e.altKey) {
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setVolume(volume.value + 0.1);
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setVolume(volume.value - 0.1);
+      }
+      return;
+    }
+
+    // +/- as a mnemonic volume alias (=/_ so it works unshifted too).
+    if (e.key === "+" || e.key === "=") {
+      e.preventDefault();
+      setVolume(volume.value + 0.1);
+      return;
+    }
+    if (e.key === "-" || e.key === "_") {
+      e.preventDefault();
+      setVolume(volume.value - 0.1);
+      return;
+    }
 
     if (e.key === "Delete" || e.key === "Backspace") {
       const list = openListTracks();
@@ -2055,9 +2225,9 @@ function setupPlayerControls(): void {
     }
 
     if (e.key === "Enter") {
-      // Enter commits the selected row (the play a plain click no longer does),
-      // in whichever pane the user last selected in.
-      if (playSelectedRow()) e.preventDefault();
+      // Enter commits the active surface's selection (a plain click no longer
+      // plays) — the queue, the navigator, the Browse tree, or the stream list.
+      if (activateKbdSelection()) e.preventDefault();
       return;
     }
 
@@ -2070,13 +2240,24 @@ function setupPlayerControls(): void {
 
     if (e.key === "ArrowUp") {
       e.preventDefault();
-      setVolume(volume.value + 0.1);
+      moveKbdSelection(-1);
       return;
     }
 
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setVolume(volume.value - 0.1);
+      moveKbdSelection(1);
+      return;
+    }
+
+    if (e.key === "Escape") {
+      // An open context menu owns Escape first (its own listener dismisses it), so
+      // one Esc closes the menu without also dropping the selection; a second Esc
+      // then clears the highlight.
+      if (contextMenuOpen()) return;
+      // Bail out of keyboard navigation: drop the active surface's highlight (and
+      // Enter's target with it).
+      if (clearKbdSelection()) e.preventDefault();
       return;
     }
 
@@ -2871,6 +3052,14 @@ async function init(): Promise<void> {
     persistLocation: persistNavLocation,
     libraryRootSet: () => libraryRootSet.value,
     setBrowseActive,
+    markNavFocused: () => {
+      app.lastSelectionPane = "nav";
+    },
+    clearNavSelection: () => {
+      const had = navSel.signal.peek().size > 0;
+      navSel.clear();
+      return had;
+    },
   }, navLocation));
   setupPlaybackModes();
   await setupWindowSize(appWindow);
