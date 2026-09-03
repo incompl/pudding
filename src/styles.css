@@ -903,7 +903,10 @@ html[data-mode="light"] .context-menu {
   /* Left padding matches #queue-header so the number column lines up flush with
      the queue title, with the track text as a second column to its right. */
   padding: 0.28em 0.4em 0.28em 0.25em;
-  border-radius: 4px;
+  /* Full-bleed (no radius), like the browse tree and streams rows: hover and
+     selection then share one rectangle shape, so adjacent hovered and selected
+     rows tile seamlessly instead of a rounded hover clashing with a square
+     selection band (see .queue-row.selected, which used to re-square the row). */
   cursor: pointer;
 }
 
@@ -955,32 +958,40 @@ html[data-mode="light"] .context-menu {
   background-color: var(--accent);
 }
 
+/* Single line, mirroring the browse tree's .label-text: the title and the
+   inline artist share one line that truncates with a single trailing ellipsis,
+   so a long title pushes the artist off the end and the row height never
+   changes (keeping the windowed geometry uniform). */
 .queue-text {
   min-width: 0;
   flex: 1;
-  display: flex;
-  flex-direction: column;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .queue-primary {
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
+/* The track's artist, inline after the title and dimmed, with a dim middot
+   separator on ::before so the span's text stays the bare artist (matching the
+   tree's inline .artist). */
 .queue-secondary {
-  font-size: 0.8em;
   color: var(--text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+.queue-secondary::before {
+  content: " · ";
 }
 
-/* The playing row picks up the accent, matching the tree's .playing highlight. */
+/* The playing row picks up the accent, matching the tree's .playing highlight;
+   the inline artist takes the dimmer accent, like the tree's playing .artist. */
 .queue-row.playing .queue-primary,
 .queue-row.playing .queue-num {
   color: var(--accent);
+}
+.queue-row.playing .queue-secondary {
+  color: var(--accent-dim);
 }
 
 /* The playing queue row swaps its number for the equalizer glyph at rest; on hover
@@ -1001,7 +1012,6 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
    text still shows through on top. */
 .queue-row.selected {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
-  border-radius: 0;
 }
 
 .queue-row.selected:hover {

@@ -175,7 +175,11 @@ export function windowedList(opts: {
       row.style.left = "0";
       row.style.right = "0";
       // Pin the row to the exact slot height so its box lands on device pixels
-      // (crisp boundaries, no subpixel shimmer while scrolling).
+      // (crisp boundaries, no subpixel shimmer while scrolling). border-box so
+      // this height *is* the border-box: otherwise a row with vertical padding
+      // (content-box default) overflows its slot and overlaps the next row, whose
+      // semi-transparent hover/selection fill then blends into a stray band.
+      row.style.boxSizing = "border-box";
       row.style.height = `${rowHeight}px`;
       container.appendChild(row);
     }

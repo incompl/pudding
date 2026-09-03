@@ -136,11 +136,12 @@ function buildQueueRow(
   );
   // A missing playlist row is shown but can't be played: dim it, label it, and
   // skip the click handler so it reads as unavailable rather than dropped.
-  const secondaryText = t.missing ? "Missing file" : (t.artist ?? t.album ?? "");
-  // Always render the secondary line — a non-breaking space when there's no
-  // subtitle — so every row is the same two-line height. The window places row i
-  // at i * rowHeight (measured from one probe row), so a row that collapsed to a
-  // single line would desync the geometry for the whole list.
+  const secondaryText = t.missing ? "Missing file" : (t.artist ?? "");
+  // Single line, matching the browse tree's track rows: the title, then the
+  // track's artist inline (dimmed, after a middot) — never the album. The line
+  // truncates with one trailing ellipsis, so a long title pushes the artist off
+  // the end; the row is one line at every width, so the windowed row geometry
+  // (each slot placed at i * rowHeight, from one probe row) stays uniform.
   const text = h(
     "span",
     { class: "queue-text" },
@@ -148,8 +149,10 @@ function buildQueueRow(
       class: "queue-primary",
       text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
     }),
-    h("span", { class: "queue-secondary", text: secondaryText || " " }),
   );
+  if (secondaryText) {
+    text.appendChild(h("span", { class: "queue-secondary", text: secondaryText }));
+  }
   // Row remove (curation): strips this row from the list (and file, if a
   // playlist). Stops propagation so it never counts as a play/commit click.
   const remove = h("button", {
