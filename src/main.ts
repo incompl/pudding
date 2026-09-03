@@ -712,8 +712,20 @@ function upNextLabel(): string | null {
 
 export const paneView = computed<PaneView>(() => {
   const browsed = browsedPlaylist.value;
-  const list = browsed ?? activeQueue.value;
-  const isSource = browsed === null;
+  const active = activeQueue.value;
+  const list = browsed ?? active;
+  // A browsed playlist that *is* the playing source (same file, and a queue owns
+  // the playhead) is treated as the source: its playing row highlights and its
+  // rows jump the pool. Otherwise returning to a playlist you're playing would
+  // read as a detached browse with no playhead. A distinct playlist, or folder /
+  // stream / lone-track play, stays a plain browse (isSource false).
+  const browsedIsPlayingSource =
+    browsed !== null &&
+    isPlaylistSource(browsed) &&
+    isPlaylistSource(active) &&
+    browsed.sourcePath === active!.sourcePath &&
+    queueIsActivePool();
+  const isSource = browsed === null || browsedIsPlayingSource;
   const showList = listFaceOpen.value;
   if (!list) return { list: null, isSource, showList: false, nav: null };
 
@@ -728,7 +740,6 @@ export const paneView = computed<PaneView>(() => {
       // straight to that source's list alongside the hero flip. Suppressed when
       // the browsed playlist is itself the playing source (same file) — that
       // button would just point back at the list you're already viewing.
-      const active = activeQueue.value;
       const source =
         browsed !== null && active && active.sourcePath !== browsed.sourcePath
           ? active
