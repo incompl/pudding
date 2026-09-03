@@ -786,6 +786,32 @@ export const paneView = computed<PaneView>(() => {
   return { list, isSource, showList, nav };
 });
 
+// The now-playing hero is the visible right-pane face: the list face is down and no
+// settings/about/editor panel has taken the pane over. This is the track analog of a
+// playlist being "open" — a playing track lights its nav row with the accent only
+// while the hero (which is showing that track) is what the right pane displays, the
+// same way a browsed playlist's row is accented because its contents fill the pane.
+// A signal so the highlight effects repaint as you flip faces or open a panel.
+export const heroVisible = computed(
+  () =>
+    !listFaceOpen.value &&
+    !settingsOpen.value &&
+    !aboutOpen.value &&
+    paneEditor.value === null,
+);
+
+// The playlist whose contents currently fill the pane's list face — the browsed one,
+// or the playing source once you play from it (playQueue clears browsedPlaylist and
+// makes the playlist the activeQueue). This is the playlist analog of heroVisible: a
+// playlist row is "open" (accented) exactly while the right pane is showing that
+// playlist's list, whether you're browsing it or playing it. Null when the hero is up
+// or the list face shows a plain (unsaved) queue.
+export const shownPlaylistPath = computed(() => {
+  if (!listFaceOpen.value) return null;
+  const list = browsedPlaylist.value ?? activeQueue.value;
+  return isPlaylistSource(list) ? (list!.sourcePath ?? null) : null;
+});
+
 // Paint the nav bar from the derived view. Nothing to reconcile: text and button
 // are already resolved in paneView.
 function renderNavBar(): void {
@@ -1396,6 +1422,8 @@ export function renderLeafTrackList(
       currentNodePath.peek() === t.path
     ) {
       row.classList.add("playing");
+      // The accent (see the reactive effect) rides along only while the hero is up.
+      if (heroVisible.peek()) row.classList.add("open");
     }
 
     return row;
@@ -2532,34 +2560,52 @@ function setupEffects(): void {
     // — which reads non-reactive currentParent — cannot, so the highlight moves
     // even when the file path is unchanged (same track replayed from the tree).
     const queueOwnsPlayhead = queuePlayingIndex.value !== null;
-    // A browsed playlist marks its tree row as "open" (an accent), independent of
-    // what's playing — so the panel shows which playlist is open even when a
-    // different source owns the playhead.
-    const browsed = browsedPlaylist.value;
+    // Two orthogonal channels light a tree row (see .node-label.playing/.open in the
+    // CSS): .playing is the equalizer glyph — "this row IS the active play context";
+    // .open is the accent — "the right pane is currently showing this row". A playlist
+    // takes .playing when its pool plays and .open when it's browsed; a track takes
+    // .playing when it owns the playhead from the tree and .open when it does so while
+    // the now-playing hero is the visible face (the mirror of a browsed playlist).
+    const openPlaylist = shownPlaylistPath.value;
+    // The playing playlist: a queue owns the playhead and that queue is a real
+    // playlist (a backing file). Its tree row takes the glyph, mirroring how a played
+    // folder lights its track row.
+    const playingPlaylist =
+      queueOwnsPlayhead && isPlaylistSource(activeQueue.value)
+        ? (activeQueue.value!.sourcePath ?? null)
+        : null;
+    const heroShowsTrack = heroVisible.value;
     document
       .querySelectorAll(
         "#folder-tree .node-label.playing, #folder-tree .node-label.open, #streams-list .node-label.playing",
       )
       .forEach((el) => el.classList.remove("playing", "open"));
-    // The now-playing accent marks the context that owns the playhead, not every
-    // occurrence of the same file. When a playlist/queue is the active pool it
-    // carries the highlight in the right pane, so the tree's copy of the same
-    // track stays plain.
+    // The glyph marks the context that owns the playhead, not every occurrence of the
+    // same file. When a playlist/queue is the active pool it carries the glyph on its
+    // own row (below / in the right pane), so the tree's copy of the track stays plain.
     if (path && !queueOwnsPlayhead) {
+      const row = document.querySelector(
+        `#folder-tree .node-label[data-path="${CSS.escape(path)}"]`,
+      );
+      row?.classList.add("playing");
+      // ...and the accent when the hero (showing this track) is the visible face.
+      if (heroShowsTrack) row?.classList.add("open");
+    }
+    if (playingPlaylist) {
       document
-        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(path)}"]`)
+        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(playingPlaylist)}"]`)
         ?.classList.add("playing");
     }
-    // A playing playlist gets no row accent — for a playlist row the accent means
-    // "open" only (painted below), a deliberate exception to how tracks highlight.
     if (url) {
       document
         .querySelector(`#streams-list .node-label[data-stream-url="${CSS.escape(url)}"]`)
         ?.classList.add("playing");
     }
-    if (browsed?.sourcePath) {
+    // The playlist whose contents fill the list face is "open" (accent), whether it's
+    // merely browsed or the playing source you played from.
+    if (openPlaylist) {
       document
-        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(browsed.sourcePath)}"]`)
+        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(openPlaylist)}"]`)
         ?.classList.add("open");
     }
   });
@@ -2683,27 +2729,39 @@ function setupEffects(): void {
   // change moves the track too, so the currentNodePath read keeps this in step.
   effect(() => {
     const path = currentNodePath.value;
+    const heroShows = heroVisible.value;
     const isLivePool = app.navLeafPoolPath === (app.currentParent?.path ?? null);
     document
       .querySelectorAll<HTMLElement>("#library-nav .nav-track-row")
       .forEach((el) => {
         const t = app.navLeafTracks[Number(el.dataset.rowIndex)];
-        el.classList.toggle("playing", !!t && isLivePool && t.path === path);
+        const playing = !!t && isLivePool && t.path === path;
+        // .playing is the glyph; .open is the accent, shown only while the hero (which
+        // is displaying this track) is the visible face — the leaf-list mirror of the
+        // tree rule above.
+        el.classList.toggle("playing", playing);
+        el.classList.toggle("open", playing && heroShows);
       });
   });
 
-  // The navigator's playlist rows (root "Playlists" section) mark the open (browsed)
-  // playlist with the accent — .open only; a playing playlist gets no row accent (for
-  // a playlist the highlight means "open", unlike track rows). Repaint mounted rows
-  // when the browsed playlist changes; a freshly built row paints itself (see the
-  // playlist loop in library-nav), so this only covers changes while it stays mounted.
+  // The navigator's playlist rows (Playlists lens) carry the same two channels as the
+  // tree: .open (accent) for the browsed playlist, .playing (equalizer glyph) for the
+  // one whose pool is playing. Repaint mounted rows when either changes; a freshly
+  // built row paints itself (see the playlist loop in library-nav), so this only
+  // covers changes while it stays mounted.
   effect(() => {
-    const browsed = browsedPlaylist.value?.sourcePath ?? null;
+    const open = shownPlaylistPath.value;
+    const queueOwnsPlayhead = queuePlayingIndex.value !== null;
+    const playing =
+      queueOwnsPlayhead && isPlaylistSource(activeQueue.value)
+        ? (activeQueue.value!.sourcePath ?? null)
+        : null;
     document
       .querySelectorAll<HTMLElement>("#library-nav .nav-row[data-playlist-path]")
       .forEach((el) => {
         const p = el.dataset.playlistPath;
-        el.classList.toggle("open", !!p && p === browsed);
+        el.classList.toggle("open", !!p && p === open);
+        el.classList.toggle("playing", !!p && p === playing);
       });
   });
 
@@ -3076,8 +3134,15 @@ async function init(): Promise<void> {
     // A playlist row: single-click opens it in the right pane, double-click plays.
     openPlaylist: (path) => void browsePlaylistPath(path),
     playPlaylist: (path) => void playPlaylistPath(path),
-    // The open (browsed) playlist path, for the nav row's "open" accent highlight.
-    openPlaylistPath: () => browsedPlaylist.peek()?.sourcePath ?? null,
+    // The playlist filling the list face, for the nav row's "open" accent highlight
+    // (browsed, or the playing source you played from).
+    openPlaylistPath: () => shownPlaylistPath.peek(),
+    // The playing playlist path, for the nav row's equalizer glyph — a queue owns the
+    // playhead and that queue is a real playlist (a backing file).
+    playingPlaylistPath: () =>
+      queuePlayingIndex.peek() !== null && isPlaylistSource(activeQueue.peek())
+        ? (activeQueue.peek()!.sourcePath ?? null)
+        : null,
     showArtistMenu: showArtistContextMenu,
     showAlbumMenu: showAlbumContextMenu,
     showPlaylistMenu: showPlaylistContextMenu,

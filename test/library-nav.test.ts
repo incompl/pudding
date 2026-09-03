@@ -109,6 +109,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     openPlaylist: rec("openPlaylist"),
     playPlaylist: rec("playPlaylist"),
     openPlaylistPath: () => null,
+    playingPlaylistPath: () => null,
     showArtistMenu: rec("showArtistMenu"),
     showAlbumMenu: rec("showAlbumMenu"),
     showPlaylistMenu: rec("showPlaylistMenu"),

@@ -16,7 +16,8 @@ import {
   app,
   queuePlayingIndex,
   currentNodePath,
-  browsedPlaylist,
+  activeQueue,
+  isPlaylistSource,
   treeSelection,
   activeTab,
   selectedStreamUrl,
@@ -40,6 +41,8 @@ import {
   queueSel,
   playQueueTrack,
   commitBrowsedPlaylist,
+  heroVisible,
+  shownPlaylistPath,
 } from "./main";
 import {
   addPlaylistToQueue,
@@ -207,20 +210,42 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   const label = h("span", { class: "node-label", data: { path: node.path } });
   // Indent by depth — the flat window has no nested <ul> to carry the old padding.
   if (depth > 0) label.style.marginLeft = `${depth * INDENT_EM}em`;
-  // Mirror the highlight effect's basis: a live queue row means a queue owns the
-  // playhead, so the tree's copy of its track stays plain (the queue/playlist owns
-  // the now-playing highlight). Keeps a mid-playback re-render in agreement.
-  // Playlists themselves never take the playing accent — for a playlist row the
-  // accent means "open" only (see the .open paint below), a deliberate exception
-  // to how tracks highlight.
+  // Two orthogonal channels (see the reactive effect + CSS in main.ts / styles.css):
+  // .playing is the equalizer glyph — the row that IS the active play context;
+  // .open is the accent — the right pane is currently showing this row.
   const queueOwnsPlayhead = queuePlayingIndex.peek() !== null;
-  if (!node.isFolder && currentNodePath.value === node.path && !queueOwnsPlayhead) {
+  // Glyph: a track owning the playhead from the tree (a queue/playlist pool carries
+  // the glyph on its own row instead, so the tree's copy of its track stays plain),
+  // or a playlist whose pool is playing.
+  if (
+    !node.isFolder &&
+    !node.isPlaylist &&
+    currentNodePath.value === node.path &&
+    !queueOwnsPlayhead
+  ) {
     label.classList.add("playing");
   }
-  // The open (browsed) playlist carries a persistent accent so a re-render keeps
-  // showing which playlist is open (the highlight effect below reapplies it
-  // reactively; this keeps a mid-browse re-render in agreement).
-  if (node.isPlaylist && browsedPlaylist.peek()?.sourcePath === node.path) {
+  if (
+    node.isPlaylist &&
+    queueOwnsPlayhead &&
+    isPlaylistSource(activeQueue.peek()) &&
+    activeQueue.peek()!.sourcePath === node.path
+  ) {
+    label.classList.add("playing");
+  }
+  // Accent: the playlist filling the list face (browsed or the playing source), or a
+  // track that owns the playhead while the now-playing hero is the visible face (the
+  // track mirror). Persistent so a re-render stays in step with the reactive effect.
+  if (node.isPlaylist && shownPlaylistPath.peek() === node.path) {
+    label.classList.add("open");
+  }
+  if (
+    !node.isFolder &&
+    !node.isPlaylist &&
+    currentNodePath.value === node.path &&
+    !queueOwnsPlayhead &&
+    heroVisible.peek()
+  ) {
     label.classList.add("open");
   }
   // Selection background, reapplied on re-render like the highlight classes above
@@ -239,8 +264,18 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   // a home and titles stay aligned with sibling folders.
   if (node.isPlaylist) {
     // A playlist gets its own "stack of rows" glyph, distinct from folders and
-    // tracks, and always occupies the gutter.
-    label.appendChild(h("span", { class: "icon playlist" }));
+    // tracks, and always occupies the gutter. Like the track gutter, the glyph and the
+    // playing equalizer share one cell (see .icon.playlist), so a playing playlist
+    // swaps its glyph for the bars. The mask lives on the child so the (unmasked)
+    // equalizer sibling isn't clipped by it.
+    label.appendChild(
+      h(
+        "span",
+        { class: "icon playlist" },
+        h("span", { class: "playlist-glyph" }),
+        eqBars(),
+      ),
+    );
   } else if (node.isFolder) {
     label.appendChild(
       h("span", { class: `icon ${node.expanded ? "folder-open" : "folder"}` }),

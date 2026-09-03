@@ -20,7 +20,7 @@ import type {
   PlaylistRef,
   LeafListContext,
 } from "./types";
-import { h } from "./dom";
+import { h, eqBars } from "./dom";
 import { windowedList } from "./windowed-list";
 
 type IconKind = "browse" | "songs" | "playlist" | "artist" | "album";
@@ -73,9 +73,13 @@ export interface LibraryNavDeps {
   // The path of the playlist currently open (browsed) in the right pane, or null.
   // Read (peek) at build time to paint a playlist row's "open" accent; a matching
   // main.ts effect keeps it live as the browsed playlist changes while this list
-  // stays mounted. Mirrors the Browse tree's .open row treatment. (A playing
-  // playlist gets no row accent — for a playlist the highlight means "open" only.)
+  // stays mounted. Mirrors the Browse tree's .open row treatment.
   openPlaylistPath: () => string | null;
+  // The path of the playlist whose pool is currently playing, or null. Read (peek) at
+  // build time to paint a playlist row's equalizer glyph (.playing), the mirror of a
+  // track row; the same main.ts effect keeps it live. Orthogonal to "open" — a
+  // playlist can be playing, open, both, or neither.
+  playingPlaylistPath: () => string | null;
   // Right-click menus for the Artists / Albums / Playlists rows. main.ts owns the
   // menu construction (Play / Add to queue / Add to playlist), the navigator only
   // supplies the click coordinates and the artist/album/playlist identity.
@@ -390,6 +394,7 @@ function rootMenuBody(): HTMLElement {
       // correct on first render (the effect only repaints on later changes).
       row.setAttribute("data-playlist-path", p.path);
       if (deps.openPlaylistPath() === p.path) row.classList.add("open");
+      if (deps.playingPlaylistPath() === p.path) row.classList.add("playing");
       plHost.appendChild(row);
     }
   }
@@ -469,12 +474,20 @@ function drillRow(opts: {
     h("span", { class: "nav-primary", text: opts.primary }),
     opts.secondary && h("span", { class: "nav-secondary", text: opts.secondary }),
   );
-  const row = h(
-    "div",
-    { class: "nav-row" },
-    h("span", { class: `nav-icon nav-${opts.icon}` }),
-    cell,
-  );
+  // A playlist row can play as a unit, so its gutter mirrors the leaf track gutter: an
+  // unmasked container holding the glyph and the playing equalizer (which would be
+  // clipped if nested under the icon's own mask). Every other lens row is a plain
+  // masked glyph.
+  const iconEl =
+    opts.icon === "playlist"
+      ? h(
+          "span",
+          { class: "nav-gutter" },
+          h("span", { class: "nav-glyph nav-playlist" }),
+          eqBars(),
+        )
+      : h("span", { class: `nav-icon nav-${opts.icon}` });
+  const row = h("div", { class: "nav-row" }, iconEl, cell);
   row.addEventListener("click", () => {
     // A click here is also a keyboard-focus of the navigator, so subsequent ↑/↓
     // walk this pane (and the drill it opens) rather than the right-pane queue.

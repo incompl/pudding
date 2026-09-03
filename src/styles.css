@@ -1042,7 +1042,7 @@ html[data-mode="light"] .context-menu {
 /* On the playing row the runtime tints like the row's dimmed secondary, so the
    whole row reads as one accented unit rather than a dim time trailing a lit row. */
 .queue-row.playing .row-dur,
-.nav-track-row.playing .row-dur {
+.nav-track-row.open .row-dur {
   color: var(--accent-dim);
 }
 
@@ -1066,7 +1066,10 @@ body:not(.playback-paused) .queue-row.playing .queue-num-text {
 body:not(.playback-paused) .queue-row.playing .eq-bars {
   display: flex;
 }
-.queue-row.playing:hover .eq-bars {
+/* Prefixed with body:not(.playback-paused) so this outranks the show rule above (same
+   selector without :hover), which would otherwise win the specificity tie and leave the
+   equalizer showing behind the hover play button. */
+body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   display: none;
 }
 
@@ -2190,11 +2193,12 @@ ul {
   padding-bottom: 0.3em;
 }
 
-/* The accent row: a playing track/stream (.playing) and an open, browsed playlist
-   (.open) share it. A playlist never takes .playing — for a playlist row the accent
-   means "open" only, a deliberate exception to how tracks highlight (one meaning per
-   playlist reads clearer than doubling up open + playing). */
-#folder-tree .node-label.playing,
+/* The accent row means "the right pane is showing this row": an open, browsed playlist
+   or the playing track while the now-playing hero is up (both .open). It is orthogonal
+   to the .playing equalizer glyph, which marks the active play context — a row can be
+   playing (glyph) without being open (accent), e.g. a playing track while you browse
+   elsewhere. A stream has no browse/hero split (playing IS showing it), so it keeps the
+   accent on .playing. */
 #folder-tree .node-label.open,
 #streams-list .node-label.playing {
   color: var(--accent);
@@ -2264,7 +2268,7 @@ ul {
   color: var(--text-dim);
 }
 
-#folder-tree .node-label.playing .secondary {
+#folder-tree .node-label.open .secondary {
   color: var(--accent-dim);
 }
 
@@ -2298,7 +2302,7 @@ ul {
 #folder-tree .tree-window .artist::before {
   content: " · ";
 }
-#folder-tree .tree-window .node-label.playing .artist {
+#folder-tree .tree-window .node-label.open .artist {
   color: var(--accent-dim);
 }
 
@@ -2481,6 +2485,16 @@ ul {
   transform-origin: bottom;
   animation: eq-bounce 0.85s ease-in-out infinite;
 }
+/* Reserve the accent for the "open" row (the one the right pane is showing). A left-
+   panel row that's only playing — glyph, but no accent text — gets a text-colored
+   equalizer instead, so the bars read as part of its normal-weight title rather than
+   borrowing the open row's accent. The right-pane queue is always "the shown list", so
+   its playing row keeps the accent bars (untouched here). */
+.node-label.playing:not(.open) .eq-bars > span,
+.nav-track-row.playing:not(.open) .eq-bars > span,
+.nav-row.playing:not(.open) .eq-bars > span {
+  background-color: var(--text);
+}
 /* Distinct durations + offsets so the three bars never march in lockstep. */
 .eq-bars > span:nth-child(1) {
   animation-duration: 0.72s;
@@ -2613,22 +2627,41 @@ ul {
   visibility: hidden;
 }
 
+/* The playlist gutter mirrors the track gutter (see .icon.track): an unmasked grid
+   cell whose glyph and playing equalizer stack in one spot, so a playing playlist
+   swaps its glyph for the bars. The mask lives on the .playlist-glyph child, not the
+   .icon box, so the (unmasked) equalizer sibling isn't clipped by it. */
 .icon.playlist {
+  display: grid;
+  position: relative;
+  place-items: center;
+}
+.icon.playlist .playlist-glyph {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
   background-color: var(--text-muted);
   -webkit-mask-image: var(--playlist-icon);
   mask-image: var(--playlist-icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 1.05em;
+  mask-size: 1.05em;
 }
 
-/* Folder/playlist icons pick up the accent on row hover. (A stream's glyph is
+/* Folder/playlist glyphs pick up the accent on row hover. (A stream's glyph is
    swapped for the play button on hover, so it needs no hover tint.) */
 .node-label:hover .icon.folder,
 .node-label:hover .icon.folder-open,
-.node-label:hover .icon.playlist {
+.node-label:hover .icon.playlist .playlist-glyph {
   background-color: var(--accent);
 }
 
-/* The playing track's number takes the accent, matching the row highlight. */
-.node-label.playing .icon.track {
+/* The open row's number takes the accent, matching the row highlight (a paused
+   playing-but-not-open row shows its plain number back). */
+.node-label.open .icon.track {
   color: var(--accent);
 }
 
@@ -2641,15 +2674,29 @@ body:not(.playback-paused) .node-label.playing .icon.track .track-num {
 body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
   display: flex;
 }
-.node-label.playing:hover .icon.track .eq-bars {
+/* Prefixed to outrank the show rule above (see the queue's :hover rule for why). */
+body:not(.playback-paused) .node-label.playing:hover .icon.track .eq-bars {
   display: none;
 }
 
-/* An open playlist tints its glyph to match its accent row, the way a playing
-   track's number does — the masked icon takes the accent via background-color. (A
-   playing playlist gets no accent; for a playlist the accent means "open" only.) */
-.node-label.open .icon.playlist {
+/* An open playlist tints its glyph to match its accent row, the way an open track's
+   number does — the masked glyph takes the accent via background-color. */
+.node-label.open .icon.playlist .playlist-glyph {
   background-color: var(--accent);
+}
+
+/* A playing playlist swaps its glyph for the equalizer at rest, just like a playing
+   track swaps its number. Gated on active playback so a paused row shows its glyph
+   back, not a frozen equalizer. (Playlist rows have no hover play button, so — unlike
+   track gutters — the bars stay put on hover.) Suppressed while the playlist is open:
+   the right pane already shows the playing track's equalizer, so a second one on the
+   row is redundant. Open then reads as the accent + stack glyph; only a playing row you
+   can't currently see inside carries the bars. */
+body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .playlist-glyph {
+  visibility: hidden;
+}
+body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bars {
+  display: flex;
 }
 
 /* The playing station's glyph takes the accent, matching the row highlight. */
@@ -3204,6 +3251,46 @@ body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
   -webkit-mask-image: var(--playlist-icon);
   mask-image: var(--playlist-icon);
 }
+/* A playlist row can play as a unit, so its gutter mirrors the leaf track gutter: an
+   unmasked container (no .nav-icon background/mask of its own, which would show as a
+   filled rectangle or clip the equalizer) holding the stack glyph and the equalizer in
+   one cell. The .nav-glyph child carries the mask; the .nav-playlist class on it just
+   picks the icon. */
+.nav-gutter {
+  flex: none;
+  width: 1.1em;
+  height: 1.5em;
+  display: grid;
+  position: relative;
+  place-items: center;
+}
+.nav-gutter .nav-glyph {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+  background-color: var(--text-muted);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 1.05em;
+  mask-size: 1.05em;
+  transition: background-color 120ms ease;
+}
+.nav-row:hover .nav-gutter .nav-glyph,
+.nav-row.open .nav-gutter .nav-glyph {
+  background-color: var(--accent);
+}
+/* A playing playlist row swaps its glyph for the equalizer at rest (gated on active
+   playback so a paused row shows its glyph back). No hover play button on these rows,
+   so the bars stay put on hover. Suppressed while the playlist is open — the right pane
+   already shows the playing track's equalizer (see the tree's .icon.playlist rule). */
+body:not(.playback-paused) .nav-row.playing:not(.open) .nav-gutter .nav-glyph {
+  visibility: hidden;
+}
+body:not(.playback-paused) .nav-row.playing:not(.open) .nav-gutter .eq-bars {
+  display: flex;
+}
 /* Music note (songs) — the navigator glyph. */
 .nav-songs {
   -webkit-mask-image: var(--note-icon);
@@ -3292,22 +3379,21 @@ body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
   background-color: var(--accent);
 }
 
-/* The playing leaf row picks up the accent (title + gutter), matching the tree and
-   queue rows. */
-.nav-track-row.playing .nav-primary,
-.nav-track-row.playing .nav-num {
+/* An "open" leaf row picks up the accent (title + gutter) — a playing track while the
+   now-playing hero is up, the mirror of a browsed playlist. The .playing equalizer
+   glyph is orthogonal (below): a track playing while you browse elsewhere shows the
+   glyph without the accent. */
+.nav-track-row.open .nav-primary,
+.nav-track-row.open .nav-num {
   color: var(--accent);
 }
 
-/* An open (browsed) playlist row in the navigator takes the accent (label + glyph),
-   mirroring its Browse-tree row. Only "open" lights a playlist row here — a playing
-   playlist gets no accent (for a playlist the highlight means "open", unlike a
-   now-playing track row). */
+/* An open (browsed) playlist row in the navigator takes the accent on its label,
+   mirroring its Browse-tree row (its glyph accent lives with the .nav-gutter rules
+   above). Orthogonal to the .playing equalizer glyph — a playlist can be open, playing,
+   both, or neither. */
 .nav-row.open .nav-primary {
   color: var(--accent);
-}
-.nav-row.open .nav-icon {
-  background-color: var(--accent);
 }
 
 /* ...and swaps its number for the equalizer glyph at rest; on hover the glyph gives
@@ -3319,7 +3405,8 @@ body:not(.playback-paused) .nav-track-row.playing .nav-num-text {
 body:not(.playback-paused) .nav-track-row.playing .eq-bars {
   display: flex;
 }
-.nav-track-row.playing:hover .eq-bars {
+/* Prefixed to outrank the show rule above (see the queue's :hover rule for why). */
+body:not(.playback-paused) .nav-track-row.playing:hover .eq-bars {
   display: none;
 }
 
