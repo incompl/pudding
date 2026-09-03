@@ -165,6 +165,10 @@ export const settingsOpen = signal(false);
 // The About panel shares the right pane with Settings (mutually exclusive: the
 // same Back button dismisses either). Opened from Pudding → About Pudding.
 export const aboutOpen = signal(false);
+// The Visualizer is a third right-pane face, alongside Settings and About (all
+// three mutually exclusive, all dismissed by the same Back button). Opened from
+// Playback → Visualizer.
+export const visualizerOpen = signal(false);
 
 // Snap the right pane back to Now Playing, dismissing whichever panel face
 // (Settings or About) is up. Called from the user gestures that change what the
@@ -176,6 +180,7 @@ export const aboutOpen = signal(false);
 export function dismissRightPanel(): void {
   settingsOpen.value = false;
   aboutOpen.value = false;
+  visualizerOpen.value = false;
 }
 export const activeTab = signal<"files" | "streams">("files");
 

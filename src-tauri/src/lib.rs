@@ -2287,6 +2287,9 @@ pub fn run() {
                 "open-about" => {
                     let _ = app.emit("open-about", ());
                 }
+                "open-visualizer" => {
+                    let _ = app.emit("open-visualizer", ());
+                }
                 // Edit ▸ Undo / Redo relay to the frontend, which owns the curation
                 // history (playlist / queue reorder-remove-drag-in).
                 "edit-undo" => {
@@ -2527,6 +2530,10 @@ pub fn run() {
             let volume_down =
                 MenuItemBuilder::with_id("playback-volume-down", "Volume Down").build(app)?;
             let mute = CheckMenuItemBuilder::with_id("playback-mute", "Mute").build(app)?;
+            // Visualizer takes over the right pane (like Settings/About), relaying
+            // its intent to the frontend, which owns the pane face.
+            let visualizer =
+                MenuItemBuilder::with_id("open-visualizer", "Visualizer").build(app)?;
             let playback_menu = SubmenuBuilder::new(app, "Playback")
                 .item(&play_pause)
                 .item(&previous)
@@ -2540,6 +2547,7 @@ pub fn run() {
                 .item(&mute)
                 .separator()
                 .item(&autoadvance)
+                .item(&visualizer)
                 .build()?;
             app.manage(PlaybackMenu {
                 autoadvance,

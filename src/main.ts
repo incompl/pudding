@@ -13,6 +13,7 @@ import { engine } from "./engine-glue";
 import { h, eqBars } from "./dom";
 import { windowedList } from "./windowed-list";
 import { maybeStartE2eBridge } from "./e2e-bridge";
+import { createVisualizer } from "./visualizer";
 import { bootProfileStart, bootStep, bootProfileReport } from "./perf";
 import {
   initLibraryNav,
@@ -68,6 +69,7 @@ import {
   selectedStreamUrl,
   settingsOpen,
   aboutOpen,
+  visualizerOpen,
   activeTab,
   activeQueue,
   browsedPlaylist,
@@ -135,6 +137,7 @@ import {
   nowPlayingPanel,
   settingsPanel,
   aboutPanel,
+  visualizerPanel,
   aboutVersionEl,
   splitterEl,
   themeMatchSystemEl,
@@ -797,6 +800,7 @@ export const heroVisible = computed(
     !listFaceOpen.value &&
     !settingsOpen.value &&
     !aboutOpen.value &&
+    !visualizerOpen.value &&
     paneEditor.value === null,
 );
 
@@ -2018,12 +2022,24 @@ function setupSettings(): void {
   // which emits "open-settings"; the topbar's old gear is now the mini-player
   // toggle. About (Pudding → About Pudding) shares the pane and emits
   // "open-about". Opening one closes the other; the single Back button dismisses
-  // whichever is up, returning to now-playing.
-  void listen("open-settings", () => { aboutOpen.value = false; settingsOpen.value = true; });
-  void listen("open-about", () => { settingsOpen.value = false; aboutOpen.value = true; });
+  // whichever is up, returning to now-playing. The Visualizer (Playback →
+  // Visualizer) is a third face sharing the same pane and Back button.
+  void listen("open-settings", () => { aboutOpen.value = false; visualizerOpen.value = false; settingsOpen.value = true; });
+  void listen("open-about", () => { settingsOpen.value = false; visualizerOpen.value = false; aboutOpen.value = true; });
+  void listen("open-visualizer", () => { settingsOpen.value = false; aboutOpen.value = false; visualizerOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => {
     settingsOpen.value = false;
     aboutOpen.value = false;
+    visualizerOpen.value = false;
+  });
+
+  // The visualizer mounts into its right-pane face once; its rAF loop runs only
+  // while that face is the visible one, so it costs nothing when closed.
+  void createVisualizer(visualizerPanel).then((viz) => {
+    effect(() => {
+      if (visualizerOpen.value) viz.start();
+      else viz.stop();
+    });
   });
 
   // The About panel's main line is "pudding <version>"; the version is the app
@@ -2768,12 +2784,14 @@ function setupEffects(): void {
   effect(() => {
     const settings = settingsOpen.value;
     const about = aboutOpen.value;
-    // Settings and About are mutually exclusive faces of the right pane, both
-    // dismissed by the same Back button. Anything that yields the pane to a
-    // panel keys off whether *either* is open.
-    const panelOpen = settings || about;
+    const visualizer = visualizerOpen.value;
+    // Settings, About and Visualizer are mutually exclusive faces of the right
+    // pane, all dismissed by the same Back button. Anything that yields the pane
+    // to a panel keys off whether *any* is open.
+    const panelOpen = settings || about || visualizer;
     settingsPanel.classList.toggle("hidden", !settings);
     aboutPanel.classList.toggle("hidden", !about);
+    visualizerPanel.classList.toggle("hidden", !visualizer);
     nowPlayingPanel.classList.toggle("hidden", panelOpen);
     miniplayerBtn.classList.toggle("hidden", panelOpen);
     settingsBackBtn.classList.toggle("hidden", !panelOpen);
@@ -2788,7 +2806,10 @@ function setupEffects(): void {
   // and leaving them put avoids shuffling the search box as tabs switch. Only
   // the settings/about panels hide them.
   effect(() => {
-    playbackModesEl.classList.toggle("hidden", settingsOpen.value || aboutOpen.value);
+    playbackModesEl.classList.toggle(
+      "hidden",
+      settingsOpen.value || aboutOpen.value || visualizerOpen.value,
+    );
   });
 
   effect(() => {

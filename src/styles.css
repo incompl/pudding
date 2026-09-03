@@ -553,6 +553,15 @@ html[data-mode="light"] .context-menu {
   min-height: 0;
 }
 
+/* The Visualizer face fills the pane; its canvas is sized to this box (see
+   src/visualizer.ts). */
+#visualizer-panel {
+  flex: 1;
+  min-height: 0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
 /* About shares the right pane with Settings, but centers its short content
    (name/version + credit) the way now-playing-main does. */
 #about-panel {
@@ -1587,11 +1596,13 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
     height: 26px;
   }
 
-  /* Settings/About are unreachable in mini (their button is hidden), so force
-     the now-playing panel visible even if one was open when the window shrank.
-     ID beats the .hidden class, so no !important war with the toggle. */
+  /* Settings/About/Visualizer are unreachable in mini (their menu/button is
+     hidden), so force the now-playing panel visible even if one was open when
+     the window shrank. ID beats the .hidden class, so no !important war with
+     the toggle. */
   #settings-panel,
-  #about-panel {
+  #about-panel,
+  #visualizer-panel {
     display: none !important;
   }
   #now-playing-panel {

@@ -68,6 +68,16 @@ const RING_BUFFER_SECONDS: f32 = 1.0;
 // to be free on the event loop.
 const POSITION_EMIT_INTERVAL_MS: u64 = 50;
 
+// Waveform (visualizer) tap. The audio callback copies the samples it just
+// wrote into a second ring buffer; a background thread drains it and emits
+// ~30 Hz frames of the most recent oscilloscope waveform, decimated to a fixed
+// point count. Event-based (not a Tauri Channel); the frontend owns the look.
+const WAVEFORM_EMIT_INTERVAL_MS: u64 = 33;
+// Sliding window of mono samples the scope is drawn from (~21 ms at 48 kHz).
+const WAVEFORM_WINDOW: usize = 1024;
+// Points emitted per frame — the window decimated down to this many amplitudes.
+const WAVEFORM_POINTS: usize = 256;
+
 // rubato chunk size in input frames. Larger = better resampling efficiency,
 // smaller = lower latency. 1024 is the conventional sweet spot.
 const RESAMPLER_CHUNK_FRAMES: usize = 1024;
@@ -227,6 +237,13 @@ pub struct ErrorEvent {
     pub message: String,
 }
 
+// Visualizer waveform frame: `samples` are the most recent oscilloscope
+// amplitudes in roughly [-1, 1], left to right. Emitted ~30 Hz while playing.
+#[derive(Serialize, Clone)]
+pub struct WaveformEvent {
+    pub samples: Vec<f32>,
+}
+
 // Now-playing info for a radio stream. `station` comes from the icy-name
 // response header on connect; `title` is the latest in-band StreamTitle.
 // Emitted on every (re)connect and whenever the title changes.
@@ -317,6 +334,12 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     let ring_samples = (output_rate as f32 * RING_BUFFER_SECONDS) as usize * OUT_CHANNELS;
     let (rb_producer, rb_consumer) = RingBuffer::<f32>::new(ring_samples);
 
+    // Second ring for the visualizer tap: the audio callback pushes, the
+    // spectrum thread drains. Sized to a handful of FFT windows so a slow
+    // spectrum tick can't back-pressure the audio thread.
+    let viz_samples = WAVEFORM_WINDOW * OUT_CHANNELS * 4;
+    let (viz_producer, viz_consumer) = RingBuffer::<f32>::new(viz_samples);
+
     let shared = Arc::new(SharedState::new());
     let origins = Arc::new(Mutex::new(Origins::default()));
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<Command>();
@@ -334,9 +357,15 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
         std::thread::Builder::new()
             .name("audio-output".into())
             .spawn(move || {
-                let stream =
-                    match build_stream(&device, &stream_cfg, sample_format, rb_consumer, shared) {
-                        Ok(s) => s,
+                let stream = match build_stream(
+                    &device,
+                    &stream_cfg,
+                    sample_format,
+                    rb_consumer,
+                    shared,
+                    viz_producer,
+                ) {
+                    Ok(s) => s,
                         Err(e) => {
                             let _ = ready_tx.send(Err(e));
                             return;
@@ -391,6 +420,18 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
             .map_err(|e| format!("spawn position thread: {e}"))?;
     }
 
+    // Spectrum (visualizer) thread. Drains the viz ring, runs the FFT, and
+    // emits bar frames. Owns the viz consumer; nothing else reads it.
+    {
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name("audio-spectrum".into())
+            .spawn(move || {
+                waveform_emit_loop(viz_consumer, app);
+            })
+            .map_err(|e| format!("spawn spectrum thread: {e}"))?;
+    }
+
     Ok(AudioEngine { cmd_tx, shared })
 }
 
@@ -407,6 +448,10 @@ struct ConsumerState {
     // reading. Stored in the closure (not an atomic) since only the audio
     // thread ever reads or writes it.
     last_flush_gen: u64,
+    // Visualizer tap: a copy of every audible sample is pushed here for the
+    // spectrum thread to analyze. Real-time safe (lock-free, no alloc); if the
+    // ring is full we drop samples rather than block the audio thread.
+    viz: RbProducer<f32>,
 }
 
 fn build_stream(
@@ -415,11 +460,13 @@ fn build_stream(
     sample_format: SampleFormat,
     rb: RbConsumer<f32>,
     shared: Arc<SharedState>,
+    viz: RbProducer<f32>,
 ) -> Result<cpal::Stream, String> {
     let mut state = ConsumerState {
         rb,
         shared,
         last_flush_gen: 0,
+        viz,
     };
 
     let err_fn = |err| {
@@ -521,6 +568,16 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
         .shared
         .frames_played
         .fetch_add(frames, Ordering::Relaxed);
+
+    // Visualizer tap. Copy the samples we just produced into the viz ring for
+    // the spectrum thread. push() never blocks or allocates; once the ring is
+    // full we stop (drop the rest) so the audio thread is never held up. The
+    // spectrum thread drains far faster than we fill, so this rarely trips.
+    for &s in out[..written].iter() {
+        if state.viz.push(s).is_err() {
+            break;
+        }
+    }
 }
 
 // === Decode loop ===
@@ -1733,6 +1790,80 @@ fn position_emit_loop(
                 queue_ended_sent = false;
             }
         }
+    }
+}
+
+// === Waveform (visualizer) thread ===
+//
+// Drains the viz ring the audio callback fills, keeps a sliding window of the
+// most recent mono samples, and ~30 Hz emits that window decimated to a fixed
+// point count — a plain oscilloscope feed. All the look (glow, starfield,
+// feedback) lives in the frontend; this just delivers clean amplitudes.
+fn waveform_emit_loop(mut viz: RbConsumer<f32>, app: AppHandle) {
+    // Sliding window of the most recent mono samples.
+    let mut mono: VecDeque<f32> = VecDeque::with_capacity(WAVEFORM_WINDOW);
+    let mut scratch: Vec<f32> = Vec::new();
+    let zeros = vec![0.0f32; WAVEFORM_POINTS];
+    // Decimation factor: average this many window samples per emitted point.
+    let block = WAVEFORM_WINDOW / WAVEFORM_POINTS;
+
+    loop {
+        std::thread::sleep(Duration::from_millis(WAVEFORM_EMIT_INTERVAL_MS));
+
+        // Drain everything available. Keep an even count so interleaved stereo
+        // stays pair-aligned across ticks (the odd leftover waits for next tick).
+        let avail = viz.slots() & !1;
+        let mut drained_any = false;
+        if avail > 0 {
+            if let Ok(chunk) = viz.read_chunk(avail) {
+                let (a, b) = chunk.as_slices();
+                scratch.clear();
+                scratch.extend_from_slice(a);
+                scratch.extend_from_slice(b);
+                chunk.commit_all();
+                drained_any = true;
+
+                // Downmix interleaved stereo → mono, keeping only the last N.
+                let mut i = 0;
+                while i + 1 < scratch.len() {
+                    if mono.len() == WAVEFORM_WINDOW {
+                        mono.pop_front();
+                    }
+                    mono.push_back(0.5 * (scratch[i] + scratch[i + 1]));
+                    i += 2;
+                }
+            }
+        }
+
+        // Nothing new this tick (paused, silence, underrun): emit a flat line so
+        // the scope settles to center rather than freezing on the last frame.
+        if !drained_any {
+            let _ = app.emit(
+                "audio:waveform",
+                WaveformEvent {
+                    samples: zeros.clone(),
+                },
+            );
+            continue;
+        }
+
+        // Wait until we have a full window before the first real frame.
+        if mono.len() < WAVEFORM_WINDOW {
+            continue;
+        }
+
+        // Decimate the window to WAVEFORM_POINTS by block-averaging: mild low-pass
+        // that tames noise without flattening the waveform's shape.
+        let win = mono.make_contiguous();
+        let samples: Vec<f32> = (0..WAVEFORM_POINTS)
+            .map(|p| {
+                let start = p * block;
+                let sum: f32 = win[start..start + block].iter().sum();
+                sum / block as f32
+            })
+            .collect();
+
+        let _ = app.emit("audio:waveform", WaveformEvent { samples });
     }
 }
 
