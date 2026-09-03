@@ -165,10 +165,19 @@ export const settingsOpen = signal(false);
 // The About panel shares the right pane with Settings (mutually exclusive: the
 // same Back button dismisses either). Opened from Pudding → About Pudding.
 export const aboutOpen = signal(false);
-// The Visualizer is a third right-pane face, alongside Settings and About (all
-// three mutually exclusive, all dismissed by the same Back button). Opened from
-// Playback → Visualizer.
-export const visualizerOpen = signal(false);
+// The Now Playing hero renders one of two views, a persisted set-once
+// preference chosen from View ▸ Now Playing: the album-art card ("art") or the
+// MilkDrop visualizer ("visualizer"). Unlike Settings/About, the visualizer is
+// NOT a pane takeover — it's an alternate face of the hero, so the transport
+// controls and nav bar stay put beneath it.
+export type NowPlayingView = "art" | "visualizer";
+export const nowPlayingView = signal<NowPlayingView>("art");
+
+// In-app "full screen": the now-playing hero covers the window (left panel +
+// splitter hidden), controls auto-hide on idle. Transient (never persisted);
+// only meaningful while the hero face is up. Toggled from View ▸ Enter Full
+// Screen, the hover button, or Escape.
+export const nowPlayingFullscreen = signal(false);
 
 // Snap the right pane back to Now Playing, dismissing whichever panel face
 // (Settings or About) is up. Called from the user gestures that change what the
@@ -180,7 +189,6 @@ export const visualizerOpen = signal(false);
 export function dismissRightPanel(): void {
   settingsOpen.value = false;
   aboutOpen.value = false;
-  visualizerOpen.value = false;
 }
 export const activeTab = signal<"files" | "streams">("files");
 

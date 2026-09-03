@@ -80,6 +80,14 @@ struct WindowMenu {
     miniplayer: CheckMenuItem<Wry>,
 }
 
+// The View ▸ Now Playing radio-style pair (Album Art vs. Visualizer). The frontend
+// owns the persisted preference and keeps exactly one checked
+// (set_now_playing_view_checked), the same way it drives the Repeat trio.
+struct ViewMenu {
+    np_view_art: CheckMenuItem<Wry>,
+    np_view_visualizer: CheckMenuItem<Wry>,
+}
+
 // Handles into the Playlist menu that the frontend keeps in sync: the "Save as
 // Playlist" item is enabled only while an ephemeral queue is the active pool
 // (set_save_playlist_enabled), "Move Playlist File…" is enabled only while a
@@ -1617,6 +1625,14 @@ fn set_miniplayer_checked(menu: State<WindowMenu>, mini: bool) {
     let _ = menu.miniplayer.set_checked(mini);
 }
 
+// Sync the View ▸ Now Playing radio pair: exactly one of Album Art / Visualizer
+// is checked. Called whenever the view changes (menu or startup restore).
+#[tauri::command]
+fn set_now_playing_view_checked(menu: State<ViewMenu>, view: String) {
+    let _ = menu.np_view_art.set_checked(view == "art");
+    let _ = menu.np_view_visualizer.set_checked(view == "visualizer");
+}
+
 // Enable/disable "Save Queue as Playlist" (⌘S). The frontend calls this as playback
 // state changes: only an ephemeral queue that's the active pool can be
 // converted (a saved playlist already autosaves, nothing else is convertible).
@@ -2287,8 +2303,19 @@ pub fn run() {
                 "open-about" => {
                     let _ = app.emit("open-about", ());
                 }
-                "open-visualizer" => {
-                    let _ = app.emit("open-visualizer", ());
+                // View ▸ Now Playing ▸ Album Art / Visualizer are radio-style
+                // check items; each relays its target view. The frontend owns
+                // the preference (persists it, re-syncs the checkmarks).
+                "np-view-art" => {
+                    let _ = app.emit("np-view", "art");
+                }
+                "np-view-visualizer" => {
+                    let _ = app.emit("np-view", "visualizer");
+                }
+                // View ▸ Enter Full Screen relays the toggle; the frontend owns
+                // the in-app fullscreen mode (a hero view, not a window change).
+                "np-fullscreen" => {
+                    let _ = app.emit("np-fullscreen-toggle", ());
                 }
                 // Edit ▸ Undo / Redo relay to the frontend, which owns the curation
                 // history (playlist / queue reorder-remove-drag-in).
@@ -2530,10 +2557,6 @@ pub fn run() {
             let volume_down =
                 MenuItemBuilder::with_id("playback-volume-down", "Volume Down").build(app)?;
             let mute = CheckMenuItemBuilder::with_id("playback-mute", "Mute").build(app)?;
-            // Visualizer takes over the right pane (like Settings/About), relaying
-            // its intent to the frontend, which owns the pane face.
-            let visualizer =
-                MenuItemBuilder::with_id("open-visualizer", "Visualizer").build(app)?;
             let playback_menu = SubmenuBuilder::new(app, "Playback")
                 .item(&play_pause)
                 .item(&previous)
@@ -2547,7 +2570,6 @@ pub fn run() {
                 .item(&mute)
                 .separator()
                 .item(&autoadvance)
-                .item(&visualizer)
                 .build()?;
             app.manage(PlaybackMenu {
                 autoadvance,
@@ -2556,6 +2578,35 @@ pub fn run() {
                 repeat_all,
                 repeat_one,
                 mute,
+            });
+
+            // View menu: which Now Playing hero view is shown (Album Art vs.
+            // Visualizer, radio-style check items) and Enter Full Screen. This is
+            // where macOS apps (Music/iTunes) put presentation choices — the
+            // visualizer and full screen — as distinct from Playback's transport.
+            // The two view items are kept mutually exclusive from the frontend
+            // (set_now_playing_view_checked), like the Repeat trio.
+            let np_view_art =
+                CheckMenuItemBuilder::with_id("np-view-art", "Album Art").build(app)?;
+            let np_view_visualizer =
+                CheckMenuItemBuilder::with_id("np-view-visualizer", "Visualizer").build(app)?;
+            let now_playing_menu = SubmenuBuilder::new(app, "Now Playing")
+                .item(&np_view_art)
+                .item(&np_view_visualizer)
+                .build()?;
+            // ⌃⌘F is Apple's standard Enter Full Screen accelerator; ours drives
+            // the in-app cover rather than a native window fullscreen.
+            let fullscreen = MenuItemBuilder::with_id("np-fullscreen", "Enter Full Screen")
+                .accelerator("Ctrl+Cmd+F")
+                .build(app)?;
+            let view_menu = SubmenuBuilder::new(app, "View")
+                .item(&now_playing_menu)
+                .separator()
+                .item(&fullscreen)
+                .build()?;
+            app.manage(ViewMenu {
+                np_view_art,
+                np_view_visualizer,
             });
 
             // Playlist menu: New / Open… / Open Recent ▸ then Save Queue as Playlist
@@ -2614,13 +2665,14 @@ pub fn run() {
             app.manage(WindowMenu { miniplayer });
 
             // Order follows macOS convention: the app menu, then File (which owns
-            // New/Open/Save — playlists are Pudding's only document type),
-            // Edit, our Playback menu, and Window last.
+            // New/Open/Save — playlists are Pudding's only document type), Edit,
+            // View (presentation choices), our Playback menu, and Window last.
             let menu = MenuBuilder::new(app)
                 .items(&[
                     &app_menu,
                     &playlist_menu,
                     &edit_menu,
+                    &view_menu,
                     &playback_menu,
                     &window_menu,
                 ])
@@ -2669,6 +2721,7 @@ pub fn run() {
             set_repeat_checked,
             set_mute_checked,
             set_miniplayer_checked,
+            set_now_playing_view_checked,
             set_save_playlist_enabled,
             set_move_playlist_enabled,
             set_edit_undo_state,

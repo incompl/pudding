@@ -133,10 +133,44 @@
             <ul id="queue-list"></ul>
           </div>
           <!-- The now-playing hero face: the full-pane card, shown whenever the
-               list face isn't up (see styles.css). -->
+               list face isn't up (see styles.css). Renders one of two views —
+               the album-art card (below) or the visualizer layer — chosen by
+               View ▸ Now Playing (`.view-visualizer` on the panel). The
+               fullscreen button overlays either view, revealed on hover. -->
           <div id="now-playing-main">
+            <!-- The MilkDrop visualizer's canvas mounts here (src/visualizer.ts);
+                 shown only under `.view-visualizer`, its rAF loop gated to that. -->
+            <div id="now-playing-visualizer"></div>
             <p id="now-playing-empty" class="empty-state">Pudding time.</p>
             <img id="now-playing-art" class="hidden" alt="" />
+            <!-- View toggle: swaps album art <-> visualizer. Like the fullscreen
+                 button it shows the icon of the view it switches TO (a sine
+                 wave while art is up; a picture glyph while the visualizer is up),
+                 driven by `.view-visualizer` on the panel. The sine wave (an
+                 oscilloscope trace, drawn nearly square — peak-to-trough height
+                 ~= its width so it fills the icon box) reads as "waveform/visualizer"
+                 and stays legible at overlay-button size, leaving the equalizer
+                 meaning free for a future EQ control. The picture glyph (frame + sun + mountain)
+                 reads as "artwork," keeping the disc icon reserved for "album"
+                 (see --album-icon, used for album rows in search). -->
+            <button id="now-playing-view-btn" class="np-overlay-btn" type="button" title="Show visualizer" aria-label="Show visualizer">
+              <svg class="icon-viz" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2 12 Q7 -8 12 12 T22 12" />
+              </svg>
+              <svg class="icon-art" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="9" cy="9" r="2" />
+                <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" />
+              </svg>
+            </button>
+            <button id="now-playing-fullscreen-btn" class="np-overlay-btn" type="button" title="Full screen" aria-label="Full screen">
+              <svg class="fs-enter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+              </svg>
+              <svg class="fs-exit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
+              </svg>
+            </button>
             <div id="now-playing-text">
               <p id="now-playing-title" class="np-link"><span class="marquee-inner"></span></p>
               <p id="now-playing-artist" class="hidden np-link"><span class="marquee-inner"></span></p>
@@ -230,9 +264,6 @@
             <p class="credit">vibed by the best<br/><a href="https://incompl.com">incompl.com</a></p>
           </div>
         </div>
-        <!-- The Visualizer shares the right pane with Settings/About (same Back
-             button). Its canvas is created and driven by src/visualizer.ts. -->
-        <div id="visualizer-panel" class="hidden"></div>
       </section>
     </main>
     <div id="toast" aria-live="polite"></div>

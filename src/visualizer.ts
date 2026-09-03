@@ -6,10 +6,11 @@
 // center, a green bloom around it, and feedback trails that flow outward
 // (up/down) from the line and fade — the classic MilkDrop persistence effect.
 //
-// It mounts into a container (the #visualizer-panel right-pane face) and fills
-// it, resizing with the pane. The rAF loop is gated by start()/stop() so it
-// only burns cycles while the panel is the visible face (see setupSettings in
-// src/main.ts, driven off visualizerOpen).
+// It mounts into a container (the #now-playing-visualizer layer inside the
+// now-playing hero) and fills it, resizing with the pane. The rAF loop is gated
+// by start()/stop() so it only burns cycles while the visualizer is the chosen
+// hero view and that face is visible (see setupSettings in src/main.ts, driven
+// off nowPlayingView + heroVisible).
 //
 // Rendering model:
 //   - A ping-pong pair of offscreen buffers holds the bloom. Each frame the

@@ -69,7 +69,9 @@ import {
   selectedStreamUrl,
   settingsOpen,
   aboutOpen,
-  visualizerOpen,
+  nowPlayingView,
+  type NowPlayingView,
+  nowPlayingFullscreen,
   activeTab,
   activeQueue,
   browsedPlaylist,
@@ -137,7 +139,9 @@ import {
   nowPlayingPanel,
   settingsPanel,
   aboutPanel,
-  visualizerPanel,
+  nowPlayingVisualizerEl,
+  nowPlayingViewBtn,
+  nowPlayingFullscreenBtn,
   aboutVersionEl,
   splitterEl,
   themeMatchSystemEl,
@@ -269,6 +273,8 @@ const KEY_AUTOADVANCE_FILES = "autoadvanceFiles"; // legacy, migrated on load
 // Playback modes remembered across launches, like every mainstream player.
 const KEY_SHUFFLE = "shuffleMode";
 const KEY_REPEAT = "repeatMode";
+// Which Now Playing hero view the user last chose (art vs. visualizer).
+const KEY_NOW_PLAYING_VIEW = "nowPlayingView";
 
 // The user's last place in the Files-tab navigator (the serialized drill stack),
 // restored on launch so browse/songs/artists/albums drill-downs survive a restart.
@@ -795,12 +801,13 @@ export const paneView = computed<PaneView>(() => {
 // while the hero (which is showing that track) is what the right pane displays, the
 // same way a browsed playlist's row is accented because its contents fill the pane.
 // A signal so the highlight effects repaint as you flip faces or open a panel.
+// The visualizer is a face OF the hero (art vs. visualizer), not a pane
+// takeover, so it doesn't gate this — the hero is "visible" under either view.
 export const heroVisible = computed(
   () =>
     !listFaceOpen.value &&
     !settingsOpen.value &&
     !aboutOpen.value &&
-    !visualizerOpen.value &&
     paneEditor.value === null,
 );
 
@@ -1704,6 +1711,11 @@ const persistAutoadvance = async (): Promise<void> => {
   await app.store.save();
 };
 
+const persistNowPlayingView = async (): Promise<void> => {
+  await app.store.set(KEY_NOW_PLAYING_VIEW, nowPlayingView.value);
+  await app.store.save();
+};
+
 export const persistActiveTab = async (): Promise<void> => {
   await app.store.set(KEY_ACTIVE_TAB, activeTab.value);
   await app.store.save();
@@ -2022,22 +2034,22 @@ function setupSettings(): void {
   // which emits "open-settings"; the topbar's old gear is now the mini-player
   // toggle. About (Pudding → About Pudding) shares the pane and emits
   // "open-about". Opening one closes the other; the single Back button dismisses
-  // whichever is up, returning to now-playing. The Visualizer (Playback →
-  // Visualizer) is a third face sharing the same pane and Back button.
-  void listen("open-settings", () => { aboutOpen.value = false; visualizerOpen.value = false; settingsOpen.value = true; });
-  void listen("open-about", () => { settingsOpen.value = false; visualizerOpen.value = false; aboutOpen.value = true; });
-  void listen("open-visualizer", () => { settingsOpen.value = false; aboutOpen.value = false; visualizerOpen.value = true; });
+  // whichever is up, returning to now-playing. Opening either also leaves full
+  // screen (a hero mode), since the panel takes the pane the hero was covering.
+  void listen("open-settings", () => { aboutOpen.value = false; nowPlayingFullscreen.value = false; settingsOpen.value = true; });
+  void listen("open-about", () => { settingsOpen.value = false; nowPlayingFullscreen.value = false; aboutOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => {
     settingsOpen.value = false;
     aboutOpen.value = false;
-    visualizerOpen.value = false;
   });
 
-  // The visualizer mounts into its right-pane face once; its rAF loop runs only
-  // while that face is the visible one, so it costs nothing when closed.
-  void createVisualizer(visualizerPanel).then((viz) => {
+  // The visualizer mounts once into its layer inside the now-playing hero (not a
+  // pane takeover). Its rAF loop runs only while it's the chosen hero view AND
+  // the hero face is actually visible (not covered by the list, an editor, or a
+  // panel), so it costs nothing otherwise.
+  void createVisualizer(nowPlayingVisualizerEl).then((viz) => {
     effect(() => {
-      if (visualizerOpen.value) viz.start();
+      if (nowPlayingView.value === "visualizer" && heroVisible.value) viz.start();
       else viz.stop();
     });
   });
@@ -2784,14 +2796,13 @@ function setupEffects(): void {
   effect(() => {
     const settings = settingsOpen.value;
     const about = aboutOpen.value;
-    const visualizer = visualizerOpen.value;
-    // Settings, About and Visualizer are mutually exclusive faces of the right
-    // pane, all dismissed by the same Back button. Anything that yields the pane
-    // to a panel keys off whether *any* is open.
-    const panelOpen = settings || about || visualizer;
+    // Settings and About are mutually exclusive pane takeovers, both dismissed by
+    // the same Back button. Anything that yields the pane to a panel keys off
+    // whether *any* is open. (The visualizer is NOT here — it's a hero view, not
+    // a takeover, so it never hides the now-playing panel or its controls.)
+    const panelOpen = settings || about;
     settingsPanel.classList.toggle("hidden", !settings);
     aboutPanel.classList.toggle("hidden", !about);
-    visualizerPanel.classList.toggle("hidden", !visualizer);
     nowPlayingPanel.classList.toggle("hidden", panelOpen);
     miniplayerBtn.classList.toggle("hidden", panelOpen);
     settingsBackBtn.classList.toggle("hidden", !panelOpen);
@@ -2808,8 +2819,98 @@ function setupEffects(): void {
   effect(() => {
     playbackModesEl.classList.toggle(
       "hidden",
-      settingsOpen.value || aboutOpen.value || visualizerOpen.value,
+      settingsOpen.value || aboutOpen.value,
     );
+  });
+
+  // Now Playing view (art vs. visualizer): a class on the panel that CSS uses to
+  // swap the art/text card for the visualizer canvas layer. The transport
+  // controls and nav bar are siblings, so they stay put under either view.
+  effect(() => {
+    nowPlayingPanel.classList.toggle(
+      "view-visualizer",
+      nowPlayingView.value === "visualizer",
+    );
+  });
+
+  // In-app full screen: the hero covers the window, controls auto-hide on idle.
+  // Only meaningful while the hero face is up, so if a list/editor/panel takes
+  // the pane the body class drops even though the preference is retained — it
+  // re-applies when the hero returns. Not persisted.
+  let idleTimer = 0;
+  const armIdle = (): void => {
+    document.body.classList.remove("np-idle");
+    window.clearTimeout(idleTimer);
+    if (nowPlayingFullscreen.value) {
+      idleTimer = window.setTimeout(
+        () => document.body.classList.add("np-idle"),
+        2500,
+      );
+    }
+  };
+  // Reset the idle timer on *real* pointer movement only. The animating
+  // visualizer canvas makes WebKit re-fire mousemove for a stationary pointer
+  // (the pixels beneath it change each frame), which would otherwise keep the
+  // timer pinned and the controls permanently visible in visualizer full screen.
+  let lastX = -1;
+  let lastY = -1;
+  document.addEventListener("mousemove", (e) => {
+    if (e.clientX === lastX && e.clientY === lastY) return;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    armIdle();
+  });
+  effect(() => {
+    const fs = nowPlayingFullscreen.value && heroVisible.value;
+    document.body.classList.toggle("np-fullscreen", fs);
+    if (fs) {
+      armIdle();
+    } else {
+      window.clearTimeout(idleTimer);
+      document.body.classList.remove("np-idle");
+    }
+  });
+
+  // Entering full screen only makes sense while the hero owns the pane; exiting
+  // always works. The hover button toggles, View ▸ Enter Full Screen and Escape
+  // relay here too.
+  const toggleFullscreen = (on?: boolean): void => {
+    const next = on ?? !nowPlayingFullscreen.value;
+    if (next && !heroVisible.value) return;
+    nowPlayingFullscreen.value = next;
+  };
+  nowPlayingFullscreenBtn.addEventListener("click", () => toggleFullscreen());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && nowPlayingFullscreen.value) {
+      toggleFullscreen(false);
+    }
+  });
+  void listen("np-fullscreen-toggle", () => toggleFullscreen());
+
+  // View ▸ Now Playing radio items relay the chosen view; persist it and re-sync
+  // the menu checkmarks (the reactive effect below also fires on the change, but
+  // an explicit re-check covers the re-selecting-the-active-view no-op case).
+  void listen<string>("np-view", (event) => {
+    const view = event.payload === "visualizer" ? "visualizer" : "art";
+    nowPlayingView.value = view;
+    void persistNowPlayingView();
+    void invoke("set_now_playing_view_checked", { view });
+  });
+  // The hero's overlay toggle flips between the two views; the menu checkmarks and
+  // the button's own label re-sync through the effect below (which fires because
+  // the value always changes here).
+  nowPlayingViewBtn.addEventListener("click", () => {
+    nowPlayingView.value =
+      nowPlayingView.value === "visualizer" ? "art" : "visualizer";
+    void persistNowPlayingView();
+  });
+  effect(() => {
+    void invoke("set_now_playing_view_checked", { view: nowPlayingView.value });
+    // Label the toggle by the view it switches TO (matching its swapped icon).
+    const label =
+      nowPlayingView.value === "art" ? "Show visualizer" : "Show album art";
+    nowPlayingViewBtn.title = label;
+    nowPlayingViewBtn.setAttribute("aria-label", label);
   });
 
   effect(() => {
@@ -2978,6 +3079,13 @@ async function init(): Promise<void> {
   const storedRepeat = await app.store.get<RepeatMode>(KEY_REPEAT);
   repeatMode.value =
     storedRepeat === "all" || storedRepeat === "one" ? storedRepeat : "off";
+
+  // Now Playing view (album art vs. visualizer), defaults to art. The reactive
+  // sync effect in setupSettings re-checks the matching menu radio item.
+  nowPlayingView.value =
+    (await app.store.get<NowPlayingView>(KEY_NOW_PLAYING_VIEW)) === "visualizer"
+      ? "visualizer"
+      : "art";
 
   // Appearance: read the persisted mode + per-mode accents, then wire the apply
   // effect + OS-scheme listener. applyTheme runs immediately (first effect pass),
