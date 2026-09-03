@@ -622,6 +622,55 @@ html[data-mode="light"] .context-menu {
   display: none;
 }
 
+/* Track banner: the title/artist that flashes over the visualizer on each new
+   track (src/visualizer.ts showTrack). Centered horizontally and anchored low,
+   a fixed distance up from the bottom. Layout-inert (pointer-events none) and
+   invisible until .show fades it in; dropping the class fades it back out. The
+   asymmetric transition — fast in, slow out — lives in the two rules below.
+   Heavy text-shadow keeps it legible over the bright, busy scene. */
+.viz-track-banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  /* Anchored a fixed, font-relative distance up from the bottom edge (em, so it
+     tracks the text size) rather than a percentage of the pane — a spot chosen
+     to sit low and read as balanced against the tall waveform band, not a
+     hairline center. */
+  bottom: 2.4em;
+  z-index: 1;
+  text-align: center;
+  /* Cap the width and center the block so long titles wrap into stacked lines
+     (growing upward, since the bottom edge is the fixed anchor) instead of
+     running the full width of the pane. */
+  max-width: min(70%, 32rem);
+  margin-inline: auto;
+  padding: 0 1.5em;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 1.1s ease;
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.9), 0 0 3px rgba(0, 0, 0, 0.8);
+}
+.viz-track-banner.show {
+  opacity: 1;
+  transition: opacity 0.45s ease;
+}
+.viz-track-title {
+  font-size: 1.7em;
+  font-weight: 600;
+  color: #fff;
+  line-height: 1.2;
+  /* Wrap long titles across multiple lines; balance evens out the line lengths
+     so a two-line title reads as a tidy centered block. */
+  text-wrap: balance;
+}
+.viz-track-artist {
+  font-size: 1.15em;
+  color: rgba(255, 255, 255, 0.82);
+  margin-top: 0.15em;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
 /* Fullscreen toggle: a subtle glassy button in the hero's top-right, revealed
    on hover (or while focused, for keyboard). Shared by both views; overlays the
    art and the visualizer alike. Shows the enter icon at rest, the exit icon

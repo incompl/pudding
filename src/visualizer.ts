@@ -132,7 +132,15 @@ const TRAIL_SECS = 0.035;
 export interface Visualizer {
   start(): void;
   stop(): void;
+  // Flash the track's title/artist over the scene: fade in, hold, fade out.
+  // Called on each new track while the visualizer is the visible hero view.
+  showTrack(title: string, artist: string | null): void;
 }
+
+// Track banner timing (ms). Fast fade in, a comfortable hold, slow fade out —
+// the fade durations live in the CSS (.viz-track-banner); HOLD is how long the
+// text stays fully lit before we drop the class and let it fade back out.
+const BANNER_HOLD_MS = 3800;
 
 // Build a visualizer that fills `container` and can be started/stopped. Async
 // only because it subscribes to the waveform event stream once up front.
@@ -147,6 +155,19 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
   } satisfies Partial<CSSStyleDeclaration>);
   container.appendChild(canvas);
   const ctx = canvas.getContext("2d")!;
+
+  // Track banner: a DOM overlay (not painted on the canvas) so it stays crisp
+  // text and rides CSS transitions. Positioned by the stylesheet, centered and
+  // anchored low near the bottom. Hidden until showTrack.
+  const banner = document.createElement("div");
+  banner.className = "viz-track-banner";
+  const bannerTitle = document.createElement("div");
+  bannerTitle.className = "viz-track-title";
+  const bannerArtist = document.createElement("div");
+  bannerArtist.className = "viz-track-artist";
+  banner.append(bannerTitle, bannerArtist);
+  container.appendChild(banner);
+  let bannerTimer = 0;
 
   // Device-pixel dimensions; recomputed from the container on every resize.
   let W = 0;
@@ -391,6 +412,19 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
       running = false;
       if (rafId) cancelAnimationFrame(rafId);
       rafId = 0;
+    },
+    showTrack(title, artist) {
+      bannerTitle.textContent = title;
+      bannerArtist.textContent = artist ?? "";
+      bannerArtist.classList.toggle("hidden", !artist);
+      // Restart the fade from the top even if a banner is still on screen:
+      // drop the class, force a reflow so the browser registers opacity 0, then
+      // re-add it so the fade-in transition fires again.
+      banner.classList.remove("show");
+      void banner.offsetWidth;
+      banner.classList.add("show");
+      clearTimeout(bannerTimer);
+      bannerTimer = window.setTimeout(() => banner.classList.remove("show"), BANNER_HOLD_MS);
     },
   };
 }

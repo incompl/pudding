@@ -2052,6 +2052,22 @@ function setupSettings(): void {
       if (nowPlayingView.value === "visualizer" && heroVisible.value) viz.start();
       else viz.stop();
     });
+    // Announce each new track over the visualizer: flash its title/artist that
+    // fades in and back out. Only when the visualizer is the visible view (no
+    // point animating a hidden layer), and only on an actual track change — not
+    // when merely switching into the view or re-running for other signals.
+    let lastAnnounced = "";
+    effect(() => {
+      const title = npTitle.value;
+      const artist = npArtist.value;
+      const key = `${title}\n${artist ?? ""}`;
+      const changed = key !== lastAnnounced;
+      lastAnnounced = key;
+      if (!changed || !title) return;
+      if (nowPlayingView.value === "visualizer" && heroVisible.value) {
+        viz.showTrack(title, artist);
+      }
+    });
   });
 
   // The About panel's main line is "pudding <version>"; the version is the app
