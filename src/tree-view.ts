@@ -16,7 +16,6 @@ import {
   app,
   queuePlayingIndex,
   currentNodePath,
-  activeQueue,
   browsedPlaylist,
   treeSelection,
   activeTab,
@@ -209,21 +208,18 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   // Indent by depth — the flat window has no nested <ul> to carry the old padding.
   if (depth > 0) label.style.marginLeft = `${depth * INDENT_EM}em`;
   // Mirror the highlight effect's basis: a live queue row means a queue owns the
-  // playhead, so the tree's copy of its track stays plain and the playlist's own
-  // row carries the accent instead. Keeps a mid-playback re-render in agreement.
+  // playhead, so the tree's copy of its track stays plain (the queue/playlist owns
+  // the now-playing highlight). Keeps a mid-playback re-render in agreement.
+  // Playlists themselves never take the playing accent — for a playlist row the
+  // accent means "open" only (see the .open paint below), a deliberate exception
+  // to how tracks highlight.
   const queueOwnsPlayhead = queuePlayingIndex.peek() !== null;
   if (!node.isFolder && currentNodePath.value === node.path && !queueOwnsPlayhead) {
     label.classList.add("playing");
   }
-  if (node.isPlaylist && queueOwnsPlayhead) {
-    const q = activeQueue.peek();
-    if (q?.kind === "playlist" && q.sourcePath === node.path) {
-      label.classList.add("playing");
-    }
-  }
-  // The open (browsed) playlist carries a persistent selection background so a
-  // re-render keeps showing which playlist is open (the highlight effect below
-  // reapplies it reactively; this keeps a mid-browse re-render in agreement).
+  // The open (browsed) playlist carries a persistent accent so a re-render keeps
+  // showing which playlist is open (the highlight effect below reapplies it
+  // reactively; this keeps a mid-browse re-render in agreement).
   if (node.isPlaylist && browsedPlaylist.peek()?.sourcePath === node.path) {
     label.classList.add("open");
   }

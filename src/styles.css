@@ -2190,21 +2190,18 @@ ul {
   padding-bottom: 0.3em;
 }
 
+/* The accent row: a playing track/stream (.playing) and an open, browsed playlist
+   (.open) share it. A playlist never takes .playing — for a playlist row the accent
+   means "open" only, a deliberate exception to how tracks highlight (one meaning per
+   playlist reads clearer than doubling up open + playing). */
 #folder-tree .node-label.playing,
+#folder-tree .node-label.open,
 #streams-list .node-label.playing {
   color: var(--accent);
 }
 
-/* The open (browsed-for-viewing) playlist keeps a persistent selection
-   background so the tree shows which playlist is open — distinct from the
-   accent-tinted .playing row, which means it's the one currently playing. */
-#folder-tree .node-label.open {
-  background: var(--surface);
-}
-
 /* Multi-select rows carry an accent-tinted background so a built-up selection
-   reads at a glance, distinct from the neutral .open playlist background. The
-   accent text of a .playing row still shows through on top. */
+   reads at a glance. The accent text of a .playing row still shows through on top. */
 #folder-tree .node-label.selected,
 #streams-list .node-label.selected {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
@@ -2648,9 +2645,10 @@ body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
   display: none;
 }
 
-/* A playlist playing from the tree tints its glyph to match, the way the track
-   number does — the masked icon takes the accent via background-color. */
-.node-label.playing .icon.playlist {
+/* An open playlist tints its glyph to match its accent row, the way a playing
+   track's number does — the masked icon takes the accent via background-color. (A
+   playing playlist gets no accent; for a playlist the accent means "open" only.) */
+.node-label.open .icon.playlist {
   background-color: var(--accent);
 }
 
@@ -3299,6 +3297,17 @@ body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
 .nav-track-row.playing .nav-primary,
 .nav-track-row.playing .nav-num {
   color: var(--accent);
+}
+
+/* An open (browsed) playlist row in the navigator takes the accent (label + glyph),
+   mirroring its Browse-tree row. Only "open" lights a playlist row here — a playing
+   playlist gets no accent (for a playlist the highlight means "open", unlike a
+   now-playing track row). */
+.nav-row.open .nav-primary {
+  color: var(--accent);
+}
+.nav-row.open .nav-icon {
+  background-color: var(--accent);
 }
 
 /* ...and swaps its number for the equalizer glyph at rest; on hover the glyph gives

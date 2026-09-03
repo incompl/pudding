@@ -70,6 +70,12 @@ export interface LibraryNavDeps {
   // double-click plays it. Both reuse the app's existing playlist paths.
   openPlaylist: (path: string) => void;
   playPlaylist: (path: string) => void;
+  // The path of the playlist currently open (browsed) in the right pane, or null.
+  // Read (peek) at build time to paint a playlist row's "open" accent; a matching
+  // main.ts effect keeps it live as the browsed playlist changes while this list
+  // stays mounted. Mirrors the Browse tree's .open row treatment. (A playing
+  // playlist gets no row accent — for a playlist the highlight means "open" only.)
+  openPlaylistPath: () => string | null;
   // Right-click menus for the Artists / Albums / Playlists rows. main.ts owns the
   // menu construction (Play / Add to queue / Add to playlist), the navigator only
   // supplies the click coordinates and the artist/album/playlist identity.
@@ -369,18 +375,22 @@ function rootMenuBody(): HTMLElement {
     plHost.appendChild(h("div", { class: "nav-placeholder-row", text: "No playlists yet" }));
   } else {
     for (const p of items) {
-      plHost.appendChild(
-        addNavRow(
-          drillRow({
-            icon: "playlist",
-            primary: p.name,
-            onOpen: () => deps.openPlaylist(p.path),
-            onPlay: () => deps.playPlaylist(p.path),
-            onMenu: (x, y) => deps.showPlaylistMenu(x, y, p.path),
-          }),
-          () => deps.openPlaylist(p.path),
-        ),
+      const row = addNavRow(
+        drillRow({
+          icon: "playlist",
+          primary: p.name,
+          onOpen: () => deps.openPlaylist(p.path),
+          onPlay: () => deps.playPlaylist(p.path),
+          onMenu: (x, y) => deps.showPlaylistMenu(x, y, p.path),
+        }),
+        () => deps.openPlaylist(p.path),
       );
+      // Carry the path so the reactive highlight effect (main.ts) can find this row,
+      // and paint the accent now so a row built while its playlist is already open is
+      // correct on first render (the effect only repaints on later changes).
+      row.setAttribute("data-playlist-path", p.path);
+      if (deps.openPlaylistPath() === p.path) row.classList.add("open");
+      plHost.appendChild(row);
     }
   }
   host.appendChild(plHost);

@@ -2515,16 +2515,15 @@ function setupEffects(): void {
   effect(() => {
     const path = currentNodePath.value;
     const url = currentStreamUrl.value;
-    const queue = activeQueue.value;
     // A live queue row is the reactive signal for "a queue owns the playhead":
     // non-null only while a queue is the audible pool, null for folder play (and
     // when a queue rests drained). Drives this effect where queueIsActivePool()
     // — which reads non-reactive currentParent — cannot, so the highlight moves
     // even when the file path is unchanged (same track replayed from the tree).
     const queueOwnsPlayhead = queuePlayingIndex.value !== null;
-    // A browsed playlist marks its tree row as "open" (a selection background),
-    // independent of what's playing — so the panel shows which playlist is open
-    // even when a different source owns the playhead.
+    // A browsed playlist marks its tree row as "open" (an accent), independent of
+    // what's playing — so the panel shows which playlist is open even when a
+    // different source owns the playhead.
     const browsed = browsedPlaylist.value;
     document
       .querySelectorAll(
@@ -2540,14 +2539,8 @@ function setupEffects(): void {
         .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(path)}"]`)
         ?.classList.add("playing");
     }
-    // A playlist playing from the tree lights up its own row (the .m3u8 node,
-    // keyed by sourcePath) instead of its member track — the tree's stand-in for
-    // "playing from here".
-    if (queueOwnsPlayhead && queue?.kind === "playlist" && queue.sourcePath) {
-      document
-        .querySelector(`#folder-tree .node-label[data-path="${CSS.escape(queue.sourcePath)}"]`)
-        ?.classList.add("playing");
-    }
+    // A playing playlist gets no row accent — for a playlist row the accent means
+    // "open" only (painted below), a deliberate exception to how tracks highlight.
     if (url) {
       document
         .querySelector(`#streams-list .node-label[data-stream-url="${CSS.escape(url)}"]`)
@@ -2685,6 +2678,21 @@ function setupEffects(): void {
       .forEach((el) => {
         const t = app.navLeafTracks[Number(el.dataset.rowIndex)];
         el.classList.toggle("playing", !!t && isLivePool && t.path === path);
+      });
+  });
+
+  // The navigator's playlist rows (root "Playlists" section) mark the open (browsed)
+  // playlist with the accent — .open only; a playing playlist gets no row accent (for
+  // a playlist the highlight means "open", unlike track rows). Repaint mounted rows
+  // when the browsed playlist changes; a freshly built row paints itself (see the
+  // playlist loop in library-nav), so this only covers changes while it stays mounted.
+  effect(() => {
+    const browsed = browsedPlaylist.value?.sourcePath ?? null;
+    document
+      .querySelectorAll<HTMLElement>("#library-nav .nav-row[data-playlist-path]")
+      .forEach((el) => {
+        const p = el.dataset.playlistPath;
+        el.classList.toggle("open", !!p && p === browsed);
       });
   });
 
@@ -3057,6 +3065,8 @@ async function init(): Promise<void> {
     // A playlist row: single-click opens it in the right pane, double-click plays.
     openPlaylist: (path) => void browsePlaylistPath(path),
     playPlaylist: (path) => void playPlaylistPath(path),
+    // The open (browsed) playlist path, for the nav row's "open" accent highlight.
+    openPlaylistPath: () => browsedPlaylist.peek()?.sourcePath ?? null,
     showArtistMenu: showArtistContextMenu,
     showAlbumMenu: showAlbumContextMenu,
     showPlaylistMenu: showPlaylistContextMenu,
