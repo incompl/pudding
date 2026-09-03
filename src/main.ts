@@ -367,7 +367,7 @@ export function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: numb
   };
 }
 
-function formatTime(seconds: number): string {
+export function formatTime(seconds: number): string {
   if (!isFinite(seconds) || seconds < 0) seconds = 0;
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
@@ -1298,6 +1298,16 @@ export function renderLeafTrackList(
       cell.appendChild(h("span", { class: "nav-secondary", text: secondaryText }));
     }
 
+    // Trailing runtime, right-aligned and dimmed. Shown only past the two-column
+    // breakpoint (see .row-dur) — where there's room — and only when the track's
+    // duration is known (out-of-library / undecodable rows carry none, so the slot
+    // is simply absent rather than a blank cell). One inline element on the same
+    // line, so the row stays its uniform windowed height.
+    const dur =
+      t.duration != null && t.duration > 0
+        ? h("span", { class: "row-dur", text: formatTime(t.duration) })
+        : null;
+
     const row = h(
       "div",
       {
@@ -1359,6 +1369,7 @@ export function renderLeafTrackList(
       },
       num,
       cell,
+      dur,
     );
     if (navSel.signal.peek().has(t)) row.classList.add("selected");
     // The now-playing accent, applied at build time so a row scrolled into view is

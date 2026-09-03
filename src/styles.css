@@ -892,6 +892,11 @@ html[data-mode="light"] .context-menu {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Query container for the row layout: when this pane is wide enough the rows
+     split the artist into its own column (see the @container listcol block).
+     Keyed off the pane's own inline size, not the window/viewport, so each pane
+     decides independently and the switch is width-driven, hence predictable. */
+  container: listcol / inline-size;
 }
 
 .queue-row {
@@ -984,6 +989,63 @@ html[data-mode="light"] .context-menu {
   content: " · ";
 }
 
+/* Two-column rows once the pane is wide enough (container query on #queue-list's
+   inline size). The artist leaves the inline title line for its own column, so a
+   long title truncates within its track instead of shoving the artist off the end,
+   and the artists line up as a scannable second column. Below the breakpoint the
+   rows stay the inline title · artist form above. Gated on :has(.queue-secondary)
+   so a row with no artist keeps its title on the full width instead of truncating
+   at the mid-column with an empty artist cell. */
+@container listcol (min-width: 28rem) {
+  .queue-text:has(.queue-secondary) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 1.5em;
+    align-items: baseline;
+    /* Each cell truncates on its own now, so the cell as a whole must not clip. */
+    overflow: visible;
+  }
+  .queue-text:has(.queue-secondary) .queue-primary,
+  .queue-text:has(.queue-secondary) .queue-secondary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* The column gap is the separator now — drop the inline middot. */
+  .queue-secondary::before {
+    content: none;
+  }
+}
+
+/* Trailing per-track runtime, shared by the queue/playlist rows and the left-pane
+   lens leaf lists (both sit inside a `listcol` container). Hidden by default and
+   revealed only past the same 28rem breakpoint that splits the row into two
+   columns — the runtime is the extra affordance the widened row can afford, so it
+   appears exactly when there's room. flex:none keeps its intrinsic width while the
+   title/artist cell (flex:1) takes the slack and pushes it to the right edge (just
+   left of the queue's hover ✕, which reserves its slot even at rest). Dimmed with
+   tabular figures so the times form a clean right-aligned column. Rows with no
+   known duration omit the span entirely (see the row builders), so a blank slot
+   never appears. */
+.row-dur {
+  display: none;
+  flex: none;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+@container listcol (min-width: 28rem) {
+  .row-dur {
+    display: block;
+  }
+}
+/* On the playing row the runtime tints like the row's dimmed secondary, so the
+   whole row reads as one accented unit rather than a dim time trailing a lit row. */
+.queue-row.playing .row-dur,
+.nav-track-row.playing .row-dur {
+  color: var(--accent-dim);
+}
+
 /* The playing row picks up the accent, matching the tree's .playing highlight;
    the inline artist takes the dimmer accent, like the tree's playing .artist. */
 .queue-row.playing .queue-primary,
@@ -1030,14 +1092,17 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
   background: none;
 }
 
-/* Row remove (curation): a muted ✕ at the row's right edge, revealed on row
-   hover so it doesn't clutter the list at rest. */
+/* Row remove (curation): a muted ✕ at the row's right edge, revealed on row hover
+   so it doesn't clutter the list at rest. Absolutely positioned (not a flex item)
+   so it reserves no inline slot — the trailing runtime (.row-dur) then sits flush
+   to the edge instead of floating in front of a permanent gap, and the ✕ swaps
+   into that same spot on hover (see the .row-dur hover rule), mirroring the number
+   gutter's number↔play swap. Right offset clears the scroll list's scrollbar. */
 .queue-remove {
-  flex: none;
-  margin-left: auto;
-  /* Clear the scroll list's scrollbar gutter so the ✕ isn't obscured when the
-     list is long enough to scroll. */
-  margin-right: 0.5em;
+  position: absolute;
+  right: 0.5em;
+  top: 50%;
+  transform: translateY(-50%);
   border: none;
   background: transparent;
   color: var(--text-dim);
@@ -1051,6 +1116,12 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
 
 .queue-row:hover .queue-remove {
   opacity: 1;
+}
+/* Hover swaps the runtime out for the ✕ that takes its place, so the two never
+   collide at the edge. Queue rows only — the lens leaf lists have no ✕, so their
+   runtime stays put on hover. */
+.queue-row:hover .row-dur {
+  opacity: 0;
 }
 
 .queue-remove:hover {
@@ -3063,6 +3134,42 @@ body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
 }
 .nav-secondary::before {
   content: " · ";
+}
+
+/* Query container for the library lens lists (Songs / Artists / Albums), the same
+   width-driven two-column switch as the queue (see #queue-list). The windowed
+   spacer's inline size equals the row width, so the query tracks the pane. */
+.nav-window {
+  container: listcol / inline-size;
+}
+
+/* Two-column lens rows past the breakpoint, mirroring the queue (see the
+   .queue-text block). The subtitle (artist·album on Songs, artist on Albums) leaves
+   the inline title line for its own column, so a long title truncates within its
+   track instead of shoving the subtitle off, and the subtitles form a scannable
+   column. Gated on :has(.nav-secondary): rows with no subtitle (Artists, whose row
+   is just a name) keep the full width for the primary instead of truncating it at
+   the mid-column with an empty second cell. */
+@container listcol (min-width: 28rem) {
+  .nav-cell:has(.nav-secondary) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 1.5em;
+    align-items: baseline;
+    /* Each cell truncates on its own now, so the cell as a whole must not clip. */
+    overflow: visible;
+  }
+  .nav-cell:has(.nav-secondary) .nav-primary,
+  .nav-cell:has(.nav-secondary) .nav-secondary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* The column gap is the separator now — drop the inline middot. */
+  .nav-cell .nav-secondary::before {
+    content: none;
+  }
 }
 
 /* Masked line-art gutter icons, tinted like the tree icons: muted at rest,

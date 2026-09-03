@@ -66,6 +66,7 @@ import {
   addToPlaylistItem,
   toast,
   clearArt,
+  formatTime,
   UNTITLED_PLAYLIST_TITLE,
 } from "./main";
 
@@ -166,10 +167,18 @@ function buildQueueRow(
       },
     },
   });
+  // Trailing runtime, right-aligned and dimmed, sitting just left of the hover ✕.
+  // Shown only past the two-column breakpoint (see .row-dur) and only when the
+  // track's duration is known — a missing/out-of-library row carries none, so the
+  // slot is simply absent rather than a blank cell.
+  const dur =
+    !t.missing && t.duration != null && t.duration > 0
+      ? h("span", { class: "row-dur", text: formatTime(t.duration) })
+      : null;
   // The view index, so the reactive selection effect (and the drag-drop drop-index
   // math) can map back to the full list without relying on a unique path (duplicates
   // share one) — essential once the list is windowed and only a slice is mounted.
-  const li = h("li", { class: "queue-row", data: { rowIndex: i } }, num, text, remove);
+  const li = h("li", { class: "queue-row", data: { rowIndex: i } }, num, text, dur, remove);
   if (isPlaying) li.classList.add("playing");
   // Multi-select background, reapplied on remount like .playing (the list selection
   // effect keeps it live between remounts as the window scrolls).
