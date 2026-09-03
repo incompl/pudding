@@ -31,12 +31,15 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 - Live library watching: add or edit files on disk and the app updates itself
 - Search across title, artist, album, and filename — or match a folder and play it as an album
 - Search results show rather than play: artist, album, folder, and playlist hits open their view, and a track hit reveals itself in the folder tree — right-click any track hit to Play it or add it to a playlist
+- Cmd/Shift-click to select multiple tracks; every menu verb — play, queue, add to playlist — acts on the whole selection
+- Right-click a track to jump to its artist or album, or reveal it with Show in Finder
 - Embedded album art, and disc/track-number-aware sorting
+- Edit an audio file's metadata tags right in the app.
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
 
 ### Playback queue
 
-- Create and manage queues using context menus and drag-and-drop.
+- Right-click tracks to Create queue, then Play next (insert after the playhead) or Add to queue (append); reorder by dragging, remove with Delete
 
 ### Playlists
 
@@ -56,11 +59,11 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 
 ### Interface
 
-- Light and dark themes, each with a variety of flavors
+- Light and dark themes, each with a variety of flavors, and can auto-switch with the macOS light / dark setting
 - Compact mini player mode (double click now playing)
 - Window size and position remembered separately for mini and normal modes
 - Keyboard shortcuts for playback, volume, and seeking (see below)
-- macOS system integration: Now Playing in Control Center and the lock screen (with album art), plus hardware media keys for play/pause and next/previous
+- macOS system integration: Now Playing in Control Center and the lock screen (with album art), plus hardware media keys and lock-screen controls for play/pause, next/previous, and scrubbing
 
 ## Install
 
@@ -78,6 +81,7 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `Space` - play / pause
 - `↑` / `↓` - move the selection up / down the list
 - `Enter` - play the selected row
+- `Delete` / `Backspace` - remove the selected row(s) from the queue or playlist
 - `Esc` - clear the selection
 - `⌘↑` / `⌘↓` (or `+` / `-`) - volume up / down (10%)
 - `←` / `→` - seek back / forward 10s (files only)
@@ -95,7 +99,7 @@ A few things that aren't obvious:
 ## Tech stack
 
 - [Tauri](https://tauri.app/) 2 - desktop shell
-- Rust backend with [rusqlite](https://github.com/rusqlite/rusqlite) for the metadata cache, [lofty](https://github.com/Serial-ATA/lofty-rs) for tag reading, and [notify](https://github.com/notify-rs/notify) for live library watching
+- Rust backend with [rusqlite](https://github.com/rusqlite/rusqlite) for the metadata cache, [lofty](https://github.com/Serial-ATA/lofty-rs) for reading and writing tags, and [notify](https://github.com/notify-rs/notify) for live library watching
 - TypeScript frontend built with [Vite](https://vitejs.dev/) - no UI framework, reactivity via [Preact signals](https://github.com/preactjs/signals)
 - Native Rust audio engine ([symphonia](https://github.com/pdeljanov/Symphonia) + [cpal](https://github.com/RustAudio/cpal)) for gapless file playback and internet radio with in-band ICY now-playing metadata
 
