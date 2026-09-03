@@ -50,6 +50,51 @@ const PALETTE: [number, number, number][] = [
 ];
 const COLOR_SECS = 6;
 
+// --- Color-space helpers -----------------------------------------------------
+// The crossfade runs in HSL, not RGB. Straight RGB interpolation between two
+// saturated (especially complementary) shades passes through a low-saturation,
+// bright midpoint that reads as a flash to white. Rotating hue around the wheel
+// while holding saturation/lightness keeps every intermediate shade vivid.
+const rgb2hsl = ([r, g, b]: [number, number, number]): [number, number, number] => {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0) return [0, 0, l];
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let h: number;
+  if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h *= 60;
+  if (h < 0) h += 360;
+  return [h, s, l];
+};
+
+// HSL → "r, g, b" string, ready to drop into an rgba() template.
+const hsl2rgb = (h: number, s: number, l: number): string => {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = ((h % 360) + 360) % 360 / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = l - c / 2;
+  return `${Math.round((r + m) * 255)}, ${Math.round((g + m) * 255)}, ${Math.round((b + m) * 255)}`;
+};
+
+// Precomputed HSL form of the palette; the crossfade lerps between these.
+const PALETTE_HSL = PALETTE.map(rgb2hsl);
+
 // Pick a palette index different from `cur`, so the drift never crossfades a
 // color into itself and the order stays unpredictable.
 const pickColor = (cur: number): number => {
@@ -223,14 +268,21 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
       colorTo = pickColor(colorFrom);
     }
     // Current neon shade for the bloom; the background gets a very dark cast of
-    // the same hue so the whole scene drifts through the palette together.
+    // the same hue so the whole scene drifts through the palette together. The
+    // crossfade runs in HSL and rotates hue the short way around the wheel, so
+    // intermediate shades stay saturated instead of washing out toward white.
     const f = colorT / COLOR_SECS;
-    const ca = PALETTE[colorFrom];
-    const cb = PALETTE[colorTo];
-    const gr = Math.round(ca[0] + (cb[0] - ca[0]) * f);
-    const gg = Math.round(ca[1] + (cb[1] - ca[1]) * f);
-    const gb = Math.round(ca[2] + (cb[2] - ca[2]) * f);
-    const glow = `${gr}, ${gg}, ${gb}`;
+    const ca = PALETTE_HSL[colorFrom];
+    const cb = PALETTE_HSL[colorTo];
+    let dh = cb[0] - ca[0];
+    if (dh > 180) dh -= 360;
+    else if (dh < -180) dh += 360;
+    const h = ca[0] + dh * f;
+    const s = ca[1] + (cb[1] - ca[1]) * f;
+    const l = ca[2] + (cb[2] - ca[2]) * f;
+    const glow = hsl2rgb(h, s, l);
+    // Split into channels for the dark background cast below.
+    const [gr, gg, gb] = glow.split(", ").map(Number);
 
     // 1) Feedback: fade + zoom the previous bloom outward from center.
     w.setTransform(1, 0, 0, 1, 0, 0);
