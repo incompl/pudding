@@ -2034,15 +2034,31 @@ async function setupWindowSize(
   });
 }
 
-// Graphic equalizer. Ten fixed ISO frequency bands plus a preamp, each a
-// vertical gain slider (−12…+12 dB, centered at 0). The bars take their color
-// from --accent via CSS (accent-color on the range inputs), so they follow the
-// selected theme like the rest of the UI.
+// Graphic equalizer. Ten fixed ISO frequency bands plus a preamp, each an
+// abstract rectangular bar (−12…+12 dB) whose fill is painted from the center
+// (0 dB) outward — up for boost, down for cut — rather than a native slider. The
+// bar is still a real <input type=range> underneath (free drag + keyboard), just
+// with the OS chrome hidden; we draw the fill with a CSS var gradient the way the
+// seek bar does. The fill color follows --accent, and (stage 2) fades toward
+// white with the live energy at that band.
 // Slider 0 is the wideband preamp; the rest are per-band peaking gains at these
 // center frequencies (matched to EQ_FREQS in the Rust engine). Labels are for
-// display only — the engine owns the actual frequencies.
-const EQ_BANDS = ["Pre", "32", "64", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"];
+// display only — the engine owns the actual frequencies. "Preamp" is set apart
+// from the ten frequency bands by a gap + divider (see .eq-band.preamp in CSS).
+const EQ_BANDS = ["Preamp", "32", "64", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"];
 const eqSliders: HTMLInputElement[] = [];
+const eqBandEls: HTMLElement[] = [];
+
+// Paint one band's fill height: the bar fills from the bottom up to the slider's
+// value, so a flat EQ sits half-height (0 dB = 50%), boosts grow taller and cuts
+// shrink — always something on screen to see and to color. Exposed to the CSS
+// track gradient as --fill (% of track height).
+function paintBand(i: number): void {
+  const v = Number(eqSliders[i].value); // −12…+12
+  // Set the var on the slider itself: it declares its own --fill/--energy
+  // defaults, which would shadow anything set on the parent .eq-band.
+  eqSliders[i].style.setProperty("--fill", `${((v + 12) / 24) * 100}%`);
+}
 
 // The band gains (everything but the preamp at index 0).
 function eqBandGains(): number[] {
@@ -2058,12 +2074,19 @@ function pushEq(): void {
   });
 }
 
+// Live per-band energy (0..1) from the engine's audio:spectrum feed, smoothed on
+// screen with a fast attack / slow release so the bars punch on beats but ease
+// back down (mirrors the visualizer's energy easing).
+const eqEnergy = new Float32Array(EQ_BANDS.length - 1);
+let eqLatestBands: number[] = [];
+
 function setupEqualizer(): void {
   eqSliders.length = 0;
+  eqBandEls.length = 0;
   eqBandsEl.replaceChildren(
     ...EQ_BANDS.map((label, i) => {
       const band = document.createElement("div");
-      band.className = "eq-band";
+      band.className = i === 0 ? "eq-band preamp" : "eq-band";
       const slider = document.createElement("input");
       slider.type = "range";
       slider.className = "eq-slider";
@@ -2072,8 +2095,12 @@ function setupEqualizer(): void {
       slider.step = "1";
       slider.value = "0";
       slider.setAttribute("aria-label", i === 0 ? "Preamp gain" : `${label} Hz gain`);
-      slider.addEventListener("input", pushEq);
+      slider.addEventListener("input", () => {
+        paintBand(i);
+        pushEq();
+      });
       eqSliders.push(slider);
+      eqBandEls.push(band);
       const cap = document.createElement("span");
       cap.className = "eq-band-label";
       cap.textContent = label;
@@ -2081,6 +2108,7 @@ function setupEqualizer(): void {
       return band;
     }),
   );
+  eqBandEls.forEach((_, i) => paintBand(i));
 
   // On/off bypasses the whole chain in the engine; the sliders stay put (and
   // stay editable) so it's an instant A/B against your curve. A subtle dimming
@@ -2095,11 +2123,51 @@ function setupEqualizer(): void {
 
   // Reset flattens every slider (preamp included) back to 0.
   eqResetBtn.addEventListener("click", () => {
-    for (const s of eqSliders) s.value = "0";
+    eqSliders.forEach((s, i) => {
+      s.value = "0";
+      paintBand(i);
+    });
     pushEq();
   });
 
   syncEnabled();
+  setupEqSpectrum();
+}
+
+// Stage 2: drive each frequency band's fill color from accent (quiet) → white
+// (loud) using the engine's live per-band energy. The rAF loop runs only while
+// the Equalizer face is open, so it costs nothing otherwise (same gating idea as
+// the visualizer). The preamp is wideband, not a frequency band, so it has no
+// energy and stays plain accent.
+function setupEqSpectrum(): void {
+  void listen<{ bands: number[] }>("audio:spectrum", (e) => {
+    eqLatestBands = e.payload.bands;
+  });
+
+  let rafId = 0;
+  const frame = () => {
+    // When bypassed, let the bars settle back to accent (energy → 0) rather than
+    // pulsing a chain that isn't actually shaping the sound.
+    const bypassed = !eqEnabledEl.checked;
+    for (let b = 0; b < eqEnergy.length; b++) {
+      const target = bypassed ? 0 : Math.min(1, eqLatestBands[b] ?? 0);
+      // Fast attack, slow release.
+      eqEnergy[b] += (target - eqEnergy[b]) * (target > eqEnergy[b] ? 0.5 : 0.12);
+      // Sliders are offset by 1 (index 0 is the preamp). Set on the slider, not
+      // the band, so it isn't shadowed by the slider's own --energy default.
+      eqSliders[b + 1]?.style.setProperty("--energy", (eqEnergy[b] * 100).toFixed(1));
+    }
+    rafId = requestAnimationFrame(frame);
+  };
+
+  effect(() => {
+    if (equalizerOpen.value) {
+      if (!rafId) rafId = requestAnimationFrame(frame);
+    } else if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+  });
 }
 
 function setupSettings(): void {

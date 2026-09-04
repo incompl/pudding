@@ -77,6 +77,14 @@ const WAVEFORM_EMIT_INTERVAL_MS: u64 = 33;
 const WAVEFORM_WINDOW: usize = 1024;
 // Points emitted per frame — the window decimated down to this many amplitudes.
 const WAVEFORM_POINTS: usize = 256;
+// Longer mono window used only for the per-band spectrum (audio:spectrum). ~85 ms
+// at 48 kHz — enough periods to resolve the lowest EQ band (32 Hz ≈ 31 ms) via
+// Goertzel. The oscilloscope keeps its own shorter WAVEFORM_WINDOW.
+const SPECTRUM_WINDOW: usize = 4096;
+// Perceptual gain applied to each band's RMS magnitude before clamping to [0,1].
+// Tuned so ordinary program material rests around accent and strong passages push
+// the band toward white; raise to whiten more eagerly.
+const SPECTRUM_GAIN: f32 = 3.2;
 
 // rubato chunk size in input frames. Larger = better resampling efficiency,
 // smaller = lower latency. 1024 is the conventional sweet spot.
@@ -268,6 +276,14 @@ pub struct ErrorEvent {
 #[derive(Serialize, Clone)]
 pub struct WaveformEvent {
     pub samples: Vec<f32>,
+}
+
+// Per-band spectrum frame for the equalizer's live fade: one normalized energy
+// (0..1) per EQ_FREQS band, computed by Goertzel over the recent audio. Emitted
+// on the same ~30 Hz cadence as the waveform while playing.
+#[derive(Serialize, Clone)]
+pub struct SpectrumEvent {
+    pub bands: Vec<f32>,
 }
 
 // Now-playing info for a radio stream. `station` comes from the icy-name
@@ -580,7 +596,7 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
         std::thread::Builder::new()
             .name("audio-spectrum".into())
             .spawn(move || {
-                waveform_emit_loop(viz_consumer, app);
+                waveform_emit_loop(viz_consumer, app, output_rate);
             })
             .map_err(|e| format!("spawn spectrum thread: {e}"))?;
     }
@@ -1964,11 +1980,19 @@ fn position_emit_loop(
 // most recent mono samples, and ~30 Hz emits that window decimated to a fixed
 // point count — a plain oscilloscope feed. All the look (glow, starfield,
 // feedback) lives in the frontend; this just delivers clean amplitudes.
-fn waveform_emit_loop(mut viz: RbConsumer<f32>, app: AppHandle) {
+fn waveform_emit_loop(mut viz: RbConsumer<f32>, app: AppHandle, sample_rate: u32) {
     // Sliding window of the most recent mono samples.
     let mut mono: VecDeque<f32> = VecDeque::with_capacity(WAVEFORM_WINDOW);
+    // Longer sliding window feeding the per-band spectrum (Goertzel needs several
+    // periods of the lowest band to resolve it). Fed from the same drained samples.
+    let mut spec: VecDeque<f32> = VecDeque::with_capacity(SPECTRUM_WINDOW);
     let mut scratch: Vec<f32> = Vec::new();
     let zeros = vec![0.0f32; WAVEFORM_POINTS];
+    let band_zeros = vec![0.0f32; EQ_BAND_COUNT];
+    // Precompute the Goertzel coefficient per band for this sample rate.
+    let coeffs: [f32; EQ_BAND_COUNT] = std::array::from_fn(|k| {
+        2.0 * (std::f32::consts::TAU * EQ_FREQS[k] / sample_rate as f32).cos()
+    });
     // Decimation factor: average this many window samples per emitted point.
     let block = WAVEFORM_WINDOW / WAVEFORM_POINTS;
 
@@ -1988,20 +2012,27 @@ fn waveform_emit_loop(mut viz: RbConsumer<f32>, app: AppHandle) {
                 chunk.commit_all();
                 drained_any = true;
 
-                // Downmix interleaved stereo → mono, keeping only the last N.
+                // Downmix interleaved stereo → mono, keeping only the last N in
+                // each window (the short scope window and the long spectrum window).
                 let mut i = 0;
                 while i + 1 < scratch.len() {
+                    let m = 0.5 * (scratch[i] + scratch[i + 1]);
                     if mono.len() == WAVEFORM_WINDOW {
                         mono.pop_front();
                     }
-                    mono.push_back(0.5 * (scratch[i] + scratch[i + 1]));
+                    mono.push_back(m);
+                    if spec.len() == SPECTRUM_WINDOW {
+                        spec.pop_front();
+                    }
+                    spec.push_back(m);
                     i += 2;
                 }
             }
         }
 
-        // Nothing new this tick (paused, silence, underrun): emit a flat line so
-        // the scope settles to center rather than freezing on the last frame.
+        // Nothing new this tick (paused, silence, underrun): emit a flat line and
+        // silent bands so the scope settles to center and the EQ bars ease back to
+        // accent rather than freezing on the last frame.
         if !drained_any {
             let _ = app.emit(
                 "audio:waveform",
@@ -2009,7 +2040,40 @@ fn waveform_emit_loop(mut viz: RbConsumer<f32>, app: AppHandle) {
                     samples: zeros.clone(),
                 },
             );
+            let _ = app.emit(
+                "audio:spectrum",
+                SpectrumEvent {
+                    bands: band_zeros.clone(),
+                },
+            );
             continue;
+        }
+
+        // Per-band energy via Goertzel over the long window, once it has filled.
+        // Hann-windowed to curb spectral leakage between the octave-spaced bands.
+        if spec.len() == SPECTRUM_WINDOW {
+            let win = spec.make_contiguous();
+            let n = win.len();
+            let norm = 2.0 / n as f32; // Hann halves the average amplitude; ×2 restores it
+            let bands: Vec<f32> = coeffs
+                .iter()
+                .map(|&coeff| {
+                    let mut s_prev = 0.0f32;
+                    let mut s_prev2 = 0.0f32;
+                    for (j, &x) in win.iter().enumerate() {
+                        // Hann window w[j] = 0.5 - 0.5*cos(2πj/(N-1)).
+                        let w = 0.5 - 0.5 * (std::f32::consts::TAU * j as f32 / (n - 1) as f32).cos();
+                        let s = x * w + coeff * s_prev - s_prev2;
+                        s_prev2 = s_prev;
+                        s_prev = s;
+                    }
+                    let power = s_prev2 * s_prev2 + s_prev * s_prev - coeff * s_prev * s_prev2;
+                    let mag = power.max(0.0).sqrt() * norm;
+                    // Perceptual-ish: sqrt lifts quiet detail, then scale+clamp.
+                    (mag.sqrt() * SPECTRUM_GAIN).clamp(0.0, 1.0)
+                })
+                .collect();
+            let _ = app.emit("audio:spectrum", SpectrumEvent { bands });
         }
 
         // Wait until we have a full window before the first real frame.

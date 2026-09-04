@@ -621,6 +621,36 @@ html[data-mode="light"] .context-menu {
   accent-color: var(--accent);
 }
 
+/* The graph: the dB scale column beside the bar row, both filling the pane.
+   min-width: 0 lets it shrink to the pane instead of its content's min-content
+   width, which would push the rightmost bands past the viewport (see the same
+   note on #now-playing-panel). */
+.eq-graph {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  gap: 0.6em;
+  min-height: 0;
+  min-width: 0;
+  padding: 1em 0.5em;
+}
+
+/* Fixed dB scale (the "levels") down the left edge. Its three labels pin to the
+   top / center / bottom so they line up with each bar's +12 / 0 / −12 — the
+   center label marks the zero baseline the bars fill out from. Bottom padding
+   matches the bands' label gap so the scale aligns to the bar tops, not the
+   captions. */
+.eq-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding-bottom: calc(0.6em + 1em); /* band label + its gap */
+  font-size: 0.7em;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 #eq-bands {
   flex: 1;
   display: flex;
@@ -628,7 +658,7 @@ html[data-mode="light"] .context-menu {
   justify-content: space-between;
   gap: 0.5em;
   min-height: 0;
-  padding: 1em 0.5em;
+  min-width: 0;
   transition: opacity 0.15s ease;
 }
 
@@ -643,23 +673,96 @@ html[data-mode="light"] .context-menu {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.6em;
+  gap: 1em;
   min-height: 0;
   /* Shrink to an equal fraction of the row rather than the slider/label
      min-content, so all eleven bands always fit the pane width. */
   min-width: 0;
 }
 
-/* The gain slider is drawn vertically; accent-color paints the filled track and
-   thumb, so the bars follow the theme accent. */
+/* The preamp is wideband, not a frequency band: set it apart from the ten bands
+   with extra space and a hairline divider on its trailing edge. */
+.eq-band.preamp {
+  margin-right: 0.5em;
+  border-right: 1px solid var(--surface);
+  padding-right: 1em;
+}
+
+/* Each gain control is an abstract rectangular bar, not an OS slider: hide the
+   native track/thumb and paint our own fill. --fill (set per band by paintBand)
+   is the fill height as % of the track from the bottom — 0 dB rests at 50%, so
+   there's always a bar to see. --fill-color is the fill color, which stage 2
+   fades from accent toward white with the band's live energy (--energy 0..100).
+   The bar reads bottom→top: writing-mode vertical + direction rtl put the value's
+   low end at the bottom, matching the dB scale. */
 .eq-slider {
   flex: 1;
   width: 100%;
   min-height: 0;
   writing-mode: vertical-lr;
   direction: rtl;
-  accent-color: var(--accent);
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
   cursor: ns-resize;
+  --fill: 50%;
+  --energy: 0;
+  /* Fill color ramps straight from accent-dim (quiet) to white (loud) with live
+     energy (0..100): idle bands rest dark, busy bands blaze. A single mix keeps
+     the change per unit energy even across the whole range. */
+  --fill-color: color-mix(in srgb, #fff calc(var(--energy) * 1%), var(--accent-dim));
+}
+
+/* The preamp is a static control, not a spectrum band (it never gets energy), so
+   pin it to the main accent instead of resting at the dim low end of the ramp. */
+.eq-band.preamp .eq-slider {
+  --fill-color: var(--accent);
+}
+
+/* The rounded rectangular track carries the fill (bottom layer) with a faint zero
+   line at 50% painted on top (first background wins), so a flat EQ still reads as
+   a centered baseline even when a boost fills past it. */
+.eq-slider::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 100%;
+  border-radius: 3px;
+  background:
+    linear-gradient(
+      to top,
+      transparent 0 calc(50% - 0.5px),
+      color-mix(in srgb, var(--text-faint) 55%, transparent) calc(50% - 0.5px) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px) 100%
+    ),
+    linear-gradient(to top, var(--fill-color) 0 var(--fill), var(--surface) var(--fill) 100%);
+}
+.eq-slider::-moz-range-track {
+  width: 100%;
+  height: 100%;
+  border-radius: 3px;
+  background:
+    linear-gradient(
+      to top,
+      transparent 0 calc(50% - 0.5px),
+      color-mix(in srgb, var(--text-faint) 55%, transparent) calc(50% - 0.5px) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px) 100%
+    ),
+    linear-gradient(to top, var(--fill-color) 0 var(--fill), var(--surface) var(--fill) 100%);
+}
+
+/* Hide the thumb entirely — the fill is the whole story (like the seek bar). */
+.eq-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+.eq-slider::-moz-range-thumb {
+  width: 0;
+  height: 0;
+  border: 0;
+  opacity: 0;
+  background: transparent;
 }
 
 .eq-band-label {

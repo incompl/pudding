@@ -206,7 +206,18 @@
                 <button type="button" id="eq-reset" class="link-btn">Reset</button>
               </div>
             </div>
-            <div id="eq-bands"></div>
+            <!-- The graph: a fixed dB scale (the "levels") down the left edge,
+                 aligned to the bars, then the bar row itself (built by
+                 setupEqualizer). The scale doubles as the visual break between the
+                 preamp and the frequency bands. -->
+            <div class="eq-graph">
+              <div class="eq-scale" aria-hidden="true">
+                <span>+12 dB</span>
+                <span>0 dB</span>
+                <span>−12 dB</span>
+              </div>
+              <div id="eq-bands"></div>
+            </div>
           </div>
           <!-- The nav bar: one line pinned above the transport whenever a list
                exists, carrying the source context and the button that swaps the
