@@ -181,7 +181,6 @@ body.platform-mac #tabs {
   background: none;
   border: none;
   border-radius: 6px;
-  padding: 0.35em 0.7em;
   cursor: pointer;
   line-height: 1;
   font: inherit;
@@ -218,6 +217,7 @@ body.platform-mac #tabs {
 
 #settings-back-btn {
   font-size: 0.95em;
+  padding: 0.35em;
 }
 
 /* Only appears in the mini player (see the media query below); occupies the
@@ -248,9 +248,15 @@ body.platform-mac #tabs {
   display: block;
 }
 
-#miniplayer-btn:hover,
-#settings-back-btn:hover {
+#miniplayer-btn:hover {
   background: var(--surface);
+}
+
+/* Reads as a link, not a button: no background fill, just an underline on
+   hover. */
+#settings-back-btn:hover {
+  background: none;
+  text-decoration: underline;
 }
 
 /* Files-only playback-mode toggles: Folder, Shuffle, Repeat. Each is an
