@@ -128,11 +128,19 @@ textarea,
   display: flex;
   flex-shrink: 0;
   align-items: stretch;
-  /* 40px (not taller) so the topbar's centered contents — tabs, search, and the
-     mini-player button — sit tight to the top. At this height the mini-player
-     glyph lands ~13px from the top and ~13.5px from the right, i.e. equidistant
-     from the corner; a taller bar pushes it top-heavy. */
-  height: 40px;
+  /* 34px, deliberately short so the contents sit tight with equal breathing room
+     above and below. At this height the two alignments converge: the centered
+     search/mode controls and the bottom-aligned tab text (see #tabs / .tab) land
+     on the same centerline, so the tab labels read as vertically centered with
+     the search box and icon buttons. Requires line-height:1 on the tab/search
+     text (below) — the document's default 1.5 makes those boxes taller than the
+     bar, forcing the text to overflow upward and hug the top edge.
+     box-sizing + a small padding-top nudge the whole content block down so the
+     gap from the window's top edge to the text equals the gap from the text down
+     to the panel border (which sits padding-top + the panel's top margin below). */
+  box-sizing: border-box;
+  padding-top: 1px;
+  height: 34px;
 }
 
 #tabs {
@@ -313,6 +321,9 @@ body.platform-mac #tabs {
   padding: 0.4em 0.6em 0.4em 2em;
   font: inherit;
   font-size: 0.9em;
+  /* Match .tab: text-tight box so the input centers on the same line as the tab
+     labels in the short topbar rather than the taller default-line-height box. */
+  line-height: 1;
   background: transparent
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='16.5' y1='16.5' x2='21' y2='21'/%3E%3C/svg%3E")
     no-repeat 0.5em center;
@@ -518,13 +529,12 @@ html[data-mode="light"] .context-menu {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* Bottom/left inset 0.5em; top is a smaller 0.3em so the gap from the active
-     tab's underline down to the panel equals the 0.5em gap from the panel to the
-     window bottom. The top margin is measured from the topbar's bottom edge but
-     the underline floats ~3px above that (see .tab margin-bottom), so the top
-     margin is reduced by that much to keep the two visible gaps equal. Right
-     stays flush against the splitter. */
-  margin: 0.3em 0 0.5em 0.5em;
+  /* Bottom/left inset 0.5em; top is a small 0.15em so the gap from the topbar
+     down to the panel roughly matches the gap from the window top down to the
+     topbar text — keeping the tab/search text visually centered between the
+     window's top edge and this panel's border. Right stays flush against the
+     splitter. */
+  margin: 0 0 0.5em 0.5em;
   background: var(--panel);
   border-radius: 10px;
   overflow: hidden;
@@ -534,13 +544,15 @@ html[data-mode="light"] .context-menu {
   flex: 1;
   display: flex;
   flex-direction: column;
-  /* Symmetric padding so the flanking play/volume buttons sit the same distance
-     from the window's side edges as from its bottom edge (they're flush to this
-     content box). The left side is trimmed by the splitter's width: that
+  /* Sides + bottom are 0.75em so the flanking play/volume buttons sit the same
+     distance from the window's side edges as from its bottom edge (they're flush
+     to this content box). The left side is trimmed by the splitter's width: that
      transparent resize strip sits just left of this panel and would otherwise
      push the play button in that much further than the volume button on the
-     right. */
-  padding: 0.75em 0.75em 0.75em calc(0.75em - var(--splitter-width));
+     right. The top is a smaller 0.2em — matching #left's top margin — so this
+     pane's card shares a top edge with the left panel's card, which also makes
+     the gap below the search/mode controls equal the gap below the tabs. */
+  padding: 0 0.75em 0.75em calc(0.75em - var(--splitter-width));
   overflow: auto;
   min-width: 200px;
 }
@@ -820,12 +832,7 @@ html[data-mode="light"] .context-menu {
 }
 #now-playing-panel.view-visualizer #now-playing-visualizer {
   display: block;
-  /* Reach up to the top of #left's gray panel (its 0.3em margin) instead of
-     stopping at #right's 0.75em content padding — the 0.45em difference — and
-     give the transport the same breathing room below (0.75em) that the transport
-     has to the window bottom (#right's padding-bottom). */
-  top: -0.45em;
-  bottom: 0.75em;
+  bottom: 0.7em;
 }
 #now-playing-panel.view-visualizer #now-playing-art,
 #now-playing-panel.view-visualizer #now-playing-text,
@@ -920,9 +927,9 @@ html[data-mode="light"] .context-menu {
 #now-playing-fullscreen-btn {
   right: 4px;
 }
-/* The view toggle sits just left of the 28px fullscreen button (28 + 6px gap). */
+/* The view toggle sits just left of the 28px fullscreen button (28 + 2px gap). */
 #now-playing-view-btn {
-  right: calc(4px + 34px);
+  right: calc(2px + 28px + 2px);
 }
 #now-playing-fullscreen-btn .fs-exit {
   display: none;
@@ -1715,6 +1722,14 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   display: flex;
   align-items: center;
   gap: 0.6em;
+  /* Keep the transport on its own compositing layer at all times. In fullscreen
+     it gets `z-index: 3` (to float above the fixed, animating visualizer), which
+     otherwise promotes it to a GPU layer only then — and WebKit rasterizes that
+     fresh layer at a different sub-pixel phase than the in-flow paint, nudging
+     the thin antialiased transport/volume icons by a fraction of a pixel even
+     though their box coords are identical. Promoting it here too makes the layer
+     state constant across both modes, so the rasterization phase never changes. */
+  transform: translateZ(0);
 }
 
 #play-pause-btn {
@@ -2262,6 +2277,10 @@ body.dragging-noselect * {
   border-bottom: 2px solid transparent;
   font: inherit;
   font-size: 0.95em;
+  /* Compact UI: collapse the document's 1.5 line-height so the tab box is only
+     as tall as the label, letting it sit inside the short topbar without
+     overflowing (see #topbar). */
+  line-height: 1;
   letter-spacing: 0.02em;
   color: var(--text-muted);
   /* Only the label color eases. The underline is NOT transitioned: animating
