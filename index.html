@@ -264,6 +264,14 @@
             <p class="credit">vibed by the best<br/><a href="https://incompl.com">incompl.com</a></p>
           </div>
         </div>
+        <!-- Equalizer shares the right pane with Settings/About (same Back
+             button). Proof-of-concept: fixed frequency bands with vertical
+             sliders; the fill bars use the theme accent color. The band rows
+             are rendered by setupEqualizer in src/main.ts. -->
+        <div id="equalizer-panel" class="hidden">
+          <h2>Equalizer</h2>
+          <div id="eq-bands"></div>
+        </div>
       </section>
     </main>
     <div id="toast" aria-live="polite"></div>

@@ -1715,6 +1715,14 @@ fn audio_set_volume(volume: f32, engine: State<audio::AudioEngine>) {
     engine.set_volume(volume);
 }
 
+// Push the equalizer state to the engine. `preamp` and `gains` are in dB; the
+// frontend sends the full band set on every slider move. Applied in the audio
+// callback, so the change is audible immediately.
+#[tauri::command]
+fn audio_set_eq(enabled: bool, preamp: f32, gains: Vec<f32>, engine: State<audio::AudioEngine>) {
+    engine.set_eq(enabled, preamp, &gains);
+}
+
 // === System Now Playing (macOS Control Center / media keys) ===
 // The frontend drives these because it alone resolves title/artist/album/art
 // across files, external files, and radio. Position/state come from the engine
@@ -2303,6 +2311,9 @@ pub fn run() {
                 "open-about" => {
                     let _ = app.emit("open-about", ());
                 }
+                "open-equalizer" => {
+                    let _ = app.emit("open-equalizer", ());
+                }
                 // View ▸ Now Playing ▸ Album Art / Visualizer are radio-style
                 // check items; each relays its target view. The frontend owns
                 // the preference (persists it, re-syncs the checkmarks).
@@ -2557,6 +2568,14 @@ pub fn run() {
             let volume_down =
                 MenuItemBuilder::with_id("playback-volume-down", "Volume Down").build(app)?;
             let mute = CheckMenuItemBuilder::with_id("playback-mute", "Mute").build(app)?;
+            // Equalizer opens our in-app EQ panel in the right pane (like Settings
+            // / About) — an audio effect on playback, so it sits by Volume/Mute
+            // rather than in Window (it's a pane, not a separate window as in
+            // Apple Music). ⌥⌘E is the familiar Equalizer accelerator. Selecting
+            // it emits "open-equalizer" for the frontend.
+            let equalizer = MenuItemBuilder::with_id("open-equalizer", "Equalizer")
+                .accelerator("Alt+Cmd+E")
+                .build(app)?;
             let playback_menu = SubmenuBuilder::new(app, "Playback")
                 .item(&play_pause)
                 .item(&previous)
@@ -2568,6 +2587,7 @@ pub fn run() {
                 .item(&volume_up)
                 .item(&volume_down)
                 .item(&mute)
+                .item(&equalizer)
                 .separator()
                 .item(&autoadvance)
                 .build()?;
@@ -2729,6 +2749,7 @@ pub fn run() {
             audio_append,
             audio_stop,
             audio_set_volume,
+            audio_set_eq,
             now_playing_set_metadata,
             now_playing_set_playback,
             now_playing_clear,

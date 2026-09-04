@@ -69,6 +69,7 @@ import {
   selectedStreamUrl,
   settingsOpen,
   aboutOpen,
+  equalizerOpen,
   nowPlayingView,
   type NowPlayingView,
   nowPlayingFullscreen,
@@ -139,6 +140,8 @@ import {
   nowPlayingPanel,
   settingsPanel,
   aboutPanel,
+  equalizerPanel,
+  eqBandsEl,
   nowPlayingVisualizerEl,
   nowPlayingViewBtn,
   nowPlayingFullscreenBtn,
@@ -808,6 +811,7 @@ export const heroVisible = computed(
     !listFaceOpen.value &&
     !settingsOpen.value &&
     !aboutOpen.value &&
+    !equalizerOpen.value &&
     paneEditor.value === null,
 );
 
@@ -2029,6 +2033,55 @@ async function setupWindowSize(
   });
 }
 
+// Proof-of-concept graphic equalizer. Ten fixed ISO frequency bands plus a
+// preamp, each a vertical gain slider (−12…+12 dB, centered at 0). Nothing is
+// wired to the audio engine yet — this is just enough to prove the panel, menu
+// item, and accent-colored bars render. The bars take their color from
+// --accent via CSS (accent-color on the range inputs), so they follow the
+// selected theme like the rest of the UI.
+// Slider 0 is the wideband preamp; the rest are per-band peaking gains at these
+// center frequencies (matched to EQ_FREQS in the Rust engine). Labels are for
+// display only — the engine owns the actual frequencies.
+const EQ_BANDS = ["Pre", "32", "64", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"];
+const eqSliders: HTMLInputElement[] = [];
+
+// Send the current slider positions to the engine. `enabled` stays true once
+// the panel is wired up; a flat set (all zeros) is an audible no-op, so there's
+// no separate on/off for this proof-of-concept.
+function pushEq(): void {
+  const values = eqSliders.map((s) => Number(s.value));
+  void invoke("audio_set_eq", {
+    enabled: true,
+    preamp: values[0] ?? 0,
+    gains: values.slice(1),
+  });
+}
+
+function setupEqualizer(): void {
+  eqSliders.length = 0;
+  eqBandsEl.replaceChildren(
+    ...EQ_BANDS.map((label) => {
+      const band = document.createElement("div");
+      band.className = "eq-band";
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.className = "eq-slider";
+      slider.min = "-12";
+      slider.max = "12";
+      slider.step = "1";
+      slider.value = "0";
+      slider.setAttribute("aria-label", `${label} Hz gain`);
+      slider.addEventListener("input", pushEq);
+      eqSliders.push(slider);
+      const cap = document.createElement("span");
+      cap.className = "eq-band-label";
+      cap.textContent = label;
+      band.append(slider, cap);
+      return band;
+    }),
+  );
+}
+
 function setupSettings(): void {
   // Settings opens from the native application menu (Pudding → Settings…, ⌘,),
   // which emits "open-settings"; the topbar's old gear is now the mini-player
@@ -2036,12 +2089,17 @@ function setupSettings(): void {
   // "open-about". Opening one closes the other; the single Back button dismisses
   // whichever is up, returning to now-playing. Opening either also leaves full
   // screen (a hero mode), since the panel takes the pane the hero was covering.
-  void listen("open-settings", () => { aboutOpen.value = false; nowPlayingFullscreen.value = false; settingsOpen.value = true; });
-  void listen("open-about", () => { settingsOpen.value = false; nowPlayingFullscreen.value = false; aboutOpen.value = true; });
+  // Equalizer (Playback → Equalizer, ⌥⌘E) is a third member of this family: same
+  // pane, same Back button, mutually exclusive with Settings/About.
+  void listen("open-settings", () => { aboutOpen.value = false; equalizerOpen.value = false; nowPlayingFullscreen.value = false; settingsOpen.value = true; });
+  void listen("open-about", () => { settingsOpen.value = false; equalizerOpen.value = false; nowPlayingFullscreen.value = false; aboutOpen.value = true; });
+  void listen("open-equalizer", () => { settingsOpen.value = false; aboutOpen.value = false; nowPlayingFullscreen.value = false; equalizerOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => {
     settingsOpen.value = false;
     aboutOpen.value = false;
+    equalizerOpen.value = false;
   });
+  setupEqualizer();
 
   // The visualizer mounts once into its layer inside the now-playing hero (not a
   // pane takeover). Its rAF loop runs only while it's the chosen hero view AND
@@ -2812,13 +2870,15 @@ function setupEffects(): void {
   effect(() => {
     const settings = settingsOpen.value;
     const about = aboutOpen.value;
-    // Settings and About are mutually exclusive pane takeovers, both dismissed by
-    // the same Back button. Anything that yields the pane to a panel keys off
-    // whether *any* is open. (The visualizer is NOT here — it's a hero view, not
-    // a takeover, so it never hides the now-playing panel or its controls.)
-    const panelOpen = settings || about;
+    const equalizer = equalizerOpen.value;
+    // Settings, About and Equalizer are mutually exclusive pane takeovers, all
+    // dismissed by the same Back button. Anything that yields the pane to a panel
+    // keys off whether *any* is open. (The visualizer is NOT here — it's a hero
+    // view, not a takeover, so it never hides the now-playing panel or controls.)
+    const panelOpen = settings || about || equalizer;
     settingsPanel.classList.toggle("hidden", !settings);
     aboutPanel.classList.toggle("hidden", !about);
+    equalizerPanel.classList.toggle("hidden", !equalizer);
     nowPlayingPanel.classList.toggle("hidden", panelOpen);
     miniplayerBtn.classList.toggle("hidden", panelOpen);
     settingsBackBtn.classList.toggle("hidden", !panelOpen);
@@ -2835,7 +2895,7 @@ function setupEffects(): void {
   effect(() => {
     playbackModesEl.classList.toggle(
       "hidden",
-      settingsOpen.value || aboutOpen.value,
+      settingsOpen.value || aboutOpen.value || equalizerOpen.value,
     );
   });
 

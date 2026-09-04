@@ -580,6 +580,53 @@ html[data-mode="light"] .context-menu {
   margin: 0;
 }
 
+/* Equalizer shares the pane with Settings/About. Its bands sit in a row that
+   fills the pane; each band is a tall column with a vertical gain slider over a
+   frequency label. */
+#equalizer-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#eq-bands {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 0.5em;
+  min-height: 0;
+  padding: 1em 0.5em;
+}
+
+.eq-band {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6em;
+  min-height: 0;
+}
+
+/* The gain slider is drawn vertically; accent-color paints the filled track and
+   thumb, so the bars follow the theme accent. */
+.eq-slider {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  accent-color: var(--accent);
+  cursor: ns-resize;
+}
+
+.eq-band-label {
+  font-size: 0.75em;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 #now-playing-main {
   flex: 1;
   display: flex;
@@ -1800,6 +1847,7 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
      Full screen makes no sense in the thin bar, so hide its button here too. */
   #settings-panel,
   #about-panel,
+  #equalizer-panel,
   #now-playing-view-btn,
   #now-playing-fullscreen-btn {
     display: none !important;

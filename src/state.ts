@@ -165,6 +165,10 @@ export const settingsOpen = signal(false);
 // The About panel shares the right pane with Settings (mutually exclusive: the
 // same Back button dismisses either). Opened from Pudding → About Pudding.
 export const aboutOpen = signal(false);
+// The Equalizer panel is another right-pane takeover in the Settings/About
+// family (same Back button, mutually exclusive with them). Opened from
+// Playback → Equalizer (⌥⌘E).
+export const equalizerOpen = signal(false);
 // The Now Playing hero renders one of two views, a persisted set-once
 // preference chosen from View ▸ Now Playing: the album-art card ("art") or the
 // MilkDrop visualizer ("visualizer"). Unlike Settings/About, the visualizer is
@@ -189,6 +193,7 @@ export const nowPlayingFullscreen = signal(false);
 export function dismissRightPanel(): void {
   settingsOpen.value = false;
   aboutOpen.value = false;
+  equalizerOpen.value = false;
 }
 export const activeTab = signal<"files" | "streams">("files");
 

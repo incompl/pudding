@@ -82,6 +82,18 @@ const WAVEFORM_POINTS: usize = 256;
 // smaller = lower latency. 1024 is the conventional sweet spot.
 const RESAMPLER_CHUNK_FRAMES: usize = 1024;
 
+// Equalizer. A classic graphic EQ: one RBJ peaking biquad per band at these
+// ~octave-spaced center frequencies, in series, plus a wideband preamp. We run
+// it in the real-time callback (not the decode thread) so a slider move is
+// audible immediately rather than after the ~1s ring buffer drains. The shared
+// Q suits octave spacing (adjacent bands overlap gently rather than leaving
+// dips between them).
+const EQ_FREQS: [f32; 10] = [
+    32.0, 64.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
+];
+const EQ_BAND_COUNT: usize = EQ_FREQS.len();
+const EQ_Q: f32 = 1.41;
+
 // Stream reconnect policy, mirroring what mature web radio players ship
 // (icecast-metadata-player defaults): quick first retry, exponential backoff
 // to a small cap, and a bounded total outage before reporting failure and
@@ -164,6 +176,16 @@ pub struct SharedState {
     // track's duration (seek bar stuck at max=0). A seek keeps the epoch, so it
     // still doesn't spuriously re-fire track-changed.
     play_epoch: AtomicU64,
+    // Equalizer parameters, written by the UI thread and read by the audio
+    // callback. `eq_enabled` bypasses the whole chain when false. `eq_preamp_db`
+    // is a wideband gain; `eq_gains_db` holds the per-band peaking gains, all in
+    // dB stored as f32 bits. `eq_gen` is bumped on any change so the callback
+    // knows to recompute its cached biquad coefficients (the trig/pow math is
+    // too heavy to redo every callback, so it only runs on a gen change).
+    eq_enabled: AtomicBool,
+    eq_preamp_db: AtomicU32,
+    eq_gains_db: [AtomicU32; EQ_BAND_COUNT],
+    eq_gen: AtomicU64,
 }
 
 impl SharedState {
@@ -178,6 +200,10 @@ impl SharedState {
             queue_exhausted: AtomicBool::new(true),
             total_produced: AtomicU64::new(0),
             play_epoch: AtomicU64::new(0),
+            eq_enabled: AtomicBool::new(false),
+            eq_preamp_db: AtomicU32::new(0.0_f32.to_bits()),
+            eq_gains_db: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
+            eq_gen: AtomicU64::new(0),
         }
     }
 }
@@ -274,6 +300,133 @@ impl AudioEngine {
         self.shared
             .volume
             .store(clamped.to_bits(), Ordering::Relaxed);
+    }
+
+    // Update the equalizer. `gains_db` are the per-band peaking gains (any extra
+    // entries are ignored, any missing ones left unchanged is not a concern
+    // since the frontend always sends the full set). Publishing the gen last,
+    // with Release ordering, is what makes the callback pick up the new values.
+    pub fn set_eq(&self, enabled: bool, preamp_db: f32, gains_db: &[f32]) {
+        self.shared.eq_enabled.store(enabled, Ordering::Relaxed);
+        self.shared
+            .eq_preamp_db
+            .store(preamp_db.to_bits(), Ordering::Relaxed);
+        for (slot, g) in self.shared.eq_gains_db.iter().zip(gains_db.iter()) {
+            slot.store(g.to_bits(), Ordering::Relaxed);
+        }
+        self.shared.eq_gen.fetch_add(1, Ordering::Release);
+    }
+}
+
+// === Equalizer DSP ===
+
+// A single RBJ-cookbook biquad in Direct Form II transposed. Coefficients are
+// recomputed when a band's gain changes; the per-channel state (s1/s2) carries
+// across those updates and across track boundaries so there's no click.
+#[derive(Clone, Copy)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    s1: [f32; OUT_CHANNELS],
+    s2: [f32; OUT_CHANNELS],
+}
+
+impl Biquad {
+    // Identity (unity passthrough) until the first coefficient update.
+    fn identity() -> Self {
+        Self {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+            s1: [0.0; OUT_CHANNELS],
+            s2: [0.0; OUT_CHANNELS],
+        }
+    }
+
+    // RBJ "peaking EQ" design. Preserves the delay state so re-tuning while
+    // audio flows doesn't glitch.
+    fn set_peaking(&mut self, f0: f32, fs: f32, q: f32, gain_db: f32) {
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * f0 / fs;
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * q);
+        let a0 = 1.0 + alpha / a;
+        self.b0 = (1.0 + alpha * a) / a0;
+        self.b1 = (-2.0 * cos_w0) / a0;
+        self.b2 = (1.0 - alpha * a) / a0;
+        self.a1 = (-2.0 * cos_w0) / a0;
+        self.a2 = (1.0 - alpha / a) / a0;
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32, ch: usize) -> f32 {
+        let y = self.b0 * x + self.s1[ch];
+        self.s1[ch] = self.b1 * x - self.a1 * y + self.s2[ch];
+        self.s2[ch] = self.b2 * x - self.a2 * y;
+        y
+    }
+}
+
+// The callback-side EQ: a cascade of peaking biquads plus a preamp. Lives in
+// ConsumerState and is only touched by the audio thread. `refresh` pulls the
+// latest parameters when the shared gen counter moves; `process_block` filters
+// an interleaved stereo buffer in place.
+struct EqChain {
+    enabled: bool,
+    preamp: f32,
+    bands: [Biquad; EQ_BAND_COUNT],
+    sample_rate: f32,
+    last_gen: u64,
+}
+
+impl EqChain {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            enabled: false,
+            preamp: 1.0,
+            bands: [Biquad::identity(); EQ_BAND_COUNT],
+            sample_rate: sample_rate as f32,
+            last_gen: 0,
+        }
+    }
+
+    // Cheap on the common path: one Acquire load and a compare. Only when the UI
+    // has changed something do we read the gains and recompute coefficients —
+    // that's the only place the callback does trig/pow, and it's rare.
+    fn refresh(&mut self, shared: &SharedState) {
+        let gen = shared.eq_gen.load(Ordering::Acquire);
+        if gen == self.last_gen {
+            return;
+        }
+        self.last_gen = gen;
+        self.enabled = shared.eq_enabled.load(Ordering::Relaxed);
+        self.preamp =
+            10.0_f32.powf(f32::from_bits(shared.eq_preamp_db.load(Ordering::Relaxed)) / 20.0);
+        for (band, (freq, gain)) in self
+            .bands
+            .iter_mut()
+            .zip(EQ_FREQS.iter().zip(shared.eq_gains_db.iter()))
+        {
+            let gain_db = f32::from_bits(gain.load(Ordering::Relaxed));
+            band.set_peaking(*freq, self.sample_rate, EQ_Q, gain_db);
+        }
+    }
+
+    #[inline]
+    fn process_block(&mut self, out: &mut [f32]) {
+        for (i, s) in out.iter_mut().enumerate() {
+            let ch = i % OUT_CHANNELS;
+            let mut x = *s * self.preamp;
+            for band in self.bands.iter_mut() {
+                x = band.process(x, ch);
+            }
+            *s = x;
+        }
     }
 }
 
@@ -452,6 +605,10 @@ struct ConsumerState {
     // spectrum thread to analyze. Real-time safe (lock-free, no alloc); if the
     // ring is full we drop samples rather than block the audio thread.
     viz: RbProducer<f32>,
+    // Equalizer. Owned solely by the audio thread; picks up parameter changes
+    // from `shared` via a gen counter. Applied after volume, before the viz tap
+    // so the visualizer shows what you hear.
+    eq: EqChain,
 }
 
 fn build_stream(
@@ -467,6 +624,7 @@ fn build_stream(
         shared,
         last_flush_gen: 0,
         viz,
+        eq: EqChain::new(cfg.sample_rate.0),
     };
 
     let err_fn = |err| {
@@ -560,6 +718,13 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
     // the device clock; we just produce zeros so the callback returns clean.
     for s in out[written..].iter_mut() {
         *s = 0.0;
+    }
+
+    // Equalize the audible samples in place. refresh() is near-free unless the
+    // UI just moved a slider; when bypassed the whole chain is skipped.
+    state.eq.refresh(&state.shared);
+    if state.eq.enabled {
+        state.eq.process_block(&mut out[..written]);
     }
 
     // Frame-count update. `written` is in samples; divide by channels.

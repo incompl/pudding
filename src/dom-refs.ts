@@ -50,6 +50,8 @@ export let searchResultsEl: HTMLElement;
 export let nowPlayingPanel: HTMLElement;
 export let settingsPanel: HTMLElement;
 export let aboutPanel: HTMLElement;
+export let equalizerPanel: HTMLElement;
+export let eqBandsEl: HTMLElement;
 export let nowPlayingVisualizerEl: HTMLElement;
 export let nowPlayingViewBtn: HTMLButtonElement;
 export let nowPlayingFullscreenBtn: HTMLButtonElement;
@@ -114,6 +116,8 @@ export function bindDom(): void {
   paneEditorView = document.querySelector("#pane-editor-view") as HTMLElement;
   settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
   aboutPanel = document.querySelector("#about-panel") as HTMLElement;
+  equalizerPanel = document.querySelector("#equalizer-panel") as HTMLElement;
+  eqBandsEl = document.querySelector("#eq-bands") as HTMLElement;
   nowPlayingVisualizerEl = document.querySelector("#now-playing-visualizer") as HTMLElement;
   nowPlayingViewBtn = document.querySelector("#now-playing-view-btn") as HTMLButtonElement;
   nowPlayingFullscreenBtn = document.querySelector("#now-playing-fullscreen-btn") as HTMLButtonElement;
