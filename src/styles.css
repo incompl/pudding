@@ -3181,7 +3181,7 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
   display: flex;
   flex-direction: column;
   gap: 0.4em;
-  margin-bottom: 1em;
+  padding-bottom: 1em;
 }
 
 .setting label {
