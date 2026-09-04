@@ -606,6 +606,13 @@ html[data-mode="light"] .context-menu {
   flex-wrap: wrap;
 }
 
+/* The EQ is a face of the now-playing panel with inline controls, so its title
+   sits at normal weight rather than the semibold h2 of the Settings/About sheets
+   — calmer, but still a proper title. Overrides the #now-playing-panel h2 rule. */
+#equalizer-panel h2 {
+  font-weight: 400;
+}
+
 .eq-controls {
   display: flex;
   align-items: center;
@@ -619,6 +626,22 @@ html[data-mode="light"] .context-menu {
   cursor: pointer;
   color: var(--text-dim);
   accent-color: var(--accent);
+}
+
+/* Reset is a real (secondary) button, not a text link — a solid fill matching the
+   app's other secondary buttons (Choose…, Cancel) so it reads as an action. */
+#eq-reset {
+  padding: 0.2em 0.7em;
+  border: 1px solid var(--surface);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+#eq-reset:hover {
+  background: var(--surface-hover);
+  border-color: var(--surface-hover);
 }
 
 /* The graph: the dB scale column beside the bar row, both filling the pane.
@@ -686,11 +709,10 @@ html[data-mode="light"] .context-menu {
 }
 
 /* The preamp is wideband, not a frequency band: set it apart from the ten bands
-   with extra space and a hairline divider on its trailing edge. */
+   with extra space alone — a gap, no rule. */
 .eq-band.preamp {
-  margin-right: 0.5em;
-  border-right: 1px solid var(--surface);
-  padding-right: 1em;
+  margin-right: 0.75em;
+  padding-right: 0.75em;
 }
 
 /* Each gain control is an abstract rectangular bar, not an OS slider: hide the
@@ -702,7 +724,11 @@ html[data-mode="light"] .context-menu {
    low end at the bottom, matching the dB scale. */
 .eq-slider {
   flex: 1;
-  width: 100%;
+  /* For a vertical slider, width is the bar's thickness. Keep it to ~half the
+     band's share so the bars read as slim columns (the band still owns its full
+     flex fraction, so spacing/alignment are unchanged; align-items: center on
+     .eq-band centers the thinner bar). */
+  width: 50%;
   min-height: 0;
   writing-mode: vertical-lr;
   direction: rtl;
@@ -724,34 +750,20 @@ html[data-mode="light"] .context-menu {
   --fill-color: var(--accent);
 }
 
-/* The rounded rectangular track carries the fill (bottom layer) with a faint zero
-   line at 50% painted on top (first background wins), so a flat EQ still reads as
-   a centered baseline even when a boost fills past it. */
+/* The rounded rectangular track carries the fill: accent up to --fill, surface
+   above. The dB scale and Reset mark the zero baseline, so the bar itself needs
+   no midpoint line. */
 .eq-slider::-webkit-slider-runnable-track {
   width: 100%;
   height: 100%;
   border-radius: 3px;
-  background:
-    linear-gradient(
-      to top,
-      transparent 0 calc(50% - 0.5px),
-      color-mix(in srgb, var(--text-faint) 55%, transparent) calc(50% - 0.5px) calc(50% + 0.5px),
-      transparent calc(50% + 0.5px) 100%
-    ),
-    linear-gradient(to top, var(--fill-color) 0 var(--fill), var(--surface) var(--fill) 100%);
+  background: linear-gradient(to top, var(--fill-color) 0 var(--fill), var(--surface) var(--fill) 100%);
 }
 .eq-slider::-moz-range-track {
   width: 100%;
   height: 100%;
   border-radius: 3px;
-  background:
-    linear-gradient(
-      to top,
-      transparent 0 calc(50% - 0.5px),
-      color-mix(in srgb, var(--text-faint) 55%, transparent) calc(50% - 0.5px) calc(50% + 0.5px),
-      transparent calc(50% + 0.5px) 100%
-    ),
-    linear-gradient(to top, var(--fill-color) 0 var(--fill), var(--surface) var(--fill) 100%);
+  background: linear-gradient(to top, var(--fill-color) 0 var(--fill), var(--surface) var(--fill) 100%);
 }
 
 /* Hide the thumb entirely — the fill is the whole story (like the seek bar). */
