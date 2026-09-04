@@ -58,6 +58,12 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 - Automatic reconnect with backoff; pausing disconnects, resuming rejoins the live edge
 - `.pls` / `.m3u` playlist URLs resolve automatically
 
+### Equalizer & visualizer
+
+- 10-band graphic equalizer (32 Hz – 16 kHz) running in the audio engine as a cascade of RBJ peaking biquads plus a preamp
+- The equalizer bars glow with the real per-band energy of what's playing, which is just dang nifty
+- Visualizer: oldschool neon oscilloscope with starfield
+
 ### Interface
 
 - Light and dark themes, each with a variety of flavors, and can auto-switch with the macOS light / dark setting
