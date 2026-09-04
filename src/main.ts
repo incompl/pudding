@@ -73,7 +73,7 @@ import {
   equalizerOpen,
   nowPlayingView,
   type NowPlayingView,
-  nowPlayingFullscreen,
+  zenMode,
   activeTab,
   activeQueue,
   browsedPlaylist,
@@ -147,7 +147,6 @@ import {
   eqResetBtn,
   nowPlayingVisualizerEl,
   nowPlayingViewBtn,
-  nowPlayingFullscreenBtn,
   aboutVersionEl,
   splitterEl,
   themeMatchSystemEl,
@@ -2247,9 +2246,9 @@ function setupSettings(restoredEq: EqState | null): void {
   // screen (a hero mode), since the panel takes the pane the hero was covering.
   // Equalizer (Playback → Equalizer, ⌥⌘E) is a third member of this family: same
   // pane, same Back button, mutually exclusive with Settings/About.
-  void listen("open-settings", () => { aboutOpen.value = false; equalizerOpen.value = false; nowPlayingFullscreen.value = false; settingsOpen.value = true; });
-  void listen("open-about", () => { settingsOpen.value = false; equalizerOpen.value = false; nowPlayingFullscreen.value = false; aboutOpen.value = true; });
-  void listen("open-equalizer", () => { settingsOpen.value = false; aboutOpen.value = false; nowPlayingFullscreen.value = false; equalizerOpen.value = true; });
+  void listen("open-settings", () => { aboutOpen.value = false; equalizerOpen.value = false; zenMode.value = false; settingsOpen.value = true; });
+  void listen("open-about", () => { settingsOpen.value = false; equalizerOpen.value = false; zenMode.value = false; aboutOpen.value = true; });
+  void listen("open-equalizer", () => { settingsOpen.value = false; aboutOpen.value = false; zenMode.value = false; equalizerOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => {
     settingsOpen.value = false;
     aboutOpen.value = false;
@@ -3080,15 +3079,15 @@ function setupEffects(): void {
     );
   });
 
-  // In-app full screen: the hero covers the window, controls auto-hide on idle.
-  // Only meaningful while the hero face is up, so if a list/editor/panel takes
-  // the pane the body class drops even though the preference is retained — it
+  // Zen Mode: the hero covers the window, controls auto-hide on idle. Only
+  // meaningful while the hero face is up, so if a list/editor/panel takes the
+  // pane the body class drops even though the preference is retained — it
   // re-applies when the hero returns. Not persisted.
   let idleTimer = 0;
   const armIdle = (): void => {
     document.body.classList.remove("np-idle");
     window.clearTimeout(idleTimer);
-    if (nowPlayingFullscreen.value) {
+    if (zenMode.value) {
       idleTimer = window.setTimeout(
         () => document.body.classList.add("np-idle"),
         2500,
@@ -3098,7 +3097,7 @@ function setupEffects(): void {
   // Reset the idle timer on *real* pointer movement only. The animating
   // visualizer canvas makes WebKit re-fire mousemove for a stationary pointer
   // (the pixels beneath it change each frame), which would otherwise keep the
-  // timer pinned and the controls permanently visible in visualizer full screen.
+  // timer pinned and the controls permanently visible in visualizer zen mode.
   let lastX = -1;
   let lastY = -1;
   document.addEventListener("mousemove", (e) => {
@@ -3108,31 +3107,35 @@ function setupEffects(): void {
     armIdle();
   });
   effect(() => {
-    const fs = nowPlayingFullscreen.value && heroVisible.value;
-    document.body.classList.toggle("np-fullscreen", fs);
-    if (fs) {
+    const zen = zenMode.value && heroVisible.value;
+    document.body.classList.toggle("np-zen", zen);
+    if (zen) {
       armIdle();
     } else {
       window.clearTimeout(idleTimer);
       document.body.classList.remove("np-idle");
     }
   });
+  // Keep the View ▸ Zen Mode checkmark in sync (menu, ⌃⌘F, and Escape all flip
+  // the signal). Tracks the preference itself, not the hero-gated body class, so
+  // the mark reflects what ⌃⌘F will do even while a list face is up.
+  effect(() => {
+    void invoke("set_zen_mode_checked", { on: zenMode.value });
+  });
 
-  // Entering full screen only makes sense while the hero owns the pane; exiting
-  // always works. The hover button toggles, View ▸ Enter Full Screen and Escape
-  // relay here too.
-  const toggleFullscreen = (on?: boolean): void => {
-    const next = on ?? !nowPlayingFullscreen.value;
+  // Entering Zen Mode only makes sense while the hero owns the pane; exiting
+  // always works. View ▸ Zen Mode (⌃⌘F) and Escape relay here.
+  const toggleZen = (on?: boolean): void => {
+    const next = on ?? !zenMode.value;
     if (next && !heroVisible.value) return;
-    nowPlayingFullscreen.value = next;
+    zenMode.value = next;
   };
-  nowPlayingFullscreenBtn.addEventListener("click", () => toggleFullscreen());
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && nowPlayingFullscreen.value) {
-      toggleFullscreen(false);
+    if (e.key === "Escape" && zenMode.value) {
+      toggleZen(false);
     }
   });
-  void listen("np-fullscreen-toggle", () => toggleFullscreen());
+  void listen("np-zen-toggle", () => toggleZen());
 
   // View ▸ Now Playing radio items relay the chosen view; persist it and re-sync
   // the menu checkmarks (the reactive effect below also fires on the change, but
@@ -3210,8 +3213,8 @@ async function init(): Promise<void> {
   // double-click-to-maximize.
   const nowPlayingMainEl = document.querySelector("#now-playing-main") as HTMLElement;
   nowPlayingMainEl.addEventListener("dblclick", (e) => {
-    // The overlay buttons (view toggle, full screen) sit atop the hero, so
-    // double-clicking one has its own effect — don't also toggle the mini player.
+    // The overlay view toggle sits atop the hero, so double-clicking it has its
+    // own effect — don't also toggle the mini player.
     if ((e.target as HTMLElement).closest("button")) return;
     void toggleMiniPlayer();
   });

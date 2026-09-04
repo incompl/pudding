@@ -895,13 +895,10 @@ html[data-mode="light"] .context-menu {
   text-wrap: balance;
 }
 
-/* Fullscreen toggle: a subtle glassy button in the hero's top-right, revealed
-   on hover (or while focused, for keyboard). Shared by both views; overlays the
-   art and the visualizer alike. Shows the enter icon at rest, the exit icon
-   while full screen. */
-/* The hover-revealed overlay buttons on the now-playing hero: the view toggle
-   and, to its right, full screen. Shared box/hover/reveal here; each button's
-   right/bottom anchor is set per-ID below. */
+/* The hover-revealed overlay button on the now-playing hero: the view toggle
+   (album art <-> visualizer), a subtle glassy button in the hero's bottom-right,
+   revealed on hover (or while focused, for keyboard). Overlays the art and the
+   visualizer alike. */
 .np-overlay-btn {
   position: absolute;
   /* Tuck 4px above the visualizer's bottom edge (which sits 0.75em up, per
@@ -927,27 +924,14 @@ html[data-mode="light"] .context-menu {
   width: 17px;
   height: 17px;
 }
-/* 4px inset = (36px volume btn − 28px overlay btn) / 2, so the fullscreen button
-   is horizontally centered under the volume button (which is flush to the same
+/* 4px inset = (36px volume btn − 28px overlay btn) / 2, so the view toggle is
+   horizontally centered under the volume button (which is flush to the same
    right edge as the visualizer). */
-#now-playing-fullscreen-btn {
+#now-playing-view-btn {
   right: 4px;
 }
-/* The view toggle sits just left of the 28px fullscreen button (28 + 2px gap). */
-#now-playing-view-btn {
-  right: calc(2px + 28px + 2px);
-}
-#now-playing-fullscreen-btn .fs-exit {
-  display: none;
-}
-body.np-fullscreen #now-playing-fullscreen-btn .fs-enter {
-  display: none;
-}
-body.np-fullscreen #now-playing-fullscreen-btn .fs-exit {
-  display: inline;
-}
 /* View toggle shows the target view's icon: a sine wave while art is up, a
-   picture glyph while the visualizer is up (mirrors the fullscreen enter/exit swap). */
+   picture glyph while the visualizer is up. */
 #now-playing-view-btn .icon-art {
   display: none;
 }
@@ -965,12 +949,12 @@ body.np-fullscreen #now-playing-fullscreen-btn .fs-exit {
   opacity: 1;
   background: color-mix(in srgb, var(--bg) 80%, transparent);
 }
-/* In-app full screen: the now-playing hero covers the ENTIRE window — topbar
+/* Zen Mode: the now-playing hero covers the ENTIRE window — topbar
    (tabs/search/modes), left panel, and splitter all included — by pinning the
    panel over everything with an opaque backdrop. The OS traffic lights float
-   above the webview, so the window is still closable; Escape or the button (or
-   ⌃⌘F) exits. Set only while the hero face is up (see main.ts). */
-body.np-fullscreen #now-playing-panel {
+   above the webview, so the window is still closable; Escape or ⌃⌘F exits.
+   Set only while the hero face is up (see main.ts). */
+body.np-zen #now-playing-panel {
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -978,45 +962,45 @@ body.np-fullscreen #now-playing-panel {
   padding: 0.75em;
 }
 /* Full-bleed the view itself; the transport keeps the panel's edge padding. */
-body.np-fullscreen #now-playing-main {
+body.np-zen #now-playing-main {
   padding: 0;
 }
 /* The visualizer goes edge-to-edge over the whole window (fixed, so it escapes
    both the panel padding and the transport row's flow) and the transport/nav bar
    float above it rather than shrinking it. */
-body.np-fullscreen #now-playing-panel.view-visualizer #now-playing-visualizer {
+body.np-zen #now-playing-panel.view-visualizer #now-playing-visualizer {
   position: fixed;
   inset: 0;
   border-radius: 0;
 }
-body.np-fullscreen #now-playing-controls,
-body.np-fullscreen #nav-bar {
+body.np-zen #now-playing-controls,
+body.np-zen #nav-bar {
   position: relative;
   z-index: 3;
 }
 /* The overlay affordances stay put (no hover needed) until the pointer goes idle. */
-body.np-fullscreen .np-overlay-btn {
+body.np-zen .np-overlay-btn {
   opacity: 0.75;
 }
 /* Auto-hide on idle: after a couple still seconds the transport, nav bar, and the
    overlay buttons fade out and the cursor hides; any mouse move (which clears
    `.np-idle` in main.ts) brings them straight back. */
-body.np-fullscreen #now-playing-controls,
-body.np-fullscreen #nav-bar,
-body.np-fullscreen .np-overlay-btn {
+body.np-zen #now-playing-controls,
+body.np-zen #nav-bar,
+body.np-zen .np-overlay-btn {
   /* visibility returns instantly on wake; opacity fades. */
   transition: opacity 300ms ease, visibility 0s;
 }
-body.np-fullscreen.np-idle {
+body.np-zen.np-idle {
   cursor: none;
 }
 /* Also flip visibility (delayed until the fade finishes) so the controls truly
    leave the paint tree. Opacity alone ghosts here: the transport sits beside the
    continuously-animating visualizer canvas, and WebKit doesn't re-composite the
    faded sibling, leaving stale pixels on screen. */
-body.np-fullscreen.np-idle #now-playing-controls,
-body.np-fullscreen.np-idle #nav-bar,
-body.np-fullscreen.np-idle .np-overlay-btn {
+body.np-zen.np-idle #now-playing-controls,
+body.np-zen.np-idle #nav-bar,
+body.np-zen.np-idle .np-overlay-btn {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -2047,12 +2031,11 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   /* Settings/About are unreachable in mini (their menu/button is hidden), so
      force the now-playing panel visible even if one was open when the window
      shrank. ID beats the .hidden class, so no !important war with the toggle.
-     Full screen makes no sense in the thin bar, so hide its button here too. */
+     The overlay view toggle makes no sense in the thin bar, so hide it here too. */
   #settings-panel,
   #about-panel,
   #equalizer-panel,
-  #now-playing-view-btn,
-  #now-playing-fullscreen-btn {
+  #now-playing-view-btn {
     display: none !important;
   }
   #now-playing-panel {

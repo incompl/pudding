@@ -89,9 +89,12 @@ struct WindowMenu {
 // The View ▸ Now Playing radio-style pair (Album Art vs. Visualizer). The frontend
 // owns the persisted preference and keeps exactly one checked
 // (set_now_playing_view_checked), the same way it drives the Repeat trio.
+// zen_mode is the checkable View ▸ Zen Mode toggle, kept in sync from the
+// frontend (set_zen_mode_checked) since ⌃⌘F and Escape also flip it.
 struct ViewMenu {
     np_view_art: CheckMenuItem<Wry>,
     np_view_visualizer: CheckMenuItem<Wry>,
+    zen_mode: CheckMenuItem<Wry>,
 }
 
 // Handles into the Playlist menu that the frontend keeps in sync: the "Save as
@@ -1648,6 +1651,13 @@ fn set_now_playing_view_checked(menu: State<ViewMenu>, view: String) {
     let _ = menu.np_view_visualizer.set_checked(view == "visualizer");
 }
 
+// Reflect Zen Mode's on/off state in the View ▸ Zen Mode checkmark. Called
+// whenever the frontend signal changes (menu, ⌃⌘F, or Escape).
+#[tauri::command]
+fn set_zen_mode_checked(menu: State<ViewMenu>, on: bool) {
+    let _ = menu.zen_mode.set_checked(on);
+}
+
 // Enable/disable "Save Queue as Playlist" (⌘S). The frontend calls this as playback
 // state changes: only an ephemeral queue that's the active pool can be
 // converted (a saved playlist already autosaves, nothing else is convertible).
@@ -2389,10 +2399,10 @@ pub fn run() {
                 "np-view-visualizer" => {
                     let _ = app.emit("np-view", "visualizer");
                 }
-                // View ▸ Enter Full Screen relays the toggle; the frontend owns
-                // the in-app fullscreen mode (a hero view, not a window change).
-                "np-fullscreen" => {
-                    let _ = app.emit("np-fullscreen-toggle", ());
+                // View ▸ Zen Mode relays the toggle; the frontend owns the
+                // immersive hero cover (a hero view, not a window change).
+                "np-zen" => {
+                    let _ = app.emit("np-zen-toggle", ());
                 }
                 // Edit ▸ Undo / Redo relay to the frontend, which owns the curation
                 // history (playlist / queue reorder-remove-drag-in).
@@ -2699,9 +2709,9 @@ pub fn run() {
             });
 
             // View menu: which Now Playing hero view is shown (Album Art vs.
-            // Visualizer, radio-style check items) and Enter Full Screen. This is
-            // where macOS apps (Music/iTunes) put presentation choices — the
-            // visualizer and full screen — as distinct from Playback's transport.
+            // Visualizer, radio-style check items) and Zen Mode. This is where
+            // macOS apps (Music/iTunes) put presentation choices — the visualizer
+            // and the immersive cover — as distinct from Playback's transport.
             // The two view items are kept mutually exclusive from the frontend
             // (set_now_playing_view_checked), like the Repeat trio.
             let np_view_art =
@@ -2712,19 +2722,23 @@ pub fn run() {
                 .item(&np_view_art)
                 .item(&np_view_visualizer)
                 .build()?;
-            // ⌃⌘F is Apple's standard Enter Full Screen accelerator; ours drives
-            // the in-app cover rather than a native window fullscreen.
-            let fullscreen = MenuItemBuilder::with_id("np-fullscreen", "Enter Full Screen")
+            // Zen Mode: an immersive full-window player (hides all chrome), NOT a
+            // native window fullscreen. A checkable toggle, kept in sync from the
+            // frontend (set_zen_mode_checked). ⌃⌘F is Apple's standard Enter Full
+            // Screen accelerator; we borrow it since Pudding has no native
+            // fullscreen and this is the closest intent.
+            let zen_mode = CheckMenuItemBuilder::with_id("np-zen", "Zen Mode")
                 .accelerator("Ctrl+Cmd+F")
                 .build(app)?;
             let view_menu = SubmenuBuilder::new(app, "View")
                 .item(&now_playing_menu)
                 .separator()
-                .item(&fullscreen)
+                .item(&zen_mode)
                 .build()?;
             app.manage(ViewMenu {
                 np_view_art,
                 np_view_visualizer,
+                zen_mode,
             });
 
             // Playlist menu: New / Open… / Open Recent ▸ then Save Queue as Playlist
@@ -2858,6 +2872,7 @@ pub fn run() {
             set_replaygain_checked,
             set_miniplayer_checked,
             set_now_playing_view_checked,
+            set_zen_mode_checked,
             set_save_playlist_enabled,
             set_move_playlist_enabled,
             set_edit_undo_state,

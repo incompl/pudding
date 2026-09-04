@@ -315,9 +315,16 @@ export function setupSearch(): void {
     }
   });
 
-  // Cmd/Ctrl+F focuses the search field (matches Apple Music / iTunes).
+  // Cmd/Ctrl+F focuses the search field (matches Apple Music / iTunes). Exclude
+  // the Ctrl+Cmd combo: that's View ▸ Zen Mode's accelerator (⌃⌘F), and
+  // preventDefault here would otherwise swallow it before the menu sees it.
   document.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "f" || e.key === "F")) {
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !(e.metaKey && e.ctrlKey) &&
+      !e.altKey &&
+      (e.key === "f" || e.key === "F")
+    ) {
       e.preventDefault();
       searchInput.focus();
       searchInput.select();

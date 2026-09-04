@@ -55,7 +55,6 @@ export let eqEnabledEl: HTMLInputElement;
 export let eqResetBtn: HTMLButtonElement;
 export let nowPlayingVisualizerEl: HTMLElement;
 export let nowPlayingViewBtn: HTMLButtonElement;
-export let nowPlayingFullscreenBtn: HTMLButtonElement;
 export let aboutVersionEl: HTMLElement;
 export let splitterEl: HTMLElement;
 export let queueTitleEl: HTMLElement;
@@ -122,7 +121,6 @@ export function bindDom(): void {
   eqResetBtn = document.querySelector("#eq-reset") as HTMLButtonElement;
   nowPlayingVisualizerEl = document.querySelector("#now-playing-visualizer") as HTMLElement;
   nowPlayingViewBtn = document.querySelector("#now-playing-view-btn") as HTMLButtonElement;
-  nowPlayingFullscreenBtn = document.querySelector("#now-playing-fullscreen-btn") as HTMLButtonElement;
   aboutVersionEl = document.querySelector("#about-version") as HTMLElement;
   splitterEl = document.querySelector("#splitter") as HTMLElement;
   queueTitleEl = document.querySelector("#queue-title-text") as HTMLElement;

@@ -178,11 +178,12 @@ export const equalizerOpen = signal(false);
 export type NowPlayingView = "art" | "visualizer";
 export const nowPlayingView = signal<NowPlayingView>("art");
 
-// In-app "full screen": the now-playing hero covers the window (left panel +
-// splitter hidden), controls auto-hide on idle. Transient (never persisted);
-// only meaningful while the hero face is up. Toggled from View ▸ Enter Full
-// Screen, the hover button, or Escape.
-export const nowPlayingFullscreen = signal(false);
+// Zen Mode: the now-playing hero covers the window (all chrome — topbar, left
+// panel, splitter — hidden), controls auto-hide on idle. Named for what you get
+// (an immersive player) rather than the chrome it hides. Not a native window
+// fullscreen. Transient (never persisted); only meaningful while the hero face
+// is up. Toggled from View ▸ Zen Mode (⌃⌘F) or Escape.
+export const zenMode = signal(false);
 
 // Dismiss the full-pane panels (Settings / About) that take the whole pane over,
 // transport included — so a gesture whose result lives in the pane isn't left
