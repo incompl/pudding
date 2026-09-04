@@ -21,6 +21,7 @@ use tauri::menu::{
 };
 use tauri::{AppHandle, Emitter, Manager, State, Wry};
 use tauri_plugin_log::{Target, TargetKind};
+use tauri_plugin_opener::OpenerExt;
 
 const DB_FILE: &str = "metadata.db";
 // Default stream list seeded on first run, alongside the library DB in the app
@@ -2270,6 +2271,37 @@ async fn artist_albumless_tracks(
     .await
 }
 
+// Explicitly hand the "Help" submenu to AppKit as NSApplication.helpMenu. macOS
+// is supposed to auto-detect a menu titled "Help" and inject its built-in search
+// field (the one that indexes every menu item), but that auto-detection doesn't
+// fire reliably under Tauri/muda — so we find the submenu by title in the main
+// menu and set it ourselves, which lights up the search field for real.
+#[cfg(target_os = "macos")]
+fn wire_macos_help_menu() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(main_menu) = app.mainMenu() else {
+        return;
+    };
+    let count = main_menu.numberOfItems();
+    for i in 0..count {
+        let Some(item) = main_menu.itemAtIndex(i) else {
+            continue;
+        };
+        if let Some(submenu) = item.submenu() {
+            if submenu.title().to_string() == "Help" {
+                app.setHelpMenu(Some(&submenu));
+                break;
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2313,6 +2345,13 @@ pub fn run() {
                 }
                 "open-equalizer" => {
                     let _ = app.emit("open-equalizer", ());
+                }
+                // Help ▸ Pudding on GitHub opens the repo in the default browser.
+                "open-readme" => {
+                    let _ = app.opener().open_url(
+                        "https://github.com/incompl/pudding",
+                        None::<&str>,
+                    );
                 }
                 // View ▸ Now Playing ▸ Album Art / Visualizer are radio-style
                 // check items; each relays its target view. The frontend owns
@@ -2684,9 +2723,20 @@ pub fn run() {
                 .build()?;
             app.manage(WindowMenu { miniplayer });
 
+            // The submenu title must be exactly "Help" so macOS treats it as the
+            // app's Help menu and injects its built-in search field (the one that
+            // indexes every menu item — type "equalizer" and it points you at the
+            // item; see wire_macos_help_menu). The GitHub item is just there so the
+            // menu isn't empty; the search field is the real payload.
+            let readme_item =
+                MenuItemBuilder::with_id("open-readme", "Pudding on GitHub").build(app)?;
+            let help_menu = SubmenuBuilder::new(app, "Help")
+                .item(&readme_item)
+                .build()?;
+
             // Order follows macOS convention: the app menu, then File (which owns
             // New/Open/Save — playlists are Pudding's only document type), Edit,
-            // View (presentation choices), our Playback menu, and Window last.
+            // View (presentation choices), our Playback menu, Window, and Help last.
             let menu = MenuBuilder::new(app)
                 .items(&[
                     &app_menu,
@@ -2695,9 +2745,15 @@ pub fn run() {
                     &view_menu,
                     &playback_menu,
                     &window_menu,
+                    &help_menu,
                 ])
                 .build()?;
             app.set_menu(menu)?;
+
+            // macOS only adds the Help search field once the menu is registered as
+            // NSApp.helpMenu; do it after the menu is installed.
+            #[cfg(target_os = "macos")]
+            wire_macos_help_menu();
 
             Ok(())
         })
