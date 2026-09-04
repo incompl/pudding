@@ -85,7 +85,16 @@ export interface LibraryNavDeps {
   // supplies the click coordinates and the artist/album/playlist identity.
   showArtistMenu: (x: number, y: number, name: string) => void;
   showAlbumMenu: (x: number, y: number, album: string, albumArtist: string) => void;
-  showPlaylistMenu: (x: number, y: number, path: string) => void;
+  showPlaylistMenu: (
+    x: number,
+    y: number,
+    path: string,
+    name: string,
+    startRename: () => void,
+  ) => void;
+  // Begin an inline rename on a navigator playlist row: swaps its text cell (host)
+  // for an edit field, writes the new name, and reloads the index so the row re-sorts.
+  startPlaylistRename: (host: HTMLElement, path: string, name: string) => void;
   // Persist the user's current place in the Files tab (the serialized drill stack)
   // so it can be restored on the next launch. Fire-and-forget; called on every
   // navigation change from render().
@@ -385,7 +394,11 @@ function rootMenuBody(): HTMLElement {
           primary: p.name,
           onOpen: () => deps.openPlaylist(p.path),
           onPlay: () => deps.playPlaylist(p.path),
-          onMenu: (x, y) => deps.showPlaylistMenu(x, y, p.path),
+          onMenu: (x, y) =>
+            deps.showPlaylistMenu(x, y, p.path, p.name, () => {
+              const cell = row.querySelector<HTMLElement>(".nav-cell");
+              if (cell) deps.startPlaylistRename(cell, p.path, p.name);
+            }),
         }),
         () => deps.openPlaylist(p.path),
       );

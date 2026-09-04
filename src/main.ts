@@ -242,6 +242,8 @@ import {
   menuMovePlaylist,
   newPlaylistWithTracks,
   addTracksToPlaylist,
+  deletePlaylistPath,
+  startNavPlaylistRename,
 } from "./playlists";
 import { app } from "./state";
 import {
@@ -1204,13 +1206,22 @@ function showAlbumContextMenu(
 // and Add to queue / Add to playlist run off the playlist's playable tracks. Missing
 // rows are already dropped by playlistPlayableTracks, so the queue pool never carries
 // danglers.
-function showPlaylistContextMenu(x: number, y: number, path: string): void {
+function showPlaylistContextMenu(
+  x: number,
+  y: number,
+  path: string,
+  name: string,
+  startRename: () => void,
+): void {
   const getTracks: TrackProvider = async () =>
     playlistPlayableTracks(await invoke<PlaylistData>("read_playlist", { path }));
   showContextMenu(x, y, [
     { label: "Play", action: () => void playPlaylistPath(path) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
+    { label: "Rename", action: startRename },
+    { label: "Delete", action: () => void deletePlaylistPath(path, name) },
+    showInFinderItem(path),
   ]);
 }
 
@@ -3522,6 +3533,7 @@ async function init(): Promise<void> {
     showArtistMenu: showArtistContextMenu,
     showAlbumMenu: showAlbumContextMenu,
     showPlaylistMenu: showPlaylistContextMenu,
+    startPlaylistRename: startNavPlaylistRename,
     persistLocation: persistNavLocation,
     libraryRootSet: () => libraryRootSet.value,
     setBrowseActive,

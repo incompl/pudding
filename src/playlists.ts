@@ -453,7 +453,19 @@ export async function renameTreePlaylist(node: TreeNode, label: HTMLElement, raw
   node.name = name;
   const textEl = label.querySelector(".label-text .title");
   if (textEl) textEl.textContent = name;
-  // Keep any open copies (browsed / active queue) titled in agreement without a re-read.
+  if (!(await commitPlaylistRename(path, name))) return;
+  // Re-sort the tree now (deterministic, not waiting on the watcher's debounce) and
+  // scroll the renamed row into view at its new position.
+  app.pendingRevealPlaylistPath = path;
+  await refreshLibrary();
+}
+
+// Shared write path for a playlist rename (tree rows and the Files-tab navigator).
+// Keeps any open copies (browsed / active queue) and the recents list titled in
+// agreement, then rewrites the #PLAYLIST: directive. Returns whether the write
+// landed; each caller does its own view refresh (the tree re-sorts, the nav reloads
+// its index).
+async function commitPlaylistRename(path: string, name: string): Promise<boolean> {
   const retitle = (q: Queue | null): Queue | null =>
     q && q.sourcePath === path ? { ...q, title: name } : q;
   browsedPlaylist.value = retitle(browsedPlaylist.value);
@@ -463,13 +475,19 @@ export async function renameTreePlaylist(node: TreeNode, label: HTMLElement, raw
   } catch (e) {
     console.error("rename_playlist failed", path, e);
     toast("Couldn't rename playlist");
-    return;
+    return false;
   }
   addRecentPlaylist(path, name);
-  // Re-sort the tree now (deterministic, not waiting on the watcher's debounce) and
-  // scroll the renamed row into view at its new position.
-  app.pendingRevealPlaylistPath = path;
-  await refreshLibrary();
+  return true;
+}
+
+// Rename a playlist by path (the Files-tab navigator has only a path — no TreeNode).
+// Writes the directive, then reloads the playlist index so the nav row re-sorts to
+// its new alphabetical slot under the new name.
+export async function renamePlaylistPath(path: string, raw: string): Promise<void> {
+  const name = raw.trim() || UNTITLED_PLAYLIST_TITLE;
+  if (!(await commitPlaylistRename(path, name))) return;
+  await refreshPlaylistIndex();
 }
 
 // Start an inline rename on a playlist's tree row. The whole label (icon + text)
@@ -478,33 +496,53 @@ export function startTreePlaylistRename(node: TreeNode, label: HTMLElement): voi
   editInline(label, node.name, (value) => void renameTreePlaylist(node, label, value));
 }
 
-// Delete a playlist file from the tree. Confirms first (the file is removed from
-// disk), drops it from recents, closes the browse if it was open, and refreshes.
-// If the deleted playlist is the *audible* source, playback stops (tear down to
-// the empty hero) — leaving it playing would autosave, and thus resurrect, the
-// just-deleted file on the next curation. A merely *stashed* copy (a folder/stream
-// plays over it) is dropped without disturbing that unrelated playback.
+// Start an inline rename on a Files-tab navigator playlist row. Swaps the row's text
+// cell for the edit field (the playlist glyph stays put, outside the cell); commit
+// optimistically retitles the row in place — so it doesn't flash the old name — then
+// writes the file and reloads the index, which re-sorts the row.
+export function startNavPlaylistRename(host: HTMLElement, path: string, name: string): void {
+  editInline(host, name, (raw) => {
+    const next = raw.trim() || UNTITLED_PLAYLIST_TITLE;
+    if (next === name) return;
+    const primary = host.querySelector(".nav-primary");
+    if (primary) primary.textContent = next;
+    void renamePlaylistPath(path, next);
+  });
+}
+
+// Delete a playlist file from a tree row. Thin wrapper over deletePlaylistPath.
 export async function deletePlaylistNode(node: TreeNode): Promise<void> {
-  const name = displayLabel(node);
-  const filename = node.path.split(/[\\/]/).pop() ?? node.path;
+  await deletePlaylistPath(node.path, displayLabel(node));
+}
+
+// Delete a playlist file by path (used by the tree rows via deletePlaylistNode and
+// by the Files-tab navigator, which has only a path + display name — no TreeNode).
+// Confirms first (the file is removed from disk), drops it from recents, closes the
+// browse if it was open, and refreshes. If the deleted playlist is the *audible*
+// source, playback stops (tear down to the empty hero) — leaving it playing would
+// autosave, and thus resurrect, the just-deleted file on the next curation. A merely
+// *stashed* copy (a folder/stream plays over it) is dropped without disturbing that
+// unrelated playback.
+export async function deletePlaylistPath(path: string, name: string): Promise<void> {
+  const filename = path.split(/[\\/]/).pop() ?? path;
   const ok = await confirm(`This will delete ${filename}`, {
     title: `Delete ${name}?`,
     kind: "warning",
   });
   if (!ok) return;
   try {
-    await invoke("delete_playlist", { path: node.path });
+    await invoke("delete_playlist", { path });
   } catch (e) {
-    console.error("delete_playlist failed", node.path, e);
+    console.error("delete_playlist failed", path, e);
     toast("Couldn't delete playlist");
     return;
   }
-  removeRecentPlaylist(node.path);
+  removeRecentPlaylist(path);
   // Drop any curation-undo history for the file — a lingering snapshot must not be
   // able to re-save (resurrect) it on a later ⌘Z.
-  forgetCurationHistory(node.path);
+  forgetCurationHistory(path);
   const active = activeQueue.value;
-  const activeIsDeleted = isPlaylistSource(active) && active!.sourcePath === node.path;
+  const activeIsDeleted = isPlaylistSource(active) && active!.sourcePath === path;
   if (activeIsDeleted && queueIsActivePool()) {
     // The deleted playlist is the audible pool: stop and clear playback entirely.
     teardownPlaybackToEmpty();
@@ -516,7 +554,7 @@ export async function deletePlaylistNode(node: TreeNode): Promise<void> {
   }
   // If we were browsing the deleted file, close the browse. (An unrelated browse
   // of a different playlist is left open.)
-  if (browsedPlaylist.value?.sourcePath === node.path) {
+  if (browsedPlaylist.value?.sourcePath === path) {
     browsedPlaylist.value = null;
     if (!activeQueue.value) listFaceOpen.value = false;
   }

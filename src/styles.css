@@ -3611,6 +3611,17 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Inline rename hosted in a nav row's text cell. The cell normally clips its
+   overflow (for the ellipsis) and isn't a flex box, so the edit field's flex:1
+   is ignored and its border/rounded corners get shaved on the right. While editing,
+   make the cell a flex box so the field fills it, let the border show, and add a
+   right inset (matching the row's 0.4em left pad) so it doesn't touch the panel edge. */
+.nav-cell:has(> .inline-edit) {
+  display: flex;
+  overflow: visible;
+  padding-right: 0.4em;
+}
+
 /* The dimmed suffix, inline after the primary label and separated by a middot on
    ::before (so the span's text stays the bare artist/album). Shown only when there
    is a subtitle — see drillRow / renderLeafTrackList. */

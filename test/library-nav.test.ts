@@ -113,6 +113,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     showArtistMenu: rec("showArtistMenu"),
     showAlbumMenu: rec("showAlbumMenu"),
     showPlaylistMenu: rec("showPlaylistMenu"),
+    startPlaylistRename: rec("startPlaylistRename"),
     persistLocation: (steps) => void (saved.steps = steps),
     setBrowseActive: () => {},
     markNavFocused: () => {},
@@ -203,10 +204,10 @@ test("a playlist row plays on double-click and raises its menu on right-click", 
   assert.deepEqual(calls.at(-1), { name: "playPlaylist", args: ["/pl/roadtrip.m3u8"] });
 
   row.fire("contextmenu", { clientX: 12, clientY: 34 });
-  assert.deepEqual(calls.at(-1), {
-    name: "showPlaylistMenu",
-    args: [12, 34, "/pl/roadtrip.m3u8"],
-  });
+  const menuCall = calls.at(-1)!;
+  assert.equal(menuCall.name, "showPlaylistMenu");
+  assert.deepEqual(menuCall.args.slice(0, 4), [12, 34, "/pl/roadtrip.m3u8", "Roadtrip"]);
+  assert.equal(typeof menuCall.args[4], "function", "menu is handed a startRename callback");
 });
 
 test("Browse un-hides the folder tree; other lenses hide it", async () => {
