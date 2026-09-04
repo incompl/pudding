@@ -29,7 +29,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,8 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 use tauri::{AppHandle, Emitter};
+
+use lofty::prelude::*;
 
 use crate::icy;
 
@@ -194,6 +196,12 @@ pub struct SharedState {
     eq_preamp_db: AtomicU32,
     eq_gains_db: [AtomicU32; EQ_BAND_COUNT],
     eq_gen: AtomicU64,
+    // ReplayGain (volume normalization) mode: 0 = off, 1 = track, 2 = album.
+    // Read once per track when it's opened (open_track), where the file's
+    // REPLAYGAIN_* tags are turned into a constant per-track gain baked into the
+    // decoded samples — so unlike the EQ (a live callback effect) a mode change
+    // only takes effect on the next track opened, not the one already decoding.
+    rg_mode: AtomicU8,
 }
 
 impl SharedState {
@@ -212,6 +220,7 @@ impl SharedState {
             eq_preamp_db: AtomicU32::new(0.0_f32.to_bits()),
             eq_gains_db: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
             eq_gen: AtomicU64::new(0),
+            rg_mode: AtomicU8::new(0),
         }
     }
 }
@@ -331,6 +340,12 @@ impl AudioEngine {
             slot.store(g.to_bits(), Ordering::Relaxed);
         }
         self.shared.eq_gen.fetch_add(1, Ordering::Release);
+    }
+
+    // Set the ReplayGain mode (0 = off, 1 = track, 2 = album). Read by the decode
+    // thread each time it opens a track, so it applies from the next track on.
+    pub fn set_replaygain(&self, mode: u8) {
+        self.shared.rg_mode.store(mode, Ordering::Relaxed);
     }
 }
 
@@ -786,6 +801,10 @@ struct TrackReader {
     // Pending input frames that haven't been resampled yet (we feed rubato in
     // fixed-size chunks). One Vec per channel.
     pending_in: Vec<Vec<f32>>,
+    // Constant linear multiplier applied to this track's samples on the way into
+    // the ring (ReplayGain volume normalization). 1.0 when RG is off or the file
+    // carries no tags; see replaygain_multiplier.
+    gain: f32,
     // Whether we've sent the resampler its last partial chunk.
     flushed: bool,
     // Whether we've reconciled channel count / sample rate against the first
@@ -1005,7 +1024,8 @@ fn decode_loop(
                         };
                         if let Some(idx) = audible_idx {
                             if idx < queue.len() && (frontier.is_none() || idx != frontier_idx) {
-                                if let Some(reader) = open_track(&queue[idx], output_rate) {
+                                let rg = shared.rg_mode.load(Ordering::Relaxed);
+                                if let Some(reader) = open_track(&queue[idx], output_rate, rg) {
                                     frontier = Some(reader);
                                     frontier_idx = idx;
                                     shared.queue_exhausted.store(false, Ordering::Relaxed);
@@ -1356,6 +1376,8 @@ fn open_stream(
             duration_seconds: 0.0,
             path: url.to_string(),
             resampler,
+            // ReplayGain is a file-tag feature; live streams carry no such tags.
+            gain: 1.0,
             pending_in: vec![Vec::new(); input_channels],
             flushed: false,
             spec_resolved: false,
@@ -1388,8 +1410,9 @@ fn advance_to_next_playable(
     origins: &Arc<Mutex<Origins>>,
     app: &AppHandle,
 ) -> Option<TrackReader> {
+    let rg_mode = shared.rg_mode.load(Ordering::Relaxed);
     while *frontier_idx < queue.len() {
-        match open_track(&queue[*frontier_idx], output_rate) {
+        match open_track(&queue[*frontier_idx], output_rate, rg_mode) {
             Some(reader) => {
                 publish_origin(
                     origins,
@@ -1428,7 +1451,8 @@ fn decode_and_push(
                 tr.pending_in = vec![Vec::new(); tr.input_channels];
                 tr.flushed = true;
                 if !tail.is_empty() {
-                    let interleaved = interleave_stereo(&tail, tr.input_channels);
+                    let mut interleaved = interleave_stereo(&tail, tr.input_channels);
+                    apply_track_gain(&mut interleaved, tr.gain);
                     push_blocking(rb, &interleaved);
                     let frames = (interleaved.len() / OUT_CHANNELS) as u64;
                     *producer_frames += frames;
@@ -1496,7 +1520,8 @@ fn decode_and_push(
             .resampler
             .process(&in_refs, None)
             .map_err(|e| format!("resample: {e}"))?;
-        let interleaved = interleave_stereo(&out_planar, tr.input_channels);
+        let mut interleaved = interleave_stereo(&out_planar, tr.input_channels);
+        apply_track_gain(&mut interleaved, tr.gain);
         push_blocking(rb, &interleaved);
         let frames = (interleaved.len() / OUT_CHANNELS) as u64;
         *producer_frames += frames;
@@ -1544,7 +1569,7 @@ fn push_blocking(rb: &mut RbProducer<f32>, samples: &[f32]) {
 
 // === Symphonia helpers ===
 
-fn open_track(path: &std::path::Path, output_rate: u32) -> Option<TrackReader> {
+fn open_track(path: &std::path::Path, output_rate: u32, rg_mode: u8) -> Option<TrackReader> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
@@ -1614,10 +1639,72 @@ fn open_track(path: &std::path::Path, output_rate: u32) -> Option<TrackReader> {
         duration_seconds,
         path: path.to_string_lossy().to_string(),
         resampler,
+        gain: replaygain_multiplier(path, rg_mode),
         pending_in: vec![Vec::new(); input_channels],
         flushed: false,
         spec_resolved: false,
     })
+}
+
+// The per-track linear gain for the given ReplayGain mode, or 1.0 when RG is off
+// or the file has no usable tags. Reads the standard REPLAYGAIN_* tags (lofty
+// maps them across ID3v2 TXXX, Vorbis comments, and iTunes MP4 atoms). Album
+// mode prefers the album gain/peak and falls back to the track values, matching
+// how other players treat an album-mode track that was only track-scanned.
+//
+// To avoid the classic ReplayGain failure — boosting a quiet track past 0 dBFS
+// and clipping — we cap the gain so gain * peak <= 1.0 when a peak is known.
+fn replaygain_multiplier(path: &std::path::Path, mode: u8) -> f32 {
+    if mode == 0 {
+        return 1.0;
+    }
+    let Ok(tagged) = lofty::read_from_path(path) else {
+        return 1.0;
+    };
+    let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
+        return 1.0;
+    };
+
+    // A gain tag is a signed dB figure, usually suffixed " dB" (e.g. "-7.89 dB").
+    let parse_db = |k: &ItemKey| -> Option<f32> {
+        tag.get_string(k)
+            .and_then(|s| s.trim().trim_end_matches(|c: char| c.is_alphabetic()).trim().parse::<f32>().ok())
+    };
+    // A peak tag is a linear sample value (typically 0..~1); ignore non-positive.
+    let parse_peak = |k: &ItemKey| -> Option<f32> {
+        tag.get_string(k).and_then(|s| s.trim().parse::<f32>().ok()).filter(|p| *p > 0.0)
+    };
+
+    // mode 2 = album: prefer album tags, fall back to track tags.
+    let (gain_db, peak) = if mode == 2 {
+        (
+            parse_db(&ItemKey::ReplayGainAlbumGain).or_else(|| parse_db(&ItemKey::ReplayGainTrackGain)),
+            parse_peak(&ItemKey::ReplayGainAlbumPeak).or_else(|| parse_peak(&ItemKey::ReplayGainTrackPeak)),
+        )
+    } else {
+        (
+            parse_db(&ItemKey::ReplayGainTrackGain),
+            parse_peak(&ItemKey::ReplayGainTrackPeak),
+        )
+    };
+
+    replaygain_gain(gain_db, peak)
+}
+
+/// Pure ReplayGain math, split out from tag I/O so it can be unit-tested.
+/// `gain_db` is the signed dB adjustment from the tag; `peak` is the linear
+/// sample peak (if present). Returns the linear multiplier to apply to samples.
+fn replaygain_gain(gain_db: Option<f32>, peak: Option<f32>) -> f32 {
+    let Some(gain_db) = gain_db else {
+        return 1.0;
+    };
+    let mut gain = 10.0_f32.powf(gain_db / 20.0);
+    if let Some(peak) = peak {
+        // Clip prevention: never let gain*peak exceed full scale.
+        gain = gain.min(1.0 / peak);
+    }
+    // Guard against absurd tags; keep the multiplier in a sane range.
+    gain.clamp(0.0, 4.0)
 }
 
 fn compute_duration_seconds(track: &Track) -> f64 {
@@ -1773,6 +1860,17 @@ fn resample_flush(
     resampler
         .process(&in_refs, None)
         .map_err(|e| format!("flush: {e}"))
+}
+
+// Scale an interleaved buffer in place by a constant per-track gain (ReplayGain).
+// The common case (RG off / no tags) is gain == 1.0, which we skip entirely.
+fn apply_track_gain(samples: &mut [f32], gain: f32) {
+    if gain == 1.0 {
+        return;
+    }
+    for s in samples.iter_mut() {
+        *s *= gain;
+    }
 }
 
 fn interleave_stereo(planar: &[Vec<f32>], input_channels: usize) -> Vec<f32> {
@@ -2127,7 +2225,7 @@ mod spec_reconcile_tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests-fixtures")
             .join(fixture);
-        let mut tr = open_track(&path, output_rate).expect("open_track");
+        let mut tr = open_track(&path, output_rate, 0).expect("open_track");
         eprintln!(
             "fixture={fixture} input_rate={} input_channels={} duration={:.3}",
             tr.input_rate, tr.input_channels, tr.duration_seconds
@@ -2195,5 +2293,157 @@ mod spec_reconcile_tests {
         let f = produced_frames("stereo22_alac.m4a", 44100);
         eprintln!("stereo22_alac produced_frames={f}");
         assert!(f > 0);
+    }
+}
+
+#[cfg(test)]
+mod replaygain_tests {
+    //! Coverage for the ReplayGain volume-normalization feature. The audio
+    //! itself is impractical to assert on in an e2e test (gain is baked into
+    //! samples on the real-time decode thread), so we test the logic directly:
+    //!   * the pure dB->linear math, including clip prevention and clamping,
+    //!   * that apply_track_gain actually scales samples,
+    //!   * and a real round-trip: write RG tags onto an m4a fixture with lofty
+    //!     and confirm replaygain_multiplier reads them back (this is what
+    //!     validates the ItemKey -> MP4 freeform-atom wiring end to end).
+    use super::*;
+    use lofty::config::WriteOptions;
+    use lofty::tag::{Tag, TagType};
+
+    #[test]
+    fn pure_math_basics() {
+        // No gain tag -> unity, regardless of peak.
+        assert_eq!(replaygain_gain(None, None), 1.0);
+        assert_eq!(replaygain_gain(None, Some(0.5)), 1.0);
+
+        // 0 dB is unity; +6.02 dB doubles; -6.02 dB halves.
+        assert!((replaygain_gain(Some(0.0), None) - 1.0).abs() < 1e-6);
+        assert!((replaygain_gain(Some(6.0206), None) - 2.0).abs() < 1e-3);
+        assert!((replaygain_gain(Some(-6.0206), None) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn clip_prevention_caps_to_peak() {
+        // +12 dB (~3.98x) on a track that already peaks at 0.8 would clip.
+        // The multiplier must be capped to 1/peak = 1.25.
+        let g = replaygain_gain(Some(12.0), Some(0.8));
+        assert!((g - 1.25).abs() < 1e-4, "expected cap to 1/peak, got {g}");
+
+        // When headroom is ample, the peak cap does not bind.
+        let g = replaygain_gain(Some(3.0), Some(0.5));
+        assert!((g - 10.0_f32.powf(3.0 / 20.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn absurd_gain_is_clamped() {
+        // A garbage +40 dB tag (100x) is clamped to the 4.0 ceiling.
+        assert_eq!(replaygain_gain(Some(40.0), None), 4.0);
+        // Peak cap can also drive it high; clamp still holds.
+        assert_eq!(replaygain_gain(Some(40.0), Some(0.1)), 4.0);
+    }
+
+    #[test]
+    fn apply_track_gain_scales_and_skips_unity() {
+        let mut s = vec![0.5, -0.25, 1.0, -1.0];
+        apply_track_gain(&mut s, 0.5);
+        assert_eq!(s, vec![0.25, -0.125, 0.5, -0.5]);
+
+        // gain == 1.0 is a no-op fast path (bit-identical, no rounding).
+        let mut s = vec![0.3, -0.7, 0.123_456];
+        let orig = s.clone();
+        apply_track_gain(&mut s, 1.0);
+        assert_eq!(s, orig);
+    }
+
+    // Copy a fixture into a temp file so we can write tags without touching the
+    // committed fixture. Returns the temp path; caller cleans up.
+    fn temp_copy(fixture: &str, tag: &str) -> std::path::PathBuf {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests-fixtures")
+            .join(fixture);
+        let dst = std::env::temp_dir().join(format!(
+            "pud_rg_{}_{}_{}.m4a",
+            tag,
+            std::process::id(),
+            fixture,
+        ));
+        std::fs::copy(&src, &dst).expect("copy fixture");
+        dst
+    }
+
+    fn write_rg_tags(path: &std::path::Path, items: &[(ItemKey, &str)]) {
+        let mut t = Tag::new(TagType::Mp4Ilst);
+        for (k, v) in items {
+            assert!(t.insert_text(k.clone(), (*v).to_string()), "insert {k:?}");
+        }
+        t.save_to_path(path, WriteOptions::default())
+            .expect("write RG tags to fixture");
+    }
+
+    #[test]
+    fn no_rg_tags_plays_at_unity() {
+        // The committed fixtures carry no ReplayGain tags: any mode -> 1.0.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests-fixtures")
+            .join("stereo22_alac.m4a");
+        assert_eq!(replaygain_multiplier(&path, 1), 1.0);
+        assert_eq!(replaygain_multiplier(&path, 2), 1.0);
+    }
+
+    #[test]
+    fn mode_off_short_circuits() {
+        // Even with tags present, mode 0 never touches the volume.
+        let path = temp_copy("stereo22_alac.m4a", "off");
+        write_rg_tags(
+            &path,
+            &[(ItemKey::ReplayGainTrackGain, "-6.00 dB")],
+        );
+        assert_eq!(replaygain_multiplier(&path, 0), 1.0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reads_track_tags_roundtrip() {
+        let path = temp_copy("stereo22_alac.m4a", "track");
+        // -6.02 dB with a 0.9 peak: attenuation, so the peak cap won't bind.
+        write_rg_tags(
+            &path,
+            &[
+                (ItemKey::ReplayGainTrackGain, "-6.0206 dB"),
+                (ItemKey::ReplayGainTrackPeak, "0.900000"),
+            ],
+        );
+        let g = replaygain_multiplier(&path, 1);
+        assert!((g - 0.5).abs() < 1e-3, "track gain not read back, got {g}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn album_mode_prefers_album_then_falls_back_to_track() {
+        // Both album and track present: album mode uses album (+0 dB -> 1.0),
+        // track mode uses track (-6.02 dB -> 0.5). Same file, two modes.
+        let path = temp_copy("stereo22_alac.m4a", "album");
+        write_rg_tags(
+            &path,
+            &[
+                (ItemKey::ReplayGainTrackGain, "-6.0206 dB"),
+                (ItemKey::ReplayGainAlbumGain, "0.00 dB"),
+            ],
+        );
+        assert!((replaygain_multiplier(&path, 2) - 1.0).abs() < 1e-3, "album gain");
+        assert!((replaygain_multiplier(&path, 1) - 0.5).abs() < 1e-3, "track gain");
+        let _ = std::fs::remove_file(&path);
+
+        // Only track tags present: album mode must fall back to the track gain.
+        let path = temp_copy("stereo22_alac.m4a", "fallback");
+        write_rg_tags(
+            &path,
+            &[(ItemKey::ReplayGainTrackGain, "-6.0206 dB")],
+        );
+        assert!(
+            (replaygain_multiplier(&path, 2) - 0.5).abs() < 1e-3,
+            "album mode should fall back to track gain",
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

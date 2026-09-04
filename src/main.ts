@@ -41,6 +41,7 @@ import type {
   ScanResult,
   ScanProgress,
   RepeatMode,
+  ReplayGainMode,
   TrackSelection,
   ContextMenuItem,
   NavState,
@@ -81,6 +82,7 @@ import {
   queuePlayingIndex,
   shuffleMode,
   repeatMode,
+  replayGainMode,
   autoadvance,
   libraryRootSet,
   streamListPathValid,
@@ -277,6 +279,8 @@ const KEY_AUTOADVANCE_FILES = "autoadvanceFiles"; // legacy, migrated on load
 // Playback modes remembered across launches, like every mainstream player.
 const KEY_SHUFFLE = "shuffleMode";
 const KEY_REPEAT = "repeatMode";
+// ReplayGain (volume normalization) mode, remembered across launches.
+const KEY_REPLAYGAIN = "replayGainMode";
 // Which Now Playing hero view the user last chose (art vs. visualizer).
 const KEY_NOW_PLAYING_VIEW = "nowPlayingView";
 
@@ -1866,6 +1870,16 @@ function setRepeatMode(mode: RepeatMode): void {
   void persistPlaybackModes();
 }
 
+// Change the ReplayGain mode and persist it. Pushing it to the engine and syncing
+// the menu's radio checkmarks is handled by the reactive effect on replayGainMode
+// (which also fires once on load). Unlike shuffle/repeat this doesn't touch
+// playback flow, so there's no applyModeChange().
+function setReplayGainMode(mode: ReplayGainMode): void {
+  if (replayGainMode.value === mode) return;
+  replayGainMode.value = mode;
+  void app.store.set(KEY_REPLAYGAIN, mode).then(() => app.store.save());
+}
+
 function setupPlaybackModes(): void {
   modeShuffleBtn.addEventListener("click", toggleShuffle);
   modeRepeatBtn.addEventListener("click", () => {
@@ -3297,6 +3311,11 @@ async function init(): Promise<void> {
   repeatMode.value =
     storedRepeat === "all" || storedRepeat === "one" ? storedRepeat : "off";
 
+  // ReplayGain mode (defaults off). The effect below pushes it to the engine and
+  // syncs the menu radio on this initial set and after any change.
+  const storedRg = await app.store.get<ReplayGainMode>(KEY_REPLAYGAIN);
+  replayGainMode.value = storedRg === "track" || storedRg === "album" ? storedRg : "off";
+
   // Now Playing view (album art vs. visualizer), defaults to art. The reactive
   // sync effect in setupSettings re-checks the matching menu radio item.
   nowPlayingView.value =
@@ -3325,6 +3344,13 @@ async function init(): Promise<void> {
   });
   effect(() => {
     void invoke("set_mute_checked", { muted: volume.value === 0 });
+  });
+  // ReplayGain: push the mode to the engine and check the matching menu radio.
+  // Fires on load (seeding the engine from the persisted value) and after any change.
+  effect(() => {
+    const mode = replayGainMode.value;
+    void invoke("audio_set_replaygain", { mode });
+    void invoke("set_replaygain_checked", { mode });
   });
 
   // Recent playlists → the OS "Open Recent ▸" submenu. Load the persisted list
@@ -3644,6 +3670,13 @@ async function init(): Promise<void> {
     // active mode, setRepeatMode is a no-op (no signal change, so the sync effect
     // won't fire), which would leave it wrongly unchecked — re-sync explicitly.
     void invoke("set_repeat_checked", { mode: repeatMode.value });
+  });
+  await listen<string>("menu:replaygain", (event) => {
+    setReplayGainMode(event.payload as ReplayGainMode);
+    // Like Repeat: the clicked item auto-toggled its own checkmark. If it was
+    // already the active mode, setReplayGainMode is a no-op and the effect won't
+    // fire, leaving the trio wrongly checked — re-sync explicitly.
+    void invoke("set_replaygain_checked", { mode: replayGainMode.value });
   });
   await listen<string>("menu:volume", (event) => {
     setVolume(volume.value + (event.payload === "up" ? 0.1 : -0.1));

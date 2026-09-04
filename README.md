@@ -21,6 +21,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 - High-quality sinc resampling to match your output device
 - Shuffle and repeat (off / all / one), applied live without interrupting the current track
 - Autoadvance toggles in the Playback menu, set separately for the file browser and for playlists/queues — turn it off and playback stops at the end of each track instead of rolling on
+- ReplayGain volume normalization (off / track / album) that honors standard gain tags, with peak-based clip prevention — untagged files play unchanged
 
 ### Library
 

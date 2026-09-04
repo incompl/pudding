@@ -72,6 +72,11 @@ struct PlaybackMenu {
     repeat_all: CheckMenuItem<Wry>,
     repeat_one: CheckMenuItem<Wry>,
     mute: CheckMenuItem<Wry>,
+    // ReplayGain (volume normalization): three radio-style items, only one
+    // checked ("off"/"track"/"album"), synced from the frontend like Repeat.
+    rg_off: CheckMenuItem<Wry>,
+    rg_track: CheckMenuItem<Wry>,
+    rg_album: CheckMenuItem<Wry>,
 }
 
 // The Window menu's "Mini Player" checkbox. The frontend derives mini mode from
@@ -1619,6 +1624,15 @@ fn set_mute_checked(menu: State<PlaybackMenu>, muted: bool) {
     let _ = menu.mute.set_checked(muted);
 }
 
+// Sync the three ReplayGain items radio-style ("off"/"track"/"album"). Called
+// whenever the mode changes and once at startup, mirroring the Repeat trio.
+#[tauri::command]
+fn set_replaygain_checked(menu: State<PlaybackMenu>, mode: String) {
+    let _ = menu.rg_off.set_checked(mode == "off");
+    let _ = menu.rg_track.set_checked(mode == "track");
+    let _ = menu.rg_album.set_checked(mode == "album");
+}
+
 // Sync the "Mini Player" checkmark to the current mode (the frontend derives it
 // from the viewport height, on startup and on every resize).
 #[tauri::command]
@@ -1722,6 +1736,19 @@ fn audio_set_volume(volume: f32, engine: State<audio::AudioEngine>) {
 #[tauri::command]
 fn audio_set_eq(enabled: bool, preamp: f32, gains: Vec<f32>, engine: State<audio::AudioEngine>) {
     engine.set_eq(enabled, preamp, &gains);
+}
+
+// Set the ReplayGain (volume normalization) mode. The frontend owns the setting
+// (persisted in its store, menu radio items), and sends "off" / "track" / "album";
+// the engine reads it the next time it opens a track. See audio::open_track.
+#[tauri::command]
+fn audio_set_replaygain(mode: String, engine: State<audio::AudioEngine>) {
+    let m = match mode.as_str() {
+        "track" => 1,
+        "album" => 2,
+        _ => 0,
+    };
+    engine.set_replaygain(m);
 }
 
 // === System Now Playing (macOS Control Center / media keys) ===
@@ -2413,6 +2440,16 @@ pub fn run() {
                 "repeat-one" => {
                     let _ = app.emit("menu:repeat", "one");
                 }
+                // ReplayGain is three radio-style items; each selects its mode.
+                "replaygain-off" => {
+                    let _ = app.emit("menu:replaygain", "off");
+                }
+                "replaygain-track" => {
+                    let _ = app.emit("menu:replaygain", "track");
+                }
+                "replaygain-album" => {
+                    let _ = app.emit("menu:replaygain", "album");
+                }
                 // Mini Player checkbox auto-toggled before this fires; the frontend
                 // owns the mode (it resizes across the breakpoint) and re-syncs the
                 // checkmark from the resulting viewport height.
@@ -2615,6 +2652,24 @@ pub fn run() {
             let equalizer = MenuItemBuilder::with_id("open-equalizer", "Equalizer")
                 .accelerator("Alt+Cmd+E")
                 .build(app)?;
+            // ReplayGain (volume normalization): three radio-style items in a
+            // submenu next to the Equalizer, another playback audio setting. Off
+            // by default; the frontend corrects the checkmark to its persisted
+            // value at startup and after each change (set_replaygain_checked),
+            // like the Repeat trio. Applied per track from the file's
+            // REPLAYGAIN_* tags — untagged files play unchanged.
+            let rg_off = CheckMenuItemBuilder::with_id("replaygain-off", "Off")
+                .checked(true)
+                .build(app)?;
+            let rg_track =
+                CheckMenuItemBuilder::with_id("replaygain-track", "Track").build(app)?;
+            let rg_album =
+                CheckMenuItemBuilder::with_id("replaygain-album", "Album").build(app)?;
+            let replaygain_menu = SubmenuBuilder::new(app, "ReplayGain")
+                .item(&rg_off)
+                .item(&rg_track)
+                .item(&rg_album)
+                .build()?;
             let playback_menu = SubmenuBuilder::new(app, "Playback")
                 .item(&play_pause)
                 .item(&previous)
@@ -2627,6 +2682,7 @@ pub fn run() {
                 .item(&volume_down)
                 .item(&mute)
                 .item(&equalizer)
+                .item(&replaygain_menu)
                 .separator()
                 .item(&autoadvance)
                 .build()?;
@@ -2637,6 +2693,9 @@ pub fn run() {
                 repeat_all,
                 repeat_one,
                 mute,
+                rg_off,
+                rg_track,
+                rg_album,
             });
 
             // View menu: which Now Playing hero view is shown (Album Art vs.
@@ -2796,6 +2855,7 @@ pub fn run() {
             set_shuffle_checked,
             set_repeat_checked,
             set_mute_checked,
+            set_replaygain_checked,
             set_miniplayer_checked,
             set_now_playing_view_checked,
             set_save_playlist_enabled,
@@ -2806,6 +2866,7 @@ pub fn run() {
             audio_stop,
             audio_set_volume,
             audio_set_eq,
+            audio_set_replaygain,
             now_playing_set_metadata,
             now_playing_set_playback,
             now_playing_clear,

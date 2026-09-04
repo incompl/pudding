@@ -156,6 +156,11 @@ export interface ScanProgress {
 
 export type RepeatMode = "off" | "all" | "one";
 
+// ReplayGain (volume normalization) mode: off, or normalize per track / per album
+// from the file's REPLAYGAIN_* tags. A global, persistent preference set from the
+// Playback menu; the engine applies it as each track is opened.
+export type ReplayGainMode = "off" | "track" | "album";
+
 // --- Row multi-select model (queue list + navigator leaf list) ---
 //
 // A multi-select over SearchTrack *object identity* (not index or path) — the same

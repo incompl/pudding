@@ -11,6 +11,7 @@ import type { Store } from "@tauri-apps/plugin-store";
 import type {
   Queue,
   RepeatMode,
+  ReplayGainMode,
   TreeNode,
   Stream,
   SearchTrack,
@@ -326,6 +327,11 @@ export const repeatMode = signal<RepeatMode>("off");
 // so gapless prep has nothing to advance into and handleEnded stops at each
 // track's end. See applyAutoadvance.
 export const autoadvance = signal(true);
+
+// ReplayGain (volume normalization) mode. A global, persistent preference set from
+// the Playback menu (never the app UI), defaulting off. Pushed to the engine, which
+// reads each track's REPLAYGAIN_* tags as it opens it; untagged files play unchanged.
+export const replayGainMode = signal<ReplayGainMode>("off");
 
 // Whether playback flows to the next track. One global setting now — no context
 // branching. Read at each advancement point and each engine hand-off.
