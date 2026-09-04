@@ -635,20 +635,25 @@ html[data-mode="light"] .context-menu {
   padding: 1em 0.5em;
 }
 
-/* Fixed dB scale (the "levels") down the left edge. Its three labels pin to the
-   top / center / bottom so they line up with each bar's +12 / 0 / −12 — the
-   center label marks the zero baseline the bars fill out from. Bottom padding
-   matches the bands' label gap so the scale aligns to the bar tops, not the
-   captions. */
+/* Fixed dB scale (the "levels") down the left edge, sized to the bar TRACK (not
+   the whole column). Its three labels pin to top / center / bottom so they line
+   up with each bar's +12 / 0 / −12 — the center marks the zero baseline the bars
+   fill out from. The bottom padding reserves exactly the bands' caption row
+   (their 1em gap + the 0.75em label line) so the scale's content box is the
+   track: −12 dB lands flush with the bar bottoms like +12 dB does at the top,
+   and 0 dB sits dead center. Font-size lives on the labels, not here, so this
+   padding stays in the bands' em units instead of the scale's own. */
 .eq-scale {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding-bottom: calc(0.6em + 1em); /* band label + its gap */
-  font-size: 0.7em;
+  padding-bottom: calc(1em + 0.75em); /* band gap + caption line (see .eq-band) */
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+.eq-scale > span {
+  font-size: 0.7em;
 }
 
 #eq-bands {
@@ -767,6 +772,9 @@ html[data-mode="light"] .context-menu {
 
 .eq-band-label {
   font-size: 0.75em;
+  /* Pin the line box to the font size so the caption row is exactly 0.75em tall
+     — the height .eq-scale reserves to align its −12 dB to the bar bottoms. */
+  line-height: 1;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
