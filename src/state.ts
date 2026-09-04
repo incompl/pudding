@@ -183,16 +183,23 @@ export const nowPlayingView = signal<NowPlayingView>("art");
 // Screen, the hover button, or Escape.
 export const nowPlayingFullscreen = signal(false);
 
-// Snap the right pane back to Now Playing, dismissing whichever panel face
-// (Settings or About) is up. Called from the user gestures that change what the
-// pane would show — playing a track, manual skip, changing the queue, browsing a
-// playlist, opening an editor — so the result of the action is revealed instead
-// of staying hidden behind a panel. Deliberately NOT called on autoadvance (a
-// track ending into the next) or on shuffle/repeat toggles: those leave an open
-// panel up. Idempotent.
-export function dismissRightPanel(): void {
+// Dismiss the full-pane panels (Settings / About) that take the whole pane over,
+// transport included — so a gesture whose result lives in the pane isn't left
+// hidden behind one. The Equalizer is deliberately spared: it's a face of the
+// now-playing panel that coexists with the transport (you tune while listening),
+// so playing or skipping a track keeps it up rather than snapping to Now Playing.
+// Called from the pure-playback gestures (play, manual skip). Deliberately NOT
+// called on autoadvance or on shuffle/repeat toggles: those leave any panel up.
+// Idempotent.
+export function dismissFullPanels(): void {
   settingsOpen.value = false;
   aboutOpen.value = false;
+}
+
+// dismissFullPanels plus the Equalizer face — for gestures that reveal the list
+// or editor face, both of which `.show-eq` would otherwise cover. Idempotent.
+export function dismissRightPanel(): void {
+  dismissFullPanels();
   equalizerOpen.value = false;
 }
 export const activeTab = signal<"files" | "streams">("files");

@@ -28,7 +28,7 @@ import {
   shuffleMode,
   resetToLonePlayback,
   autoadvanceEnabled,
-  dismissRightPanel,
+  dismissFullPanels,
 } from "./state";
 import { fetchChildren } from "./tree-view";
 import {
@@ -383,7 +383,7 @@ export function skipNext(): void {
   // A manual Next is a move to a new track (the button is disabled at a true dead
   // end), so reveal Now Playing if a panel is up. Autoadvance reaches the next
   // track through handleEnded instead, which deliberately doesn't dismiss.
-  dismissRightPanel();
+  dismissFullPanels();
   const current = currentNodePath.value ?? app.lastQueue[app.lastIndex] ?? null;
 
   if (shuffleMode.value) {
@@ -430,7 +430,7 @@ export function skipPrev(): void {
     const prev = app.shuffleHistory.pop();
     if (prev) {
       if (current) app.shuffleBag.unshift(current);
-      dismissRightPanel();
+      dismissFullPanels();
       playSingle(prev);
     } else {
       void engine.seekTo(0);
@@ -448,7 +448,7 @@ export function skipPrev(): void {
   if (prevIdx >= 0) {
     // Only a genuine step back to another track changes the pane; the restart
     // paths above (seekTo 0) leave the same track playing, so they don't dismiss.
-    dismissRightPanel();
+    dismissFullPanels();
     playPool(pool, prevIdx);
   } else {
     void engine.seekTo(0);
@@ -481,7 +481,7 @@ export function hasNextTrack(): boolean {
 // clicked instance rather than the first path match. Omitted for folder/tree
 // clicks, where the node's path is unambiguous within its folder.
 export function playFile(node: TreeNode, parent: TreeNode, startIndex?: number): void {
-  dismissRightPanel();
+  dismissFullPanels();
   app.currentParent = parent;
   currentNodePath.value = node.path;
   currentStreamUrl.value = null;
@@ -531,7 +531,7 @@ export function playFile(node: TreeNode, parent: TreeNode, startIndex?: number):
 
 export function playStream(stream: Stream): void {
   app.pendingResume = null;
-  dismissRightPanel();
+  dismissFullPanels();
   // A stream is lone playback: dismiss any open queue/playlist and land on the
   // hero (its own face, no nav bar). Null the highlight (streams emit no
   // track-changed, so onAdvance won't).
@@ -594,7 +594,7 @@ export function applyStreamEdit(oldUrl: string, next: Stream): void {
 // the tree. The native engine opens the file directly — no prepare step needed.
 export function playSearchTrack(t: SearchTrack): void {
   app.pendingResume = null;
-  dismissRightPanel();
+  dismissFullPanels();
   // A lone search hit is lone playback: dismiss any open queue/playlist and land
   // on the hero. currentParent is null so onAdvance won't touch the highlight.
   resetToLonePlayback();

@@ -140,8 +140,9 @@ import {
   nowPlayingPanel,
   settingsPanel,
   aboutPanel,
-  equalizerPanel,
   eqBandsEl,
+  eqEnabledEl,
+  eqResetBtn,
   nowPlayingVisualizerEl,
   nowPlayingViewBtn,
   nowPlayingFullscreenBtn,
@@ -2033,11 +2034,9 @@ async function setupWindowSize(
   });
 }
 
-// Proof-of-concept graphic equalizer. Ten fixed ISO frequency bands plus a
-// preamp, each a vertical gain slider (−12…+12 dB, centered at 0). Nothing is
-// wired to the audio engine yet — this is just enough to prove the panel, menu
-// item, and accent-colored bars render. The bars take their color from
-// --accent via CSS (accent-color on the range inputs), so they follow the
+// Graphic equalizer. Ten fixed ISO frequency bands plus a preamp, each a
+// vertical gain slider (−12…+12 dB, centered at 0). The bars take their color
+// from --accent via CSS (accent-color on the range inputs), so they follow the
 // selected theme like the rest of the UI.
 // Slider 0 is the wideband preamp; the rest are per-band peaking gains at these
 // center frequencies (matched to EQ_FREQS in the Rust engine). Labels are for
@@ -2045,22 +2044,24 @@ async function setupWindowSize(
 const EQ_BANDS = ["Pre", "32", "64", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"];
 const eqSliders: HTMLInputElement[] = [];
 
-// Send the current slider positions to the engine. `enabled` stays true once
-// the panel is wired up; a flat set (all zeros) is an audible no-op, so there's
-// no separate on/off for this proof-of-concept.
+// The band gains (everything but the preamp at index 0).
+function eqBandGains(): number[] {
+  return eqSliders.slice(1).map((s) => Number(s.value));
+}
+
+// Send the current slider positions to the engine.
 function pushEq(): void {
-  const values = eqSliders.map((s) => Number(s.value));
   void invoke("audio_set_eq", {
-    enabled: true,
-    preamp: values[0] ?? 0,
-    gains: values.slice(1),
+    enabled: eqEnabledEl.checked,
+    preamp: Number(eqSliders[0].value),
+    gains: eqBandGains(),
   });
 }
 
 function setupEqualizer(): void {
   eqSliders.length = 0;
   eqBandsEl.replaceChildren(
-    ...EQ_BANDS.map((label) => {
+    ...EQ_BANDS.map((label, i) => {
       const band = document.createElement("div");
       band.className = "eq-band";
       const slider = document.createElement("input");
@@ -2070,7 +2071,7 @@ function setupEqualizer(): void {
       slider.max = "12";
       slider.step = "1";
       slider.value = "0";
-      slider.setAttribute("aria-label", `${label} Hz gain`);
+      slider.setAttribute("aria-label", i === 0 ? "Preamp gain" : `${label} Hz gain`);
       slider.addEventListener("input", pushEq);
       eqSliders.push(slider);
       const cap = document.createElement("span");
@@ -2080,6 +2081,25 @@ function setupEqualizer(): void {
       return band;
     }),
   );
+
+  // On/off bypasses the whole chain in the engine; the sliders stay put (and
+  // stay editable) so it's an instant A/B against your curve. A subtle dimming
+  // signals the bypassed state.
+  const syncEnabled = () => {
+    eqBandsEl.classList.toggle("bypassed", !eqEnabledEl.checked);
+  };
+  eqEnabledEl.addEventListener("change", () => {
+    syncEnabled();
+    pushEq();
+  });
+
+  // Reset flattens every slider (preamp included) back to 0.
+  eqResetBtn.addEventListener("click", () => {
+    for (const s of eqSliders) s.value = "0";
+    pushEq();
+  });
+
+  syncEnabled();
 }
 
 function setupSettings(): void {
@@ -2871,15 +2891,20 @@ function setupEffects(): void {
     const settings = settingsOpen.value;
     const about = aboutOpen.value;
     const equalizer = equalizerOpen.value;
-    // Settings, About and Equalizer are mutually exclusive pane takeovers, all
-    // dismissed by the same Back button. Anything that yields the pane to a panel
-    // keys off whether *any* is open. (The visualizer is NOT here — it's a hero
-    // view, not a takeover, so it never hides the now-playing panel or controls.)
+    // Settings, About and Equalizer are mutually exclusive and all dismissed by
+    // the same Back button, so the action cluster (Back / search / mode toggles)
+    // keys off whether *any* is open. But they split on how much they cover:
+    // Settings/About take the whole pane (transport included), while the
+    // Equalizer is a face of the now-playing panel (like the editor) that leaves
+    // the transport row put — you tune while listening. So only Settings/About
+    // hide the now-playing panel; the Equalizer just adds `.show-eq`. (The
+    // visualizer is in neither group — it's a hero view, not a takeover.)
     const panelOpen = settings || about || equalizer;
+    const paneCovered = settings || about;
     settingsPanel.classList.toggle("hidden", !settings);
     aboutPanel.classList.toggle("hidden", !about);
-    equalizerPanel.classList.toggle("hidden", !equalizer);
-    nowPlayingPanel.classList.toggle("hidden", panelOpen);
+    nowPlayingPanel.classList.toggle("show-eq", equalizer);
+    nowPlayingPanel.classList.toggle("hidden", paneCovered);
     miniplayerBtn.classList.toggle("hidden", panelOpen);
     settingsBackBtn.classList.toggle("hidden", !panelOpen);
     // Search targets the library/streams, not these panels — hide it here too so

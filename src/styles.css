@@ -551,6 +551,11 @@ html[data-mode="light"] .context-menu {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* #right scrolls (overflow: auto), so without this the panel keeps its content's
+     min-content width instead of shrinking to #right — a wide transport row (real
+     seek-bar + time labels, once a track is actually playing) would push the pane
+     past the viewport, clipping the equalizer's rightmost bands. */
+  min-width: 0;
 }
 
 /* About shares the right pane with Settings, but centers its short content
@@ -580,14 +585,40 @@ html[data-mode="light"] .context-menu {
   margin: 0;
 }
 
-/* Equalizer shares the pane with Settings/About. Its bands sit in a row that
-   fills the pane; each band is a tall column with a vertical gain slider over a
-   frequency label. */
+/* The Equalizer is a face of the now-playing panel (like the editor), hidden
+   until `.show-eq` reveals it in the full-view query below; the transport row
+   stays put beneath it. Its bands sit in a row that fills the pane; each band is
+   a tall column with a vertical gain slider over a frequency label. */
 #equalizer-panel {
-  flex: 1;
-  display: flex;
+  display: none;
   flex-direction: column;
   min-height: 0;
+  padding-top: 0.25em;
+}
+
+/* The equalizer header holds the title and its controls (On, Reset) on one row
+   so the band grid gets the rest of the pane. */
+.eq-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1em;
+  flex-wrap: wrap;
+}
+
+.eq-controls {
+  display: flex;
+  align-items: center;
+  gap: 1em;
+}
+
+.eq-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  cursor: pointer;
+  color: var(--text-dim);
+  accent-color: var(--accent);
 }
 
 #eq-bands {
@@ -598,6 +629,13 @@ html[data-mode="light"] .context-menu {
   gap: 0.5em;
   min-height: 0;
   padding: 1em 0.5em;
+  transition: opacity 0.15s ease;
+}
+
+/* Bypassed (On unchecked): the chain is off in the engine, so dim the bars to
+   signal it while leaving them editable. */
+#eq-bands.bypassed {
+  opacity: 0.45;
 }
 
 .eq-band {
@@ -607,6 +645,9 @@ html[data-mode="light"] .context-menu {
   align-items: center;
   gap: 0.6em;
   min-height: 0;
+  /* Shrink to an equal fraction of the row rather than the slider/label
+     min-content, so all eleven bands always fit the pane width. */
+  min-width: 0;
 }
 
 /* The gain slider is drawn vertically; accent-color paints the filled track and
@@ -1049,6 +1090,24 @@ body.np-fullscreen.np-idle .np-overlay-btn {
   .show-editor #queue-view,
   .show-editor #nav-bar {
     display: none;
+  }
+  /* Equalizer face: takes the pane over whichever face was up, but unlike
+     Settings/About the transport row below it stays visible — you tune while
+     listening. Ordered last so it wins the equal-specificity tie over the
+     .show-list / .has-nav / .show-editor rules and hides them all. */
+  .show-eq #equalizer-panel {
+    display: flex;
+    flex: 1;
+  }
+  .show-eq #now-playing-main,
+  .show-eq #queue-view,
+  .show-eq #pane-editor-view,
+  .show-eq #nav-bar {
+    display: none;
+  }
+  /* Lift the controls off the bands, matching the .has-nav spacing. */
+  .show-eq #now-playing-controls {
+    margin-top: 0.6em;
   }
 }
 

@@ -187,6 +187,27 @@
                reveals whatever face was underneath, so you land back where you
                were. The form itself is built by buildInlineEditor. -->
           <div id="pane-editor-view"></div>
+          <!-- The Equalizer face: like the editor, it takes the pane above the
+               transport (shown by `.show-eq`, which hides the hero, list, and nav
+               bar but leaves the controls row put — you tune while listening).
+               Dismissed by the same Back button as Settings/About. Fixed frequency
+               bands with vertical sliders whose fill uses the theme accent; the
+               band rows are rendered by setupEqualizer in src/main.ts. The header
+               controls toggle the whole chain (On) and flatten every slider
+               (Reset). -->
+          <div id="equalizer-panel">
+            <div class="eq-header">
+              <h2>Equalizer</h2>
+              <div class="eq-controls">
+                <label class="eq-toggle">
+                  <input type="checkbox" id="eq-enabled" checked />
+                  <span>On</span>
+                </label>
+                <button type="button" id="eq-reset" class="link-btn">Reset</button>
+              </div>
+            </div>
+            <div id="eq-bands"></div>
+          </div>
           <!-- The nav bar: one line pinned above the transport whenever a list
                exists, carrying the source context and the button that swaps the
                two faces (see renderNavBar / .has-nav in styles.css). -->
@@ -263,14 +284,6 @@
             <p id="about-version" class="about-version">pudding</p>
             <p class="credit">vibed by the best<br/><a href="https://incompl.com">incompl.com</a></p>
           </div>
-        </div>
-        <!-- Equalizer shares the right pane with Settings/About (same Back
-             button). Proof-of-concept: fixed frequency bands with vertical
-             sliders; the fill bars use the theme accent color. The band rows
-             are rendered by setupEqualizer in src/main.ts. -->
-        <div id="equalizer-panel" class="hidden">
-          <h2>Equalizer</h2>
-          <div id="eq-bands"></div>
         </div>
       </section>
     </main>
