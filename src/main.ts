@@ -280,6 +280,10 @@ const KEY_REPEAT = "repeatMode";
 // Which Now Playing hero view the user last chose (art vs. visualizer).
 const KEY_NOW_PLAYING_VIEW = "nowPlayingView";
 
+// The graphic equalizer's saved curve (on/off, preamp, per-band gains), restored
+// on launch and re-pushed to the engine so your EQ survives a restart.
+const KEY_EQ = "equalizer";
+
 // The user's last place in the Files-tab navigator (the serialized drill stack),
 // restored on launch so browse/songs/artists/albums drill-downs survive a restart.
 const KEY_NAV_LOCATION = "navLocation";
@@ -2049,6 +2053,22 @@ const EQ_BANDS = ["Preamp", "32", "64", "125", "250", "500", "1K", "2K", "4K", "
 const eqSliders: HTMLInputElement[] = [];
 const eqBandEls: HTMLElement[] = [];
 
+// The persisted EQ curve: on/off, the preamp, and one gain per frequency band
+// (all in dB). `gains` has EQ_BANDS.length − 1 entries (the preamp is separate).
+type EqState = { enabled: boolean; preamp: number; gains: number[] };
+
+// Persist the current sliders + on/off. Debounced (like volume) so dragging a
+// band doesn't hammer the store; the trailing write captures the final curve.
+const persistEq = debounce(async () => {
+  const state: EqState = {
+    enabled: eqEnabledEl.checked,
+    preamp: Number(eqSliders[0].value),
+    gains: eqBandGains(),
+  };
+  await app.store.set(KEY_EQ, state);
+  await app.store.save();
+}, 200);
+
 // Paint one band's fill height: the bar fills from the bottom up to the slider's
 // value, so a flat EQ sits half-height (0 dB = 50%), boosts grow taller and cuts
 // shrink — always something on screen to see and to color. Exposed to the CSS
@@ -2065,13 +2085,16 @@ function eqBandGains(): number[] {
   return eqSliders.slice(1).map((s) => Number(s.value));
 }
 
-// Send the current slider positions to the engine.
+// Send the current slider positions to the engine and remember them. Called from
+// every user-driven change (a band drag, the on/off toggle, Reset), so the engine
+// and the store stay in step with the sliders.
 function pushEq(): void {
   void invoke("audio_set_eq", {
     enabled: eqEnabledEl.checked,
     preamp: Number(eqSliders[0].value),
     gains: eqBandGains(),
   });
+  persistEq();
 }
 
 // Live per-band energy (0..1) from the engine's audio:spectrum feed, smoothed on
@@ -2080,9 +2103,16 @@ function pushEq(): void {
 const eqEnergy = new Float32Array(EQ_BANDS.length - 1);
 let eqLatestBands: number[] = [];
 
-function setupEqualizer(): void {
+function setupEqualizer(restored: EqState | null): void {
   eqSliders.length = 0;
   eqBandEls.length = 0;
+  // The restored curve, index-aligned to the sliders: slider 0 is the preamp, the
+  // rest are the per-band gains. Missing/out-of-range values fall back to 0 (flat).
+  const savedFor = (i: number): number => {
+    if (!restored) return 0;
+    const v = i === 0 ? restored.preamp : restored.gains[i - 1];
+    return typeof v === "number" ? Math.max(-12, Math.min(12, v)) : 0;
+  };
   eqBandsEl.replaceChildren(
     ...EQ_BANDS.map((label, i) => {
       const band = document.createElement("div");
@@ -2093,7 +2123,7 @@ function setupEqualizer(): void {
       slider.min = "-12";
       slider.max = "12";
       slider.step = "1";
-      slider.value = "0";
+      slider.value = String(savedFor(i));
       slider.setAttribute("aria-label", i === 0 ? "Preamp gain" : `${label} Hz gain`);
       slider.addEventListener("input", () => {
         paintBand(i);
@@ -2109,6 +2139,19 @@ function setupEqualizer(): void {
     }),
   );
   eqBandEls.forEach((_, i) => paintBand(i));
+
+  // Restore the on/off state (defaults on, matching a fresh engine), then push the
+  // restored curve straight to the engine so it reflects the sliders from the first
+  // frame. Sent directly rather than through pushEq() to avoid a redundant store
+  // write on every launch — the sliders already hold exactly what's persisted.
+  eqEnabledEl.checked = restored ? restored.enabled : true;
+  if (restored) {
+    void invoke("audio_set_eq", {
+      enabled: restored.enabled,
+      preamp: Number(eqSliders[0].value),
+      gains: eqBandGains(),
+    });
+  }
 
   // On/off bypasses the whole chain in the engine; the sliders stay put (and
   // stay editable) so it's an instant A/B against your curve. A subtle dimming
@@ -2170,7 +2213,7 @@ function setupEqSpectrum(): void {
   });
 }
 
-function setupSettings(): void {
+function setupSettings(restoredEq: EqState | null): void {
   // Settings opens from the native application menu (Pudding → Settings…, ⌘,),
   // which emits "open-settings"; the topbar's old gear is now the mini-player
   // toggle. About (Pudding → About Pudding) shares the pane and emits
@@ -2187,7 +2230,7 @@ function setupSettings(): void {
     aboutOpen.value = false;
     equalizerOpen.value = false;
   });
-  setupEqualizer();
+  setupEqualizer(restoredEq);
 
   // The visualizer mounts once into its layer inside the now-playing hero (not a
   // pane takeover). Its rAF loop runs only while it's the chosen hero view AND
@@ -3261,6 +3304,10 @@ async function init(): Promise<void> {
       ? "visualizer"
       : "art";
 
+  // The saved equalizer curve, handed to setupSettings → setupEqualizer below to
+  // seed the sliders and re-push to the engine on launch.
+  const restoredEq = (await app.store.get<EqState>(KEY_EQ)) ?? null;
+
   // Appearance: read the persisted mode + per-mode accents, then wire the apply
   // effect + OS-scheme listener. applyTheme runs immediately (first effect pass),
   // painting the saved theme before setupSettings renders the swatch row.
@@ -3464,7 +3511,7 @@ async function init(): Promise<void> {
   setupPlaybackModes();
   await setupWindowSize(appWindow);
   setupSplitter(splitterWidth);
-  setupSettings();
+  setupSettings(restoredEq);
   setupSearch();
   setupPlayerControls();
   setupVolumeControl();
