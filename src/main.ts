@@ -2268,12 +2268,22 @@ function setupSettings(restoredEq: EqState | null): void {
     });
     // Announce each new track over the visualizer: flash its title/artist that
     // fades in and back out. Only when the visualizer is the visible view (no
-    // point animating a hidden layer), and only on an actual track change — not
+    // point animating a hidden layer), and only on an actual change — not
     // when merely switching into the view or re-running for other signals.
+    //
+    // For streams we flash the ICY song/artist rather than the station name;
+    // stations that never send metadata get nothing (an empty banner would just
+    // repeat the station name already shown in the hero, so we skip it).
     let lastAnnounced = "";
     effect(() => {
-      const title = npTitle.value;
-      const artist = npArtist.value;
+      let title = npTitle.value;
+      let artist = npArtist.value;
+      if (isStream.value) {
+        const meta = npStreamMeta.value;
+        if (!meta) return;
+        title = meta.song;
+        artist = meta.artist;
+      }
       const key = `${title}\n${artist ?? ""}`;
       const changed = key !== lastAnnounced;
       lastAnnounced = key;
