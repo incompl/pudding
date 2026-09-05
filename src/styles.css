@@ -913,9 +913,17 @@ body.np-zen #now-playing-panel {
   background: var(--bg);
   padding: 0.75em;
 }
-/* Full-bleed the view itself; the transport keeps the panel's edge padding. */
+/* Full-bleed the view itself; the transport keeps the panel's edge padding.
+   Top padding re-centers the flow card to the SAME on-screen height it has in
+   normal mode. Going edge-to-edge drops two things that biased the card down in
+   normal mode: the 34px topbar above the panel, and the card's own asymmetric
+   padding (2.4em top / 1em, plus #right's 0.2em top / 0.75em bottom = +0.85em of
+   downward bias). Both net to a downward offset of 34px + 0.85em; halving that
+   (justify-content:center splits added top padding above/below) means padding-top
+   of the full 34px + 0.85em lands the art at its normal-mode Y. The visualizer
+   ignores this — it's fixed inset:0 in zen. */
 body.np-zen #now-playing-main {
-  padding: 0;
+  padding: calc(34px + 0.85em) 0 0;
 }
 /* The visualizer goes edge-to-edge over the whole window (fixed, so it escapes
    both the panel padding and the transport row's flow) and the transport/nav bar
