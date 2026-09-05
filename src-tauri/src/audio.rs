@@ -406,6 +406,14 @@ impl Biquad {
         self.a2 = (1.0 - alpha / a) / a0;
     }
 
+    // Drop the delay state. Used when a band goes idle: a band that isn't being
+    // run should hold no history, so that if it comes back it starts from
+    // silence rather than ringing out whatever it held the last time it ran.
+    fn reset_state(&mut self) {
+        self.s1 = [0.0; OUT_CHANNELS];
+        self.s2 = [0.0; OUT_CHANNELS];
+    }
+
     #[inline]
     fn process(&mut self, x: f32, ch: usize) -> f32 {
         let y = self.b0 * x + self.s1[ch];
@@ -423,6 +431,15 @@ struct EqChain {
     enabled: bool,
     preamp: f32,
     bands: [Biquad; EQ_BAND_COUNT],
+    // Indices into `bands` of the bands that actually change the signal, and how
+    // many of them there are. A peaking biquad at 0 dB is an exact identity —
+    // the RBJ design gives b0 = 1 and b1/b2 equal to a1/a2, so H(z) = 1 — and an
+    // enabled EQ sitting at its default is ten of those in series. Running that
+    // cascade costs ~880k biquad evaluations a second inside the real-time
+    // callback to reproduce the input sample for sample, so we run only the
+    // bands the user has actually moved.
+    active: [u8; EQ_BAND_COUNT],
+    active_len: usize,
     sample_rate: f32,
     last_gen: u64,
 }
@@ -433,6 +450,8 @@ impl EqChain {
             enabled: false,
             preamp: 1.0,
             bands: [Biquad::identity(); EQ_BAND_COUNT],
+            active: [0; EQ_BAND_COUNT],
+            active_len: 0,
             sample_rate: sample_rate as f32,
             last_gen: 0,
         }
@@ -450,23 +469,44 @@ impl EqChain {
         self.enabled = shared.eq_enabled.load(Ordering::Relaxed);
         self.preamp =
             10.0_f32.powf(f32::from_bits(shared.eq_preamp_db.load(Ordering::Relaxed)) / 20.0);
-        for (band, (freq, gain)) in self
+        let sample_rate = self.sample_rate;
+        let mut active_len = 0;
+        for (i, (band, (freq, gain))) in self
             .bands
             .iter_mut()
             .zip(EQ_FREQS.iter().zip(shared.eq_gains_db.iter()))
+            .enumerate()
         {
             let gain_db = f32::from_bits(gain.load(Ordering::Relaxed));
-            band.set_peaking(*freq, self.sample_rate, EQ_Q, gain_db);
+            // Exact zero, not an epsilon: 0 dB is the "user never moved this
+            // band" resting value the UI writes, and a real setting that happens
+            // to be tiny should still be honoured rather than silently dropped.
+            if gain_db == 0.0 {
+                band.reset_state();
+                continue;
+            }
+            band.set_peaking(*freq, sample_rate, EQ_Q, gain_db);
+            self.active[active_len] = i as u8;
+            active_len += 1;
         }
+        self.active_len = active_len;
     }
 
     #[inline]
     fn process_block(&mut self, out: &mut [f32]) {
+        // No live bands and a unity preamp means the whole chain is an exact
+        // identity — leave the buffer alone rather than multiplying it by one.
+        if self.active_len == 0 && self.preamp == 1.0 {
+            return;
+        }
+        let preamp = self.preamp;
+        let bands = &mut self.bands;
+        let active = &self.active[..self.active_len];
         for (i, s) in out.iter_mut().enumerate() {
             let ch = i % OUT_CHANNELS;
-            let mut x = *s * self.preamp;
-            for band in self.bands.iter_mut() {
-                x = band.process(x, ch);
+            let mut x = *s * preamp;
+            for &b in active {
+                x = bands[b as usize].process(x, ch);
             }
             *s = x;
         }
@@ -2527,5 +2567,143 @@ mod replaygain_tests {
             "album mode should fall back to track gain",
         );
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod eq_bypass_tests {
+    //! The EQ skips bands sitting at 0 dB. That is only safe because an RBJ
+    //! peaking biquad at 0 dB is an *exact* identity, not merely a close one:
+    //! with A = 1 the design gives b0 = 1 and b1/b2 bit-identical to a1/a2, so
+    //! y = x and the delay state stays exactly zero forever. These tests pin
+    //! that down by comparing against a chain that runs every band, and require
+    //! bit equality rather than a tolerance.
+    use super::*;
+
+    fn shared_with(gains: [f32; EQ_BAND_COUNT], preamp_db: f32) -> SharedState {
+        let shared = SharedState::new();
+        shared.eq_enabled.store(true, Ordering::Relaxed);
+        shared
+            .eq_preamp_db
+            .store(preamp_db.to_bits(), Ordering::Relaxed);
+        for (slot, g) in shared.eq_gains_db.iter().zip(gains.iter()) {
+            slot.store(g.to_bits(), Ordering::Relaxed);
+        }
+        shared.eq_gen.fetch_add(1, Ordering::Release);
+        shared
+    }
+
+    // The pre-optimization behaviour: every band runs, 0 dB or not.
+    fn reference_block(gains: [f32; EQ_BAND_COUNT], preamp_db: f32, out: &mut [f32]) {
+        let preamp = 10.0_f32.powf(preamp_db / 20.0);
+        let mut bands = [Biquad::identity(); EQ_BAND_COUNT];
+        for (band, (freq, gain)) in bands.iter_mut().zip(EQ_FREQS.iter().zip(gains.iter())) {
+            band.set_peaking(*freq, 44_100.0, EQ_Q, *gain);
+        }
+        for (i, s) in out.iter_mut().enumerate() {
+            let ch = i % OUT_CHANNELS;
+            let mut x = *s * preamp;
+            for band in bands.iter_mut() {
+                x = band.process(x, ch);
+            }
+            *s = x;
+        }
+    }
+
+    // A few seconds of something with content across the spectrum.
+    fn signal() -> Vec<f32> {
+        (0..4096)
+            .map(|i| {
+                let t = i as f32 / 44_100.0;
+                0.3 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                    + 0.2 * (2.0 * std::f32::consts::PI * 3000.0 * t).sin()
+            })
+            .collect()
+    }
+
+    fn run_chain(gains: [f32; EQ_BAND_COUNT], preamp_db: f32, out: &mut [f32]) -> usize {
+        let shared = shared_with(gains, preamp_db);
+        let mut eq = EqChain::new(44_100);
+        eq.refresh(&shared);
+        eq.process_block(out);
+        eq.active_len
+    }
+
+    #[test]
+    fn all_bands_flat_is_fully_bypassed() {
+        let mut got = signal();
+        let active = run_chain([0.0; EQ_BAND_COUNT], 0.0, &mut got);
+        assert_eq!(active, 0, "no band should be live at 0 dB");
+        assert_eq!(got, signal(), "flat EQ must leave the buffer untouched");
+    }
+
+    #[test]
+    fn flat_bands_match_running_them() {
+        // The optimization is only legitimate if it changes nothing.
+        let mut got = signal();
+        run_chain([0.0; EQ_BAND_COUNT], 0.0, &mut got);
+        let mut want = signal();
+        reference_block([0.0; EQ_BAND_COUNT], 0.0, &mut want);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn mixed_gains_match_running_every_band() {
+        // Identity bands interleaved between live ones must not perturb the
+        // cascade — this is the case that would break if 0 dB were merely close
+        // to transparent instead of exactly transparent.
+        let mut gains = [0.0f32; EQ_BAND_COUNT];
+        gains[0] = 6.0;
+        gains[4] = -3.5;
+        gains[9] = 2.0;
+
+        let mut got = signal();
+        let active = run_chain(gains, 0.0, &mut got);
+        assert_eq!(active, 3, "only the three moved bands should be live");
+
+        let mut want = signal();
+        reference_block(gains, 0.0, &mut want);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn preamp_still_applies_with_every_band_flat() {
+        // Bypass keys on the preamp too; a preamp with no live bands must still
+        // scale the signal rather than being skipped along with the bands.
+        let mut got = signal();
+        let active = run_chain([0.0; EQ_BAND_COUNT], 6.0, &mut got);
+        assert_eq!(active, 0);
+        let mut want = signal();
+        reference_block([0.0; EQ_BAND_COUNT], 6.0, &mut want);
+        assert_eq!(got, want);
+        assert!(got[100] != signal()[100], "preamp must have been applied");
+    }
+
+    #[test]
+    fn band_returning_from_flat_starts_from_silence() {
+        // A skipped band holds no history, so re-enabling it must not ring out
+        // state left over from the last time it ran.
+        let shared = shared_with([0.0; EQ_BAND_COUNT], 0.0);
+        let mut eq = EqChain::new(44_100);
+
+        let mut gains = [0.0f32; EQ_BAND_COUNT];
+        gains[3] = 9.0;
+        for (slot, g) in shared.eq_gains_db.iter().zip(gains.iter()) {
+            slot.store(g.to_bits(), Ordering::Relaxed);
+        }
+        shared.eq_gen.fetch_add(1, Ordering::Release);
+        eq.refresh(&shared);
+        eq.process_block(&mut signal());
+        assert_eq!(eq.active_len, 1);
+
+        // Back to flat: the band goes idle and must drop its delay state.
+        for slot in shared.eq_gains_db.iter() {
+            slot.store(0.0_f32.to_bits(), Ordering::Relaxed);
+        }
+        shared.eq_gen.fetch_add(1, Ordering::Release);
+        eq.refresh(&shared);
+        assert_eq!(eq.active_len, 0);
+        assert_eq!(eq.bands[3].s1, [0.0; OUT_CHANNELS]);
+        assert_eq!(eq.bands[3].s2, [0.0; OUT_CHANNELS]);
     }
 }
