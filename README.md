@@ -4,13 +4,27 @@
 
 ![Mini player screenshot](images/mini.png)
 
-Filesystem-first desktop media player in the spirit of Winamp but with the modern niceties of Spotify / Apple Music.
+## What is Pudding?
 
-## Philosophy
+Abandon your streaming service. Buy music. Pay artists. Donate to listener-supported radio.
 
-* Files and radio only.
-* High polish, high completeness.
-* Compact 2 column layout.
+If that's your vibe, maybe you'd like this media player.
+
+It plays local files and internet radio. It's not a streaming service. It's free.
+
+In the spirit of Winamp but with modern nicities.
+
+## What makes Pudding different?
+
+These features are bog standard for streaming service apps, but rare for file-based media players:
+
+* No import step. You pick your library folders and they are automatically watched: no need for import or rescan.
+* Relational navigation eg "Go to album"
+* Search-based navigation: ⌘F, type album name, hit enter.
+* First class queue. Right click anything to build one.
+* Playlists are autosaved files, not something you import/export.
+* Full macOS integration. Light / dark mode, media keys, lock screen with album art, control center.
+* Art forward presentation. We love album covers.
 
 ## Features
 
@@ -26,13 +40,12 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 ### Library
 
 - Point it at one or more folders: no import step, your files browsed as they are
-- Four lenses on the same library, switched from the Files pane: Browse the real folder tree, or view it flat as Songs, Artists, or Albums — the last three drill iPod-style (artist → album → tracks) and remember your place across restarts
+- Four views for the same library, switched from the Files pane: Browse the real folder tree, or view it flat as Songs, Artists, or Albums — the last three drill iPod-style (artist → album → tracks) and remember your place across restarts
 - Fast SQLite metadata cache, scanned in the background
-- Built to scale: snappy at 100,000 tracks and functional to 500,000 — every long list (Songs, folder tree, queue, playlists) is windowed so only the on-screen rows exist in the DOM, opened lens views are cached, and the whole-library sort is served from a covering index
+- Built to scale: tested up to 500,000 tracks. Every long list  is windowed so only the on-screen rows exist in the DOM, opened views are cached, and the whole-library sort is served from a covering index
 - Live library watching: add or edit files on disk and the app updates itself
-- Search across title, artist, album, and filename — or match a folder and play it as an album
-- Search results show rather than play: artist, album, folder, and playlist hits open their view, and a track hit reveals itself in the folder tree — right-click any track hit to Play it or add it to a playlist
-- Cmd/Shift-click to select multiple tracks; every menu verb — play, queue, add to playlist — acts on the whole selection
+- Search across title, artist, album, and filename, or match a folder and play it as an album
+- Cmd/Shift-click to select multiple tracks; every menu verb (play, queue, add to playlist) acts on the whole selection
 - Right-click a track to jump to its artist or album, or reveal it with Show in Finder
 - Embedded album art, and disc/track-number-aware sorting
 - Edit an audio file's metadata tags right in the app.
@@ -44,16 +57,16 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 
 ### Playlists
 
-- Playlists are plain `.m3u8` files on disk — no database lock-in, hand-editable and readable by any other player, and they autosave on every change
-- Start one from the Playlist menu (New Playlist…), or turn the current queue into a saved playlist with Save Queue as Playlist… (⌘S)
-- Right-click any track and use "Add to playlist ▸" to file it into an existing list or a new one
+- Playlists are plain `.m3u8` files on disk. No lock-in, hand-editable and readable by any other player, and they autosave on every change
+- Start one from the Playlist menu, or turn the current queue into a saved playlist with Save Queue as Playlist (⌘S)
+- Right-click any track and use "Add to playlist" to file it into an existing list or a new one
 - Single-click a playlist in the tree to browse it, double-click to play; rename, move, or delete it from the tree or the Playlist menu
 - Recent playlists live under Playlist ▸ Open Recent, and every `.m3u` / `.m3u8` under your library is searchable
 
 ### Internet radio
 
 - Icecast / SHOUTcast streams with in-band ICY now-playing metadata
-- Manage your stations right in the Streams tab — add, edit, reorder, and delete, with optional per-station art — saved to a plain `.m3u8` you can also hand-edit or share
+- Manage your stations right in the Streams tab: add, edit, reorder, and delete, with optional per-station art. Saved to a plain `.m3u8` you can also hand-edit or share
 - Starts with a writable list on first run; point it at any existing `.m3u` / `.m3u8`, or a remote `http(s)` URL (read-only)
 - Automatic reconnect with backoff; pausing disconnects, resuming rejoins the live edge
 - `.pls` / `.m3u` playlist URLs resolve automatically
@@ -75,7 +88,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 
 ## Install
 
-No prebuilt releases - build it yourself. Requires [Rust](https://www.rust-lang.org/tools/install), [Node](https://nodejs.org/), and [pnpm](https://pnpm.io/).
+No prebuilt release yet. Requires [Rust](https://www.rust-lang.org/tools/install), [Node](https://nodejs.org/), and [pnpm](https://pnpm.io/).
 
 ```sh
 pnpm install
@@ -103,9 +116,9 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 
 A few things that aren't obvious:
 
-- **Click the title in Now Playing** to jump to wherever the current track is playing from.
+- **Click the title in Now Playing** to jump to wherever the current track is playing from. Album and artist are also clickable.
 - **Click the Files tab while it's already showing** to pop back to the top of the navigation hierarchy.
-- **Double-click the album art** to switch between the full window and the compact mini player.
+- **Double-click the album art** to switch to and from the mini player.
 
 ## Tech stack
 
