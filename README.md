@@ -20,7 +20,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 - Plays MP3, FLAC, WAV, AAC/M4A, Ogg/Opus, and AIFF
 - High-quality sinc resampling to match your output device
 - Shuffle and repeat (off / all / one), applied live without interrupting the current track
-- Autoadvance toggles in the Playback menu, set separately for the file browser and for playlists/queues — turn it off and playback stops at the end of each track instead of rolling on
+- Autoadvance toggle in the Playback menu — turn it off and playback stops at the end of each track instead of rolling on
 - ReplayGain volume normalization (off / track / album) that honors standard gain tags, with peak-based clip prevention — untagged files play unchanged
 
 ### Library
@@ -62,12 +62,13 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 
 - 10-band graphic equalizer (32 Hz – 16 kHz) running in the audio engine as a cascade of RBJ peaking biquads plus a preamp
 - The equalizer bars glow with the real per-band energy of what's playing, which is just dang nifty
-- Visualizer: oldschool neon oscilloscope with starfield
+- Visualizer: an oldschool neon oscilloscope over a starfield, toggled from the topbar.
 
 ### Interface
 
 - Light and dark themes, each with a variety of flavors, and can auto-switch with the macOS light / dark setting
 - Compact mini player mode (double click now playing)
+- Zen Mode (View ▸ Zen Mode / ⌃⌘F) expands the Now Playing view (album art or visualizer) to fill the window and hide all chrome. Try it with fullscreen!
 - Window size and position remembered separately for mini and normal modes
 - Keyboard shortcuts for playback, volume, and seeking (see below)
 - macOS system integration: Now Playing in Control Center and the lock screen (with album art), plus hardware media keys and lock-screen controls for play/pause, next/previous, and scrubbing
@@ -94,6 +95,7 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `←` / `→` - seek back / forward 10s (files only)
 - `⌘F` / `Ctrl+F` - focus search
 - `⌘S` - save the current queue as a playlist
+- `⌃⌘F` - toggle Zen Mode
 
 ## Tips
 
