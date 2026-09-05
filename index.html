@@ -123,6 +123,11 @@
       <div id="splitter" role="separator" aria-orientation="vertical"></div>
       <section id="right">
         <div id="now-playing-panel">
+          <!-- Zen-mode drag strip: a thin transparent band across the top edge
+               so the window stays draggable in Zen Mode, where the fixed panel
+               (and the full-bleed visualizer) cover the topbar's normal drag
+               region. Only shown under `body.np-zen` (see styles.css). -->
+          <div id="zen-drag-strip" data-tauri-drag-region></div>
           <!-- The list face: the ephemeral queue, or an open playlist. Which one
                (and its title/Clear affordance) is decided in renderQueue. -->
           <div id="queue-view">

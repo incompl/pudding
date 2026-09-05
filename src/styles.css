@@ -978,6 +978,24 @@ body.np-zen #nav-bar {
   position: relative;
   z-index: 3;
 }
+/* The topbar (the window's only drag region) is hidden under the fixed panel in
+   Zen, so a click-drag across the top edge — over the full-bleed visualizer —
+   does nothing. This transparent strip restores that grab: fixed to the top edge
+   and stacked above the visualizer (which is z-auto within the panel), it feeds
+   the same data-tauri-drag-region path the topbar uses. Height matches the macOS
+   traffic-light band. Present only in Zen; the real topbar drags otherwise. */
+#zen-drag-strip {
+  display: none;
+}
+body.np-zen #zen-drag-strip {
+  display: block;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 34px;
+  z-index: 3;
+}
 /* Auto-hide on idle: after a couple still seconds the transport and nav bar
    fade out and the cursor hides; any mouse move (which clears `.np-idle` in
    main.ts) brings them straight back. */
