@@ -2123,6 +2123,15 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   #now-playing-main:has(#now-playing-empty:not(.hidden)) #now-playing-text {
     flex: 0;
   }
+  /* In Zen the panel goes full-bleed (fixed inset:0, see the base zen rule) and
+     reclaims the 26px the mini topbar reserves above it in normal mode. That
+     grows the centering region upward and raises the placeholder ~13px. Add the
+     topbar's height back as top padding — halved by the vertical centering, like
+     the full-view zen rule's calc(34px + …) — so it lands at the same on-screen
+     height as non-Zen mini. */
+  body.np-zen #now-playing-main:has(#now-playing-empty:not(.hidden)) {
+    padding-top: 26px;
+  }
 
   /* Album art fills the bar's height as a square, rather than the fixed
      thumbnail it is in the full layout. */
