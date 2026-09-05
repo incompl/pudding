@@ -266,6 +266,10 @@ body.platform-mac #tabs {
   display: flex;
   align-items: center;
   gap: 0.1em;
+  /* #viz-btn sits in #topbar-actions (0.25em gap) but reads as part of this
+     mode-button cluster. Pull the group in so viz→shuffle matches the 0.1em
+     shuffle→repeat gap — the same trick #miniplayer-btn uses on its left. */
+  margin-left: -0.15em;
 }
 
 .mode-btn {
