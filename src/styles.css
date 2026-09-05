@@ -895,60 +895,6 @@ html[data-mode="light"] .context-menu {
   text-wrap: balance;
 }
 
-/* The hover-revealed overlay button on the now-playing hero: the view toggle
-   (album art <-> visualizer), a subtle glassy button in the hero's bottom-right,
-   revealed on hover (or while focused, for keyboard). Overlays the art and the
-   visualizer alike. */
-.np-overlay-btn {
-  position: absolute;
-  /* Tuck 4px above the visualizer's bottom edge (which sits 0.75em up, per
-     #now-playing-visualizer's `bottom`), mirroring the 4px right inset below so
-     the button sits equidistant from both corner edges when the visualizer's open. */
-  bottom: calc(0.75em + 4px);
-  z-index: 2;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--bg) 55%, transparent);
-  color: var(--text);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease, background 120ms ease;
-}
-.np-overlay-btn svg {
-  width: 17px;
-  height: 17px;
-}
-/* 4px inset = (36px volume btn − 28px overlay btn) / 2, so the view toggle is
-   horizontally centered under the volume button (which is flush to the same
-   right edge as the visualizer). */
-#now-playing-view-btn {
-  right: 4px;
-}
-/* View toggle shows the target view's icon: a sine wave while art is up, a
-   picture glyph while the visualizer is up. */
-#now-playing-view-btn .icon-art {
-  display: none;
-}
-#now-playing-panel.view-visualizer #now-playing-view-btn .icon-viz {
-  display: none;
-}
-#now-playing-panel.view-visualizer #now-playing-view-btn .icon-art {
-  display: inline;
-}
-#now-playing-main:hover .np-overlay-btn,
-.np-overlay-btn:focus-visible {
-  opacity: 0.75;
-}
-.np-overlay-btn:hover {
-  opacity: 1;
-  background: color-mix(in srgb, var(--bg) 80%, transparent);
-}
 /* Zen Mode: the now-playing hero covers the ENTIRE window — topbar
    (tabs/search/modes), left panel, and splitter all included — by pinning the
    panel over everything with an opaque backdrop. The OS traffic lights float
@@ -978,16 +924,11 @@ body.np-zen #nav-bar {
   position: relative;
   z-index: 3;
 }
-/* The overlay affordances stay put (no hover needed) until the pointer goes idle. */
-body.np-zen .np-overlay-btn {
-  opacity: 0.75;
-}
-/* Auto-hide on idle: after a couple still seconds the transport, nav bar, and the
-   overlay buttons fade out and the cursor hides; any mouse move (which clears
-   `.np-idle` in main.ts) brings them straight back. */
+/* Auto-hide on idle: after a couple still seconds the transport and nav bar
+   fade out and the cursor hides; any mouse move (which clears `.np-idle` in
+   main.ts) brings them straight back. */
 body.np-zen #now-playing-controls,
-body.np-zen #nav-bar,
-body.np-zen .np-overlay-btn {
+body.np-zen #nav-bar {
   /* visibility returns instantly on wake; opacity fades. */
   transition: opacity 300ms ease, visibility 0s;
 }
@@ -999,8 +940,7 @@ body.np-zen.np-idle {
    continuously-animating visualizer canvas, and WebKit doesn't re-composite the
    faded sibling, leaving stale pixels on screen. */
 body.np-zen.np-idle #now-playing-controls,
-body.np-zen.np-idle #nav-bar,
-body.np-zen.np-idle .np-overlay-btn {
+body.np-zen.np-idle #nav-bar {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -1872,14 +1812,6 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   cursor: default;
 }
 
-#now-playing-controls > * {
-  transition: opacity 200ms ease;
-}
-
-#now-playing-controls:has(#volume-popover.open) > *:not(#volume-control) {
-  opacity: 0.4;
-}
-
 #volume-control {
   position: relative;
   flex-shrink: 0;
@@ -1916,13 +1848,13 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
 
 #volume-popover {
   position: absolute;
-  right: calc(100% + 6px);
-  top: 50%;
-  transform: translateY(-50%);
-  background: var(--surface);
-  border-radius: 6px;
-  padding: 0.6em 0.8em;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  /* Generous horizontal padding widens the invisible hit area past the 36px
+     button so the pointer can drift sideways on its way up without slipping
+     off the narrow bar and dismissing the popover. */
+  padding: 6px 16px;
   z-index: 10;
   opacity: 0;
   pointer-events: none;
@@ -1934,40 +1866,45 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   pointer-events: auto;
 }
 
+/* Invisible bridge so the pointer can travel from the button up to the bar
+   without crossing a gap that would close the popover. */
 #volume-popover::after {
   content: "";
   position: absolute;
-  left: 100%;
-  top: 0;
-  bottom: 0;
-  width: 6px;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 6px;
 }
 
 #volume-bar {
   display: block;
-  width: 120px;
+  width: 0.85em;
+  height: 96px;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
   background: transparent;
-  height: 0.85em;
+  /* Vertical orientation with min at the bottom, max at the top. */
+  writing-mode: vertical-lr;
+  direction: rtl;
   margin: 0;
   padding: 0;
 }
 
 #volume-bar::-webkit-slider-runnable-track {
-  height: 100%;
+  width: 100%;
   background: linear-gradient(
-    to right,
+    to top,
     var(--accent) 0 var(--progress, 100%),
-    var(--bg) var(--progress, 100%) 100%
+    var(--surface) var(--progress, 100%) 100%
   );
   border-radius: 2px;
 }
 
 #volume-bar::-moz-range-track {
-  height: 100%;
-  background: var(--bg);
+  width: 100%;
+  background: var(--surface);
   border-radius: 2px;
   border: none;
 }
@@ -2007,6 +1944,7 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   #settings-back-btn,
   #left,
   #splitter,
+  #viz-btn,
   #playback-modes {
     display: none;
   }
@@ -2030,12 +1968,10 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
 
   /* Settings/About are unreachable in mini (their menu/button is hidden), so
      force the now-playing panel visible even if one was open when the window
-     shrank. ID beats the .hidden class, so no !important war with the toggle.
-     The overlay view toggle makes no sense in the thin bar, so hide it here too. */
+     shrank. ID beats the .hidden class, so no !important war with the toggle. */
   #settings-panel,
   #about-panel,
-  #equalizer-panel,
-  #now-playing-view-btn {
+  #equalizer-panel {
     display: none !important;
   }
   #now-playing-panel {

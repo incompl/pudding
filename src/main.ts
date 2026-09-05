@@ -146,7 +146,7 @@ import {
   eqEnabledEl,
   eqResetBtn,
   nowPlayingVisualizerEl,
-  nowPlayingViewBtn,
+  vizBtn,
   aboutVersionEl,
   splitterEl,
   themeMatchSystemEl,
@@ -2606,11 +2606,18 @@ function toggleMute(): void {
 function setupVolumeControl(): void {
   volumeBtn.addEventListener("click", toggleMute);
 
+  // A tiny open delay so the bar doesn't flash into view when the pointer just
+  // flies past the button — short enough not to read as a deliberate pause.
+  let openTimer: ReturnType<typeof setTimeout> | undefined;
+
   volumeControlEl.addEventListener("mouseenter", () => {
-    volumePopoverOpen.value = true;
+    openTimer = setTimeout(() => {
+      volumePopoverOpen.value = true;
+    }, 50);
   });
 
   volumeControlEl.addEventListener("mouseleave", () => {
+    clearTimeout(openTimer);
     volumePopoverOpen.value = false;
   });
 
@@ -3063,10 +3070,10 @@ function setupEffects(): void {
   // and leaving them put avoids shuffling the search box as tabs switch. Only
   // the settings/about panels hide them.
   effect(() => {
-    playbackModesEl.classList.toggle(
-      "hidden",
-      settingsOpen.value || aboutOpen.value || equalizerOpen.value,
-    );
+    const hide = settingsOpen.value || aboutOpen.value || equalizerOpen.value;
+    playbackModesEl.classList.toggle("hidden", hide);
+    // The viz toggle sits beside the mode toggles and clears out with them.
+    vizBtn.classList.toggle("hidden", hide);
   });
 
   // Now Playing view (art vs. visualizer): a class on the panel that CSS uses to
@@ -3149,18 +3156,23 @@ function setupEffects(): void {
   // The hero's overlay toggle flips between the two views; the menu checkmarks and
   // the button's own label re-sync through the effect below (which fires because
   // the value always changes here).
-  nowPlayingViewBtn.addEventListener("click", () => {
+  // The topbar viz button toggles art <-> visualizer; the menu checkmarks and
+  // the button's own state re-sync through the effect below (which fires because
+  // the value always changes here).
+  vizBtn.addEventListener("click", () => {
     nowPlayingView.value =
       nowPlayingView.value === "visualizer" ? "art" : "visualizer";
     void persistNowPlayingView();
   });
   effect(() => {
     void invoke("set_now_playing_view_checked", { view: nowPlayingView.value });
-    // Label the toggle by the view it switches TO (matching its swapped icon).
-    const label =
-      nowPlayingView.value === "art" ? "Show visualizer" : "Show album art";
-    nowPlayingViewBtn.title = label;
-    nowPlayingViewBtn.setAttribute("aria-label", label);
+    // The button keeps its fixed viz glyph; it lights up (accent) while the
+    // visualizer is the active view and reads pressed for assistive tech.
+    const showingViz = nowPlayingView.value === "visualizer";
+    vizBtn.classList.toggle("active", showingViz);
+    vizBtn.setAttribute("aria-pressed", String(showingViz));
+    vizBtn.title = showingViz ? "Show album art" : "Show visualizer";
+    vizBtn.setAttribute("aria-label", vizBtn.title);
   });
 
   effect(() => {

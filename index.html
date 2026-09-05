@@ -26,6 +26,11 @@
           />
           <div id="search-results" class="hidden" role="listbox"></div>
         </div>
+        <button id="viz-btn" class="mode-btn" type="button" aria-label="Show visualizer" title="Show visualizer" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 12 Q7 -8 12 12 T22 12" />
+          </svg>
+        </button>
         <div id="playback-modes" role="group" aria-label="Playback mode">
           <button id="mode-shuffle" class="mode-btn" type="button" aria-label="Shuffle" title="Shuffle" aria-pressed="false">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -143,26 +148,6 @@
             <div id="now-playing-visualizer"></div>
             <p id="now-playing-empty" class="empty-state">Pudding time.</p>
             <img id="now-playing-art" class="hidden" alt="" />
-            <!-- View toggle: swaps album art <-> visualizer. Shows the icon of
-                 the view it switches TO (a sine wave while art is up; a picture
-                 glyph while the visualizer is up),
-                 driven by `.view-visualizer` on the panel. The sine wave (an
-                 oscilloscope trace, drawn nearly square — peak-to-trough height
-                 ~= its width so it fills the icon box) reads as "waveform/visualizer"
-                 and stays legible at overlay-button size, leaving the equalizer
-                 meaning free for a future EQ control. The picture glyph (frame + sun + mountain)
-                 reads as "artwork," keeping the disc icon reserved for "album"
-                 (see --album-icon, used for album rows in search). -->
-            <button id="now-playing-view-btn" class="np-overlay-btn" type="button" title="Show visualizer" aria-label="Show visualizer">
-              <svg class="icon-viz" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M2 12 Q7 -8 12 12 T22 12" />
-              </svg>
-              <svg class="icon-art" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <circle cx="9" cy="9" r="2" />
-                <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" />
-              </svg>
-            </button>
             <div id="now-playing-text">
               <p id="now-playing-title" class="np-link"><span class="marquee-inner"></span></p>
               <p id="now-playing-artist" class="hidden np-link"><span class="marquee-inner"></span></p>
