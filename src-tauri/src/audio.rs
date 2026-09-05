@@ -692,6 +692,11 @@ struct ConsumerState {
     // from `shared` via a gen counter. Applied after volume, before the viz tap
     // so the visualizer shows what you hear.
     eq: EqChain,
+    // Set when a flush drains the ring, cleared by the first callback that
+    // reads anything back. While it's set the ring is *supposed* to be empty
+    // (the decode thread is parked in flush_and_wait until we ack), so the
+    // silence we emit is intentional and must not be counted as an underrun.
+    post_flush: bool,
 }
 
 fn build_stream(
@@ -708,6 +713,7 @@ fn build_stream(
         last_flush_gen: 0,
         viz,
         eq: EqChain::new(cfg.sample_rate.0),
+        post_flush: false,
     };
 
     let err_fn = |err| {
@@ -759,6 +765,7 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
             }
         }
         state.last_flush_gen = cur_gen;
+        state.post_flush = true;
         // Tell the decode thread the ring is drained and it's safe to push
         // new audio. Release pairs with the decode thread's Acquire load.
         state
@@ -803,11 +810,23 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
         *s = 0.0;
     }
 
-    // Count the shortfall so it can be reported off the real-time thread. Once
-    // the decode thread has drained the queue the ring is *supposed* to empty —
-    // that's the end of playback, not starvation — so gate on queue_exhausted
-    // to keep the tail of every queue out of the numbers.
-    if written < want && !state.shared.queue_exhausted.load(Ordering::Relaxed) {
+    // Any audio at all means the producer has refilled the ring after a flush.
+    if written > 0 {
+        state.post_flush = false;
+    }
+
+    // Count the shortfall so it can be reported off the real-time thread. Two
+    // cases silence the ring by design rather than by starvation, and both are
+    // gated out here: once the decode thread has drained the queue the ring is
+    // *supposed* to empty (that's the end of playback, not starvation), and a
+    // seek deliberately empties it — the callback that performs the drain then
+    // finds nothing to read, since the decode thread stays parked in
+    // flush_and_wait until we ack. Without post_flush every seek logged a
+    // one-callback underrun.
+    if written < want
+        && !state.shared.queue_exhausted.load(Ordering::Relaxed)
+        && !state.post_flush
+    {
         state.shared.underrun_events.fetch_add(1, Ordering::Relaxed);
         state
             .shared
