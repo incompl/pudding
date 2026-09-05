@@ -150,13 +150,20 @@ export function windowedList(opts: {
       teardown();
       return;
     }
-    if (!scrollParent) scrollParent = findScrollParent(container);
+    const parent = resolveScrollParent();
     if (!ensureRowHeight()) {
       // Connected but not laid out yet — try again next frame, bounded so a list
       // that never gets a box (0 height) doesn't spin forever.
       if (retries++ < 10) requestAnimationFrame(paint);
       return;
     }
+    // Connected but currently hidden (an ancestor is display:none — e.g. the list
+    // face is swapped out for the now-playing hero). The scroll pane has no box, so
+    // visibleRange would read clientHeight 0 and compute an empty slice, blanking
+    // the list. Bail WITHOUT touching the mounted rows or range, so flipping the
+    // face back shows the last-good slice intact. The ResizeObserver re-schedules a
+    // paint when the box returns (display:none → laid out fires a resize).
+    if (parent.clientHeight === 0) return;
     // Measure the list's offset once it's laid out (and after a resize), off the
     // scroll hot path — visibleRange then reads only scrollTop against it.
     if (!offsetMeasured) {
@@ -207,6 +214,33 @@ export function windowedList(opts: {
     if (frame !== 0) cancelAnimationFrame(frame);
     if (scrollParent) scrollParent.removeEventListener("scroll", schedule);
     window.removeEventListener("resize", onResize);
+    ro.disconnect();
+  }
+
+  // Re-drives paint when the scroll pane gains or loses its box — notably the
+  // display:none → laid-out transition when the list face is swapped back in for the
+  // now-playing hero. paint() bails while hidden (preserving the mounted slice), so
+  // this is what brings it back once the box returns; it also covers a resize that
+  // shifts the offset. Observes the scroll pane, NOT our own container: paint writes
+  // container.style.height, which would otherwise feed back as a resize and loop.
+  const ro = new ResizeObserver(() => {
+    if (!container.isConnected) {
+      teardown();
+      return;
+    }
+    offsetMeasured = false;
+    schedule();
+  });
+
+  // Resolve the scrolling ancestor once (needs the container connected), wiring its
+  // scroll listener and the resize observer together so both attach exactly once.
+  function resolveScrollParent(): HTMLElement {
+    if (!scrollParent) {
+      scrollParent = findScrollParent(container);
+      scrollParent.addEventListener("scroll", schedule, { passive: true });
+      ro.observe(scrollParent);
+    }
+    return scrollParent;
   }
 
   // The count changed (a tree folder expanded/collapsed): resize the spacer to the
@@ -226,16 +260,19 @@ export function windowedList(opts: {
     let tries = 0;
     const go = (): void => {
       if (!container.isConnected) return;
-      if (!scrollParent) scrollParent = findScrollParent(container);
+      const parent = resolveScrollParent();
       if (!ensureRowHeight()) {
         if (tries++ < 30) requestAnimationFrame(go);
         return;
       }
+      // Hidden (no box): the scroll would run against a 0-height pane. Skip it —
+      // renderQueue re-issues the reveal when the list face flips back into view.
+      if (parent.clientHeight === 0) return;
       if (!offsetMeasured) {
         measureOffset();
         offsetMeasured = true;
       }
-      scrollParent.scrollTop = Math.max(0, listOffset + index * rowHeight - margin);
+      parent.scrollTop = Math.max(0, listOffset + index * rowHeight - margin);
       schedule();
     };
     requestAnimationFrame(go);
@@ -248,22 +285,25 @@ export function windowedList(opts: {
     let tries = 0;
     const go = (): void => {
       if (!container.isConnected) return;
-      if (!scrollParent) scrollParent = findScrollParent(container);
+      const parent = resolveScrollParent();
       if (!ensureRowHeight()) {
         if (tries++ < 30) requestAnimationFrame(go);
         return;
       }
+      // Hidden (no box): a reveal against a 0-height pane would corrupt scrollTop.
+      // Skip it — renderQueue re-issues the reveal when the face flips back.
+      if (parent.clientHeight === 0) return;
       if (!offsetMeasured) {
         measureOffset();
         offsetMeasured = true;
       }
       const rowTop = listOffset + index * rowHeight;
       const rowBottom = rowTop + rowHeight;
-      if (rowTop < scrollParent.scrollTop + margin) {
-        scrollParent.scrollTop = Math.max(0, rowTop - margin);
+      if (rowTop < parent.scrollTop + margin) {
+        parent.scrollTop = Math.max(0, rowTop - margin);
         schedule();
-      } else if (rowBottom > scrollParent.scrollTop + scrollParent.clientHeight) {
-        scrollParent.scrollTop = rowBottom - scrollParent.clientHeight;
+      } else if (rowBottom > parent.scrollTop + parent.clientHeight) {
+        parent.scrollTop = rowBottom - parent.clientHeight;
         schedule();
       }
     };
@@ -275,10 +315,7 @@ export function windowedList(opts: {
   // container — paint() measures the row height by forcing layout, so it mounts rows
   // there and then rather than a frame later.
   function start(): void {
-    if (container.isConnected && !scrollParent) {
-      scrollParent = findScrollParent(container);
-      scrollParent.addEventListener("scroll", schedule, { passive: true });
-    }
+    if (container.isConnected) resolveScrollParent();
     paint();
   }
 
