@@ -190,6 +190,10 @@ body.platform-mac #tabs {
 }
 
 #miniplayer-btn {
+  /* Resting-gray like the search glyph and the .mode-btn cluster's "off" state:
+     this is a plain window-resize action, not a persistent "on" toggle, so it
+     shouldn't wear the accent that shuffle/repeat/viz reserve for .active. */
+  color: var(--text-muted);
   /* 25px box matching .mode-btn's side padding (28px box, 15px icon) so the
      whitespace beside the mini-player glyph equals the whitespace around the
      shuffle/repeat glyphs. */
@@ -234,12 +238,15 @@ body.platform-mac #tabs {
   justify-content: center;
   align-self: center;
   cursor: pointer;
-  color: var(--accent);
-  transition: background 200ms ease;
+  /* Resting-gray to match #miniplayer-btn — it's the same window-resize action,
+     just the mini-mode mirror, so it stays out of the accent "on" state too. */
+  color: var(--text-muted);
+  transition: background 200ms ease, color 200ms ease;
 }
 
 #expand-btn:hover {
   background: var(--surface);
+  color: var(--text);
 }
 
 #expand-btn svg {
@@ -250,6 +257,7 @@ body.platform-mac #tabs {
 
 #miniplayer-btn:hover {
   background: var(--surface);
+  color: var(--text);
 }
 
 /* Reads as a link, not a button: no background fill, just an underline on
