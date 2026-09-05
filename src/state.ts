@@ -171,8 +171,10 @@ export const aboutOpen = signal(false);
 // Playback → Equalizer (⌥⌘E).
 export const equalizerOpen = signal(false);
 // The Now Playing hero renders one of two views, a persisted set-once
-// preference chosen from View ▸ Now Playing: the album-art card ("art") or the
-// MilkDrop visualizer ("visualizer"). Unlike Settings/About, the visualizer is
+// preference toggled from View ▸ Visualizer (⌘T) or the topbar viz button: the
+// album-art card ("art") or the MilkDrop visualizer ("visualizer"). The menu
+// item is a single on/off checkbox mirroring the button. Unlike Settings/About,
+// the visualizer is
 // NOT a pane takeover — it's an alternate face of the hero, so the transport
 // controls and nav bar stay put beneath it.
 export type NowPlayingView = "art" | "visualizer";

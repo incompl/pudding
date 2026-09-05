@@ -86,13 +86,13 @@ struct WindowMenu {
     miniplayer: CheckMenuItem<Wry>,
 }
 
-// The View ▸ Now Playing radio-style pair (Album Art vs. Visualizer). The frontend
-// owns the persisted preference and keeps exactly one checked
-// (set_now_playing_view_checked), the same way it drives the Repeat trio.
-// zen_mode is the checkable View ▸ Zen Mode toggle, kept in sync from the
-// frontend (set_zen_mode_checked) since ⌃⌘F and Escape also flip it.
+// The View ▸ Visualizer toggle (album art when off, MilkDrop visualizer when on).
+// A single checkable item that mirrors the topbar viz button's on/off state; the
+// frontend owns the persisted preference and keeps the checkmark in sync
+// (set_now_playing_view_checked). zen_mode is the checkable View ▸ Zen Mode
+// toggle, kept in sync from the frontend (set_zen_mode_checked) since ⌃⌘F and
+// Escape also flip it.
 struct ViewMenu {
-    np_view_art: CheckMenuItem<Wry>,
     np_view_visualizer: CheckMenuItem<Wry>,
     zen_mode: CheckMenuItem<Wry>,
 }
@@ -1643,11 +1643,11 @@ fn set_miniplayer_checked(menu: State<WindowMenu>, mini: bool) {
     let _ = menu.miniplayer.set_checked(mini);
 }
 
-// Sync the View ▸ Now Playing radio pair: exactly one of Album Art / Visualizer
-// is checked. Called whenever the view changes (menu or startup restore).
+// Sync the View ▸ Visualizer checkmark: checked while the visualizer is the
+// active hero view. Called whenever the view changes (menu, topbar button, or
+// startup restore).
 #[tauri::command]
 fn set_now_playing_view_checked(menu: State<ViewMenu>, view: String) {
-    let _ = menu.np_view_art.set_checked(view == "art");
     let _ = menu.np_view_visualizer.set_checked(view == "visualizer");
 }
 
@@ -2390,14 +2390,12 @@ pub fn run() {
                         None::<&str>,
                     );
                 }
-                // View ▸ Now Playing ▸ Album Art / Visualizer are radio-style
-                // check items; each relays its target view. The frontend owns
-                // the preference (persists it, re-syncs the checkmarks).
-                "np-view-art" => {
-                    let _ = app.emit("np-view", "art");
-                }
+                // View ▸ Visualizer is a single on/off toggle (⌘T); it relays a
+                // flip. The frontend owns the preference (swaps art <-> visualizer,
+                // persists it, re-syncs the checkmark) — same path as the topbar
+                // viz button.
                 "np-view-visualizer" => {
-                    let _ = app.emit("np-view", "visualizer");
+                    let _ = app.emit("np-view-toggle", ());
                 }
                 // View ▸ Zen Mode relays the toggle; the frontend owns the
                 // immersive hero cover (a hero view, not a window change).
@@ -2634,7 +2632,9 @@ pub fn run() {
             // frontend owns the state and re-syncs these checkmarks after any
             // change (set_shuffle_checked / set_repeat_checked / set_mute_checked).
             // Repeat is three radio-style items (only one checked); Volume nudges
-            // and Mute have bare-key toolbar equivalents, so no accelerators here.
+            // (+/-, ⌘↑/⌘↓) and Mute (bare M) have frontend key equivalents that a
+            // text-input guard can gate, so no menu accelerators here (a bare-key
+            // menu accelerator would fire app-wide and swallow typing).
             let shuffle =
                 CheckMenuItemBuilder::with_id("playback-shuffle", "Shuffle").build(app)?;
             let repeat_off = CheckMenuItemBuilder::with_id("repeat-off", "Off")
@@ -2708,20 +2708,17 @@ pub fn run() {
                 rg_album,
             });
 
-            // View menu: which Now Playing hero view is shown (Album Art vs.
-            // Visualizer, radio-style check items) and Zen Mode. This is where
-            // macOS apps (Music/iTunes) put presentation choices — the visualizer
-            // and the immersive cover — as distinct from Playback's transport.
-            // The two view items are kept mutually exclusive from the frontend
-            // (set_now_playing_view_checked), like the Repeat trio.
-            let np_view_art =
-                CheckMenuItemBuilder::with_id("np-view-art", "Album Art").build(app)?;
+            // View menu: presentation choices, as distinct from Playback's
+            // transport — this is where macOS apps (Music/iTunes) put them. The
+            // Visualizer toggle swaps the hero between album art and the MilkDrop
+            // visualizer; it's a single checkable item (mirroring the topbar viz
+            // button's on/off state), kept in sync from the frontend
+            // (set_now_playing_view_checked). ⌘T is Apple's classic iTunes
+            // "Show Visualizer" accelerator.
             let np_view_visualizer =
-                CheckMenuItemBuilder::with_id("np-view-visualizer", "Visualizer").build(app)?;
-            let now_playing_menu = SubmenuBuilder::new(app, "Now Playing")
-                .item(&np_view_art)
-                .item(&np_view_visualizer)
-                .build()?;
+                CheckMenuItemBuilder::with_id("np-view-visualizer", "Visualizer")
+                    .accelerator("CmdOrCtrl+T")
+                    .build(app)?;
             // Zen Mode: an immersive full-window player (hides all chrome), NOT a
             // native window fullscreen. A checkable toggle, kept in sync from the
             // frontend (set_zen_mode_checked). ⌃⌘F is Apple's standard Enter Full
@@ -2731,12 +2728,11 @@ pub fn run() {
                 .accelerator("Ctrl+Cmd+F")
                 .build(app)?;
             let view_menu = SubmenuBuilder::new(app, "View")
-                .item(&now_playing_menu)
+                .item(&np_view_visualizer)
                 .separator()
                 .item(&zen_mode)
                 .build()?;
             app.manage(ViewMenu {
-                np_view_art,
                 np_view_visualizer,
                 zen_mode,
             });

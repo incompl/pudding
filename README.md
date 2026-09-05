@@ -62,7 +62,7 @@ Filesystem-first desktop media player in the spirit of Winamp but with the moder
 
 - 10-band graphic equalizer (32 Hz – 16 kHz) running in the audio engine as a cascade of RBJ peaking biquads plus a preamp
 - The equalizer bars glow with the real per-band energy of what's playing, which is just dang nifty
-- Visualizer: an oldschool neon oscilloscope over a starfield, toggled from the topbar.
+- Visualizer: an oldschool neon oscilloscope over a starfield, toggled from the topbar or with ⌘T
 
 ### Interface
 
@@ -92,9 +92,11 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `Delete` / `Backspace` - remove the selected row(s) from the queue or playlist
 - `Esc` - clear the selection
 - `⌘↑` / `⌘↓` (or `+` / `-`) - volume up / down (10%)
+- `M` - mute / unmute
 - `←` / `→` - seek back / forward 10s (files only)
 - `⌘F` / `Ctrl+F` - focus search
 - `⌘S` - save the current queue as a playlist
+- `⌘T` - toggle the visualizer
 - `⌃⌘F` - toggle Zen Mode
 
 ## Tips

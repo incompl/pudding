@@ -871,7 +871,7 @@ html[data-mode="light"] #search-input:hover {
 }
 
 /* The visualizer layer fills the hero, framed by the card's padding. Hidden
-   until View ▸ Now Playing picks it (`.view-visualizer` on the panel), when it
+   until View ▸ Visualizer picks it (`.view-visualizer` on the panel), when it
    takes over and the art/text/empty card is hidden. The canvas inside sizes to
    this box via a ResizeObserver (src/visualizer.ts). */
 #now-playing-visualizer {

@@ -2525,6 +2525,15 @@ function setupPlayerControls(): void {
       return;
     }
 
+    // Mute toggle on bare M (VLC's key). ⌘M stays Minimize — the modifier block
+    // above already returned, so this only fires unmodified, and the text-input
+    // guard at the top keeps "m" typeable in fields.
+    if (e.key === "m" || e.key === "M") {
+      e.preventDefault();
+      toggleMute();
+      return;
+    }
+
     if (e.key === "Delete" || e.key === "Backspace") {
       const list = openListTracks();
       const sel = queueSel.resolveIn(list);
@@ -3144,26 +3153,17 @@ function setupEffects(): void {
   });
   void listen("np-zen-toggle", () => toggleZen());
 
-  // View ▸ Now Playing radio items relay the chosen view; persist it and re-sync
-  // the menu checkmarks (the reactive effect below also fires on the change, but
-  // an explicit re-check covers the re-selecting-the-active-view no-op case).
-  void listen<string>("np-view", (event) => {
-    const view = event.payload === "visualizer" ? "visualizer" : "art";
-    nowPlayingView.value = view;
-    void persistNowPlayingView();
-    void invoke("set_now_playing_view_checked", { view });
-  });
-  // The hero's overlay toggle flips between the two views; the menu checkmarks and
-  // the button's own label re-sync through the effect below (which fires because
-  // the value always changes here).
-  // The topbar viz button toggles art <-> visualizer; the menu checkmarks and
-  // the button's own state re-sync through the effect below (which fires because
-  // the value always changes here).
-  vizBtn.addEventListener("click", () => {
+  // Flip the hero between album art and the visualizer, then persist. The menu
+  // checkmark and the topbar button's state re-sync through the effect below
+  // (which fires because the value always changes here). Shared by the topbar
+  // viz button and View ▸ Visualizer (⌘T).
+  const toggleVisualizer = (): void => {
     nowPlayingView.value =
       nowPlayingView.value === "visualizer" ? "art" : "visualizer";
     void persistNowPlayingView();
-  });
+  };
+  vizBtn.addEventListener("click", toggleVisualizer);
+  void listen("np-view-toggle", () => toggleVisualizer());
   effect(() => {
     void invoke("set_now_playing_view_checked", { view: nowPlayingView.value });
     // The button keeps its fixed viz glyph; it lights up (accent) while the
