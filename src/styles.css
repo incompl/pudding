@@ -818,7 +818,13 @@ html[data-mode="light"] .context-menu {
   text-align: center;
   gap: 0.4em;
   min-height: 0;
-  padding: 1em;
+  /* Extra top padding biases the centered art/text card down ~0.7em, undoing the
+     upward shift the compact topbar introduced: shrinking the topbar (−5px) and
+     dropping #right's top padding (−12px) raised this band's center ~11px, so the
+     card sat higher against the transport than before. Only the flow card moves —
+     the visualizer fills the padding box via inset:0, so it stays full-bleed, and
+     Zen resets padding to 0 below. */
+  padding: 2.4em 1em 1em;
   /* Anchor for the absolutely-positioned visualizer layer and the fullscreen
      button, both of which overlay the centered art/text card. */
   position: relative;
