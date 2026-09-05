@@ -14,6 +14,15 @@ edition = "2021"
 name = "pudding_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Optimize dependencies even in dev builds. Pudding is developed and used day to
+# day as `tauri dev`, and the audio decode thread has a hard real-time deadline:
+# at opt-level 0 symphonia + rubato had only ~4x real-time headroom, so any
+# scheduling pressure (a background QoS clamp, for instance) starved the ring
+# buffer and playback broke up. Our own crate stays at opt-level 0 so incremental
+# builds stay fast; only third-party code is optimized.
+[profile.dev.package."*"]
+opt-level = 2
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

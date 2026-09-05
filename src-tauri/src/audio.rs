@@ -196,6 +196,16 @@ pub struct SharedState {
     eq_preamp_db: AtomicU32,
     eq_gains_db: [AtomicU32; EQ_BAND_COUNT],
     eq_gen: AtomicU64,
+    // Ring underrun counters, bumped by the audio callback when it had to pad
+    // its output with silence because the decode thread hadn't kept the ring
+    // filled. The callback is real-time and can't log, so it only touches these
+    // atomics; position_emit_loop drains and reports them at a human rate.
+    // Cumulative for the life of the process — this is a diagnostic, and a
+    // running total is what you want when comparing playback under stress.
+    // `underrun_events` counts callbacks that came up short, `underrun_frames`
+    // the stereo frames of silence inserted (severity, not just frequency).
+    underrun_events: AtomicU64,
+    underrun_frames: AtomicU64,
     // ReplayGain (volume normalization) mode: 0 = off, 1 = track, 2 = album.
     // Read once per track when it's opened (open_track), where the file's
     // REPLAYGAIN_* tags are turned into a constant per-track gain baked into the
@@ -220,6 +230,8 @@ impl SharedState {
             eq_preamp_db: AtomicU32::new(0.0_f32.to_bits()),
             eq_gains_db: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
             eq_gen: AtomicU64::new(0),
+            underrun_events: AtomicU64::new(0),
+            underrun_frames: AtomicU64::new(0),
             rg_mode: AtomicU8::new(0),
         }
     }
@@ -751,6 +763,18 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
         *s = 0.0;
     }
 
+    // Count the shortfall so it can be reported off the real-time thread. Once
+    // the decode thread has drained the queue the ring is *supposed* to empty —
+    // that's the end of playback, not starvation — so gate on queue_exhausted
+    // to keep the tail of every queue out of the numbers.
+    if written < want && !state.shared.queue_exhausted.load(Ordering::Relaxed) {
+        state.shared.underrun_events.fetch_add(1, Ordering::Relaxed);
+        state
+            .shared
+            .underrun_frames
+            .fetch_add(((want - written) / OUT_CHANNELS) as u64, Ordering::Relaxed);
+    }
+
     // Equalize the audible samples in place. refresh() is near-free unless the
     // UI just moved a slider; when bypassed the whole chain is skipped.
     state.eq.refresh(&state.shared);
@@ -797,7 +821,7 @@ struct TrackReader {
     // Resampler kept across decode calls so internal state (sinc taps) carries
     // over between symphonia packets. Recreated per-track because input rate
     // or channel count may change.
-    resampler: SincFixedIn<f32>,
+    resampler: ResampleStage,
     // Pending input frames that haven't been resampled yet (we feed rubato in
     // fixed-size chunks). One Vec per channel.
     pending_in: Vec<Vec<f32>>,
@@ -1446,7 +1470,9 @@ fn decode_and_push(
         Err(SymError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
             // EOF: flush the resampler's tail, push it, then signal end.
             if !tr.flushed {
-                let tail = resample_flush(&mut tr.resampler, &tr.pending_in, tr.input_channels)
+                let tail = tr
+                    .resampler
+                    .flush(&tr.pending_in, tr.input_channels)
                     .map_err(|e| format!("resample flush: {e}"))?;
                 tr.pending_in = vec![Vec::new(); tr.input_channels];
                 tr.flushed = true;
@@ -1515,11 +1541,7 @@ fn decode_and_push(
         let chunk_in: Vec<Vec<f32>> = (0..tr.input_channels)
             .map(|c| tr.pending_in[c].drain(..RESAMPLER_CHUNK_FRAMES).collect())
             .collect();
-        let in_refs: Vec<&[f32]> = chunk_in.iter().map(|v| v.as_slice()).collect();
-        let out_planar = tr
-            .resampler
-            .process(&in_refs, None)
-            .map_err(|e| format!("resample: {e}"))?;
+        let out_planar = tr.resampler.process(chunk_in)?;
         let mut interleaved = interleave_stereo(&out_planar, tr.input_channels);
         apply_track_gain(&mut interleaved, tr.gain);
         push_blocking(rb, &interleaved);
@@ -1741,7 +1763,63 @@ fn seek_track(tr: &mut TrackReader, target_seconds: f64) {
     tr.decoder.reset();
 }
 
-fn make_resampler(input_rate: u32, output_rate: u32, channels: usize) -> SincFixedIn<f32> {
+// The resampling stage between decoder and ring.
+//
+// rubato has no 1:1 fast path: asked for a ratio of exactly 1.0 it still runs
+// its 256-tap sinc filter over every sample, and still applies the f_cutoff
+// low-pass. On a 44.1 kHz device playing 44.1 kHz files — the common case —
+// that was ~97% of the decode thread's cost, all of it to reproduce the input.
+// Passthrough skips the filter entirely and hands the frames straight through.
+enum ResampleStage {
+    // input_rate == output_rate: no conversion needed.
+    Passthrough,
+    // Boxed because SincFixedIn is large (sinc tables) and TrackReader is moved
+    // around; the enum shouldn't inherit its footprint.
+    Sinc(Box<SincFixedIn<f32>>),
+}
+
+impl ResampleStage {
+    // Takes the chunk by value so Passthrough can return it untouched rather
+    // than copying planar buffers it isn't going to change.
+    fn process(&mut self, input: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
+        match self {
+            ResampleStage::Passthrough => Ok(input),
+            ResampleStage::Sinc(r) => {
+                let in_refs: Vec<&[f32]> = input.iter().map(|v| v.as_slice()).collect();
+                r.process(&in_refs, None)
+                    .map_err(|e| format!("resample: {e}"))
+            }
+        }
+    }
+
+    // End-of-track tail: whatever is left in pending_in, below a full chunk.
+    fn flush(&mut self, pending_in: &[Vec<f32>], channels: usize) -> Result<Vec<Vec<f32>>, String> {
+        match self {
+            // No internal state — the pending frames *are* the tail, exactly.
+            ResampleStage::Passthrough => Ok(pending_in.to_vec()),
+            ResampleStage::Sinc(r) => {
+                // Feed the resampler one last partial chunk padded with zeros so
+                // its internal state flushes the audio tail. Without this, the
+                // last ~5ms of every track are lost — a small but real per-track
+                // gap.
+                let padded: Vec<Vec<f32>> = (0..channels)
+                    .map(|c| {
+                        let mut v = pending_in[c].clone();
+                        v.resize(RESAMPLER_CHUNK_FRAMES, 0.0);
+                        v
+                    })
+                    .collect();
+                let in_refs: Vec<&[f32]> = padded.iter().map(|v| v.as_slice()).collect();
+                r.process(&in_refs, None).map_err(|e| format!("flush: {e}"))
+            }
+        }
+    }
+}
+
+fn make_resampler(input_rate: u32, output_rate: u32, channels: usize) -> ResampleStage {
+    if input_rate == output_rate {
+        return ResampleStage::Passthrough;
+    }
     let params = SincInterpolationParameters {
         sinc_len: 256,
         f_cutoff: 0.95,
@@ -1750,16 +1828,18 @@ fn make_resampler(input_rate: u32, output_rate: u32, channels: usize) -> SincFix
         window: WindowFunction::BlackmanHarris2,
     };
     let ratio = output_rate as f64 / input_rate as f64;
-    SincFixedIn::<f32>::new(
-        ratio,
-        // max_resample_ratio_relative — used by rubato for buffer sizing. 2.0
-        // is plenty since input/output rates are fixed within a track.
-        2.0,
-        params,
-        RESAMPLER_CHUNK_FRAMES,
-        channels,
-    )
-    .expect("resampler init")
+    ResampleStage::Sinc(Box::new(
+        SincFixedIn::<f32>::new(
+            ratio,
+            // max_resample_ratio_relative — used by rubato for buffer sizing. 2.0
+            // is plenty since input/output rates are fixed within a track.
+            2.0,
+            params,
+            RESAMPLER_CHUNK_FRAMES,
+            channels,
+        )
+        .expect("resampler init"),
+    ))
 }
 
 fn append_planar(decoded: &AudioBufferRef<'_>, into: &mut [Vec<f32>], expected_channels: usize) {
@@ -1838,28 +1918,6 @@ fn append_planar(decoded: &AudioBufferRef<'_>, into: &mut [Vec<f32>], expected_c
     }
     // If the source had more channels than expected, the rest are dropped
     // (5.1 → stereo: take L, R only). Acceptable for a music player.
-}
-
-fn resample_flush(
-    resampler: &mut SincFixedIn<f32>,
-    pending_in: &[Vec<f32>],
-    channels: usize,
-) -> Result<Vec<Vec<f32>>, String> {
-    // Feed the resampler one last partial chunk padded with zeros so its
-    // internal state flushes the audio tail. Without this, the last ~5ms of
-    // every track are lost — a small but real per-track gap.
-    let chunk_size = RESAMPLER_CHUNK_FRAMES;
-    let padded: Vec<Vec<f32>> = (0..channels)
-        .map(|c| {
-            let mut v = pending_in[c].clone();
-            v.resize(chunk_size, 0.0);
-            v
-        })
-        .collect();
-    let in_refs: Vec<&[f32]> = padded.iter().map(|v| v.as_slice()).collect();
-    resampler
-        .process(&in_refs, None)
-        .map_err(|e| format!("flush: {e}"))
 }
 
 // Scale an interleaved buffer in place by a constant per-track gain (ReplayGain).
@@ -1972,9 +2030,33 @@ fn position_emit_loop(
     let mut last_emitted_index: Option<usize> = None;
     let mut last_emitted_epoch: Option<u64> = None;
     let mut queue_ended_sent = false;
+    let mut reported_underrun_events: u64 = 0;
+    let mut reported_underrun_frames: u64 = 0;
+    let mut last_underrun_log = Instant::now();
 
     loop {
         std::thread::sleep(Duration::from_millis(POSITION_EMIT_INTERVAL_MS));
+
+        // Report ring underruns the callback recorded. Batched to at most one
+        // line a second: a starved ring produces them in bursts, and a log line
+        // per callback would itself become a source of load.
+        let underrun_events = shared.underrun_events.load(Ordering::Relaxed);
+        if underrun_events != reported_underrun_events
+            && last_underrun_log.elapsed() >= Duration::from_secs(1)
+        {
+            let underrun_frames = shared.underrun_frames.load(Ordering::Relaxed);
+            let ms = |frames: u64| frames as f64 * 1000.0 / output_rate as f64;
+            log::warn!(
+                "audio: ring underrun +{} callbacks / {:.1}ms silence (total {} / {:.1}ms)",
+                underrun_events - reported_underrun_events,
+                ms(underrun_frames - reported_underrun_frames),
+                underrun_events,
+                ms(underrun_frames),
+            );
+            reported_underrun_events = underrun_events;
+            reported_underrun_frames = underrun_frames;
+            last_underrun_log = Instant::now();
+        }
 
         let frames_played = shared.frames_played.load(Ordering::Relaxed);
 
