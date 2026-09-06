@@ -2612,21 +2612,37 @@ function toggleMute(): void {
 }
 
 function setupVolumeControl(): void {
-  volumeBtn.addEventListener("click", toggleMute);
-
-  // A tiny open delay so the bar doesn't flash into view when the pointer just
-  // flies past the button — short enough not to read as a deliberate pause.
-  let openTimer: ReturnType<typeof setTimeout> | undefined;
-
-  volumeControlEl.addEventListener("mouseenter", () => {
-    openTimer = setTimeout(() => {
+  // The button is click-to-open, not hover-to-open: a merely passing pointer
+  // never unfurls the bar over the transport. The first click opens it; a
+  // second click, while it's open, toggles mute — so from closed a double-click
+  // reads as mute/unmute, and a lone click can't silence playback by accident.
+  volumeBtn.addEventListener("click", () => {
+    if (volumePopoverOpen.value) {
+      toggleMute();
+    } else {
       volumePopoverOpen.value = true;
-    }, 50);
+    }
   });
 
+  // Dismissal stays hover-based: the bar folds away as soon as the pointer
+  // leaves the button+popover cluster, so there's nothing extra to click.
+  // A thumb drag is exempt — pointers routinely stray off a 120px bar mid-drag,
+  // and closing there would drop `pointer-events` out from under the drag.
+  let dragging = false;
+
   volumeControlEl.addEventListener("mouseleave", () => {
-    clearTimeout(openTimer);
-    volumePopoverOpen.value = false;
+    if (!dragging) volumePopoverOpen.value = false;
+  });
+
+  volumeBar.addEventListener("pointerdown", () => {
+    dragging = true;
+  });
+
+  window.addEventListener("pointerup", () => {
+    if (!dragging) return;
+    dragging = false;
+    // Releasing outside the cluster is the deferred mouseleave.
+    if (!volumeControlEl.matches(":hover")) volumePopoverOpen.value = false;
   });
 
   volumeBar.addEventListener("input", () => {

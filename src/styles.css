@@ -1865,6 +1865,14 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   cursor: default;
 }
 
+#now-playing-controls > * {
+  transition: opacity 200ms ease;
+}
+
+#now-playing-controls:has(#volume-popover.open) > *:not(#volume-control) {
+  opacity: 0.4;
+}
+
 #volume-control {
   position: relative;
   flex-shrink: 0;
@@ -1901,13 +1909,13 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
 
 #volume-popover {
   position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-  /* Generous horizontal padding widens the invisible hit area past the 36px
-     button so the pointer can drift sideways on its way up without slipping
-     off the narrow bar and dismissing the popover. */
-  padding: 6px 16px;
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 0.6em 0.8em;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   z-index: 10;
   opacity: 0;
   pointer-events: none;
@@ -1919,45 +1927,42 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   pointer-events: auto;
 }
 
-/* Invisible bridge so the pointer can travel from the button up to the bar
+/* Invisible bridge so the pointer can travel from the button across to the bar
    without crossing a gap that would close the popover. */
 #volume-popover::after {
   content: "";
   position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  height: 6px;
+  left: 100%;
+  top: 0;
+  bottom: 0;
+  width: 6px;
 }
 
 #volume-bar {
   display: block;
-  width: 0.85em;
-  height: 96px;
+  width: 120px;
+  height: 0.85em;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
   background: transparent;
-  /* Vertical orientation with min at the bottom, max at the top. */
-  writing-mode: vertical-lr;
-  direction: rtl;
   margin: 0;
   padding: 0;
 }
 
 #volume-bar::-webkit-slider-runnable-track {
-  width: 100%;
+  height: 100%;
   background: linear-gradient(
-    to top,
+    to right,
     var(--accent) 0 var(--progress, 100%),
-    var(--surface) var(--progress, 100%) 100%
+    var(--bg) var(--progress, 100%) 100%
   );
   border-radius: 2px;
 }
 
 #volume-bar::-moz-range-track {
-  width: 100%;
-  background: var(--surface);
+  height: 100%;
+  background: var(--bg);
   border-radius: 2px;
   border: none;
 }
