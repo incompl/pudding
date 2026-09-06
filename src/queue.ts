@@ -54,6 +54,7 @@ import {
   playPool,
   poolPaths,
   shuffled,
+  rowPlayButton,
 } from "./playback";
 import {
   queueSel,
@@ -196,22 +197,11 @@ function buildQueueRow(
       else commitBrowsedPlaylist(rowPoolIdx);
     };
     // The playing-row equalizer glyph, hidden until this row owns the playhead
-    // (CSS keys off .queue-row.playing) and swapped for the play button on hover.
+    // (CSS keys off .queue-row.playing) and swapped for the pause button on hover.
     num.appendChild(eqBars());
-    // Hover play button in the gutter, mirroring the tree's track rows. Swallows
-    // the click so the row's select-on-click doesn't also fire.
-    num.appendChild(
-      h("button", {
-        class: "row-play",
-        attrs: { type: "button", "aria-label": "Play" },
-        on: {
-          click: (e) => {
-            e.stopPropagation();
-            playRow();
-          },
-        },
-      }),
-    );
+    // Hover play button in the gutter, mirroring the tree's track rows (pause
+    // on the row that owns the playhead — see rowPlayButton).
+    num.appendChild(rowPlayButton(playRow));
     li.addEventListener("click", (e) => {
       app.lastSelectionPane = "list";
       // Cmd/Ctrl- and Shift-click build a selection; a plain click selects just

@@ -207,6 +207,7 @@ import {
   skipPrev,
   hasNextTrack,
   lastNonZeroVolume,
+  rowPlayButton,
 } from "./playback";
 import {
   renderQueue,
@@ -1333,18 +1334,9 @@ export function renderLeafTrackList(
       { class: "nav-num" },
       numText,
       // The playing-row equalizer glyph, hidden until this row is the one playing
-      // (CSS keys off .nav-track-row.playing) and swapped for the play button on hover.
+      // (CSS keys off .nav-track-row.playing) and swapped for the pause button on hover.
       eqBars(),
-      h("button", {
-        class: "row-play",
-        attrs: { type: "button", "aria-label": "Play" },
-        on: {
-          click: (e) => {
-            e.stopPropagation();
-            playAt(t, i);
-          },
-        },
-      }),
+      rowPlayButton(() => playAt(t, i)),
     );
 
     // Single line, left-aligned (matching the browse tree): the title, then the

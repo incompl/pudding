@@ -7,9 +7,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { TreeNode, Stream, SearchTrack, SearchFolder } from "./types";
 import { engine } from "./engine-glue";
+import { h } from "./dom";
 import {
   app,
   hasTrack,
+  isPlaying,
   npTitle,
   npArtist,
   npAlbum,
@@ -138,6 +140,46 @@ export function togglePlayPause(): void {
   // Streams also route through togglePause: the engine implements live-radio
   // semantics natively (pause disconnects, resume rejoins the live edge).
   void engine.togglePause();
+}
+
+// The row that owns the playhead, or null: a gutter play button sits inside it,
+// so one closest() answers "is this the playing row" without threading state
+// through every list renderer.
+function playingRowOf(btn: HTMLElement): HTMLElement | null {
+  return btn.closest(".playing");
+}
+
+// The per-row hover button every track gutter renders (tree, queue, streams, the
+// navigator's leaf lists). On an ordinary row it plays that row. On the row that
+// already owns the playhead it *is* the transport — pause while audio runs,
+// resume once paused — so hovering what's playing offers the useful verb instead
+// of a restart. The glyph follows in CSS (.playing .row-play swaps the triangle
+// for the pause bars, and body.playback-paused swaps it back).
+export function rowPlayButton(onPlay: () => void): HTMLButtonElement {
+  const btn = h("button", {
+    class: "row-play",
+    attrs: { type: "button", "aria-label": "Play" },
+    on: {
+      // Pause/resume only toggles a body class — no row rebuild — so the label
+      // can't be baked in at build time; refresh it when the button is about to
+      // be used instead of keeping every button reactive.
+      pointerenter: () => syncRowPlayLabel(btn),
+      focus: () => syncRowPlayLabel(btn),
+      click: (e) => {
+        e.stopPropagation();
+        if (playingRowOf(btn)) togglePlayPause();
+        else onPlay();
+      },
+    },
+  });
+  return btn;
+}
+
+function syncRowPlayLabel(btn: HTMLElement): void {
+  btn.setAttribute(
+    "aria-label",
+    playingRowOf(btn) && isPlaying.value ? "Pause" : "Play",
+  );
 }
 
 const persistVolume = debounce(async (v: number) => {

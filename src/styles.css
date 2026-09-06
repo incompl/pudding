@@ -49,6 +49,11 @@
      glyph has no built-in left padding — left-aligned in its box it then lines
      up with the left-aligned track numbers it replaces on hover. */
   --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='8 5 11 14' fill='%23fff'%3E%3Cpath d='M8 5v14l11-7z'/%3E%3C/svg%3E");
+  /* Two filled bars for that same gutter button on the row that owns the playhead,
+     where hovering offers pause rather than a restart. Cropped to the bars' bounds
+     like --play-icon, and at nearly the same aspect ratio, so the mask lands on the
+     same column at the same optical size — the glyph swaps in place. */
+  --pause-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='6 4 12 16' fill='%23fff'%3E%3Cpath d='M6 4h4v16H6zM14 4h4v16h-4z'/%3E%3C/svg%3E");
   /* The two-note glyph for the Songs navigator (.nav-songs). */
   --note-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5l12-2v13'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Ccircle cx='18' cy='16' r='3'/%3E%3C/svg%3E");
   /* A single eighth note (filled head, straight stem, flag) in that same stroke
@@ -1483,20 +1488,27 @@ body.np-zen.np-idle #nav-bar {
 }
 
 /* The playing queue row swaps its number for the equalizer glyph at rest; on hover
-   the glyph gives way to the play button (same as the number does). Gated on active
-   playback so a paused row shows its number back, not a frozen glyph (Apple Music /
-   Spotify behavior — see body.playback-paused below). */
+   the glyph gives way to the button (pause here, not play — see .playing .row-play).
+   Gated on active playback so a paused row shows its number back, not a frozen
+   glyph (Apple Music / Spotify behavior — see body.playback-paused below). */
 body:not(.playback-paused) .queue-row.playing .queue-num-text {
   visibility: hidden;
 }
 body:not(.playback-paused) .queue-row.playing .eq-bars {
   display: flex;
 }
-/* Prefixed with body:not(.playback-paused) so this outranks the show rule above (same
-   selector without :hover), which would otherwise win the specificity tie and leave the
-   equalizer showing behind the hover play button. */
-body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
-  display: none;
+/* Hidden with visibility, never display. `display: none` *cancels* the animation outright,
+   so every hover in/out has to recreate it — and a whole-document style invalidation that
+   lands while it's canceled can eat that restart (WebKit), leaving three static full-height
+   bars on the next unhover. The drag arm does exactly that on every click: pointerdown adds
+   `body.dragging-noselect`, whose `*` rule invalidates every element, and pointerup removes
+   it. Under visibility the animation just keeps running behind the play button, so there's
+   no restart to lose. Same property the number gutter above uses, and .eq-bars is
+   pointer-events:none and absolutely positioned, so the hidden glyph neither eats the click
+   nor holds layout. (No specificity prefix needed: this sets a different property than the
+   show rule above, so the two don't compete.) */
+.queue-row.playing:hover .eq-bars {
+  visibility: hidden;
 }
 
 /* Multi-select background, matching the tree's .selected row. The .playing accent
@@ -2843,10 +2855,11 @@ ul {
   grid-area: 1 / 1;
 }
 
-/* The hover "play" button shared by every track gutter — the browse tree, the
-   queue, and the Songs-list nav all render a .row-play, so its look and feel live
-   here in one place; each gutter below only says when to reveal it and which cell
-   it centers over.
+/* The hover play button shared by every track gutter — the browse tree, the queue,
+   and the Songs-list nav all render a .row-play, so its look and feel live here in
+   one place; each gutter below only says when to reveal it and which cell it centers
+   over. (On the row that owns the playhead the same button becomes pause; only the
+   masked glyph changes — see .playing .row-play below.)
 
    At rest it's just the filled triangle sitting where the track number was. The
    click target, though, is a wide invisible square centered on the triangle and
@@ -2876,7 +2889,6 @@ ul {
   /* Inherit the gutter's color (muted gray at rest, accent on the playing row) so
      the triangle picks it up via currentColor. Buttons don't inherit color. */
   color: inherit;
-  transition: transform 80ms ease;
 }
 
 /* The filled triangle: a fixed size, centered over the (larger) hit area, so it
@@ -2900,20 +2912,39 @@ ul {
   mask-position: center;
   -webkit-mask-size: contain;
   mask-size: contain;
-  transition: background-color 80ms ease;
+  transition:
+    background-color 80ms ease,
+    transform 80ms ease;
 }
 
-/* Pressed: with no hover state to build on, the feedback lives on the triangle
-   itself. It dips inward (scale) and pops to the foreground color — near-white on
-   the dark UI, near-black on light — so it brightens (dark) or darkens (light)
-   against its backdrop; either way it reads as a tangible push, where matching the
-   backdrop would recede. The centering translate is preserved alongside the scale.
-   Snaps back on release. */
-.row-play:active {
-  transform: translate(-50%, -50%) scale(0.82);
+/* The row that owns the playhead gets the transport instead of a restart: while
+   audio runs its hover button shows pause (clicking pauses — see rowPlayButton),
+   and once paused it shows the plain triangle again, which resumes. Only the mask
+   changes, so the swap happens in place with no reflow. */
+.playing .row-play::before {
+  -webkit-mask-image: var(--pause-icon);
+  mask-image: var(--pause-icon);
 }
 
+body.playback-paused .playing .row-play::before {
+  -webkit-mask-image: var(--play-icon);
+  mask-image: var(--play-icon);
+}
+
+/* Pressed: with no hover state to build on, the feedback lives on the glyph itself.
+   It dips inward (scale) and pops to the foreground color — near-white on the dark
+   UI, near-black on light — so it brightens (dark) or darkens (light) against its
+   backdrop; either way it reads as a tangible push, where matching the backdrop
+   would recede. The centering translate is preserved alongside the scale. Snaps
+   back on release.
+
+   The scale lives on ::before, never on the button: transforming the button would
+   shrink its own hit area mid-press, so a mousedown near the edge of the target
+   would leave the cursor outside the shrunken button and the mouseup — and with it
+   the click — would land on the row instead. Only the glyph moves; the hit box
+   stays exactly where it was pressed. */
 .row-play:active::before {
+  transform: translate(-50%, -50%) scale(0.82);
   background-color: var(--text);
 }
 
@@ -3129,17 +3160,19 @@ ul {
 }
 
 /* The playing tree row swaps its number for the equalizer glyph at rest; on hover
-   the glyph gives way to the play button (same as the number does). Gated on active
-   playback so a paused row shows its number back, not a frozen glyph. */
+   the glyph gives way to the button (pause here, not play — see .playing .row-play).
+   Gated on active playback so a paused row shows its number back, not a frozen
+   glyph. */
 body:not(.playback-paused) .node-label.playing .icon.track .track-num {
   visibility: hidden;
 }
 body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
   display: flex;
 }
-/* Prefixed to outrank the show rule above (see the queue's :hover rule for why). */
-body:not(.playback-paused) .node-label.playing:hover .icon.track .eq-bars {
-  display: none;
+/* Hidden with visibility rather than display, so the bounce survives the hover round-trip
+   — see the queue's :hover rule for the full why. */
+.node-label.playing:hover .icon.track .eq-bars {
+  visibility: hidden;
 }
 
 /* An open playlist tints its glyph to match its accent row, the way an open track's
@@ -3871,17 +3904,18 @@ body:not(.playback-paused) .nav-row.playing:not(.open) .nav-gutter .eq-bars {
 }
 
 /* ...and swaps its number for the equalizer glyph at rest; on hover the glyph gives
-   way to the play button (same as the number does). Gated on active playback so a
-   paused row shows its number back, not a frozen glyph. */
+   way to the button (pause here, not play — see .playing .row-play). Gated on
+   active playback so a paused row shows its number back, not a frozen glyph. */
 body:not(.playback-paused) .nav-track-row.playing .nav-num-text {
   visibility: hidden;
 }
 body:not(.playback-paused) .nav-track-row.playing .eq-bars {
   display: flex;
 }
-/* Prefixed to outrank the show rule above (see the queue's :hover rule for why). */
-body:not(.playback-paused) .nav-track-row.playing:hover .eq-bars {
-  display: none;
+/* Hidden with visibility rather than display, so the bounce survives the hover round-trip
+   — see the queue's :hover rule for the full why. */
+.nav-track-row.playing:hover .eq-bars {
+  visibility: hidden;
 }
 
 /* Multi-select background, matching the queue's .selected row. */

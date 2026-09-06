@@ -18,7 +18,7 @@ import { attachStreamReorder } from "./drag-drop";
 import { buildInlineEditor, closePaneEditor, openPaneEditor } from "./editors";
 import { refreshStreams } from "./library";
 import { setEmpty } from "./main";
-import { playStream, applyStreamEdit } from "./playback";
+import { playStream, applyStreamEdit, rowPlayButton } from "./playback";
 
 export function renderStreams(streams: Stream[]): void {
   streamsContainer.innerHTML = "";
@@ -38,26 +38,17 @@ export function renderStreams(streams: Stream[]): void {
     if (selectedStreamUrl.value === stream.url) {
       label.classList.add("selected");
     }
-    // The gutter shows the station glyph at rest and a play button on hover —
-    // the same swap tree tracks do with their track number, now that a plain
-    // click selects rather than plays.
+    // The gutter shows the station glyph at rest and a play button on hover (pause
+    // on the station now playing) — the same swap tree tracks do with their track
+    // number, now that a plain click selects rather than plays.
     label.appendChild(
       h(
         "span",
         { class: "icon stream" },
         h("span", { class: "radio" }),
-        // Plays directly and swallows the click so the row's select-on-click
-        // doesn't also fire.
-        h("button", {
-          class: "row-play",
-          attrs: { "aria-label": "Play" },
-          on: {
-            click: (e) => {
-              e.stopPropagation();
-              playStream(stream);
-            },
-          },
-        }),
+        // Plays directly (pause instead on the station now playing) and swallows
+        // the click so the row's select-on-click doesn't also fire.
+        rowPlayButton(() => playStream(stream)),
       ),
     );
     label.appendChild(h("span", { class: "label-text", text: stream.name }));

@@ -53,7 +53,7 @@ import {
   attachPlaylistClicks,
 } from "./playlists";
 import { editMetadataItem } from "./editors";
-import { playFile, playFolder, playStream } from "./playback";
+import { playFile, playFolder, playStream, rowPlayButton } from "./playback";
 import { addFolderToQueue, nodeToTrack, queueMenuItems } from "./queue";
 import { windowedList, type WindowedList } from "./windowed-list";
 
@@ -291,20 +291,11 @@ function renderTreeRow(row: TreeRow): HTMLElement {
             parent !== app.rootNode && node.track != null ? String(node.track) : "",
         }),
         // The playing-row equalizer glyph, hidden until this row owns the playhead
-        // (CSS keys off .node-label.playing) and swapped for the play button on hover.
+        // (CSS keys off .node-label.playing) and swapped for the pause button on hover.
         eqBars(),
-        // The button plays directly and swallows the click so the row's
-        // select-on-click doesn't also fire.
-        h("button", {
-          class: "row-play",
-          attrs: { "aria-label": "Play" },
-          on: {
-            click: (e) => {
-              e.stopPropagation();
-              playTreeTrack(node, parent);
-            },
-          },
-        }),
+        // Plays directly (pause instead on the row that owns the playhead) and
+        // swallows the click so the row's select-on-click doesn't also fire.
+        rowPlayButton(() => playTreeTrack(node, parent)),
       ),
     );
   }
