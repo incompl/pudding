@@ -128,7 +128,7 @@ textarea,
   display: flex;
   flex-shrink: 0;
   align-items: stretch;
-  /* 34px, deliberately short so the contents sit tight with equal breathing room
+  /* 36px, deliberately short so the contents sit tight with equal breathing room
      above and below. At this height the two alignments converge: the centered
      search/mode controls and the bottom-aligned tab text (see #tabs / .tab) land
      on the same centerline, so the tab labels read as vertically centered with
@@ -137,10 +137,14 @@ textarea,
      bar, forcing the text to overflow upward and hug the top edge.
      box-sizing + a small padding-top nudge the whole content block down so the
      gap from the window's top edge to the text equals the gap from the text down
-     to the panel border (which sits padding-top + the panel's top margin below). */
+     to the panel border (which sits padding-top + the panel's top margin below).
+     The 1px vertical padding on top of that nudge is extra breathing room around
+     the whole bar: it grows the bar by 2px and re-centers the content 1px lower,
+     leaving every relative position inside it untouched. */
   box-sizing: border-box;
-  padding-top: 1px;
-  height: 34px;
+  padding-top: 2px;
+  padding-bottom: 1px;
+  height: 36px;
 }
 
 #tabs {
@@ -150,6 +154,11 @@ textarea,
      vertical centering. That makes the gap down to the #left panel a fixed,
      controllable margin (see #left) rather than a font-dependent byproduct. */
   align-items: flex-end;
+  /* Cancel the topbar's 1px bottom breathing room for the tabs only: the extra
+     space belongs ABOVE the active tab's underline, not between the underline
+     and the bar's bottom edge, so the tab box stays flush with that edge and
+     .tab's bottom padding takes the 1px instead (see .tab). */
+  margin-bottom: -1px;
   width: var(--left-width);
   min-width: 120px;
   flex-shrink: 0;
@@ -172,7 +181,11 @@ body.platform-mac #tabs {
   align-items: center;
   justify-content: flex-end;
   gap: 0.25em;
-  padding: 0 0.5em;
+  /* The extra 1px on the right is the same breathing room the bar gained above
+     and below (see #topbar): it keeps the gap from the mini-player icon to the
+     window's right edge equal to the gap from the content up to the top edge.
+     The left value is interior spacing against the splitter, so it stays put. */
+  padding: 0 calc(0.5em + 1px) 0 0.5em;
   min-width: 200px;
 }
 
@@ -924,14 +937,14 @@ body.np-zen #now-playing-panel {
 /* Full-bleed the view itself; the transport keeps the panel's edge padding.
    Top padding re-centers the flow card to the SAME on-screen height it has in
    normal mode. Going edge-to-edge drops two things that biased the card down in
-   normal mode: the 34px topbar above the panel, and the card's own asymmetric
+   normal mode: the 36px topbar above the panel, and the card's own asymmetric
    padding (2.4em top / 1em, plus #right's 0.2em top / 0.75em bottom = +0.85em of
-   downward bias). Both net to a downward offset of 34px + 0.85em; halving that
+   downward bias). Both net to a downward offset of 36px + 0.85em; halving that
    (justify-content:center splits added top padding above/below) means padding-top
-   of the full 34px + 0.85em lands the art at its normal-mode Y. The visualizer
+   of the full 36px + 0.85em lands the art at its normal-mode Y. The visualizer
    ignores this — it's fixed inset:0 in zen. */
 body.np-zen #now-playing-main {
-  padding: calc(34px + 0.85em) 0 0;
+  padding: calc(36px + 0.85em) 0 0;
 }
 /* The visualizer goes edge-to-edge over the whole window (fixed, so it escapes
    both the panel padding and the transport row's flow) and the transport/nav bar
@@ -2003,6 +2016,16 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
      overlay it); everything else is the now-playing bar. */
   #topbar {
     height: 26px;
+    /* Drop the full view's 1px bottom breathing room (and its matching top
+       nudge) — mini has no tabs or centered controls to balance, just the
+       expand button pinned to the top of this strip. */
+    padding-top: 1px;
+    padding-bottom: 0;
+  }
+  /* Same reasoning for the side: mini's bar never took the extra vertical
+     breathing room, so the expand button keeps the plain 0.5em edge gap. */
+  #topbar-actions {
+    padding-right: 0.5em;
   }
 
   /* Settings/About are unreachable in mini (their menu/button is hidden), so
@@ -2243,8 +2266,11 @@ body.dragging-noselect * {
      underline. Bottom padding then sets where the label sits inside the box, so
      it's tuned to keep the label at the bar's vertical center (aligned with the
      centered search/mode controls) even as the box floats up. margin+padding sum
-     is roughly constant to hold that alignment. */
-  padding: 0.6em 1em 0.35em;
+     is roughly constant to hold that alignment. The +1px is the topbar's added
+     bottom breathing room, moved above the underline: the box bottom (and so the
+     underline) tracks the bar's bottom edge, while the label still drops the same
+     1px as the centered search/mode controls. */
+  padding: 0.6em 1em calc(0.35em + 1px);
   margin-bottom: 0.21em;
   cursor: pointer;
   border-bottom: 2px solid transparent;
