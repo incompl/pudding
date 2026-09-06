@@ -56,7 +56,7 @@ export interface LibraryNavDeps {
   listAllAlbums: () => Promise<SearchAlbum[]>;
   // The current playlist index, read synchronously from the in-memory cache
   // (app.playlistIndex) — NOT a per-render filesystem walk. `loaded` is false until
-  // the first walk lands so the root menu can show "Loading…" rather than a false
+  // the first walk lands so the root menu can show "Loading..." rather than a false
   // "No playlists yet". refreshNavPlaylists() re-renders the root when the cache
   // updates (fs watcher / our own writes), keeping this in step.
   playlistIndex: () => { loaded: boolean; items: PlaylistRef[] };
@@ -250,7 +250,7 @@ function list(): HTMLElement {
 //
 // We cache the Promise, not the resolved array, so concurrent opens of the same
 // view share one in-flight load, and a resolved entry replays with no visible
-// "Loading…" flash (asyncListBody's host is still connected on the next microtask).
+// "Loading..." flash (asyncListBody's host is still connected on the next microtask).
 // Playlists are deliberately absent — they aren't a view and have their own
 // refreshNavPlaylists cache path.
 //
@@ -379,11 +379,11 @@ function rootMenuBody(): HTMLElement {
   // filesystem walk — that walk froze the UI for ~1s on large libraries). The cache
   // is kept fresh by refreshPlaylistIndex (fs watcher + our own writes), which calls
   // refreshNavPlaylists() to re-render this root when it changes. Until the first
-  // walk lands, show "Loading…" rather than a false "No playlists yet".
+  // walk lands, show "Loading..." rather than a false "No playlists yet".
   const plHost = list();
   const { loaded, items } = deps.playlistIndex();
   if (!loaded) {
-    plHost.appendChild(h("div", { class: "nav-placeholder-row", text: "Loading…" }));
+    plHost.appendChild(h("div", { class: "nav-placeholder-row", text: "Loading..." }));
   } else if (items.length === 0) {
     plHost.appendChild(h("div", { class: "nav-placeholder-row", text: "No playlists yet" }));
   } else {
@@ -428,7 +428,7 @@ function rootMenuBody(): HTMLElement {
 }
 
 // A list body that loads asynchronously. build() must return synchronously, so
-// this shows a "Loading…" line at once and swaps in the real rows (or an empty /
+// this shows a "Loading..." line at once and swaps in the real rows (or an empty /
 // error line) when `load` resolves. Every drill pane — Songs, Artists, artist and
 // album detail — shares this shell so loading / empty / failure handling lives in
 // one place. `fill` receives the resolved items and the host to append rows to
@@ -440,7 +440,7 @@ function asyncListBody<T>(opts: {
   fill: (items: T[], host: HTMLElement) => void;
 }): HTMLElement {
   const host = list();
-  const loading = h("div", { class: "nav-coming-soon", text: "Loading…" });
+  const loading = h("div", { class: "nav-coming-soon", text: "Loading..." });
   host.appendChild(loading);
   opts
     .load()
@@ -520,7 +520,7 @@ function drillRow(opts: {
 // Window a whole-library drill list (Artists / Albums) the way renderLeafTrackList
 // windows Songs: mount only the on-screen row slice over a full-height spacer. The
 // asymmetry this fixes — entering was "instant" (the eager per-item build ran
-// behind asyncListBody's "Loading…" line, read as loading) but Back froze for ~1s,
+// behind asyncListBody's "Loading..." line, read as loading) but Back froze for ~1s,
 // because render()'s container.replaceChildren() had to tear down one .nav-row per
 // artist/album synchronously in the click handler. A screenful of nodes builds and
 // tears down cheaply on both sides. Rows must be uniform height (the window places

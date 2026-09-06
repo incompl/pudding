@@ -127,7 +127,7 @@ function cargoComponents() {
 
 // --- npm packages ----------------------------------------------------------
 //
-// --prod only: devDependencies (vite, playwright, typescript…) are build tooling
+// --prod only: devDependencies (vite, playwright, typescript...) are build tooling
 // and none of their code is in the shipped bundle.
 function npmComponents() {
   const tree = JSON.parse(

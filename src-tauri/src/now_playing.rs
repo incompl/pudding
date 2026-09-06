@@ -49,7 +49,7 @@ struct Snapshot {
     title: String,
     artist: Option<String>,
     album: Option<String>,
-    /// Decoded image bytes (whatever NSImage can read: PNG/JPEG/…). None when the
+    /// Decoded image bytes (whatever NSImage can read: PNG/JPEG/...). None when the
     /// source has no art.
     art: Option<Vec<u8>>,
     duration: f64,

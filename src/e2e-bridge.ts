@@ -59,7 +59,7 @@ async function handle(
     case "attr":
       return el(String(a.selector)).getAttribute(String(a.name));
     case "prop":
-      // Read a live DOM property (disabled, value, checked, …) rather than the
+      // Read a live DOM property (disabled, value, checked, ...) rather than the
       // attribute, so state changes are reflected.
       return (el(String(a.selector)) as unknown as Record<string, unknown>)[
         String(a.name)

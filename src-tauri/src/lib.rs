@@ -99,7 +99,7 @@ struct ViewMenu {
 
 // Handles into the Playlist menu that the frontend keeps in sync: the "Save as
 // Playlist" item is enabled only while an ephemeral queue is the active pool
-// (set_save_playlist_enabled), "Move Playlist File…" is enabled only while a
+// (set_save_playlist_enabled), "Move Playlist File..." is enabled only while a
 // playlist is open — browsed or playing (set_move_playlist_enabled) — and the
 // "Open Recent" submenu is rebuilt from the frontend's persisted recents list
 // (set_recent_playlists).
@@ -386,7 +386,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );",
     )?;
     // Each cached track carries its owning library root (the folder that was scanned
-    // to produce it). Reconcile and prune filter on it — `root = ?` / `root NOT IN (…)`
+    // to produce it). Reconcile and prune filter on it — `root = ?` / `root NOT IN (...)`
     // — so scoping a delete to one library folder is a column match rather than a
     // path-prefix reconstruction the caller has to remember. Indexed so those deletes
     // don't scan the whole table.
@@ -1458,7 +1458,7 @@ async fn write_tags(
         let mut tagged = lofty::read_from_path(&p).map_err(|e| format!("read failed: {}", e))?;
 
         // Untagged files have no tag to mutate; give them one of the container's
-        // native type (ID3v2 for MP3, MP4 atoms for m4a, Vorbis comments for FLAC…).
+        // native type (ID3v2 for MP3, MP4 atoms for m4a, Vorbis comments for FLAC...).
         if tagged.primary_tag_mut().is_none() {
             let tag_type = tagged.primary_tag_type();
             tagged.insert_tag(lofty::tag::Tag::new(tag_type));
@@ -1666,7 +1666,7 @@ fn set_save_playlist_enabled(menu: State<PlaylistMenu>, enabled: bool) {
     let _ = menu.save_as.set_enabled(enabled);
 }
 
-// Toggle "Move Playlist File…" as the open playlist (browsed or playing) comes
+// Toggle "Move Playlist File..." as the open playlist (browsed or playing) comes
 // and goes: there's no file to relocate when no playlist is open.
 #[tauri::command]
 fn set_move_playlist_enabled(menu: State<PlaylistMenu>, enabled: bool) {
@@ -1918,7 +1918,7 @@ async fn search_folders(
 #[tauri::command]
 async fn folder_tracks(path: String, db: State<'_, DbHandle>) -> Result<Vec<SearchResult>, String> {
     db.read(move |conn| {
-        // Trailing slash so `/a/b` matches `/a/b/…` but not a sibling `/a/bc/…`.
+        // Trailing slash so `/a/b` matches `/a/b/...` but not a sibling `/a/bc/...`.
         let prefix = if path.ends_with('/') {
             path.clone()
         } else {
@@ -2555,9 +2555,9 @@ pub fn run() {
             let about_item = MenuItemBuilder::with_id("open-about", "About Pudding").build(app)?;
 
             // App settings live under the standard macOS Preferences slot
-            // (Pudding → Settings…, ⌘,). Selecting it emits "open-settings",
+            // (Pudding → Settings..., ⌘,). Selecting it emits "open-settings",
             // which the frontend uses to reveal the settings panel.
-            let settings_item = MenuItemBuilder::with_id("open-settings", "Settings…")
+            let settings_item = MenuItemBuilder::with_id("open-settings", "Settings...")
                 .accelerator("CmdOrCtrl+,")
                 .build(app)?;
 
@@ -2752,27 +2752,27 @@ pub fn run() {
                 zen_mode,
             });
 
-            // Playlist menu: New / Open… / Open Recent ▸ then Save Queue as Playlist
-            // (⌘S) and Move Playlist File…. Every item relays to the frontend
+            // Playlist menu: New / Open... / Open Recent ▸ then Save Queue as Playlist
+            // (⌘S) and Move Playlist File.... Every item relays to the frontend
             // (menu:playlist / menu:playlist-open-path), which owns the dialogs,
             // file writes, and recents list. "Save Queue as Playlist" starts disabled
             // (only an ephemeral queue can be converted) and Open Recent starts
             // with a placeholder; the frontend syncs both after load.
             let new_playlist =
-                MenuItemBuilder::with_id("playlist-new", "New Playlist…").build(app)?;
+                MenuItemBuilder::with_id("playlist-new", "New Playlist...").build(app)?;
             let open_playlist =
-                MenuItemBuilder::with_id("playlist-open", "Open Playlist…").build(app)?;
+                MenuItemBuilder::with_id("playlist-open", "Open Playlist...").build(app)?;
             let recent_submenu = SubmenuBuilder::new(app, "Open Recent Playlist").build()?;
             let recent_placeholder =
                 MenuItemBuilder::with_id("playlist-recent-empty", "No Recent Playlists")
                     .enabled(false)
                     .build(app)?;
             recent_submenu.append(&recent_placeholder)?;
-            let save_as = MenuItemBuilder::with_id("playlist-save", "Save Queue as Playlist…")
+            let save_as = MenuItemBuilder::with_id("playlist-save", "Save Queue as Playlist...")
                 .accelerator("CmdOrCtrl+S")
                 .enabled(false)
                 .build(app)?;
-            let move_file = MenuItemBuilder::with_id("playlist-move", "Move Playlist File…")
+            let move_file = MenuItemBuilder::with_id("playlist-move", "Move Playlist File...")
                 .enabled(false)
                 .build(app)?;
             let playlist_menu = SubmenuBuilder::new(app, "File")

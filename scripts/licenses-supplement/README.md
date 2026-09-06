@@ -4,7 +4,7 @@ License text for dependencies that declare a license but ship no copy of it.
 
 Some crates keep their `LICENSE` at a workspace root that `cargo package` never
 includes, so the file is missing from what we actually build against. Where the
-license text is invariant (Apache-2.0, MPL-2.0, …) `gen-licenses.mjs` recovers it
+license text is invariant (Apache-2.0, MPL-2.0, ...) `gen-licenses.mjs` recovers it
 from a sibling package automatically and nothing is needed here. What lands in
 this directory is the rest: MIT- and BSD-style licenses, whose text carries the
 copyright holder's own name and therefore cannot be borrowed from anyone else.

@@ -2,7 +2,7 @@
 // MODE (dark / light / system); a THEME only swaps the two accent custom
 // properties (--accent / --accent-dim). So a "theme" is nothing more than an
 // accent pair layered on the mode's neutrals — see styles.css :root (dark
-// neutrals) and the html[data-mode="…"] hook applyTheme sets below.
+// neutrals) and the html[data-mode="..."] hook applyTheme sets below.
 //
 // Persistence is three keys: the mode preference, plus the chosen accent *per*
 // mode. Splitting the accent by mode is what makes an OS dark<->light auto-switch
@@ -100,7 +100,7 @@ function resolveTheme(mode: ThemeMode): AccentTheme | undefined {
 
 // Push the resolved mode + accent onto <html>: data-mode drives the neutral
 // palette in CSS; setting the two custom properties recolors everything that
-// reads var(--accent…). Registered as an effect (setupTheme), so it re-runs on
+// reads var(--accent...). Registered as an effect (setupTheme), so it re-runs on
 // any preference, accent, or OS-scheme change.
 export function applyTheme(): void {
   const mode = effectiveMode();

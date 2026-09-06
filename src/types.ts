@@ -126,11 +126,11 @@ export type QueueKind = "artist" | "album" | "folder" | "playlist";
 
 export interface Queue {
   kind: QueueKind;
-  title: string; // header line: the queue/playlist name (artist, album, folder…)
+  title: string; // header line: the queue/playlist name (artist, album, folder...)
   subtitle: string | null; // always a track count
   tracks: SearchTrack[];
   // For a playlist source (kind === "playlist"): the `.m3u8` file path. Lets the
-  // OS menu act on the open playlist (Move Playlist File…). Absent for ephemeral
+  // OS menu act on the open playlist (Move Playlist File...). Absent for ephemeral
   // queues and other sources.
   sourcePath?: string;
   // Curation-undo identity for an *ephemeral* queue (which has no sourcePath to key
@@ -220,7 +220,7 @@ export interface InlineEditorField {
   // When true, Save stays disabled until this field is non-empty. A form with no
   // required fields keeps Save always enabled.
   required?: boolean;
-  // When set, the field gets a trailing "Choose…" button; it resolves to a value
+  // When set, the field gets a trailing "Choose..." button; it resolves to a value
   // to drop into the input (or null to leave it), e.g. picking an image file.
   browse?: () => Promise<string | null>;
 }

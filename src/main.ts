@@ -601,7 +601,7 @@ function makeTrackSelection(onSelect: () => void = () => {}): TrackSelection {
 }
 
 // The right-pane queue/browsed-playlist selection and the Files-tab navigator's
-// leaf-list (Songs, …) selection — separate Sets so they never mirror each other
+// leaf-list (Songs, ...) selection — separate Sets so they never mirror each other
 // (a queued track is the same object as its Songs row), but mutually exclusive:
 // selecting in one drops the other's (and the tree's) highlight, so exactly one
 // surface is ever selected. The forward refs resolve at call time (both consts
@@ -976,8 +976,8 @@ export function toast(message: string): void {
 // --- Add to playlist ▸ (phase 4) ---
 //
 // A universal submenu on any track-bearing node (tree tracks/folders/playlists,
-// queue rows, search hits): a leading New Playlist… plus every indexed library
-// playlist. New Playlist… seeds a fresh file with the clicked tracks; an
+// queue rows, search hits): a leading New Playlist... plus every indexed library
+// playlist. New Playlist... seeds a fresh file with the clicked tracks; an
 // existing target appends. When the target is the open list (browsed or
 // playing), the append goes through the in-memory list + autosave (applyCuration
 // reconciles playback and writes the file) so we never double-write; otherwise
@@ -1008,7 +1008,7 @@ export function showInFinderItem(path: string): ContextMenuItem {
 
 export function addToPlaylistItem(getTracks: TrackProvider): ContextMenuItem {
   const submenu: ContextMenuItem[] = [
-    { label: "New Playlist…", action: () => void newPlaylistWithTracks(getTracks) },
+    { label: "New Playlist...", action: () => void newPlaylistWithTracks(getTracks) },
   ];
   // Duplicate #PLAYLIST: names may yield two identically-labelled entries
   // (accepted limitation); they still target distinct files by path.
@@ -2072,7 +2072,7 @@ async function setupWindowSize(
 }
 
 // Graphic equalizer. Ten fixed ISO frequency bands plus a preamp, each an
-// abstract rectangular bar (−12…+12 dB) whose fill is painted from the center
+// abstract rectangular bar (−12...+12 dB) whose fill is painted from the center
 // (0 dB) outward — up for boost, down for cut — rather than a native slider. The
 // bar is still a real <input type=range> underneath (free drag + keyboard), just
 // with the OS chrome hidden; we draw the fill with a CSS var gradient the way the
@@ -2107,7 +2107,7 @@ const persistEq = debounce(async () => {
 // shrink — always something on screen to see and to color. Exposed to the CSS
 // track gradient as --fill (% of track height).
 function paintBand(i: number): void {
-  const v = Number(eqSliders[i].value); // −12…+12
+  const v = Number(eqSliders[i].value); // −12...+12
   // Set the var on the slider itself: it declares its own --fill/--energy
   // defaults, which would shadow anything set on the parent .eq-band.
   eqSliders[i].style.setProperty("--fill", `${((v + 12) / 24) * 100}%`);
@@ -2247,7 +2247,7 @@ function setupEqSpectrum(): void {
 }
 
 function setupSettings(restoredEq: EqState | null): void {
-  // Settings opens from the native application menu (Pudding → Settings…, ⌘,),
+  // Settings opens from the native application menu (Pudding → Settings..., ⌘,),
   // which emits "open-settings"; the topbar's old gear is now the mini-player
   // toggle. About (Pudding → About Pudding) shares the pane and emits
   // "open-about". Opening one closes the other; the single Back button dismisses
@@ -2371,7 +2371,7 @@ let licensesLoaded = false;
 async function loadLicenses(): Promise<void> {
   if (licensesLoaded) return;
   licensesLoaded = true;
-  licensesBody.textContent = "Loading…";
+  licensesBody.textContent = "Loading...";
   try {
     const res = await fetch("licenses.json");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -3565,7 +3565,7 @@ async function init(): Promise<void> {
     void invoke("set_save_playlist_enabled", { enabled: queueCanSaveAsPlaylist() });
   });
 
-  // Keep "Move Playlist File…" enabled only while a playlist is open — browsed,
+  // Keep "Move Playlist File..." enabled only while a playlist is open — browsed,
   // else playing (openPlaylistPath). There's no file to relocate otherwise, and
   // enabling it mirrors exactly what menuMovePlaylist would act on.
   effect(() => {
@@ -3612,7 +3612,7 @@ async function init(): Promise<void> {
   document.addEventListener("focusin", refreshEditingText);
   document.addEventListener("focusout", refreshEditingText);
 
-  // Playlist menu intents (New / Open… / Save / Move / Clear Recent), plus a
+  // Playlist menu intents (New / Open... / Save / Move / Clear Recent), plus a
   // recent item carrying its own path.
   await listen<string>("menu:playlist", (event) => {
     switch (event.payload) {
@@ -3743,13 +3743,13 @@ async function init(): Promise<void> {
   streamListPathInput.value = streamListPath;
 
   // The + under the library rows appends a folder via the same picker as a row's
-  // Choose… button.
+  // Choose... button.
   libraryRootAddBtn.addEventListener("click", () => void browseLibraryRoot());
   streamListPathBrowseBtn.addEventListener("click", () => void browseStreamListPath());
 
   // The stream field also accepts a typed/pasted path: Enter commits (blur fires
   // "change"), and change re-reads the stream list via the same path as the
-  // Choose… button. (Library rows wire their own inputs in renderLibraryRootRows.)
+  // Choose... button. (Library rows wire their own inputs in renderLibraryRootRows.)
   streamListPathInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") streamListPathInput.blur();
   });
@@ -3771,8 +3771,8 @@ async function init(): Promise<void> {
     const render = (done: number, total: number): void => {
       label.textContent =
         done > 0
-          ? `Scanning… ${done.toLocaleString()} of ${total.toLocaleString()}`
-          : "Scanning…";
+          ? `Scanning... ${done.toLocaleString()} of ${total.toLocaleString()}`
+          : "Scanning...";
       fill.style.width = total > 0 ? `${(done / total) * 100}%` : "0%";
     };
 

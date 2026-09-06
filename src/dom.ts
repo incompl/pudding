@@ -13,11 +13,11 @@ export interface ElProps<K extends keyof HTMLElementTagNameMap> {
   text?: string;
   // data-* attributes (keys are the bit after data-, camelCase like dataset).
   data?: Record<string, string | number>;
-  // Any other attributes (type, aria-*, role, disabled…). false/null omits it.
+  // Any other attributes (type, aria-*, role, disabled...). false/null omits it.
   attrs?: Record<string, string | number | boolean | null | undefined>;
   // Inline styles, including custom properties via setProperty for --vars.
   style?: Record<string, string>;
-  // Typed event listeners: { click: (e) => …, contextmenu: (e) => … }.
+  // Typed event listeners: { click: (e) => ..., contextmenu: (e) => ... }.
   on?: {
     [E in keyof HTMLElementEventMap]?: (
       this: HTMLElementTagNameMap[K],

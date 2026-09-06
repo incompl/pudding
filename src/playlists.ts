@@ -145,7 +145,7 @@ export async function browsePlaylist(node: TreeNode): Promise<void> {
   await browsePlaylistPath(node.path);
 }
 
-// Browse a playlist by file path (tree single-click, OS Open…, Open Recent).
+// Browse a playlist by file path (tree single-click, OS Open..., Open Recent).
 // Reads and shows it as the open playlist without changing playback, and
 // records it as recent.
 // Flash the list-face title once, marking where a playlist search hit landed — the
@@ -220,7 +220,7 @@ export async function addPlaylistToQueue(
 }
 
 // --- OS Playlist menu ---
-// The Playlist menu (New / Open… / Open Recent ▸ / Save Queue as Playlist / Move) is
+// The Playlist menu (New / Open... / Open Recent ▸ / Save Queue as Playlist / Move) is
 // built in Rust and relays intents here; the frontend owns the dialogs, file
 // writes, and the recents list (persisted in the settings store, mirrored into
 // the native Open Recent submenu via set_recent_playlists).
@@ -300,7 +300,7 @@ export function syncRecentPlaylistsMenu(): void {
   void invoke("set_recent_playlists", { items: app.recentPlaylists });
 }
 
-// New Playlist…: save dialog → write an empty .m3u8 → open it ready to fill.
+// New Playlist...: save dialog → write an empty .m3u8 → open it ready to fill.
 export async function menuNewPlaylist(): Promise<void> {
   const dir = defaultPlaylistDir();
   const path = await save({
@@ -320,7 +320,7 @@ export async function menuNewPlaylist(): Promise<void> {
   await browsePlaylistPath(path);
 }
 
-// Open…: native dialog filtered to playlists; may live outside the library.
+// Open...: native dialog filtered to playlists; may live outside the library.
 export async function menuOpenPlaylist(): Promise<void> {
   const selected = await open({
     directory: false,
@@ -376,7 +376,7 @@ export async function saveQueueAsPlaylist(path: string): Promise<void> {
   await browsePlaylistPath(path);
 }
 
-// Move Playlist File…: relocate the open playlist on disk (rewriting relative
+// Move Playlist File...: relocate the open playlist on disk (rewriting relative
 // paths against the new location), then re-open it there.
 export async function menuMovePlaylist(): Promise<void> {
   const src = openPlaylistPath();
@@ -561,7 +561,7 @@ export async function deletePlaylistPath(path: string, name: string): Promise<vo
   await refreshLibrary();
 }
 
-// New Playlist… from a menu: save dialog → write an .m3u8 seeded with the
+// New Playlist... from a menu: save dialog → write an .m3u8 seeded with the
 // clicked tracks → browse it (playback untouched) as confirmation.
 export async function newPlaylistWithTracks(getTracks: TrackProvider): Promise<void> {
   const tracks = await getTracks();

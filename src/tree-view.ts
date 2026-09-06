@@ -745,9 +745,9 @@ export function renderTree(): void {
   // the browser clamps scroll to 0 and the tree jumps to the top mid-browse.
   //
   // The window must still be mounted, not just non-null: refreshTree (roots changed,
-  // e.g. a folder was added) replaces treeContainer with a "Loading…" placeholder
+  // e.g. a folder was added) replaces treeContainer with a "Loading..." placeholder
   // before calling us, detaching treeWin.el while the variable still points at it.
-  // Repainting that orphaned window would strand Browse on "Loading…" forever — so
+  // Repainting that orphaned window would strand Browse on "Loading..." forever — so
   // fall through to buildTree(), which re-mounts a fresh window in the container.
   if (treeWin?.el.isConnected && app.rootNode && app.rootNode.children.length > 0)
     refreshTreeRows();

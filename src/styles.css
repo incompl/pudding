@@ -350,7 +350,12 @@ body.platform-mac #tabs {
 }
 
 #search-input {
-  width: 100px;
+  /* Wide enough for the "Search..." placeholder. Only ~55px of that is text: an
+     <input type="search"> reserves ~15px at its right edge for WebKit's clear
+     button whether or not the field holds a value, and that reserve clips the
+     placeholder before the declared padding does. Measured in WKWebView: at
+     100px the last dot was cut off. Re-measure if the placeholder text changes. */
+  width: 108px;
   /* An <input>'s inner text hangs from its TOP padding edge — it is never
      centered in the box, and giving the box an explicit height does not move the
      glyphs (measured: forcing height:24px/26px leaves the placeholder exactly
@@ -708,7 +713,7 @@ html[data-mode="light"] .context-menu {
 }
 
 /* Reset is a real (secondary) button, not a text link — a solid fill matching the
-   app's other secondary buttons (Choose…, Cancel) so it reads as an action. */
+   app's other secondary buttons (Choose..., Cancel) so it reads as an action. */
 #eq-reset {
   padding: 0.2em 0.7em;
   border: 1px solid var(--surface);
@@ -2532,7 +2537,7 @@ body.dragging-noselect * {
   border-color: var(--accent);
 }
 
-/* Per-field "Choose…" button (e.g. pick an image file), sitting just right of
+/* Per-field "Choose..." button (e.g. pick an image file), sitting just right of
    its input. Muted like a secondary control so the input stays the focus. */
 .inline-editor-browse {
   flex: none;
@@ -2751,7 +2756,7 @@ ul {
   padding-top: 0.3em;
 }
 
-/* …and the last stream row reaches the bottom edge the same way — the mirror of
+/* ...and the last stream row reaches the bottom edge the same way — the mirror of
    the first-row rule above, pulling the row down over #tab-streams' 0.1em bottom
    padding so a hovered/selected final row's fill follows the lower rounded
    corner. */
@@ -3608,7 +3613,7 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
 }
 
 /* The × that removes a library-folder row. Square, matching the input height, so
-   the row reads input | Choose… | ×. */
+   the row reads input | Choose... | ×. */
 .path-picker button.path-remove {
   padding: 0 0.7em;
   font-size: 1.1em;

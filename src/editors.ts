@@ -53,7 +53,7 @@ export function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
           h("button", {
             class: "inline-editor-browse",
             attrs: { type: "button" },
-            text: "Choose…",
+            text: "Choose...",
           }),
       ),
     );
@@ -234,14 +234,14 @@ function openMetadataEditor(path: string, seed: FileEntry): void {
   openPaneEditor("metadata", editor);
 }
 
-// The single "Edit metadata…" context-menu verb, shared by every track surface.
+// The single "Edit metadata..." context-menu verb, shared by every track surface.
 // Reads the file's tags fresh from disk before opening — a view carries only a
 // partial row (a SearchTrack from Songs/album/artist lists has no album-artist or
 // disc), so seeding the editor from the row would let a save write those fields
 // back empty and wipe them. read_file_tags returns the whole tag set.
 export function editMetadataItem(path: string): ContextMenuItem {
   return {
-    label: "Edit metadata…",
+    label: "Edit metadata...",
     action: async () => {
       let seed: FileEntry;
       try {

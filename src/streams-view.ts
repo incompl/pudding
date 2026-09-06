@@ -69,7 +69,7 @@ export function renderStreams(streams: Stream[]): void {
       const items: ContextMenuItem[] = [{ label: "Play", action: () => playStream(stream) }];
       if (streamListWritable.value) {
         items.push(
-          { label: "Edit…", action: () => openEditStationEditor(stream) },
+          { label: "Edit...", action: () => openEditStationEditor(stream) },
           { label: "Delete", action: () => void deleteStream(stream) },
         );
       }

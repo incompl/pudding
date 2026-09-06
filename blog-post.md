@@ -24,7 +24,7 @@ The first problem with a heisenbug-after-hours is that you can't watch devtools 
 
 - Added [`tauri-plugin-log`](https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/log) to the Rust side ([src-tauri/Cargo.toml](src-tauri/Cargo.toml)).
 - Added `@tauri-apps/plugin-log` to the JS side and a tiny `alog/awarn/aerr` wrapper that funnels diagnostics to disk and the console at once ([src/audio-engine.ts](src/audio-engine.ts)).
-- Configured rotation: `Target::new(TargetKind::LogDir { … })`, 8 MB per file, `RotationStrategy::KeepAll`, and a 7-day prune in `setup()` ([src-tauri/src/lib.rs](src-tauri/src/lib.rs)) so disk doesn't accumulate forever.
+- Configured rotation: `Target::new(TargetKind::LogDir { ... })`, 8 MB per file, `RotationStrategy::KeepAll`, and a 7-day prune in `setup()` ([src-tauri/src/lib.rs](src-tauri/src/lib.rs)) so disk doesn't accumulate forever.
 - Added `"log:default"` to the capability ([src-tauri/capabilities/default.json](src-tauri/capabilities/default.json)).
 
 No flag-guarding. The user explicitly accepted the disk cost in exchange for not having to remember to enable logging when the bug fires.
@@ -66,7 +66,7 @@ This would turn out to be the most important diagnostic in the whole investigati
 Two more lightweight markers that paid off:
 
 - `SESSION_ID`: a `crypto.randomUUID().slice(0,8)` generated once per JS module evaluation, stamped on every log line. Same `sid` across two log lines means same JS execution context. Different `sid` means the WebView re-evaluated the bundle (a background reload, navigation, whatever).
-- `app.boot version=… pid=…`: emitted from Rust `setup()` exactly once per process start.
+- `app.boot version=... pid=...`: emitted from Rust `setup()` exactly once per process start.
 
 The four-way grid these enable:
 
@@ -196,7 +196,7 @@ Implementation:
 
 - A tiny in-code generator for a ~150-byte 8 kHz silent WAV as a `data:` URL.
 - An `HTMLAudioElement` set to `loop=true`, `volume=0.001`, kicked off at engine construction and re-kicked on the first `play()` call (autoplay restrictions often require a user gesture).
-- `navigator.mediaSession.setActionHandler('play'/'pause', …)` — registering handlers signals to macOS that we're a controllable media app, independent of the keep-alive.
+- `navigator.mediaSession.setActionHandler('play'/'pause', ...)` — registering handlers signals to macOS that we're a controllable media app, independent of the keep-alive.
 
 Result on test: every keep-alive attempt rejected with `NotSupportedError: The operation is not supported.` The bug recurred.
 
@@ -205,11 +205,11 @@ Result on test: every keep-alive attempt rejected with `NotSupportedError: The o
 `NotSupportedError` on `audio.play()` for a valid format usually means the source couldn't load. Checked the Tauri config:
 
 ```jsonc
-"csp": "… img-src 'self' data: asset: http://asset.localhost;
-        media-src 'self' asset: http://asset.localhost https: http: …"
+"csp": "... img-src 'self' data: asset: http://asset.localhost;
+        media-src 'self' asset: http://asset.localhost https: http: ..."
 ```
 
-`img-src` allows `data:`. `media-src` doesn't. So `<audio src="data:audio/wav;base64,…">` is blocked by CSP before WebKit ever looks at the bytes. Added `data:` to `media-src`. Rebuilt.
+`img-src` allows `data:`. `media-src` doesn't. So `<audio src="data:audio/wav;base64,...">` is blocked by CSP before WebKit ever looks at the bytes. Added `data:` to `media-src`. Rebuilt.
 
 Not the WAV's fault; not WKWebView's fault. Just a config gap that ate a whole iteration.
 

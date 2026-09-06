@@ -23,7 +23,7 @@ import type {
 //
 // The reassigned module-level `let`s that aren't reactive — "the current value,
 // no re-render on change". They live as fields on one shared object so any
-// feature module can read AND write them (`app.currentParent = …`) without the
+// feature module can read AND write them (`app.currentParent = ...`) without the
 // read-only live-binding problem a plain exported `let` would hit. Reactive
 // state stays in the signals below; DOM refs live in dom-refs.ts.
 //
@@ -64,7 +64,7 @@ export interface AppState {
   playlistIndex: PlaylistRef[];
   // Whether the playlist index has completed its first build (distinguishes a
   // genuinely empty library from "not walked yet" so the navigator can show a
-  // "Loading…" line until the initial walk lands rather than a false "No playlists").
+  // "Loading..." line until the initial walk lands rather than a false "No playlists").
   playlistIndexLoaded: boolean;
   // The leaf list currently shown in the navigator (maps the nav selection back
   // to rows by view index).
@@ -231,7 +231,7 @@ export function clearActiveQueue(): void {
   activeQueue.value = null;
 }
 
-// A playlist opened for *browsing* only — single-click in the tree, OS Open… /
+// A playlist opened for *browsing* only — single-click in the tree, OS Open... /
 // Open Recent, or New Playlist. Viewing/curating it never changes playback: a
 // queue can keep playing (as `activeQueue`) while you look at a playlist here.
 // Playing *from* it (double-click, or clicking a row) is the commit that makes
@@ -259,7 +259,7 @@ export function isPlaylistSource(q: Queue | null | undefined): boolean {
 // (you can browse a playlist while a queue plays underneath) — is derived, along
 // with everything else the right pane renders, by `paneView`.
 
-// The open playlist file the OS menu acts on (Move Playlist File…): the one
+// The open playlist file the OS menu acts on (Move Playlist File...): the one
 // being browsed, else the one playing.
 export function openPlaylistPath(): string | undefined {
   if (isPlaylistSource(browsedPlaylist.value)) return browsedPlaylist.value!.sourcePath;
@@ -295,7 +295,7 @@ export function showSourceList(): void {
 // whole story. It dismisses any open queue/playlist entirely, so the pane is the
 // hero alone with no nav bar. Distinct from showHeroFace (the nav bar's flip),
 // which keeps the queue. Callers repoint the engine themselves (playFile /
-// playStream / …), so dropping the queue here is state-only.
+// playStream / ...), so dropping the queue here is state-only.
 export function resetToLonePlayback(): void {
   clearActiveQueue();
   browsedPlaylist.value = null;

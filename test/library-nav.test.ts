@@ -185,12 +185,12 @@ test("a playlist row OPENS RIGHT without drilling — the root menu stays put", 
   await flush();
   rowByLabel(container, "Roadtrip").fire("click");
 
-  // openPlaylist fired with the file path…
+  // openPlaylist fired with the file path...
   assert.deepEqual(
     calls.filter((c) => c.name === "openPlaylist"),
     [{ name: "openPlaylist", args: ["/pl/roadtrip.m3u8"] }],
   );
-  // …and, critically, we did NOT drill: no back header, root view rows still present.
+  // ...and, critically, we did NOT drill: no back header, root view rows still present.
   assert.ok(!hasBackHeader(container), "opening a playlist must not drill the pane");
   assert.ok(labels(container).includes("Artists"), "root menu must stay put");
 });

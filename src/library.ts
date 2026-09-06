@@ -77,7 +77,7 @@ export async function refreshTree(roots: string[]): Promise<void> {
     renderLibraryRootRows();
     return;
   }
-  setEmpty(treeContainer, "Loading…", "loading");
+  setEmpty(treeContainer, "Loading...", "loading");
   // List every root in parallel; a failed root becomes an empty folder node and
   // is flagged invalid (its Settings row outlines red) rather than sinking the
   // whole tree.
@@ -267,7 +267,7 @@ export async function refreshStreams(streamListPath: string): Promise<void> {
     setEmpty(streamsContainer, "No stream list path set");
     return;
   }
-  setEmpty(streamsContainer, "Loading…", "loading");
+  setEmpty(streamsContainer, "Loading...", "loading");
   try {
     const streams = await bootStep("  read_stream_list(invoke)", () =>
       invoke<Stream[]>("read_stream_list", { path: streamListPath }),
@@ -318,7 +318,7 @@ export async function setLibraryRoots(paths: string[]): Promise<void> {
 }
 
 // Rebuild the Settings library-folder rows from `libraryRoots`. Each row is a
-// .path-picker: the folder path (editable), a Choose… button that repoints that
+// .path-picker: the folder path (editable), a Choose... button that repoints that
 // row, and an × that removes it. All three edit paths funnel through
 // setLibraryRoots so persistence, rescan/watch, and the tree stay in step.
 export function renderLibraryRootRows(): void {
@@ -345,7 +345,7 @@ export function renderLibraryRootRows(): void {
 
     const choose = h("button", {
       attrs: { type: "button" },
-      text: "Choose…",
+      text: "Choose...",
       on: { click: () => void browseLibraryRoot(index) },
     });
 
