@@ -9,7 +9,7 @@
 # Default: 50000 copies of e2e/fixtures/tone.m4a into ~/pudding-stress-lib
 #
 # Then in Pudding: add OUT_DIR as a library folder, let the scan finish, open the
-# Songs lens, and scroll. Rows read 1..N (no tags -> positional number + filename),
+# Songs view, and scroll. Rows read 1..N (no tags -> positional number + filename),
 # so the gutter is a live check that row i lands at slot i.
 set -euo pipefail
 

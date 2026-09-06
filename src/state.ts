@@ -344,7 +344,7 @@ export function autoadvanceEnabled(): boolean {
 }
 // Whether a library root has been configured at all. When false the whole Files
 // panel is replaced by a get-started prompt (see the files-empty effect) rather
-// than showing an empty lens springboard the user can't do anything with.
+// than showing an empty view springboard the user can't do anything with.
 export const libraryRootSet = signal(false);
 export const streamListPathValid = signal(true);
 // Whether a stream list path has been configured. When false the Streams panel is

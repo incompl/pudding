@@ -8,8 +8,8 @@
 //
 // The focus is the design invariants that are easy to regress and that the e2e
 // suite can't reach (the e2e fixtures carry no artist/album metadata, so the
-// Artist/Album lenses are empty there):
-//   - lenses DRILL LEFT (replace + back header); playlists OPEN RIGHT and must
+// Artist/Album views are empty there):
+//   - views DRILL LEFT (replace + back header); playlists OPEN RIGHT and must
 //     NOT disturb the root menu — the whole edit workflow depends on it;
 //   - the async-load guard bails when a navigation detached its host;
 //   - album detail's synthetic pool path stays byte-for-byte the openAlbumQueue
@@ -141,20 +141,20 @@ const hasBackHeader = (container: FakeEl) => container.queryAll("nav-back").leng
 beforeEach(() => {
   // A fresh document per test; setup() installs it. popNavToRoot resets the
   // module's navigation stack so state can't leak between tests. Likewise drop the
-  // memoized lens lists, or a prior test's cached loader would satisfy this test's
+  // memoized view lists, or a prior test's cached loader would satisfy this test's
   // open and its fresh loader would never run.
   installFakeDom();
   invalidateNavListCache();
-  // The Artists/Albums lenses window their rows (see windowDrillRows), which needs
+  // The Artists/Albums views window their rows (see windowDrillRows), which needs
   // measured row heights the fake DOM has no layout to provide. Flip the same
-  // escape hatch renderLeafTrackList uses so those lenses render every row eagerly,
+  // escape hatch renderLeafTrackList uses so those views render every row eagerly,
   // letting the tests assert on real drill rows.
   (globalThis as { __noWindowing?: boolean }).__noWindowing = true;
 });
 
-test("root menu lists the four lenses, then the cached playlist index", async () => {
+test("root menu lists the four views, then the cached playlist index", async () => {
   const { container, createBtn, folderTree } = setup();
-  // The four lenses render synchronously; playlists arrive after the load.
+  // The four views render synchronously; playlists arrive after the load.
   assert.deepEqual(labels(container).slice(0, 4), ["Browse", "Songs", "Artists", "Albums"]);
   await flush();
   assert.ok(labels(container).includes("Roadtrip"), "playlist row never rendered");
@@ -163,14 +163,14 @@ test("root menu lists the four lenses, then the cached playlist index", async ()
   assert.ok(folderTree.classList.contains("hidden"), "folder tree hidden outside Browse");
 });
 
-test("a lens drills in (replace + back header); back returns to the root menu", async () => {
+test("a view drills in (replace + back header); back returns to the root menu", async () => {
   const { container, createBtn } = setup();
   rowByLabel(container, "Songs").fire("click");
   await flush();
 
-  assert.ok(hasBackHeader(container), "drilling a lens must leave a back header");
+  assert.ok(hasBackHeader(container), "drilling a view must leave a back header");
   assert.ok(createBtn.classList.contains("hidden"), "create button hides while drilled");
-  // The root lens rows are gone — the pane was replaced, not stacked.
+  // The root menu's view rows are gone — the pane was replaced, not stacked.
   assert.ok(!labels(container).includes("Artists"), "root menu should be replaced");
 
   container.queryAll("nav-back")[0].fire("click");
@@ -190,7 +190,7 @@ test("a playlist row OPENS RIGHT without drilling — the root menu stays put", 
     calls.filter((c) => c.name === "openPlaylist"),
     [{ name: "openPlaylist", args: ["/pl/roadtrip.m3u8"] }],
   );
-  // …and, critically, we did NOT drill: no back header, root lenses still present.
+  // …and, critically, we did NOT drill: no back header, root view rows still present.
   assert.ok(!hasBackHeader(container), "opening a playlist must not drill the pane");
   assert.ok(labels(container).includes("Artists"), "root menu must stay put");
 });
@@ -210,14 +210,14 @@ test("a playlist row plays on double-click and raises its menu on right-click", 
   assert.equal(typeof menuCall.args[4], "function", "menu is handed a startRename callback");
 });
 
-test("Browse un-hides the folder tree; other lenses hide it", async () => {
+test("Browse un-hides the folder tree; other views hide it", async () => {
   const { container, folderTree } = setup();
   rowByLabel(container, "Browse").fire("click");
   assert.ok(!folderTree.classList.contains("hidden"), "Browse must reveal the folder tree");
 
   popNavToRoot();
   rowByLabel(container, "Songs").fire("click");
-  assert.ok(folderTree.classList.contains("hidden"), "non-Browse lenses hide the folder tree");
+  assert.ok(folderTree.classList.contains("hidden"), "non-Browse views hide the folder tree");
   popNavToRoot();
 });
 
@@ -292,7 +292,7 @@ test("an async list bails when a navigation detached its host before load resolv
   assert.equal(leafCtx.length, 0, "fill ran against a detached host");
 });
 
-test("a lens list is memoized: re-opening Songs reuses the cache, invalidation reloads", async () => {
+test("a view list is memoized: re-opening Songs reuses the cache, invalidation reloads", async () => {
   let loads = 0;
   const fixture = setup({
     listAllSongs: async () => {
@@ -335,7 +335,7 @@ test("refreshNavPlaylists reloads at the root, but is a no-op while drilled", as
   await flush();
   assert.equal(loads, 1, "root menu reads the playlist index once on init");
 
-  // Drilled into a lens: the playlist list isn't shown, so a refresh must not
+  // Drilled into a view: the playlist list isn't shown, so a refresh must not
   // re-render (and re-load) it.
   rowByLabel(container, "Songs").fire("click");
   await flush();
@@ -350,26 +350,26 @@ test("refreshNavPlaylists reloads at the root, but is a no-op while drilled", as
   assert.equal(loads, 3, "back-to-root render (2) + explicit refresh (3) each re-read");
 });
 
-test("persists the current place on every navigation (root, lens, deep drill)", async () => {
+test("persists the current place on every navigation (root, view, deep drill)", async () => {
   const { container, saved } = setup();
   // The root menu persists as an empty stack (restores to the springboard).
   assert.deepEqual(saved.steps, []);
 
   rowByLabel(container, "Artists").fire("click");
   await flush();
-  assert.deepEqual(saved.steps, [{ t: "lens", lens: "artist" }]);
+  assert.deepEqual(saved.steps, [{ t: "view", view: "artist" }]);
 
   rowByLabel(container, "Alice").fire("click"); // -> artist detail
   await flush();
   assert.deepEqual(saved.steps, [
-    { t: "lens", lens: "artist" },
+    { t: "view", view: "artist" },
     { t: "artist", name: "Alice" },
   ]);
 
   rowByLabel(container, "Split").fire("click"); // -> album detail (albumArtist "Various")
   await flush();
   assert.deepEqual(saved.steps, [
-    { t: "lens", lens: "artist" },
+    { t: "view", view: "artist" },
     { t: "artist", name: "Alice" },
     { t: "album", album: "Split", albumArtist: "Various" },
   ]);
@@ -378,7 +378,7 @@ test("persists the current place on every navigation (root, lens, deep drill)", 
   container.queryAll("nav-back")[0].fire("click");
   await flush();
   assert.deepEqual(saved.steps, [
-    { t: "lens", lens: "artist" },
+    { t: "view", view: "artist" },
     { t: "artist", name: "Alice" },
   ]);
   popNavToRoot();
@@ -386,7 +386,7 @@ test("persists the current place on every navigation (root, lens, deep drill)", 
 
 test("restores a persisted deep drill on init (rebuilds the stack + back header)", async () => {
   const { container, leafCtx } = setup({}, [
-    { t: "lens", lens: "album" },
+    { t: "view", view: "album" },
     { t: "album", album: "Split", albumArtist: "Various" },
   ]);
   await flush();
@@ -399,7 +399,7 @@ test("restores a persisted deep drill on init (rebuilds the stack + back header)
 });
 
 test("a malformed persisted location falls back to the root menu", async () => {
-  // First step isn't a lens — a corrupt/stale store. Restore must discard it.
+  // First step isn't a view — a corrupt/stale store. Restore must discard it.
   const { container } = setup({}, [{ t: "artist", name: "Alice" }]);
   await flush();
   assert.ok(!hasBackHeader(container), "malformed location must not leave a broken stack");

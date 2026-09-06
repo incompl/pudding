@@ -607,7 +607,7 @@ function isAncestorOrSelf(folderPath: string, target: string): boolean {
 // Reveal a folder in the Browse tree: expand every ancestor from the root down
 // (loading each lazily), expand the target itself so its contents show, then
 // scroll it into view. Backs the search hit's "Go to folder" — the caller has
-// already switched to the Files tab and entered the Browse lens (which un-hides
+// already switched to the Files tab and entered the Browse view (which un-hides
 // this tree). A path that isn't under the library resolves to nothing and just
 // leaves the tree where it was.
 export async function revealFolderInTree(path: string): Promise<void> {
@@ -641,7 +641,7 @@ export async function revealFolderInTree(path: string): Promise<void> {
 // Reveal a *file* in the Browse tree: expand down to its containing folder (so the
 // track row exists in the flattened list), then scroll that track row to the top.
 // Backs the now-playing title's "reveal where this lives" fallback — a track played
-// from a plain queue / an ad-hoc pool / outside the library has no lens home, so we
+// from a plain queue / an ad-hoc pool / outside the library has no library-view home, so we
 // land on the file itself in Browse. Like revealFolderInTree, a path outside the
 // library resolves to nothing and leaves the tree where it was.
 export async function revealFileInTree(filePath: string): Promise<void> {
@@ -674,10 +674,10 @@ export function revealTreeRow(path: string): void {
 }
 
 // The Browse folder tree is costly to build for a large library, yet it's hidden
-// unless the Browse lens is the active view — and most sessions live in Songs and
+// unless Browse is the active view — and most sessions live in Songs and
 // never open Browse. So defer the DOM build: when Browse isn't active, renderTree()
 // just flags the tree stale and returns, sparing the startup + scan-complete freeze.
-// library-nav's render() calls setBrowseActive() when the lens changes; entering
+// library-nav's render() calls setBrowseActive() when the view changes; entering
 // Browse with a stale tree builds it once. The node *model* (app.rootNode) is kept
 // current by refreshTree/reconcile regardless — only the DOM paint waits.
 let browseActive = false;
@@ -754,14 +754,14 @@ export function renderTree(): void {
   else buildTree();
 }
 
-// Tell the tree whether the Browse lens is now the active view. Entering Browse
+// Tell the tree whether Browse is now the active view. Entering Browse
 // with a deferred (stale) tree builds it now — the paint we skipped while hidden.
 export function setBrowseActive(active: boolean): void {
   browseActive = active;
   if (active && treeStale) buildTree();
 }
 
-// Whether the Browse lens (the real folder tree) is the current Files-tab view, so
+// Whether Browse (the real folder tree) is the current Files-tab view, so
 // the shared keyboard cursor knows the tree — not the springboard navigator — is
 // the left pane's active list.
 export function isBrowseActive(): boolean {

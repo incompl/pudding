@@ -2232,7 +2232,7 @@ async fn list_all_albums(db: State<'_, DbHandle>) -> Result<Vec<AlbumResult>, St
 // grouping key (ALBUM_ARTIST_EXPR) so a drill-in via album_tracks / openAlbumQueue
 // matches — including a compilation whose album_artist differs from the track
 // artist. Reuses AlbumResult. Backs the artist-detail (albums) view of the
-// Artists browse lens; filtering on the *track* artist mirrors artist_tracks.
+// Artists browse view; filtering on the *track* artist mirrors artist_tracks.
 #[tauri::command]
 async fn artist_albums(
     artist: String,

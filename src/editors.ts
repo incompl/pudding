@@ -20,7 +20,7 @@ import {
   dismissRightPanel,
 } from "./state";
 import { paneEditorView, queueTitleEl } from "./dom-refs";
-import { reloadNavView } from "./library-nav";
+import { reloadNavPane } from "./library-nav";
 import { findNode, refreshLibrary } from "./library";
 import { renderTree } from "./tree-view";
 import { renameOpenPlaylist } from "./playlists";
@@ -259,7 +259,7 @@ export function editMetadataItem(path: string): ContextMenuItem {
 // edit is decoupled from any one row, so each surface updates through its own path:
 //   - Tree: the fs watcher's own scan skips this row (write_tags pre-synced
 //     mtime/size), so patch the in-memory node and repaint the tree here.
-//   - Library nav lenses (Songs/Artists/Albums + detail): reload so tag-derived
+//   - Library nav views (Songs/Artists/Albums + detail): reload so tag-derived
 //     membership recomputes — an edited-away track drops out and the list re-sorts.
 //   - Open right-pane list (queue / browsed playlist): membership is by path
 //     (unchanged), so patch the matching rows' display fields in place and repaint.
@@ -277,7 +277,7 @@ function applyTagUpdate(path: string, tags: FileEntry): void {
       renderTree();
     }
   }
-  reloadNavView();
+  reloadNavPane();
   const list = browsedPlaylist.value ?? activeQueue.value;
   if (list && list.tracks.some((t) => t.path === path)) {
     for (const t of list.tracks) {

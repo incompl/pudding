@@ -1,15 +1,15 @@
 // Library navigator: the left-pane browser that lives under the Files tab. Its
-// home is an in-pane root menu listing the library lenses (Browse / Songs /
+// home is an in-pane root menu listing the library views (Browse / Songs /
 // Artists / Albums) *and*, below them, every playlist — Apple-Music-style
 // sidebar shape.
 //
 // Two open behaviors, split by what the thing IS:
-//   - Lenses are read-only views of the library, so they DRILL LEFT (Replace +
+//   - Views are read-only slices of the library, so they DRILL LEFT (Replace +
 //     back): artist → album → tracks, iPod-style, replacing the pane and leaving a
 //     thin back header. Browse drills to the real folder tree.
 //   - Playlists are editable documents, so they OPEN RIGHT (deps.openPlaylist →
 //     the right-pane list face) WITHOUT drilling. The root menu stays put, so you
-//     can then drill a lens on the left and drag its tracks onto the open playlist.
+//     can then drill a view on the left and drag its tracks onto the open playlist.
 //     That left-source + right-target split is the whole editing workflow. See
 //     plan.md and the design discussion.
 
@@ -25,21 +25,21 @@ import { windowedList } from "./windowed-list";
 
 type IconKind = "browse" | "songs" | "playlist" | "artist" | "album";
 
-// The library lenses — the read-only views that drill left. Playlists are NOT a
-// lens (they're editable documents that open right), so they're absent here and
+// The library views — the read-only slices that drill left. Playlists are NOT a
+// view (they're editable documents that open right), so they're absent here and
 // listed as their own root-menu section instead.
-export type Lens = "browse" | "songs" | "artist" | "album";
-const DRILL_LENSES: Lens[] = ["browse", "songs", "artist", "album"];
+export type View = "browse" | "songs" | "artist" | "album";
+const DRILL_VIEWS: View[] = ["browse", "songs", "artist", "album"];
 
 // A serializable description of one level in the drill stack, so the user's place
-// in the Files tab survives an app restart. The bottom step is always a lens; the
+// in the Files tab survives an app restart. The bottom step is always a view; the
 // drill-downs above it are the artist/album we descended into. Rebuilt into live
-// Views by restoreLocation, persisted by deps.persistLocation on every nav change.
+// Panes by restoreLocation, persisted by deps.persistLocation on every nav change.
 export type NavStep =
-  | { t: "lens"; lens: Lens }
+  | { t: "view"; view: View }
   | { t: "artist"; name: string }
   | { t: "album"; album: string; albumArtist: string };
-const LENS_LABEL: Record<Lens, string> = {
+const VIEW_LABEL: Record<View, string> = {
   browse: "Browse",
   songs: "Songs",
   artist: "Artists",
@@ -100,10 +100,10 @@ export interface LibraryNavDeps {
   // navigation change from render().
   persistLocation: (steps: NavStep[]) => void;
   // Whether a library folder has been configured. When false the panel shows a
-  // get-started prompt (#files-empty) instead of the lens springboard; main.ts
+  // get-started prompt (#files-empty) instead of the view springboard; main.ts
   // re-renders (renderNav) whenever this flips.
   libraryRootSet: () => boolean;
-  // Tell the Browse folder tree whether it's the active lens. The tree defers its
+  // Tell the Browse folder tree whether it's the active view. The tree defers its
   // (costly) DOM build while hidden, so entering Browse flushes any pending build.
   // Injected rather than imported so this module never pulls in tree-view/main.
   setBrowseActive: (active: boolean) => void;
@@ -119,16 +119,16 @@ export interface LibraryNavDeps {
 
 let deps: LibraryNavDeps;
 
-// A view is a title (for the back header) and a body-builder. The stack gives us
+// A pane is a title (for the back header) and a body-builder. The stack gives us
 // Replace + back: an empty stack is the root menu; push replaces the visible body
-// and back() pops. The bottom view (stack[0]) carries its `lens` tag so we can name
-// the current lens and reveal the folder tree only inside Browse.
-interface View {
+// and back() pops. The bottom pane (stack[0]) carries its `view` tag so we can name
+// the current view and reveal the folder tree only inside Browse.
+interface Pane {
   title: string;
   build: () => HTMLElement;
-  lens?: Lens;
+  view?: View;
   // The serializable identity of this drill level (see NavStep). Present on every
-  // view that lives in the stack; the root menu (never stacked) has none.
+  // pane that lives in the stack; the root menu (never stacked) has none.
   step?: NavStep;
 }
 
@@ -136,7 +136,7 @@ let container: HTMLElement;
 let folderTree: HTMLElement;
 let createBtn: HTMLElement;
 let filesEmpty: HTMLElement;
-const stack: View[] = [];
+const stack: Pane[] = [];
 // Set for a single navigateTo when the caller wants the landing detail's Back-bar
 // title to flash — the "here it is" cue for album/artist search hits, which (unlike
 // a browsed-to track) have no persistent row highlight to say where you arrived.
@@ -147,14 +147,14 @@ let pendingFlashTitle = false;
 // ---- keyboard cursor -------------------------------------------------------
 //
 // The navigator's arm of the shared left-pane cursor (see activeKbdList in
-// main.ts): bare ↑/↓ walk the current view's rows and Enter activates one (drill
-// into a lens/artist/album, open/play a playlist, or play a track). Each view
+// main.ts): bare ↑/↓ walk the current pane's rows and Enter activates one (drill
+// into a view/artist/album, open/play a playlist, or play a track). Each pane
 // registers its navigable list as it builds — synchronously for the root menu,
-// from the async `fill` for the lenses. Two highlight styles, by whether the row
+// from the async `fill` for the views. Two highlight styles, by whether the row
 // type already has a selection model:
 //   - Leaf track lists reuse navSel (their existing `.selected`), so Enter plays
 //     the selected row and the highlight survives a windowed remount for free.
-//   - Drill / lens / playlist rows have no selection model, so they carry a
+//   - Drill / view / playlist rows have no selection model, so they carry a
 //     dedicated `.kbd-cursor` class tracked by navCursor (a row's data-nav-index).
 interface NavKbd {
   count: number;
@@ -166,11 +166,11 @@ interface NavKbd {
   activate: (i: number) => void;
 }
 let navKbd: NavKbd | null = null;
-// Cursor row for the `.kbd-cursor` (drill/lens/playlist) lists; unused by leaf
+// Cursor row for the `.kbd-cursor` (drill/view/playlist) lists; unused by leaf
 // lists, which track their cursor through navSel instead.
 let navCursor = -1;
 
-// Registered by a view's row builder as it lays out its navigable rows. Resets the
+// Registered by a pane's row builder as it lays out its navigable rows. Resets the
 // cursor — a freshly (re)built list starts unfocused. Exported so main.ts's shared
 // leaf-row builder (renderLeafTrackList) can register its navSel-backed list too.
 export function registerNavList(kbd: NavKbd | null): void {
@@ -198,7 +198,7 @@ function isNavCursorRow(i: number): boolean {
 }
 
 // Move the navigator cursor by one row (clamped at the ends). With nothing focused,
-// ↓ lands on the first row and ↑ on the last. A no-op while the view has no list
+// ↓ lands on the first row and ↑ on the last. A no-op while the pane has no list
 // yet (still loading) or is empty.
 export function navMove(delta: 1 | -1): void {
   if (!navKbd || navKbd.count === 0) return;
@@ -239,9 +239,9 @@ function list(): HTMLElement {
   return h("div", { class: "nav-list" });
 }
 
-// ---- lens list cache -------------------------------------------------------
+// ---- view list cache -------------------------------------------------------
 
-// Memoize the resolved lens lists (Songs / Artists / Albums and the artist/album
+// Memoize the resolved view lists (Songs / Artists / Albums and the artist/album
 // detail loads) so repeat opens are instant: the O(N) whole-library loads
 // (list_all_songs et al.) only pay their invoke + IPC + parse cost once per scan.
 // First open is unchanged (a cache miss), and the full resolved array is preserved
@@ -249,14 +249,14 @@ function list(): HTMLElement {
 // playback-pool model is untouched.
 //
 // We cache the Promise, not the resolved array, so concurrent opens of the same
-// lens share one in-flight load, and a resolved entry replays with no visible
+// view share one in-flight load, and a resolved entry replays with no visible
 // "Loading…" flash (asyncListBody's host is still connected on the next microtask).
-// Playlists are deliberately absent — they aren't a lens and have their own
+// Playlists are deliberately absent — they aren't a view and have their own
 // refreshNavPlaylists cache path.
 //
 // Correctness hinges on invalidation covering BOTH ways the library changes under
 // us, or a stale list flashes: background scans (library-scanned → main.ts calls
-// invalidateNavListCache) and explicit metadata edits (editors.ts → reloadNavView).
+// invalidateNavListCache) and explicit metadata edits (editors.ts → reloadNavPane).
 // See invalidateNavListCache.
 const listCache = new Map<string, Promise<unknown>>();
 
@@ -273,9 +273,9 @@ function cached<T>(key: string, load: () => Promise<T[]>): Promise<T[]> {
   return p;
 }
 
-// Drop every memoized lens list. Called whenever the library changes on disk (scan)
+// Drop every memoized view list. Called whenever the library changes on disk (scan)
 // or via an edit, so the next open re-fetches. Clearing wholesale is intentional: a
-// scan can touch any lens, and the lists are cheap to rebuild lazily on next open.
+// scan can touch any view, and the lists are cheap to rebuild lazily on next open.
 export function invalidateNavListCache(): void {
   listCache.clear();
 }
@@ -291,10 +291,10 @@ export function popNavToRoot(): void {
   render();
 }
 
-// Drill into a lens from the root: the lens becomes the bottom of a fresh stack.
-function enterLens(lens: Lens): void {
+// Drill into a view from the root: the view becomes the bottom of a fresh stack.
+function enterView(view: View): void {
   stack.length = 0;
-  stack.push(lensView(lens));
+  stack.push(viewPane(view));
   render();
 }
 
@@ -310,7 +310,7 @@ export function navigateTo(steps: NavStep[], opts?: { flashTitle?: boolean }): v
 }
 
 // The current drill location (top of the stack), or null at the root menu. Lets
-// a track menu hide a "Go to artist/album" that would just re-open the view it's
+// a track menu hide a "Go to artist/album" that would just re-open the pane it's
 // already sitting in (the artist/album detail lists its own tracks).
 export function currentNavStep(): NavStep | null {
   return stack.length === 0 ? null : (stack[stack.length - 1].step ?? null);
@@ -318,41 +318,41 @@ export function currentNavStep(): NavStep | null {
 
 // ---- views -----------------------------------------------------------------
 
-// The lens's drill view. Browse's body is empty — render() un-hides the real
+// The view's drill pane. Browse's body is empty — render() un-hides the real
 // #folder-tree when Browse is the current view; the others build their own bodies.
-function lensView(lens: Lens): View {
-  let base: View;
-  switch (lens) {
+function viewPane(view: View): Pane {
+  let base: Pane;
+  switch (view) {
     case "browse":
       base = { title: "Browse", build: () => list() };
       break;
     case "songs":
-      base = songsView();
+      base = songsPane();
       break;
     case "artist":
-      base = artistsView();
+      base = artistsPane();
       break;
     case "album":
-      base = albumsView();
+      base = albumsPane();
       break;
   }
-  base.lens = lens;
-  base.step = { t: "lens", lens };
+  base.view = view;
+  base.step = { t: "view", view };
   return base;
 }
 
-// The root menu: the library lenses as drill rows, then a Playlists section
-// listing every playlist. Lens rows drill left; playlist rows open right (single
+// The root menu: the library views as drill rows, then a Playlists section
+// listing every playlist. View rows drill left; playlist rows open right (single
 // click) / play (double click) and never disturb this menu, so it stays as the
 // springboard for the edit workflow.
-function rootMenuView(): View {
+function rootMenuPane(): Pane {
   return { title: "Files", build: rootMenuBody };
 }
 
 function rootMenuBody(): HTMLElement {
   const host = list();
   // The root menu isn't windowed, so its rows all stay mounted — collect them in
-  // display order (lenses, then playlists) as one keyboard list, tagging each with
+  // display order (views, then playlists) as one keyboard list, tagging each with
   // its data-nav-index and its Enter action.
   const activations: (() => void)[] = [];
   const addNavRow = (row: HTMLElement, activate: () => void): HTMLElement => {
@@ -360,15 +360,15 @@ function rootMenuBody(): HTMLElement {
     activations.push(activate);
     return row;
   };
-  for (const lens of DRILL_LENSES) {
+  for (const view of DRILL_VIEWS) {
     host.appendChild(
       addNavRow(
         drillRow({
-          icon: lens,
-          primary: LENS_LABEL[lens],
-          onOpen: () => enterLens(lens),
+          icon: view,
+          primary: VIEW_LABEL[view],
+          onOpen: () => enterView(view),
         }),
-        () => enterLens(lens),
+        () => enterView(view),
       ),
     );
   }
@@ -429,7 +429,7 @@ function rootMenuBody(): HTMLElement {
 
 // A list body that loads asynchronously. build() must return synchronously, so
 // this shows a "Loading…" line at once and swaps in the real rows (or an empty /
-// error line) when `load` resolves. Every drill view — Songs, Artists, artist and
+// error line) when `load` resolves. Every drill pane — Songs, Artists, artist and
 // album detail — shares this shell so loading / empty / failure handling lives in
 // one place. `fill` receives the resolved items and the host to append rows to
 // (the loading line is cleared first).
@@ -465,7 +465,7 @@ function asyncListBody<T>(opts: {
   return host;
 }
 
-// A drill-down row (a lens, an artist, an album, or a playlist): a gutter icon, a
+// A drill-down row (a view, an artist, an album, or a playlist): a gutter icon, a
 // primary label, an optional dimmed inline suffix, and a hover highlight. Left-click
 // drills / opens via `onOpen`; double-click plays via `onPlay` (playlists only);
 // right-click raises the injected context menu via `onMenu`.
@@ -474,7 +474,7 @@ function drillRow(opts: {
   primary: string;
   // An optional subtitle (e.g. an album's artist) shown inline after the primary,
   // dimmed and after a separator (see .nav-secondary). Every row is a single line
-  // whether or not this is present, so the windowed lenses (Artists/Albums) keep the
+  // whether or not this is present, so the windowed views (Artists/Albums) keep the
   // uniform row height they position by — no blank line needs reserving.
   secondary?: string;
   onOpen: () => void;
@@ -489,7 +489,7 @@ function drillRow(opts: {
   );
   // A playlist row can play as a unit, so its gutter mirrors the leaf track gutter: an
   // unmasked container holding the glyph and the playing equalizer (which would be
-  // clipped if nested under the icon's own mask). Every other lens row is a plain
+  // clipped if nested under the icon's own mask). Every other view row is a plain
   // masked glyph.
   const iconEl =
     opts.icon === "playlist"
@@ -584,7 +584,7 @@ function windowDrillRows<T>(
 // builder. Each row plays the list as a queue from that track (see
 // renderLeafTrackList's play semantics). The list is windowed (renderLeafTrackList
 // mounts only the on-screen row slice), so the whole library stays cheap to scroll.
-function songsView(): View {
+function songsPane(): Pane {
   return {
     title: "Songs",
     build: () =>
@@ -598,7 +598,7 @@ function songsView(): View {
               title: "Songs",
               syntheticPath: "queue:songs",
               // Songs is the flat "just play a track" list — if you're here you've
-              // already passed over the Albums lens, so drop the per-row album and
+              // already passed over the Albums view, so drop the per-row album and
               // show only title · artist, keeping the rows uncluttered.
               hideAlbum: true,
             }),
@@ -613,7 +613,7 @@ function songsView(): View {
 // the injected menu. Windowed (see windowDrillRows) so a whole-library artist list
 // stays a screenful of DOM — building and, crucially, tearing down on Back are both
 // cheap.
-function artistsView(): View {
+function artistsPane(): Pane {
   return {
     title: "Artists",
     build: () =>
@@ -629,10 +629,10 @@ function artistsView(): View {
               drillRow({
                 icon: "artist",
                 primary: a.name,
-                onOpen: () => push(artistDetailView(a.name)),
+                onOpen: () => push(artistDetailPane(a.name)),
                 onMenu: (x, y) => deps.showArtistMenu(x, y, a.name),
               }),
-            (a) => push(artistDetailView(a.name)),
+            (a) => push(artistDetailPane(a.name)),
           );
         },
       }),
@@ -646,8 +646,8 @@ function artistsView(): View {
 // The album carries its own album-artist key (from artist_albums), so a compilation
 // this artist merely appears on drills through correctly. The Tracks list is the
 // artist's whole catalog (in-album songs included), so it deliberately overlaps the
-// albums above — a scannable "play any song without drilling" view.
-function artistDetailView(name: string): View {
+// albums above — a scannable "play any song without drilling" pane.
+function artistDetailPane(name: string): Pane {
   // Load albums and the flat track list together so the shared loading / empty /
   // error shell still applies, then render each under its own section header.
   type Detail = { albums: SearchAlbum[]; tracks: SearchTrack[] };
@@ -679,7 +679,7 @@ function artistDetailView(name: string): View {
                   // drilled from — e.g. a compilation credited to someone else.
                   secondary:
                     al.artist && al.artist !== name ? al.artist : undefined,
-                  onOpen: () => push(albumDetailView(al.album, al.artist)),
+                  onOpen: () => push(albumDetailPane(al.album, al.artist)),
                   onMenu: (x, y) => deps.showAlbumMenu(x, y, al.album, al.artist),
                 }),
               );
@@ -705,11 +705,11 @@ function artistDetailView(name: string): View {
 
 // Albums: the library's distinct albums as drill rows, each grouped by
 // ALBUM_ARTIST_EXPR so its album-artist key matches album_tracks / openAlbumQueue.
-// Opening one pushes the same album detail the Artists lens uses (albumDetailView);
+// Opening one pushes the same album detail the Artists view uses (albumDetailPane);
 // right-click plays / queues the whole album through the injected menu. Windowed
-// like the Artists lens (see windowDrillRows); rows reserve the album-artist line so
+// like the Artists view (see windowDrillRows); rows reserve the album-artist line so
 // they stay uniform height for the window.
-function albumsView(): View {
+function albumsPane(): Pane {
   return {
     title: "Albums",
     build: () =>
@@ -726,10 +726,10 @@ function albumsView(): View {
                 icon: "album",
                 primary: al.album,
                 secondary: al.artist || undefined,
-                onOpen: () => push(albumDetailView(al.album, al.artist)),
+                onOpen: () => push(albumDetailPane(al.album, al.artist)),
                 onMenu: (x, y) => deps.showAlbumMenu(x, y, al.album, al.artist),
               }),
-            (al) => push(albumDetailView(al.album, al.artist)),
+            (al) => push(albumDetailPane(al.album, al.artist)),
           );
         },
       }),
@@ -740,7 +740,7 @@ function albumsView(): View {
 // queue / select / context / drag all behave as everywhere else. The synthetic pool
 // path mirrors openAlbumQueue's key (albumArtist NUL album) so playing a row here
 // plays the album in context, under the same pool identity as Play album.
-function albumDetailView(album: string, albumArtist: string): View {
+function albumDetailPane(album: string, albumArtist: string): Pane {
   return {
     title: album,
     step: { t: "album", album, albumArtist },
@@ -766,10 +766,10 @@ function albumDetailView(album: string, albumArtist: string): View {
 
 // ---- render / navigation ---------------------------------------------------
 
-// Drill in: replace the visible body with `view` and leave a back header to
+// Drill in: replace the visible body with `pane` and leave a back header to
 // return. The stack is the Replace + back history (see back()).
-function push(view: View): void {
-  stack.push(view);
+function push(pane: Pane): void {
+  stack.push(pane);
   render();
 }
 
@@ -780,43 +780,43 @@ function back(): void {
 
 // Re-render just the root menu when the playlist index changes (fs watcher / our
 // own writes) — that's the only place the playlist list is shown, so there's
-// nothing to refresh while drilled into a lens.
+// nothing to refresh while drilled into a view.
 export function refreshNavPlaylists(): void {
   if (stack.length === 0) render();
 }
 
 // Force a re-render from outside — main.ts calls this when the library-root-set
-// state flips so render() can swap between the get-started prompt and the lenses.
+// state flips so render() can swap between the get-started prompt and the views.
 export function renderNav(): void {
   render();
 }
 
-// Reload the current drill view from the backend — main.ts calls this after a
-// metadata edit. Rebuilding re-runs the view's load(), so a track edited out of
+// Reload the current drill pane from the backend — main.ts calls this after a
+// metadata edit. Rebuilding re-runs the pane's load(), so a track edited out of
 // this album/artist drops away and the list re-sorts (membership here is derived
 // from the tags just written). Scroll resets, which reads as intentional since
 // the list's contents changed. A no-op-ish refresh at the root (Browse/tree self-
 // refresh by other means) but harmless.
-export function reloadNavView(): void {
-  // An edit rewrote tags, so every memoized lens list is potentially stale (a track
+export function reloadNavPane(): void {
+  // An edit rewrote tags, so every memoized view list is potentially stale (a track
   // may have moved artist/album, or its title changed). Drop the cache before
-  // re-rendering so the rebuilt view re-fetches fresh membership.
+  // re-rendering so the rebuilt pane re-fetches fresh membership.
   invalidateNavListCache();
   render();
 }
 
 // A background library scan finished and changed what's on disk: reflect it in the
-// open lens/detail view so the user doesn't have to leave and re-enter to see new
+// open view/detail pane so the user doesn't have to leave and re-enter to see new
 // tracks. The Browse tree refreshes itself (refreshLibrary → renderTree), so skip it
-// here. Unlike reloadNavView (an explicit edit, where a scroll reset reads as
+// here. Unlike reloadNavPane (an explicit edit, where a scroll reset reads as
 // intentional), this is an unprompted background event, so the scroll position is
 // preserved — a scan completing shouldn't yank the user back to the top. The current
-// view reloads asynchronously and its windowed leaf list sizes its full-height spacer
+// pane reloads asynchronously and its windowed leaf list sizes its full-height spacer
 // a frame later, so the restore is retried briefly until the content is tall enough
 // to hold the saved offset (we can't hook the async fill from out here).
-export function refreshNavViewAfterScan(): void {
+export function refreshNavPaneAfterScan(): void {
   const top = stack[stack.length - 1];
-  if (top?.lens === "browse") return;
+  if (top?.view === "browse") return;
   const scroller = document.getElementById("tab-files") as HTMLElement | null;
   const savedTop = scroller?.scrollTop ?? 0;
   render();
@@ -836,12 +836,12 @@ export function refreshNavViewAfterScan(): void {
 
 function render(): void {
   container.replaceChildren();
-  // A fresh view starts with no keyboard list; each view's row builder re-registers
-  // one (synchronously for the root menu, from the async fill for the lenses). Clears
-  // here so a still-loading or empty view doesn't inherit the previous list.
+  // A fresh pane starts with no keyboard list; each pane's row builder re-registers
+  // one (synchronously for the root menu, from the async fill for the views). Clears
+  // here so a still-loading or empty pane doesn't inherit the previous list.
   registerNavList(null);
 
-  // No library folder yet: the whole panel is a get-started prompt. Every lens
+  // No library folder yet: the whole panel is a get-started prompt. Every view
   // and the folder tree would be dead ends, so hide them and bail before the
   // springboard is built.
   const hasRoot = deps.libraryRootSet();
@@ -859,9 +859,9 @@ function render(): void {
 
   const atRoot = stack.length === 0;
   const top = atRoot ? null : stack[stack.length - 1];
-  const inBrowse = top?.lens === "browse";
+  const inBrowse = top?.view === "browse";
 
-  // The real folder tree belongs to the Browse lens; the create-playlist button
+  // The real folder tree belongs to the Browse view; the create-playlist button
   // lives with the root menu's Playlists section. Entering Browse also flushes any
   // tree DOM build deferred while it was hidden (see tree-view's renderTree).
   folderTree.classList.toggle("hidden", !inBrowse);
@@ -881,7 +881,7 @@ function render(): void {
     container.appendChild(header);
     // One-shot flash to mark where a search hit landed (see pendingFlashTitle). Washes
     // the whole Back bar; the class is dropped on animationend so a later re-render of
-    // the same view is clean.
+    // the same pane is clean.
     if (flashTitle) {
       header.classList.add("flash");
       header.addEventListener("animationend", () => header.classList.remove("flash"), {
@@ -890,31 +890,31 @@ function render(): void {
     }
   }
 
-  const view = atRoot ? rootMenuView() : top!;
-  container.appendChild(view.build());
+  const pane = atRoot ? rootMenuPane() : top!;
+  container.appendChild(pane.build());
 
-  // render() is the single choke point every navigation flows through (enterLens,
+  // render() is the single choke point every navigation flows through (enterView,
   // push, back, popNavToRoot), so persist the current place here. An empty stack
   // (root menu) persists as [], which restores to the springboard.
   deps.persistLocation(stack.map((v) => v.step).filter((s): s is NavStep => s != null));
 }
 
 // Rebuild the drill stack from a persisted location. The bottom step must be a
-// lens for the stack to be well-formed; anything else (a corrupt or stale store)
+// view step for the stack to be well-formed; anything else (a corrupt or stale store)
 // is discarded, leaving the root menu. Does not render — the caller renders once.
 function restoreLocation(steps: NavStep[]): void {
   stack.length = 0;
-  if (steps.length === 0 || steps[0].t !== "lens") return;
+  if (steps.length === 0 || steps[0].t !== "view") return;
   for (const step of steps) {
     switch (step.t) {
-      case "lens":
-        stack.push(lensView(step.lens));
+      case "view":
+        stack.push(viewPane(step.view));
         break;
       case "artist":
-        stack.push(artistDetailView(step.name));
+        stack.push(artistDetailPane(step.name));
         break;
       case "album":
-        stack.push(albumDetailView(step.album, step.albumArtist));
+        stack.push(albumDetailPane(step.album, step.albumArtist));
         break;
     }
   }

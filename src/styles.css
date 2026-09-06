@@ -1481,7 +1481,7 @@ body.np-zen.np-idle #nav-bar {
 }
 
 /* Trailing per-track runtime, shared by the queue/playlist rows and the left-pane
-   lens leaf lists (both sit inside a `listcol` container). Hidden by default and
+   library-view leaf lists (both sit inside a `listcol` container). Hidden by default and
    revealed only past the same 28rem breakpoint that splits the row into two
    columns — the runtime is the extra affordance the widened row can afford, so it
    appears exactly when there's room. flex:none keeps its intrinsic width while the
@@ -1590,7 +1590,7 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
   opacity: 1;
 }
 /* Hover swaps the runtime out for the ✕ that takes its place, so the two never
-   collide at the edge. Queue rows only — the lens leaf lists have no ✕, so their
+   collide at the edge. Queue rows only — the library-view leaf lists have no ✕, so their
    runtime stays put on hover. */
 .queue-row:hover .row-dur {
   opacity: 0;
@@ -2410,7 +2410,7 @@ body.dragging-noselect * {
 .tab-panel {
   flex: 1;
   overflow: auto;
-  /* Always reserve the scrollbar gutter so content (esp. the lens strip's
+  /* Always reserve the scrollbar gutter so content (esp. the view strip's
      space-between spread) doesn't shift left/right as the scrollbar appears and
      disappears on navigation between a short and a long list. */
   scrollbar-gutter: stable;
@@ -3550,9 +3550,9 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
   padding: 0.1em 0;
 }
 
-/* PROTOTYPE (#2 "lens strip"): a persistent segmented control pinned to the top
-   of the Files pane. The six browse modes live here as small pills; the pane
-   below always shows the active lens's content. Pinned like the back bar so it
+/* PROTOTYPE (#2 "view strip"): a persistent segmented control pinned to the top
+   of the Files pane. The six library views live here as small pills; the pane
+   below always shows the active view's content. Pinned like the back bar so it
    stays put as the list scrolls under it. */
 /* Library-scan progress sits in a fixed footer at the bottom of the left pane (a
    flex-none sibling of the scroll panes), so it never scrolls. Collapsed to zero
@@ -3707,7 +3707,7 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
   color: var(--text-dim);
 }
 
-/* Root-menu section label (e.g. "Playlists") between the library lenses and the
+/* Root-menu section label (e.g. "Playlists") between the library views and the
    playlist list. A quiet caps label carries the grouping on its own — whitespace,
    not a rule, sets the two groups apart. */
 .nav-section {
@@ -3760,7 +3760,7 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
    and an optional dimmed suffix (artist / album) share one line that truncates
    with a single trailing ellipsis, so a long title pushes the suffix off the end
    and nothing wraps. One line at every width keeps every row a uniform height —
-   the height the windowed lenses (Artists/Albums) position rows by. */
+   the height the windowed views (Artists/Albums) position rows by. */
 .nav-cell {
   flex: 1;
   min-width: 0;
@@ -3789,14 +3789,14 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
   content: " · ";
 }
 
-/* Query container for the library lens lists (Songs / Artists / Albums), the same
+/* Query container for the library view lists (Songs / Artists / Albums), the same
    width-driven two-column switch as the queue (see #queue-list). The windowed
    spacer's inline size equals the row width, so the query tracks the pane. */
 .nav-window {
   container: listcol / inline-size;
 }
 
-/* Two-column lens rows past the breakpoint, mirroring the queue (see the
+/* Two-column view rows past the breakpoint, mirroring the queue (see the
    .queue-text block). The subtitle (artist·album on Songs, artist on Albums) leaves
    the inline title line for its own column, so a long title truncates within its
    track instead of shoving the subtitle off, and the subtitles form a scannable
@@ -4025,7 +4025,7 @@ body:not(.playback-paused) .nav-track-row.playing .eq-bars {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-/* The keyboard cursor on a drill / lens / playlist row. Those rows have no mouse
+/* The keyboard cursor on a drill / view / playlist row. Those rows have no mouse
    selection model of their own (they navigate on click), so ↑/↓ mark the focused
    one with this class — the same accent wash a selected track row gets, so the
    keyboard focus reads identically whichever nav row type it lands on. */

@@ -21,7 +21,7 @@ import {
   currentNavStep,
   popNavToRoot,
   renderNav,
-  refreshNavViewAfterScan,
+  refreshNavPaneAfterScan,
   invalidateNavListCache,
   registerNavList,
   navMove,
@@ -274,7 +274,7 @@ const KEY_WINDOW_POSITION = "windowPosition";
 // Autoadvance: one global preference (does playback flow track-to-track, or stop
 // after each?). Lives in the OS Playback menu, not the app UI. Was once split by
 // context (file tree vs. playlists), but that context turned into six library
-// lenses + playlists; a single global toggle keeps the behavior predictable
+// views + playlists; a single global toggle keeps the behavior predictable
 // without any "which context am I in?" reasoning. KEY_AUTOADVANCE_FILES is read
 // once at load to migrate the old browsing setting; the new key supersedes both.
 const KEY_AUTOADVANCE = "autoadvance";
@@ -1055,14 +1055,14 @@ export function goToArtist(name: string): void {
   // flashTitle: the detail view has no persistent marker for where you landed, so
   // pulse its Back-bar title as the "here it is" cue — the album/artist analogue of
   // the tree-row flash a browsed-to track gets (see goToFile).
-  navigateTo([{ t: "lens", lens: "artist" }, { t: "artist", name }], {
+  navigateTo([{ t: "view", view: "artist" }, { t: "artist", name }], {
     flashTitle: true,
   });
 }
 
 export function goToAlbum(album: string, albumArtist: string): void {
   goToFilesTab();
-  navigateTo([{ t: "lens", lens: "album" }, { t: "album", album, albumArtist }], {
+  navigateTo([{ t: "view", view: "album" }, { t: "album", album, albumArtist }], {
     flashTitle: true,
   });
 }
@@ -1071,7 +1071,7 @@ export async function goToFolder(path: string): Promise<void> {
   goToFilesTab();
   // Browse hosts the real folder tree; show it, then expand + scroll to the target
   // and flash the row — the same "here it is" a track hit gets (see goToFile).
-  navigateTo([{ t: "lens", lens: "browse" }]);
+  navigateTo([{ t: "view", view: "browse" }]);
   await revealFolderInTree(path);
   revealTreeRow(path);
 }
@@ -1083,7 +1083,7 @@ export async function goToFolder(path: string): Promise<void> {
 // no persistent marker, so the flash is what says "here it is".
 export async function goToFile(path: string): Promise<void> {
   goToFilesTab();
-  navigateTo([{ t: "lens", lens: "browse" }]);
+  navigateTo([{ t: "view", view: "browse" }]);
   await revealFileInTree(path);
   revealTreeRow(path);
 }
@@ -1096,11 +1096,11 @@ export async function goToFile(path: string): Promise<void> {
 // mirror openAlbumQueue / the leaf lists' syntheticPath — see the syntheticParent
 // call sites), so we read the context straight off it rather than recording a
 // parallel breadcrumb that could drift from the actual pool:
-//   queue:album:<albumArtist>\0<album>  → the Albums lens' album detail
-//   queue:artist:<name>                 → the Artists lens' artist detail
-//   queue:songs                         → the Songs lens
+//   queue:album:<albumArtist>\0<album>  → the Albums view's album detail
+//   queue:artist:<name>                 → the Artists view's artist detail
+//   queue:songs                         → the Songs view
 //   anything else (real folder pool, an explicit/ad-hoc/restored queue, or no pool
-//     at all for a search / OS-opened file) has no lens home, so we degenerate to
+//     at all for a search / OS-opened file) has no view home, so we degenerate to
 //     revealing where the file lives — its folder in Browse. Either way we stash the
 //     path so the list that lands scrolls straight to the playing row.
 // Hidden for streams (no file) and when nothing's playing.
@@ -1112,20 +1112,20 @@ export function revealNowPlaying(): void {
     const [albumArtist, album] = pool.slice("queue:album:".length).split("\0");
     goToFilesTab();
     app.pendingRevealPlayingPath = path;
-    navigateTo([{ t: "lens", lens: "album" }, { t: "album", album, albumArtist }]);
+    navigateTo([{ t: "view", view: "album" }, { t: "album", album, albumArtist }]);
   } else if (pool.startsWith("queue:artist:")) {
     const name = pool.slice("queue:artist:".length);
     goToFilesTab();
     app.pendingRevealPlayingPath = path;
-    navigateTo([{ t: "lens", lens: "artist" }, { t: "artist", name }]);
+    navigateTo([{ t: "view", view: "artist" }, { t: "artist", name }]);
   } else if (pool === "queue:songs") {
     goToFilesTab();
     app.pendingRevealPlayingPath = path;
-    navigateTo([{ t: "lens", lens: "songs" }]);
+    navigateTo([{ t: "view", view: "songs" }]);
   } else if (path) {
     goToFilesTab();
-    navigateTo([{ t: "lens", lens: "browse" }]);
-    // Same "here it is" the lens branches get above, via the tree's own reveal.
+    navigateTo([{ t: "view", view: "browse" }]);
+    // Same "here it is" the view branches get above, via the tree's own reveal.
     void revealFileInTree(path).then(() => revealTreeRow(path));
   }
 }
@@ -2440,7 +2440,7 @@ function moveKbdSelection(delta: 1 | -1): void {
 }
 
 // Enter: commit the active surface's selection (play a track/station, open a
-// playlist, drill a lens/album/artist, or expand a folder). Returns whether it acted.
+// playlist, drill a view/album/artist, or expand a folder). Returns whether it acted.
 function activateKbdSelection(): boolean {
   switch (activeKbdSurface()) {
     case "nav":
@@ -2952,7 +2952,7 @@ function setupEffects(): void {
   });
 
   // Until a library folder is configured, the whole Files panel is a get-started
-  // prompt instead of the lens springboard. render() owns hiding the navigator,
+  // prompt instead of the view springboard. render() owns hiding the navigator,
   // folder tree and create button (it already gates those), so just re-render it
   // when the root-set state flips.
   effect(() => {
@@ -3048,7 +3048,7 @@ function setupEffects(): void {
       });
   });
 
-  // The navigator's playlist rows (Playlists lens) carry the same two channels as the
+  // The navigator's playlist rows (Playlists view) carry the same two channels as the
   // tree: .open (accent) for the browsed playlist, .playing (equalizer glyph) for the
   // one whose pool is playing. Repaint mounted rows when either changes; a freshly
   // built row paints itself (see the playlist loop in library-nav), so this only
@@ -3499,7 +3499,7 @@ async function init(): Promise<void> {
 
   setupTabs();
   // Debug perf timing for the whole-library loaders: set `__perfLog = true` in the
-  // devtools console, then open a lens. Logs how long invoke+IPC+JSON.parse took and
+  // devtools console, then open a view. Logs how long invoke+IPC+JSON.parse took and
   // the row count — i.e. the pre-render pause, which windowing does not address.
   const perfTimed = async <T>(label: string, run: () => Promise<T>): Promise<T> => {
     if (!(globalThis as { __perfLog?: boolean }).__perfLog) return run();
@@ -3673,15 +3673,15 @@ async function init(): Promise<void> {
       return;
     }
     void refreshLibrary();
-    // The scan changed what's on disk, so the memoized lens lists are stale. Drop
-    // them unconditionally — even while an inline edit blocks the view refresh below,
+    // The scan changed what's on disk, so the memoized view lists are stale. Drop
+    // them unconditionally — even while an inline edit blocks the pane refresh below,
     // the cache must not outlive the data it mirrors, or a later open serves stale
     // rows.
     invalidateNavListCache();
-    // Also refresh the open navigator lens/detail view so new/changed tracks show
+    // Also refresh the open navigator view/detail pane so new/changed tracks show
     // without leaving and re-entering. Skip while an inline edit is open — like
     // refreshLibrary, a rebuild would tear out the edit input.
-    if (!app.inlineEditing) refreshNavViewAfterScan();
+    if (!app.inlineEditing) refreshNavPaneAfterScan();
   });
 
   await listen<string>("open-file", (event) => {
