@@ -26,6 +26,7 @@ import {
 import { treeContainer } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
 import { startTrackDrag } from "./drag-drop";
+import { applyRowFlash, startRowFlash } from "./row-flash";
 import {
   joinPath,
   displayLabel,
@@ -210,6 +211,9 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   const label = h("span", { class: "node-label", data: { path: node.path } });
   // Indent by depth — the flat window has no nested <ul> to carry the old padding.
   if (depth > 0) label.style.marginLeft = `${depth * INDENT_EM}em`;
+  // A reveal's one-shot wash, applied at build time (like .selected / .playing) so
+  // it survives the remount the reveal's own scroll triggers — see row-flash.
+  applyRowFlash(label, node.path);
   // Two orthogonal channels (see the reactive effect + CSS in main.ts / styles.css):
   // .playing is the equalizer glyph — the row that IS the active play context;
   // .open is the accent — the right pane is currently showing this row.
@@ -654,28 +658,19 @@ function scrollTreeToPath(path: string): number {
   return idx;
 }
 
-// Scroll a tree row into view (by file path) and briefly flash it — used to follow
-// a just-renamed playlist to its new sorted slot. The row mounts a frame or two
-// after the scroll lands, so poll briefly for its label before flashing.
+// Scroll a tree row into view (by file path) and flash it — the "here it is" for a
+// search hit, the now-playing reveal, and a just-renamed playlist arriving at its
+// new sorted slot. Arming the wash before the scroll is what makes it stick: the
+// row mounts (or *re*mounts, the scroll being a range change) with the class
+// already on it, so the fade isn't cut short by the repaint. Rows that were on
+// screen all along aren't rebuilt, so paint those directly.
 export function revealTreeRow(path: string): void {
   if (scrollTreeToPath(path) < 0) return;
-  let tries = 0;
-  const flash = (): void => {
-    const label = treeContainer.querySelector<HTMLElement>(
-      `.node-label[data-path="${CSS.escape(path)}"]`,
-    );
-    if (!label) {
-      if (tries++ < 15) requestAnimationFrame(flash);
-      return;
-    }
-    label.classList.remove("flash");
-    void label.offsetWidth; // restart the animation if it was mid-flight
-    label.classList.add("flash");
-    label.addEventListener("animationend", () => label.classList.remove("flash"), {
-      once: true,
-    });
-  };
-  requestAnimationFrame(flash);
+  startRowFlash(path);
+  const label = treeContainer.querySelector<HTMLElement>(
+    `.node-label[data-path="${CSS.escape(path)}"]`,
+  );
+  if (label) applyRowFlash(label, path);
 }
 
 // The Browse folder tree is costly to build for a large library, yet it's hidden

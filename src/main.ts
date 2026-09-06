@@ -180,6 +180,7 @@ import {
   revealTreeRow,
   setBrowseActive,
 } from "./tree-view";
+import { applyRowFlash, startRowFlash } from "./row-flash";
 import {
   closePaneEditor,
   editMetadataItem,
@@ -1124,7 +1125,8 @@ export function revealNowPlaying(): void {
   } else if (path) {
     goToFilesTab();
     navigateTo([{ t: "lens", lens: "browse" }]);
-    void revealFileInTree(path);
+    // Same "here it is" the lens branches get above, via the tree's own reveal.
+    void revealFileInTree(path).then(() => revealTreeRow(path));
   }
 }
 
@@ -1435,6 +1437,10 @@ export function renderLeafTrackList(
       dur,
     );
     if (navSel.signal.peek().has(t)) row.classList.add("selected");
+    // A reveal's one-shot wash, applied at build time (like the selection and
+    // playing state below) so it survives the remount the reveal's own scroll
+    // triggers — see row-flash.
+    applyRowFlash(row, t.path);
     // The now-playing accent, applied at build time so a row scrolled into view is
     // already correct (the effect below repaints mounted rows as the track changes).
     // Light the playing row only when this leaf list IS the live pool — its synthetic
@@ -1507,7 +1513,14 @@ export function renderLeafTrackList(
   if (revealPath) {
     app.pendingRevealPlayingPath = null;
     const idx = tracks.findIndex((t) => t.path === revealPath);
-    if (idx >= 0) win.revealIndex(idx);
+    if (idx >= 0) {
+      // Flash it as well as scrolling to it: landing on a list you were already
+      // looking at (or whose playing row was already on screen) otherwise reads as
+      // the click doing nothing at all. Armed before the window's first paint, so
+      // the row mounts already washing (see row-flash).
+      startRowFlash(revealPath);
+      win.revealIndex(idx);
+    }
   }
   return ul;
 }

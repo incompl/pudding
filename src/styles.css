@@ -2781,10 +2781,18 @@ ul {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-/* A one-shot accent wash that fades out, applied after a rename to draw the eye to
-   the row's new sorted position (see revealTreeRow). Purely transient — the class
-   is removed on animationend. */
+/* A one-shot accent wash that fades out, marking the row a reveal just landed on:
+   a search hit's track, the now-playing title's reveal, or a renamed playlist's new
+   sorted position (see revealTreeRow). Purely transient — the class is removed on
+   animationend. Windowed rows re-apply it at build time with a negative
+   animation-delay, so the wash rides across a remount (see row-flash.ts). */
 #folder-tree .node-label.flash {
+  animation: row-flash 900ms ease-out;
+}
+
+/* The same wash on a leaf-list track row (Songs / album / artist detail), marking
+   where the now-playing title's reveal landed. */
+.nav-track-row.flash {
   animation: row-flash 900ms ease-out;
 }
 
