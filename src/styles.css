@@ -134,12 +134,13 @@ textarea,
   flex-shrink: 0;
   align-items: stretch;
   /* 36px, deliberately short so the contents sit tight with equal breathing room
-     above and below. At this height the two alignments converge: the centered
-     search/mode controls and the bottom-aligned tab text (see #tabs / .tab) land
-     on the same centerline, so the tab labels read as vertically centered with
-     the search box and icon buttons. Requires line-height:1 on the tab/search
-     text (below) — the document's default 1.5 makes those boxes taller than the
-     bar, forcing the text to overflow upward and hug the top edge.
+     above and below. Everything in the bar — tab labels, search box, icon
+     buttons — is centered in this one content box, so they share a single
+     centerline by construction rather than by tuning (see #tabs / .tab).
+     Requires line-height:1 on the tab labels (below) — the document's default
+     1.5 makes that box taller than the bar, forcing the text to overflow upward
+     and hug the top edge. (It does nothing for the search field; see
+     #search-input.)
      box-sizing + a small padding-top nudge the whole content block down so the
      gap from the window's top edge to the text equals the gap from the text down
      to the panel border (which sits padding-top + the panel's top margin below).
@@ -154,16 +155,12 @@ textarea,
 
 #tabs {
   display: flex;
-  /* Bottom-align so the active tab's underline lands on the topbar's bottom edge
-     regardless of tab font size, instead of floating on the leftover slack from
-     vertical centering. That makes the gap down to the #left panel a fixed,
-     controllable margin (see #left) rather than a font-dependent byproduct. */
-  align-items: flex-end;
-  /* Cancel the topbar's 1px bottom breathing room for the tabs only: the extra
-     space belongs ABOVE the active tab's underline, not between the underline
-     and the bar's bottom edge, so the tab box stays flush with that edge and
-     .tab's bottom padding takes the 1px instead (see .tab). */
-  margin-bottom: -1px;
+  /* Stretch each tab to the full height of the topbar's content box. That does
+     two things at once: the label can then be centered inside the tab on the
+     SAME centerline as the search box and mode buttons (which are centered in
+     that same box), and the tab's bottom edge is a fixed, font-independent
+     reference the underline can be pinned to (see .tab::after). */
+  align-items: stretch;
   width: var(--left-width);
   min-width: 120px;
   flex-shrink: 0;
@@ -186,11 +183,15 @@ body.platform-mac #tabs {
   align-items: center;
   justify-content: flex-end;
   gap: 0.25em;
-  /* The extra 1px on the right is the same breathing room the bar gained above
-     and below (see #topbar): it keeps the gap from the mini-player icon to the
-     window's right edge equal to the gap from the content up to the top edge.
-     The left value is interior spacing against the splitter, so it stays put. */
-  padding: 0 calc(0.5em + 1px) 0 0.5em;
+  /* The right value makes the gap from the collapse glyph to the window's right
+     edge equal its gap to the window's top edge. Those two are set by different
+     things, so one has to be solved for: above the glyph sit the topbar's 2px
+     padding-top plus (33 - 14) / 2 = 9.5px of centering slack in the 33px content
+     box — 11.5px. To its right, the 25px button already contributes
+     (25 - 14) / 2 = 5.5px of its own, so the bar owes the remaining 6px. Recompute
+     if the button (#miniplayer-btn, 25px), its icon (14px), or the bar's height
+     changes. The left value is interior spacing against the splitter — untouched. */
+  padding: 0 6px 0 0.5em;
   min-width: 200px;
 }
 
@@ -350,15 +351,35 @@ body.platform-mac #tabs {
 
 #search-input {
   width: 100px;
-  padding: 0.4em 0.6em 0.4em 2em;
+  /* An <input>'s inner text hangs from its TOP padding edge — it is never
+     centered in the box, and giving the box an explicit height does not move the
+     glyphs (measured: forcing height:24px/26px leaves the placeholder exactly
+     where it was). So the asymmetric top/bottom values here ARE the text's
+     vertical position, not decoration: half a pixel off the top and onto the
+     bottom lifts the placeholder onto the same baseline as the tab labels, while
+     the box height — and so the hover/focus outline — stays centered in the bar.
+     The 0.5px is WebKit's offset, measured in WKWebView (what Tauri ships). A
+     dev-server Chromium wants 1px here and will render the placeholder half a
+     pixel low; trust the WebKit number, it's the one users see. */
+  padding: calc(0.4em - 0.5px) 0.6em calc(0.4em + 0.5px) 2em;
   font: inherit;
-  font-size: 0.9em;
-  /* Match .tab: text-tight box so the input centers on the same line as the tab
-     labels in the short topbar rather than the taller default-line-height box. */
+  /* Same size as .tab: with one text size on the row, the cap tops and baselines
+     of "Files"/"Streams" and the search placeholder line up exactly instead of
+     splitting the difference around a shared centerline. */
+  font-size: 0.95em;
+  /* Not what it looks like: unlike on .tab, this does NOT make the box
+     text-tight — the field measures 28.63px tall with it or with `normal`,
+     because an input's inner editor uses the font's own line box. Kept because it
+     still shifts the text ~0.5px once the field holds a value, and the padding
+     above is tuned with it in place. Re-measure the padding if you drop it. */
   line-height: 1;
   background: transparent
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='16.5' y1='16.5' x2='21' y2='21'/%3E%3C/svg%3E")
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='10.5' r='7'/%3E%3Cline x1='16.5' y1='16' x2='21' y2='20.5'/%3E%3C/svg%3E")
     no-repeat 0.5em center;
+  /* The glyph above is translated 0.5 units up from where it was drawn: its ink
+     (circle top through the handle's tip) spanned 3–22 of the 24 viewBox, half a
+     unit low, so background-position:center placed the visible magnifier below
+     the centerline every other icon in the bar sits on. */
   background-size: 1em;
   color: var(--text-muted);
   border: 1px solid transparent;
@@ -2066,11 +2087,6 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
     padding-top: 1px;
     padding-bottom: 0;
   }
-  /* Same reasoning for the side: mini's bar never took the extra vertical
-     breathing room, so the expand button keeps the plain 0.5em edge gap. */
-  #topbar-actions {
-    padding-right: 0.5em;
-  }
 
   /* Settings/About are unreachable in mini (their menu/button is hidden), so
      force the now-playing panel visible even if one was open when the window
@@ -2304,34 +2320,45 @@ body.dragging-noselect * {
   flex: 1;
   background: none;
   border: none;
-  /* Two knobs work together while the tab is bottom-aligned in the topbar (see
-     #tabs). margin-bottom lifts the whole box — and thus the underline — up off
-     the bar's bottom edge, tightening the gap between the label and its
-     underline. Bottom padding then sets where the label sits inside the box, so
-     it's tuned to keep the label at the bar's vertical center (aligned with the
-     centered search/mode controls) even as the box floats up. margin+padding sum
-     is roughly constant to hold that alignment. The +1px is the topbar's added
-     bottom breathing room, moved above the underline: the box bottom (and so the
-     underline) tracks the bar's bottom edge, while the label still drops the same
-     1px as the centered search/mode controls. */
-  padding: 0.6em 1em calc(0.35em + 1px);
-  margin-bottom: 0.21em;
+  /* Label position and underline position are independent. The tab stretches to
+     the topbar's full content height (see #tabs) and centers its label, so the
+     label lands on exactly the same centerline as the search box and the mode
+     buttons no matter what font size the tab uses — nothing to re-tune. The
+     underline is drawn by .tab::after, pinned to the tab's bottom edge, so it
+     never borrows from the label's box. Vertical padding is therefore zero. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: 0 1em;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
   font: inherit;
   font-size: 0.95em;
-  /* Compact UI: collapse the document's 1.5 line-height so the tab box is only
-     as tall as the label, letting it sit inside the short topbar without
-     overflowing (see #topbar). */
+  /* Compact UI: collapse the document's 1.5 line-height so the label's line box
+     is only as tall as the text itself. That's what the centering above acts on,
+     so the label centers on its glyphs rather than on inherited leading. */
   line-height: 1;
   letter-spacing: 0.02em;
   color: var(--text-muted);
-  /* Only the label color eases. The underline is NOT transitioned: animating
-     border-color fades the outgoing tab's accent underline through partial-alpha
-     "darker green" values over ~120ms, which reads as a stray underline lingering
-     on the tab you just left. Snapping it on/off keeps the underline strictly a
-     marker of the active tab. */
+  /* Only the label color eases. The underline is NOT transitioned: fading its
+     accent through partial-alpha "darker green" values over ~120ms reads as a
+     stray underline lingering on the tab you just left. Snapping it on/off keeps
+     the underline strictly a marker of the active tab. */
   transition: color 120ms ease;
+}
+
+/* The active tab's underline. Absolutely positioned rather than a border so it
+   sits at a fixed distance from the bar's bottom edge — `bottom` is the one knob
+   for that gap — while the label stays centered in the bar. Always present so
+   the accent only has to switch on, never reflow. */
+.tab::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  height: 2px;
+  background: transparent;
 }
 
 .tab:hover {
@@ -2339,9 +2366,12 @@ body.dragging-noselect * {
 }
 
 .tab.active {
-  border-bottom-color: var(--accent);
   color: var(--accent);
   font-weight: 600;
+}
+
+.tab.active::after {
+  background: var(--accent);
 }
 
 .tab-panel {
