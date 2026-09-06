@@ -417,7 +417,16 @@ body.platform-mac #tabs {
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   z-index: 20;
-  padding: 0.25em 0;
+  /* No vertical padding on the card itself: a 0.25em strip of card background
+     above the first row and below the last one would stay unpainted when those
+     rows are hovered, reading as a gap between the highlight and the card's
+     edge (the same gap the files panel's first/last nav rows close against the
+     panel edge). With it gone, the rows' own 0.25em padding does the work: the
+     end rows keep exactly as much room above/below their text as every interior
+     row, measured from the card edge that is now the row's edge. Don't add the
+     strip back onto the end rows — that would double their inset and make the
+     top and bottom highlights read taller than the ones between them. */
+  padding: 0;
 }
 
 .search-result {
@@ -522,7 +531,11 @@ body.platform-mac #tabs {
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   z-index: 30;
-  padding: 0.25em 0;
+  /* Same as #search-results: no vertical padding on the card, so a hovered
+     first/last item's fill reaches the rounded edge instead of stopping short of
+     a strip of card background, and every item keeps the same 0.2em above and
+     below its label. */
+  padding: 0;
   /* A long playlist list scrolls rather than running off-screen. */
   max-height: 60vh;
   overflow-y: auto;
