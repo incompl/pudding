@@ -192,7 +192,7 @@ body.platform-mac #tabs {
 #miniplayer-btn {
   /* Resting-gray like the search glyph and the .mode-btn cluster's "off" state:
      this is a plain window-resize action, not a persistent "on" toggle, so it
-     shouldn't wear the accent that shuffle/repeat/viz reserve for .active. */
+     shouldn't wear the accent that shuffle/repeat reserve for .active. */
   color: var(--text-muted);
   /* 25px box matching .mode-btn's side padding (28px box, 15px icon) so the
      whitespace beside the mini-player glyph equals the whitespace around the
@@ -270,21 +270,10 @@ body.platform-mac #tabs {
 /* Files-only playback-mode toggles: Folder, Shuffle, Repeat. Each is an
    independent on/off. "Off" is dimmed (muted stroke); "on" is the accent
    colour with a subtle filled pill. Hidden entirely in streams/settings view. */
-/* Pull viz in toward the search square so search→viz matches the 0.1em cluster
-   gap (viz→shuffle etc.) rather than the wider 0.25em #topbar-actions gap — the
-   same trick #playback-modes and #miniplayer-btn use to close their left gaps. */
-#viz-btn {
-  margin-left: -0.15em;
-}
-
 #playback-modes {
   display: flex;
   align-items: center;
   gap: 0.1em;
-  /* #viz-btn sits in #topbar-actions (0.25em gap) but reads as part of this
-     mode-button cluster. Pull the group in so viz→shuffle matches the 0.1em
-     shuffle→repeat gap — the same trick #miniplayer-btn uses on its left. */
-  margin-left: -0.15em;
 }
 
 .mode-btn {
@@ -342,16 +331,8 @@ body.platform-mac #tabs {
 }
 
 #search-input {
-  /* Passive, the field is collapsed to a bare magnifier button — a 30px square
-     matching the .mode-btn glyph boxes beside it, with the icon centred like
-     theirs. On focus it grows rightward to a full input: the box widens, its
-     left padding opens up an icon gutter, and the glyph slides from centre to
-     that gutter so text has room. border-box keeps the animated width honest,
-     and the fixed 30px height keeps it from jumping vertically as it opens. */
-  box-sizing: border-box;
-  width: 28px;
-  height: 28px;
-  padding: 0;
+  width: 100px;
+  padding: 0.4em 0.6em 0.4em 2em;
   font: inherit;
   font-size: 0.9em;
   /* Match .tab: text-tight box so the input centers on the same line as the tab
@@ -359,45 +340,31 @@ body.platform-mac #tabs {
   line-height: 1;
   background: transparent
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='16.5' y1='16.5' x2='21' y2='21'/%3E%3C/svg%3E")
-    no-repeat center;
-  background-size: 15px;
+    no-repeat 0.5em center;
+  background-size: 1em;
   color: var(--text-muted);
   border: 1px solid transparent;
   border-radius: 6px;
-  cursor: pointer;
-  transition: width 160ms ease, padding 160ms ease,
-    background-position 160ms ease, background-color 200ms ease,
-    border-color 120ms ease;
+  transition: width 160ms ease, border-color 120ms ease;
 }
 
-/* Collapsed, it's just an icon in the .mode-btn cluster, so it hovers like one:
-   filled surface + brightened glyph (a second data-URI with a --text stroke,
-   since a baked SVG can't use currentColor). The border belongs to the focused
-   state, where it genuinely becomes an input field. */
 #search-input:hover {
-  background-color: var(--surface);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23f1f1f1' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='16.5' y1='16.5' x2='21' y2='21'/%3E%3C/svg%3E");
+  border-color: var(--text-muted);
 }
 
 #search-input:focus {
   outline: none;
   width: 240px;
-  padding: 0 0.6em 0 2em;
-  background-color: transparent;
-  background-position: 0.5em center;
   border-color: var(--accent);
-  cursor: text;
 }
 
-/* Placeholder text only belongs to the expanded field; while collapsed it would
-   just be clipped stubble behind the icon, so hide it until focus. */
 #search-input::placeholder {
-  color: transparent;
+  color: var(--text-muted);
   transition: color 120ms ease;
 }
 
 #search-input:focus::placeholder {
-  color: var(--text-muted);
+  color: var(--surface-hover);
 }
 
 #search-results {
@@ -532,13 +499,6 @@ html[data-mode="light"] #search-results,
 html[data-mode="light"] .context-menu {
   border: 1px solid rgba(0, 0, 0, 0.1);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
-}
-
-/* The hover glyph's brighter stroke is baked near-white for dark mode; on the
-   light surface that's invisible, so swap in a dark --text stroke to match how
-   the currentColor .mode-btn glyphs darken on light-mode hover. */
-html[data-mode="light"] #search-input:hover {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%231c1c1e' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='16.5' y1='16.5' x2='21' y2='21'/%3E%3C/svg%3E");
 }
 
 .context-menu-item {
@@ -2024,7 +1984,6 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   #settings-back-btn,
   #left,
   #splitter,
-  #viz-btn,
   #playback-modes {
     display: none;
   }

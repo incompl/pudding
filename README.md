@@ -75,7 +75,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 
 - 10-band graphic equalizer (32 Hz – 16 kHz) running in the audio engine as a cascade of RBJ peaking biquads plus a preamp
 - The equalizer bars glow with the real per-band energy of what's playing, which is just dang nifty
-- Visualizer: an oldschool neon oscilloscope over a starfield, toggled from the topbar or with ⌘T
+- Visualizer: an oldschool neon oscilloscope over a starfield, toggled from View ▸ Visualizer or with ⌘T
 
 ### Interface
 

@@ -146,7 +146,6 @@ import {
   eqEnabledEl,
   eqResetBtn,
   nowPlayingVisualizerEl,
-  vizBtn,
   aboutVersionEl,
   splitterEl,
   themeMatchSystemEl,
@@ -3079,10 +3078,10 @@ function setupEffects(): void {
   // and leaving them put avoids shuffling the search box as tabs switch. Only
   // the settings/about panels hide them.
   effect(() => {
-    const hide = settingsOpen.value || aboutOpen.value || equalizerOpen.value;
-    playbackModesEl.classList.toggle("hidden", hide);
-    // The viz toggle sits beside the mode toggles and clears out with them.
-    vizBtn.classList.toggle("hidden", hide);
+    playbackModesEl.classList.toggle(
+      "hidden",
+      settingsOpen.value || aboutOpen.value || equalizerOpen.value,
+    );
   });
 
   // Now Playing view (art vs. visualizer): a class on the panel that CSS uses to
@@ -3153,26 +3152,17 @@ function setupEffects(): void {
   });
   void listen("np-zen-toggle", () => toggleZen());
 
-  // Flip the hero between album art and the visualizer, then persist. The menu
-  // checkmark and the topbar button's state re-sync through the effect below
-  // (which fires because the value always changes here). Shared by the topbar
-  // viz button and View ▸ Visualizer (⌘T).
+  // Flip the hero between album art and the visualizer, then persist. The only
+  // control is View ▸ Visualizer (⌘T); the menu checkmark re-syncs through the
+  // effect below (which fires because the value always changes here).
   const toggleVisualizer = (): void => {
     nowPlayingView.value =
       nowPlayingView.value === "visualizer" ? "art" : "visualizer";
     void persistNowPlayingView();
   };
-  vizBtn.addEventListener("click", toggleVisualizer);
   void listen("np-view-toggle", () => toggleVisualizer());
   effect(() => {
     void invoke("set_now_playing_view_checked", { view: nowPlayingView.value });
-    // The button keeps its fixed viz glyph; it lights up (accent) while the
-    // visualizer is the active view and reads pressed for assistive tech.
-    const showingViz = nowPlayingView.value === "visualizer";
-    vizBtn.classList.toggle("active", showingViz);
-    vizBtn.setAttribute("aria-pressed", String(showingViz));
-    vizBtn.title = showingViz ? "Show album art" : "Show visualizer";
-    vizBtn.setAttribute("aria-label", vizBtn.title);
   });
 
   effect(() => {

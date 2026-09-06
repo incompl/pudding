@@ -54,7 +54,6 @@ export let eqBandsEl: HTMLElement;
 export let eqEnabledEl: HTMLInputElement;
 export let eqResetBtn: HTMLButtonElement;
 export let nowPlayingVisualizerEl: HTMLElement;
-export let vizBtn: HTMLButtonElement;
 export let aboutVersionEl: HTMLElement;
 export let splitterEl: HTMLElement;
 export let queueTitleEl: HTMLElement;
@@ -120,7 +119,6 @@ export function bindDom(): void {
   eqEnabledEl = document.querySelector("#eq-enabled") as HTMLInputElement;
   eqResetBtn = document.querySelector("#eq-reset") as HTMLButtonElement;
   nowPlayingVisualizerEl = document.querySelector("#now-playing-visualizer") as HTMLElement;
-  vizBtn = document.querySelector("#viz-btn") as HTMLButtonElement;
   aboutVersionEl = document.querySelector("#about-version") as HTMLElement;
   splitterEl = document.querySelector("#splitter") as HTMLElement;
   queueTitleEl = document.querySelector("#queue-title-text") as HTMLElement;
