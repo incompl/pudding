@@ -1140,7 +1140,7 @@ body.np-zen.np-idle #nav-bar {
   align-items: center;
   gap: 0.7em;
   margin: 0;
-  padding: 0.55em 0.25em 0;
+  padding: 0.6em 0.25em 0;
   border-top: 1px solid var(--surface-hover);
   font-size: 0.9em;
   color: var(--text-muted);
