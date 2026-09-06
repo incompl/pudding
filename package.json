@@ -5,8 +5,9 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "pnpm gen:licenses && vite",
+    "build": "pnpm gen:licenses && tsc && vite build",
+    "gen:licenses": "node scripts/gen-licenses.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "preview": "vite preview",
     "tauri": "tauri",

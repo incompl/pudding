@@ -126,6 +126,7 @@ A few things that aren't obvious:
 - Rust backend with [rusqlite](https://github.com/rusqlite/rusqlite) for the metadata cache, [lofty](https://github.com/Serial-ATA/lofty-rs) for reading and writing tags, and [notify](https://github.com/notify-rs/notify) for live library watching
 - TypeScript frontend built with [Vite](https://vitejs.dev/) - no UI framework, reactivity via [Preact signals](https://github.com/preactjs/signals)
 - Native Rust audio engine ([symphonia](https://github.com/pdeljanov/Symphonia) + [cpal](https://github.com/RustAudio/cpal)) for gapless file playback and internet radio with in-band ICY now-playing metadata
+- Help ▸ Licenses lists every bundled dependency and its license text, generated from the real cargo and pnpm dependency graphs by `scripts/gen-licenses.mjs` (run by `pnpm dev` and `pnpm build`). It covers the statically linked Rust standard library too, and the build fails if any dependency would ship without attribution
 
 ## Some streams I like
 

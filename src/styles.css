@@ -624,7 +624,8 @@ html[data-mode="light"] .context-menu {
 }
 
 #now-playing-panel,
-#settings-panel {
+#settings-panel,
+#licenses-panel {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -2106,6 +2107,7 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
      shrank. ID beats the .hidden class, so no !important war with the toggle. */
   #settings-panel,
   #about-panel,
+  #licenses-panel,
   #equalizer-panel {
     display: none !important;
   }
@@ -3307,6 +3309,7 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
 }
 
 #settings-panel h2,
+#licenses-panel h2,
 #now-playing-panel h2 {
   margin-top: 0;
   margin-bottom: 1em;
@@ -3469,6 +3472,101 @@ body:not(.playback-paused) .node-label.playing:not(.open) .icon.playlist .eq-bar
 #about-panel .credit a {
   color: var(--accent);
   text-decoration: none;
+}
+
+/* The Licenses panel (Help ▸ Licenses): a long list of dependencies, one
+   collapsed row each. It shares the pane and the Back button with
+   Settings/About, and scrolls with #right like the settings form does — the
+   rows are deliberately plain and tight, since this is a reference list you
+   scan rather than a screen you operate. */
+.licenses-intro {
+  margin: 0 0 1em;
+  font-size: 0.85em;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* One dependency. The summary is the whole clickable row; the marker is dropped
+   because the row's own hover fill already reads as "this opens". */
+.license-entry > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5em;
+  padding: 0.3em 0.4em;
+  border-radius: 5px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.85em;
+}
+
+.license-entry > summary::-webkit-details-marker {
+  display: none;
+}
+
+.license-entry > summary:hover {
+  background: var(--surface);
+}
+
+.license-name {
+  color: var(--text);
+}
+
+.license-version {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The SPDX expression is pushed to the far edge so the licenses line up as a
+   readable column down the right of the list. */
+.license-spdx {
+  margin-left: auto;
+  padding-left: 1em;
+  color: var(--text-muted);
+  opacity: 0.75;
+  text-align: right;
+}
+
+.license-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+  padding: 0.4em 0.4em 1em;
+}
+
+.license-source,
+.license-elected {
+  margin: 0;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.license-source a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* License texts are hard-wrapped at whatever width their author chose, so the
+   block scrolls sideways rather than forcing the pane wider (#right would
+   otherwise inherit their min-content width). */
+.license-text {
+  margin: 0;
+  padding: 0.7em 0.8em;
+  max-height: 22em;
+  overflow: auto;
+  background: var(--surface);
+  border-radius: 6px;
+  font-size: 0.75em;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+/* The stand-in shown for packages that ship no license file: prose, not a
+   license, so it wraps and drops the monospace face. */
+.license-text-missing {
+  font-family: inherit;
+  font-size: 0.8em;
+  white-space: normal;
 }
 
 .path-picker {

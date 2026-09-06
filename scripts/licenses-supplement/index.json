@@ -1,0 +1,44 @@
+{
+  "objc2": {
+    "license": "MIT",
+    "file": "objc2-mit.txt",
+    "source": "https://github.com/madsmtm/objc2/blob/main/LICENSE-MIT.txt"
+  },
+  "block2": {
+    "license": "MIT",
+    "file": "objc2-mit.txt",
+    "source": "https://github.com/madsmtm/objc2/blob/main/LICENSE-MIT.txt"
+  },
+  "objc2-encode": {
+    "license": "MIT",
+    "file": "objc2-mit.txt",
+    "source": "https://github.com/madsmtm/objc2/blob/main/LICENSE-MIT.txt"
+  },
+  "objc2-foundation": {
+    "license": "MIT",
+    "file": "objc2-mit.txt",
+    "source": "https://github.com/madsmtm/objc2/blob/main/LICENSE-MIT.txt"
+  },
+  "alloc-stdlib": {
+    "license": "BSD-3-Clause",
+    "file": "alloc-stdlib.txt",
+    "source": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/master/LICENSE"
+  },
+  "seahash": {
+    "license": "MIT",
+    "file": "seahash.txt",
+    "source": "https://gitlab.redox-os.org/redox-os/seahash/-/blob/master/LICENSE"
+  },
+  "brotli": {
+    "license": "BSD-3-Clause AND MIT",
+    "file": "brotli-bsd-3-clause.txt",
+    "mode": "append",
+    "appendLabel": "BSD-3-Clause",
+    "source": "https://github.com/dropbox/rust-brotli/blob/master/LICENSE.BSD-3-Clause"
+  },
+  "realfft": {
+    "license": "MIT",
+    "source": "https://github.com/HEnquist/realfft",
+    "note": "Upstream declares MIT in Cargo.toml and the README but publishes no license file and no copyright notice, so there is no notice to reproduce."
+  }
+}

@@ -52,6 +52,8 @@ export let searchResultsEl: HTMLElement;
 export let nowPlayingPanel: HTMLElement;
 export let settingsPanel: HTMLElement;
 export let aboutPanel: HTMLElement;
+export let licensesPanel: HTMLElement;
+export let licensesBody: HTMLElement;
 export let eqBandsEl: HTMLElement;
 export let eqEnabledEl: HTMLInputElement;
 export let eqResetBtn: HTMLButtonElement;
@@ -118,6 +120,8 @@ export function bindDom(): void {
   paneEditorView = document.querySelector("#pane-editor-view") as HTMLElement;
   settingsPanel = document.querySelector("#settings-panel") as HTMLElement;
   aboutPanel = document.querySelector("#about-panel") as HTMLElement;
+  licensesPanel = document.querySelector("#licenses-panel") as HTMLElement;
+  licensesBody = document.querySelector("#licenses-body") as HTMLElement;
   eqBandsEl = document.querySelector("#eq-bands") as HTMLElement;
   eqEnabledEl = document.querySelector("#eq-enabled") as HTMLInputElement;
   eqResetBtn = document.querySelector("#eq-reset") as HTMLButtonElement;

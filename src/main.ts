@@ -70,6 +70,7 @@ import {
   selectedStreamUrl,
   settingsOpen,
   aboutOpen,
+  licensesOpen,
   equalizerOpen,
   nowPlayingView,
   type NowPlayingView,
@@ -143,6 +144,8 @@ import {
   nowPlayingPanel,
   settingsPanel,
   aboutPanel,
+  licensesPanel,
+  licensesBody,
   eqBandsEl,
   eqEnabledEl,
   eqResetBtn,
@@ -823,6 +826,7 @@ export const heroVisible = computed(
     !listFaceOpen.value &&
     !settingsOpen.value &&
     !aboutOpen.value &&
+    !licensesOpen.value &&
     !equalizerOpen.value &&
     paneEditor.value === null,
 );
@@ -2251,12 +2255,14 @@ function setupSettings(restoredEq: EqState | null): void {
   // screen (a hero mode), since the panel takes the pane the hero was covering.
   // Equalizer (Playback → Equalizer, ⌥⌘E) is a third member of this family: same
   // pane, same Back button, mutually exclusive with Settings/About.
-  void listen("open-settings", () => { aboutOpen.value = false; equalizerOpen.value = false; zenMode.value = false; settingsOpen.value = true; });
-  void listen("open-about", () => { settingsOpen.value = false; equalizerOpen.value = false; zenMode.value = false; aboutOpen.value = true; });
-  void listen("open-equalizer", () => { settingsOpen.value = false; aboutOpen.value = false; zenMode.value = false; equalizerOpen.value = true; });
+  void listen("open-settings", () => { aboutOpen.value = false; licensesOpen.value = false; equalizerOpen.value = false; zenMode.value = false; settingsOpen.value = true; });
+  void listen("open-about", () => { settingsOpen.value = false; licensesOpen.value = false; equalizerOpen.value = false; zenMode.value = false; aboutOpen.value = true; });
+  void listen("open-licenses", () => { settingsOpen.value = false; aboutOpen.value = false; equalizerOpen.value = false; zenMode.value = false; licensesOpen.value = true; void loadLicenses(); });
+  void listen("open-equalizer", () => { settingsOpen.value = false; aboutOpen.value = false; licensesOpen.value = false; zenMode.value = false; equalizerOpen.value = true; });
   settingsBackBtn.addEventListener("click", () => {
     settingsOpen.value = false;
     aboutOpen.value = false;
+    licensesOpen.value = false;
     equalizerOpen.value = false;
   });
   setupEqualizer(restoredEq);
@@ -2328,6 +2334,140 @@ function setupSettings(restoredEq: EqState | null): void {
     e.preventDefault();
     void openUrl(link.href);
   });
+}
+
+// One dependency in the generated license manifest (public/licenses.json, built
+// by scripts/gen-licenses.mjs). `text` indexes the shared `texts` array — the
+// same Apache-2.0 body is quoted by hundreds of crates, so bodies are stored once
+// and referenced.
+//
+// `elected` names which branch of an "or" license the shown text is, for packages
+// offered under a choice; `note` replaces the text for the rare package that
+// publishes no notice at all to reproduce. Exactly one of a real `text` or a
+// `note` is always present — the generator fails the build otherwise.
+interface LicenseComponent {
+  name: string;
+  version: string;
+  ecosystem: "cargo" | "npm" | "rust";
+  license: string;
+  url: string;
+  text: number;
+  elected?: string;
+  note?: string;
+}
+
+interface LicenseManifest {
+  generated: string;
+  app: { name: string; version: string; license: string; text: number };
+  components: LicenseComponent[];
+  texts: string[];
+}
+
+// The manifest is a static asset rather than an import so its ~1.5 MB of license
+// text never enters the JS bundle: it's fetched the first time Help ▸ Licenses is
+// opened and the rendered DOM is kept for later opens. A failed fetch clears the
+// flag so reopening the panel retries.
+let licensesLoaded = false;
+async function loadLicenses(): Promise<void> {
+  if (licensesLoaded) return;
+  licensesLoaded = true;
+  licensesBody.textContent = "Loading…";
+  try {
+    const res = await fetch("licenses.json");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderLicenses((await res.json()) as LicenseManifest);
+  } catch (e) {
+    console.error("loading licenses.json failed", e);
+    licensesLoaded = false;
+    licensesBody.textContent = "The license list could not be loaded.";
+  }
+}
+
+// Build the license list: a summary line, then one collapsed row per dependency
+// that expands to its actual license text. Rows are built eagerly (377 of them is
+// nothing) but their license bodies are filled on first expand, so opening the
+// panel doesn't put a megabyte of text into the DOM.
+function renderLicenses(data: LicenseManifest): void {
+  licensesBody.textContent = "";
+
+  const intro = document.createElement("p");
+  intro.className = "licenses-intro";
+  intro.textContent =
+    `${data.app.name} ${data.app.version} is ${data.app.license} licensed and is built on ` +
+    `${data.components.length} open source packages, listed below with their license terms. ` +
+    `This list is generated from the project's dependencies (last built ${data.generated}).`;
+  licensesBody.append(intro);
+
+  // Pudding's own license leads the list, then everything it depends on.
+  const entries: LicenseComponent[] = [
+    {
+      name: data.app.name,
+      version: data.app.version,
+      ecosystem: "cargo",
+      license: data.app.license,
+      url: "https://github.com/incompl/pudding",
+      text: data.app.text,
+    },
+    ...data.components,
+  ];
+
+  for (const c of entries) {
+    const row = document.createElement("details");
+    row.className = "license-entry";
+
+    const summary = document.createElement("summary");
+    const name = document.createElement("span");
+    name.className = "license-name";
+    name.textContent = c.name;
+    const version = document.createElement("span");
+    version.className = "license-version";
+    version.textContent = c.version;
+    const spdx = document.createElement("span");
+    spdx.className = "license-spdx";
+    spdx.textContent = c.license || "license not declared";
+    summary.append(name, version, spdx);
+    row.append(summary);
+
+    const detail = document.createElement("div");
+    detail.className = "license-detail";
+    row.append(detail);
+
+    // Filled once, on first expand.
+    row.addEventListener("toggle", () => {
+      if (!row.open || detail.childElementCount > 0) return;
+
+      // Labelled "Source" rather than left as a bare link: the MPL-2.0 packages
+      // (symphonia and friends) must tell you where to get their source, and for
+      // everything else it's the project page anyway.
+      const source = document.createElement("p");
+      source.className = "license-source";
+      source.append("Source: ");
+      const link = document.createElement("a");
+      link.href = c.url;
+      link.textContent = c.url;
+      source.append(link);
+      detail.append(source);
+
+      // Offered under a choice of licenses: say which one the text below is, so
+      // it doesn't read as the package's only terms.
+      if (c.elected) {
+        const elected = document.createElement("p");
+        elected.className = "license-elected";
+        elected.textContent = `Offered as ${c.license}; shown here under ${c.elected}.`;
+        detail.append(elected);
+      }
+
+      const body = document.createElement("pre");
+      body.className = "license-text";
+      // A handful of packages publish no notice anywhere to reproduce; the
+      // generator records why, and that stands in for the text.
+      body.textContent = c.text >= 0 ? data.texts[c.text] : (c.note ?? "");
+      body.classList.toggle("license-text-missing", c.text < 0);
+      detail.append(body);
+    });
+
+    licensesBody.append(row);
+  }
 }
 
 // Render the appearance picker: a Dark group and a Light group, each a row of
@@ -3072,6 +3212,7 @@ function setupEffects(): void {
   effect(() => {
     const settings = settingsOpen.value;
     const about = aboutOpen.value;
+    const licenses = licensesOpen.value;
     const equalizer = equalizerOpen.value;
     // Settings, About and Equalizer are mutually exclusive and all dismissed by
     // the same Back button, so the action cluster (Back / search / mode toggles)
@@ -3081,10 +3222,11 @@ function setupEffects(): void {
     // the transport row put — you tune while listening. So only Settings/About
     // hide the now-playing panel; the Equalizer just adds `.show-eq`. (The
     // visualizer is in neither group — it's a hero view, not a takeover.)
-    const panelOpen = settings || about || equalizer;
-    const paneCovered = settings || about;
+    const panelOpen = settings || about || licenses || equalizer;
+    const paneCovered = settings || about || licenses;
     settingsPanel.classList.toggle("hidden", !settings);
     aboutPanel.classList.toggle("hidden", !about);
+    licensesPanel.classList.toggle("hidden", !licenses);
     nowPlayingPanel.classList.toggle("show-eq", equalizer);
     nowPlayingPanel.classList.toggle("hidden", paneCovered);
     miniplayerBtn.classList.toggle("hidden", panelOpen);
@@ -3102,7 +3244,7 @@ function setupEffects(): void {
   effect(() => {
     playbackModesEl.classList.toggle(
       "hidden",
-      settingsOpen.value || aboutOpen.value || equalizerOpen.value,
+      settingsOpen.value || aboutOpen.value || licensesOpen.value || equalizerOpen.value,
     );
   });
 

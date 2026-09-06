@@ -166,6 +166,11 @@ export const settingsOpen = signal(false);
 // The About panel shares the right pane with Settings (mutually exclusive: the
 // same Back button dismisses either). Opened from Pudding → About Pudding.
 export const aboutOpen = signal(false);
+// The Licenses panel: the third full-pane member of the Settings/About family
+// (same Back button, mutually exclusive with them). Opened from Help → Licenses.
+// Its contents are fetched on first open rather than bundled — see
+// renderLicenses in src/main.ts.
+export const licensesOpen = signal(false);
 // The Equalizer panel is another right-pane takeover in the Settings/About
 // family (same Back button, mutually exclusive with them). Opened from
 // Playback → Equalizer (⌥⌘E).
@@ -188,7 +193,7 @@ export const nowPlayingView = signal<NowPlayingView>("art");
 // View ▸ Zen Mode (⌘⇧F) or Escape.
 export const zenMode = signal(false);
 
-// Dismiss the full-pane panels (Settings / About) that take the whole pane over,
+// Dismiss the full-pane panels (Settings / About / Licenses) that take the whole pane over,
 // transport included — so a gesture whose result lives in the pane isn't left
 // hidden behind one. The Equalizer is deliberately spared: it's a face of the
 // now-playing panel that coexists with the transport (you tune while listening),
@@ -199,6 +204,7 @@ export const zenMode = signal(false);
 export function dismissFullPanels(): void {
   settingsOpen.value = false;
   aboutOpen.value = false;
+  licensesOpen.value = false;
 }
 
 // dismissFullPanels plus the Equalizer face — for gestures that reveal the list

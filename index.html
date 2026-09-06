@@ -19,7 +19,7 @@
           <input
             type="search"
             id="search-input"
-            placeholder="Search…"
+            placeholder="Search..."
             spellcheck="false"
             autocomplete="off"
             aria-label="Search library and streams"
@@ -274,6 +274,15 @@
             <p id="about-version" class="about-version">pudding</p>
             <p class="credit">vibed by the best<br/><a href="https://incompl.com">incompl.com</a></p>
           </div>
+        </div>
+        <!-- Licenses: the open source software Pudding is built from, another
+             full-pane panel in the Settings/About family. The list is generated
+             at build time into public/licenses.json (scripts/gen-licenses.mjs)
+             and fetched by renderLicenses in src/main.ts the first time the panel
+             opens, so a megabyte of license text stays out of the bundle. -->
+        <div id="licenses-panel" class="hidden">
+          <h2>Licenses</h2>
+          <div id="licenses-body"></div>
         </div>
       </section>
     </main>

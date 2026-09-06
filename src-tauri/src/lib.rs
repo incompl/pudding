@@ -2380,6 +2380,9 @@ pub fn run() {
                 "open-about" => {
                     let _ = app.emit("open-about", ());
                 }
+                "open-licenses" => {
+                    let _ = app.emit("open-licenses", ());
+                }
                 "open-equalizer" => {
                     let _ = app.emit("open-equalizer", ());
                 }
@@ -2807,12 +2810,17 @@ pub fn run() {
             // The submenu title must be exactly "Help" so macOS treats it as the
             // app's Help menu and injects its built-in search field (the one that
             // indexes every menu item — type "equalizer" and it points you at the
-            // item; see wire_macos_help_menu). The GitHub item is just there so the
-            // menu isn't empty; the search field is the real payload.
+            // item; see wire_macos_help_menu).
             let readme_item =
                 MenuItemBuilder::with_id("open-readme", "Pudding on GitHub").build(app)?;
+            // Licenses opens another right-pane panel in the Settings/About family
+            // (same Back button): the open source software Pudding is built from,
+            // generated from the real dependency graph at build time.
+            let licenses_item =
+                MenuItemBuilder::with_id("open-licenses", "Licenses").build(app)?;
             let help_menu = SubmenuBuilder::new(app, "Help")
                 .item(&readme_item)
+                .item(&licenses_item)
                 .build()?;
 
             // Order follows macOS convention: the app menu, then File (which owns
