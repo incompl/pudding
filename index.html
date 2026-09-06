@@ -205,7 +205,9 @@
             <button id="nav-bar-btn" type="button"></button>
           </div>
           <div id="now-playing-controls">
-            <button id="play-pause-btn" type="button" aria-label="Play" disabled>▶</button>
+            <!-- The glyph lives in its own span so the pressed state can scale it without
+                 scaling the button (which would shrink the hit area mid-press). -->
+            <button id="play-pause-btn" type="button" aria-label="Play" disabled><span class="btn-glyph">▶</span></button>
             <button id="prev-btn" class="skip-btn" type="button" aria-label="Previous" disabled>
               <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5v14h2V5H6zm3 7l10 7V5l-10 7z" /></svg>
             </button>

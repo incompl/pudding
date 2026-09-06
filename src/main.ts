@@ -120,6 +120,7 @@ import {
   nowPlayingArtEl,
   nowPlayingEmptyEl,
   playPauseBtn,
+  playPauseGlyph,
   prevBtn,
   nextBtn,
   seekBar,
@@ -2779,7 +2780,7 @@ function setupEffects(): void {
   });
 
   effect(() => {
-    playPauseBtn.textContent = isPlaying.value ? "⏸" : "▶";
+    playPauseGlyph.textContent = isPlaying.value ? "⏸" : "▶";
     playPauseBtn.setAttribute("aria-label", isPlaying.value ? "Pause" : "Play");
     // Freeze the playing-row equalizer bars while paused (CSS pins their animation
     // off body.playback-paused), matching the paused transport state.

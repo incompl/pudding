@@ -1388,10 +1388,7 @@ body.np-zen.np-idle #nav-bar {
 
 .queue-row:hover .queue-num .row-play {
   display: block;
-}
-
-.queue-row:hover .queue-num .row-play::before {
-  background-color: var(--accent);
+  --row-play-ink: var(--accent);
 }
 
 /* Single line, mirroring the browse tree's .label-text: the title and the
@@ -1749,6 +1746,13 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
   background: var(--surface-hover);
 }
 
+/* The glyph is a span rather than a bare text node precisely so it can be the
+   transform target — see the shared pressed rules below. */
+#play-pause-btn .btn-glyph {
+  display: block;
+  line-height: 1;
+}
+
 #play-pause-btn:disabled {
   color: var(--text-dim);
   cursor: default;
@@ -1913,6 +1917,29 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
   width: 16px;
   height: 16px;
   display: block;
+}
+
+/* Pressed feedback for the transport cluster, the same gesture the track-row play
+   buttons use (see .row-play:active::before): the glyph dips inward, and only
+   inward — the motion carries the push on its own, with the accent held steady
+   through the press.
+
+   The scale lands on the glyph and never on the button: transforming a
+   36px circle would shrink its own hit area mid-press, so a mousedown near the edge
+   would leave the cursor outside the shrunken target and the mouseup — with it the
+   click — would be lost. The button's box, background and hover fill stay exactly
+   where they were pressed; only the mark inside moves. Disabled buttons are
+   excluded so a dead transport gives no push feedback. */
+#play-pause-btn .btn-glyph,
+.skip-btn svg,
+#volume-btn svg {
+  transition: transform 80ms ease;
+}
+
+#play-pause-btn:active:not(:disabled) .btn-glyph,
+.skip-btn:active:not(:disabled) svg,
+#volume-btn:active svg {
+  transform: scale(0.82);
 }
 
 .volume-wave {
@@ -2902,8 +2929,15 @@ ul {
   left: 50%;
   width: 1.25em;
   height: 0.95em;
-  transform: translate(-50%, -50%);
-  background-color: currentColor;
+  /* The resting offset and resting color arrive as inherited custom properties
+     (--row-play-nudge, --row-play-ink) that each gutter sets on the button, rather
+     than as per-gutter overrides on this pseudo-element. Those overrides carried
+     the gutter's whole descendant chain as specificity, which silently outranked
+     the plain `.row-play:active::before` below and killed the press feedback. With
+     the values coming in as properties, the pressed rule is the only other rule
+     touching transform/background-color here, so it always wins. */
+  transform: translate(calc(-50% + var(--row-play-nudge, 0em)), -50%);
+  background-color: var(--row-play-ink, currentColor);
   -webkit-mask-image: var(--play-icon);
   mask-image: var(--play-icon);
   -webkit-mask-repeat: no-repeat;
@@ -2932,11 +2966,10 @@ body.playback-paused .playing .row-play::before {
 }
 
 /* Pressed: with no hover state to build on, the feedback lives on the glyph itself.
-   It dips inward (scale) and pops to the foreground color — near-white on the dark
-   UI, near-black on light — so it brightens (dark) or darkens (light) against its
-   backdrop; either way it reads as a tangible push, where matching the backdrop
-   would recede. The centering translate is preserved alongside the scale. Snaps
-   back on release.
+   It dips inward (scale) and nothing else — the motion carries the push on its own,
+   with the hover accent held steady through the press. The centering translate (and
+   any gutter's optical nudge) is preserved alongside the scale. Snaps back on
+   release.
 
    The scale lives on ::before, never on the button: transforming the button would
    shrink its own hit area mid-press, so a mousedown near the edge of the target
@@ -2944,8 +2977,7 @@ body.playback-paused .playing .row-play::before {
    the click — would land on the row instead. Only the glyph moves; the hit box
    stays exactly where it was pressed. */
 .row-play:active::before {
-  transform: translate(-50%, -50%) scale(0.82);
-  background-color: var(--text);
+  transform: translate(calc(-50% + var(--row-play-nudge, 0em)), -50%) scale(0.82);
 }
 
 /* The animated "now playing" equalizer glyph shared by every track gutter (tree,
@@ -3034,24 +3066,22 @@ body.playback-paused .playing .row-play::before {
   visibility: hidden;
 }
 
+/* On row hover the gutter reveals the button, and the triangle brightens to the
+   accent, matching the queue and nav gutters (and the untagged-row rule below). */
 .node-label:hover .icon.track .row-play,
 .node-label:hover .icon.stream .row-play {
   display: block;
-}
-
-/* On row hover the triangle brightens to the accent, matching the queue and nav
-   gutters (and the untagged-row rule below). */
-.node-label:hover .icon.track .row-play::before,
-.node-label:hover .icon.stream .row-play::before {
-  background-color: var(--accent);
+  --row-play-ink: var(--accent);
 }
 
 /* Optical alignment for the tree gutter: the triangle's mask bounding box is
    centered on the cell, but it reads a touch right of the centered track numbers
    it replaces on hover. Nudge it left so the play button lands right on the
-   numbers. Scoped to the tree so the queue/nav gutters keep their own centering. */
-#folder-tree .icon.track .row-play::before {
-  transform: translate(calc(-50% - -0.2em), -50%);
+   numbers. Scoped to the tree so the queue/nav gutters keep their own centering.
+   Handed to the shared rules as a property so the pressed transform can apply the
+   same offset instead of being overridden by (and losing its scale to) this rule. */
+#folder-tree .icon.track .row-play {
+  --row-play-nudge: 0.2em;
 }
 
 /* Untagged rows have no track number, which left the gutter blank and made their
@@ -3881,9 +3911,7 @@ body:not(.playback-paused) .nav-row.playing:not(.open) .nav-gutter .eq-bars {
 }
 .nav-track-row:hover .nav-num .row-play {
   display: block;
-}
-.nav-track-row:hover .nav-num .row-play::before {
-  background-color: var(--accent);
+  --row-play-ink: var(--accent);
 }
 
 /* An "open" leaf row picks up the accent (title + gutter) — a playing track while the

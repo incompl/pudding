@@ -22,6 +22,8 @@ export let liveIndicatorEl: HTMLElement;
 export let nowPlayingArtEl: HTMLImageElement;
 export let nowPlayingEmptyEl: HTMLElement;
 export let playPauseBtn: HTMLButtonElement;
+/* The span inside #play-pause-btn holding ▶/⏸ — see index.html. */
+export let playPauseGlyph: HTMLElement;
 export let prevBtn: HTMLButtonElement;
 export let nextBtn: HTMLButtonElement;
 export let seekBar: HTMLInputElement;
@@ -86,6 +88,7 @@ export function bindDom(): void {
   nowPlayingArtEl = document.querySelector("#now-playing-art") as HTMLImageElement;
   nowPlayingEmptyEl = document.querySelector("#now-playing-empty") as HTMLElement;
   playPauseBtn = document.querySelector("#play-pause-btn") as HTMLButtonElement;
+  playPauseGlyph = playPauseBtn.querySelector(".btn-glyph") as HTMLElement;
   prevBtn = document.querySelector("#prev-btn") as HTMLButtonElement;
   nextBtn = document.querySelector("#next-btn") as HTMLButtonElement;
   seekBar = document.querySelector("#seek-bar") as HTMLInputElement;
