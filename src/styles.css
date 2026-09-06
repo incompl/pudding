@@ -2173,12 +2173,32 @@ body:not(.playback-paused) .queue-row.playing .eq-bars {
   #now-playing-main:has(#now-playing-empty:not(.hidden)) #now-playing-text {
     flex: 0;
   }
-  /* In Zen the panel goes full-bleed (fixed inset:0, see the base zen rule) and
-     reclaims the 26px the mini topbar reserves above it in normal mode. That
-     grows the centering region upward and raises the placeholder ~13px. Add the
-     topbar's height back as top padding — halved by the vertical centering, like
-     the full-view zen rule's calc(34px + …) — so it lands at the same on-screen
-     height as non-Zen mini. */
+  /* --- Zen in mini ---
+     In Zen the panel goes full-bleed (fixed inset:0, see the base zen rule) and
+     reclaims the 26px the mini topbar reserves above it in normal mode, so every
+     mini rule above owes that 26px back as top padding — and no more. The base
+     zen rule's calc(36px + 0.85em) is sized for the FULL view (its 36px topbar
+     plus the flow card's own downward bias) and outranks mini's `padding: 0`, so
+     without these overrides it lands in the mini bar too: the art/text drop ~50px
+     and the height-100% art shrinks by the same amount. Each rule below mirrors
+     its non-Zen counterpart with the 26px added, which keeps the bar identical to
+     non-Zen mini — the stretched art keeps its size and Y, and centered content
+     (whose centering halves the padding) cancels the ~13px it would otherwise
+     rise. */
+  /* The full-bleed panel also swaps whose padding frames the bar: in normal mode
+     it's #right's 0.7em above and below, in Zen the panel's own 0.75em (from the
+     base zen rule). Match #right's value so the content box is identical, not
+     0.8px shorter at each end — the sides already agree at 0.75em. */
+  body.np-zen #now-playing-panel {
+    padding-top: 0.7em;
+    padding-bottom: 0.7em;
+  }
+  body.np-zen #now-playing-main {
+    padding-top: 26px;
+  }
+  body.np-zen #now-playing-main:has(#now-playing-art.hidden) {
+    padding-top: calc(26px + 0.8em);
+  }
   body.np-zen #now-playing-main:has(#now-playing-empty:not(.hidden)) {
     padding-top: 26px;
   }
