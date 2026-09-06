@@ -90,7 +90,7 @@ struct WindowMenu {
 // A single checkable item that mirrors the topbar viz button's on/off state; the
 // frontend owns the persisted preference and keeps the checkmark in sync
 // (set_now_playing_view_checked). zen_mode is the checkable View ▸ Zen Mode
-// toggle, kept in sync from the frontend (set_zen_mode_checked) since ⌃⌘F and
+// toggle, kept in sync from the frontend (set_zen_mode_checked) since ⌘⇧F and
 // Escape also flip it.
 struct ViewMenu {
     np_view_visualizer: CheckMenuItem<Wry>,
@@ -1652,7 +1652,7 @@ fn set_now_playing_view_checked(menu: State<ViewMenu>, view: String) {
 }
 
 // Reflect Zen Mode's on/off state in the View ▸ Zen Mode checkmark. Called
-// whenever the frontend signal changes (menu, ⌃⌘F, or Escape).
+// whenever the frontend signal changes (menu, ⌘⇧F, or Escape).
 #[tauri::command]
 fn set_zen_mode_checked(menu: State<ViewMenu>, on: bool) {
     let _ = menu.zen_mode.set_checked(on);
@@ -2720,17 +2720,29 @@ pub fn run() {
                     .accelerator("CmdOrCtrl+T")
                     .build(app)?;
             // Zen Mode: an immersive full-window player (hides all chrome), NOT a
-            // native window fullscreen. A checkable toggle, kept in sync from the
-            // frontend (set_zen_mode_checked). ⌃⌘F is Apple's standard Enter Full
-            // Screen accelerator; we borrow it since Pudding has no native
-            // fullscreen and this is the closest intent.
+            // native window fullscreen — the two compose, and Zen inside full
+            // screen is the album-art-fills-the-display state neither reaches
+            // alone. A checkable toggle, kept in sync from the frontend
+            // (set_zen_mode_checked). ⌘⇧F keeps it on the same letter as the real
+            // fullscreen below, the modifier tier marking which is ours (⌘⇧) and
+            // which is the system's (⌃⌘).
             let zen_mode = CheckMenuItemBuilder::with_id("np-zen", "Zen Mode")
-                .accelerator("Ctrl+Cmd+F")
+                .accelerator("CmdOrCtrl+Shift+F")
                 .build(app)?;
+            // Real window fullscreen, which the window has always supported (the
+            // green traffic light offers it) with no menu item to reach it — and
+            // ⌃⌘F is an App Shortcut macOS routes to a menu item *by name*, so
+            // without one the key did nothing. This predefined item brings both
+            // the ⌃⌘F accelerator and toggleFullScreen: with it. Left as muda's
+            // default "Toggle Full Screen" rather than "Enter Full Screen": AppKit
+            // only swaps Enter/Exit titles for the standard nib item, and a
+            // toggle label reads correctly in both states.
+            let fullscreen = PredefinedMenuItem::fullscreen(app, None)?;
             let view_menu = SubmenuBuilder::new(app, "View")
                 .item(&np_view_visualizer)
                 .separator()
                 .item(&zen_mode)
+                .item(&fullscreen)
                 .build()?;
             app.manage(ViewMenu {
                 np_view_visualizer,

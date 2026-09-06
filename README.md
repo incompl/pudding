@@ -81,7 +81,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 
 - Light and dark themes, each with a variety of flavors, and can auto-switch with the macOS light / dark setting
 - Compact mini player mode (double click now playing)
-- Zen Mode (View ▸ Zen Mode / ⌃⌘F) expands the Now Playing view (album art or visualizer) to fill the window and hide all chrome. Try it with fullscreen!
+- Zen Mode (View ▸ Zen Mode / ⌘⇧F) expands the Now Playing view (album art or visualizer) to fill the window and hide all chrome. Try it with fullscreen!
 - Window size and position remembered separately for mini and normal modes
 - Keyboard shortcuts for playback, volume, and seeking (see below)
 - macOS system integration: Now Playing in Control Center and the lock screen (with album art), plus hardware media keys and lock-screen controls for play/pause, next/previous, and scrubbing
@@ -110,7 +110,7 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `⌘F` / `Ctrl+F` - focus search
 - `⌘S` - save the current queue as a playlist
 - `⌘T` - toggle the visualizer
-- `⌃⌘F` - toggle Zen Mode
+- `⌘⇧F` - toggle Zen Mode
 
 ## Tips
 

@@ -3147,15 +3147,15 @@ function setupEffects(): void {
       document.body.classList.remove("np-idle");
     }
   });
-  // Keep the View ▸ Zen Mode checkmark in sync (menu, ⌃⌘F, and Escape all flip
+  // Keep the View ▸ Zen Mode checkmark in sync (menu, ⌘⇧F, and Escape all flip
   // the signal). Tracks the preference itself, not the hero-gated body class, so
-  // the mark reflects what ⌃⌘F will do even while a list face is up.
+  // the mark reflects what ⌘⇧F will do even while a list face is up.
   effect(() => {
     void invoke("set_zen_mode_checked", { on: zenMode.value });
   });
 
   // Entering Zen Mode only makes sense while the hero owns the pane; exiting
-  // always works. View ▸ Zen Mode (⌃⌘F) and Escape relay here.
+  // always works. View ▸ Zen Mode (⌘⇧F) and Escape relay here.
   const toggleZen = (on?: boolean): void => {
     const next = on ?? !zenMode.value;
     if (next && !heroVisible.value) return;

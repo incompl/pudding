@@ -183,8 +183,9 @@ export const nowPlayingView = signal<NowPlayingView>("art");
 // Zen Mode: the now-playing hero covers the window (all chrome — topbar, left
 // panel, splitter — hidden), controls auto-hide on idle. Named for what you get
 // (an immersive player) rather than the chrome it hides. Not a native window
-// fullscreen. Transient (never persisted); only meaningful while the hero face
-// is up. Toggled from View ▸ Zen Mode (⌃⌘F) or Escape.
+// fullscreen — it composes with one rather than replacing it. Transient (never
+// persisted); only meaningful while the hero face is up. Toggled from
+// View ▸ Zen Mode (⌘⇧F) or Escape.
 export const zenMode = signal(false);
 
 // Dismiss the full-pane panels (Settings / About) that take the whole pane over,

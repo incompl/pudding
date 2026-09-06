@@ -925,7 +925,7 @@ html[data-mode="light"] .context-menu {
 /* Zen Mode: the now-playing hero covers the ENTIRE window — topbar
    (tabs/search/modes), left panel, and splitter all included — by pinning the
    panel over everything with an opaque backdrop. The OS traffic lights float
-   above the webview, so the window is still closable; Escape or ⌃⌘F exits.
+   above the webview, so the window is still closable; Escape or ⌘⇧F exits.
    Set only while the hero face is up (see main.ts). */
 body.np-zen #now-playing-panel {
   position: fixed;
