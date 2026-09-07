@@ -2926,7 +2926,6 @@ pub fn run() {
                 .item(&recent_submenu)
                 .separator()
                 .item(&new_playlist)
-                .separator()
                 .item(&save_as)
                 .item(&move_file)
                 .build()?;
