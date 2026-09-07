@@ -1,0 +1,20 @@
+Pudding
+Copyright 2026 Greg Smith
+
+Licensed under the Apache License, Version 2.0. You may obtain a copy of the
+License in the LICENSE file distributed with this software, or at
+http://www.apache.org/licenses/LICENSE-2.0
+
+Third-party dependencies are distributed under their own licenses, listed in
+full within the app under Help > Licenses.
+
+
+TRADEMARKS
+
+"Pudding" and the Pudding application icon are trademarks of Greg Smith.
+Section 6 of the Apache License does not grant permission to use them.
+
+You are welcome to fork this code and ship your own version. If you distribute
+a modified build, please give it a different name and a different icon, so
+people can tell it apart from ours. Redistributing an unmodified official build
+under the Pudding name is fine.

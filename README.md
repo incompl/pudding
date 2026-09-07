@@ -1,5 +1,7 @@
 # Pudding
 
+**Music player for local files and internet radio. Oldschool taste, newschool features.**
+
 ![Pudding screenshot](images/screenshot.png)
 
 ![Mini player screenshot](images/mini.png)
@@ -142,7 +144,7 @@ Some more questions and answers on the topic:
 
 **Who's responsible when it breaks?** Me. It's my app and the bugs are mine. You can report issues on [GitHub](https://github.com/incompl/pudding/issues).
 
-**Does this change the license?** No. It's MIT, same as it would be otherwise. Dependencies keep their own licenses and are attributed in Help > Licenses.
+**Does this change the license?** No. It's Apache-2.0, same as it would be otherwise. Dependencies keep their own licenses and are attributed in Help > Licenses.
 
 **Do you take AI-assisted contributions?** Sure, as long as you understand what you're sending and it works. That said, I am the auteur of this project and I am very strict about features and scope. If you want to add something new, opening an issue for discussion first is best.
 
