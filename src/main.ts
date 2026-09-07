@@ -1330,8 +1330,7 @@ export function renderLeafTrackList(
       // width, so N digits fit 3 digits' width at scale 3/N). Self-limiting: the
       // number never grows past the 3-digit footprint, it just gets smaller, and
       // it only shrinks past 999 — well inside the 100k-snappy / 500k-functional
-      // library target (see TODO's "Library scale target"), where 6-digit gutters
-      // are real.
+      // library target, where 6-digit gutters are real.
       style: label.length > 3 ? { "font-size": `${3 / label.length}em` } : {},
     });
     // Number gutter that gives way to a hover play button, matching the queue and

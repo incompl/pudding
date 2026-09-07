@@ -4,7 +4,7 @@
 // the .m3u8 *and* repoints the live pool at that file, so from then on curating
 // the still-playing queue autosaves to disk. The old behaviour only browsed the
 // new file while the pool stayed ephemeral — so post-save edits were silently
-// lost (TODO "dead-end promotion" trap).
+// lost — the save dead-ended instead of promoting the pool.
 //
 // The native save picker is undrivable in e2e, so the flow runs through the
 // `savePlaylistAs` action (the real post-dialog logic with an explicit path).

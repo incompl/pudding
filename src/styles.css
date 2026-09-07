@@ -2725,7 +2725,7 @@ ul {
      placeholder height at 2em, then remembers each row's real measured height so
      the scrollbar doesn't drift. Safe here because these rows carry no
      boundary-straddling decoration (unlike the queue's drop-line ::after, which
-     paint containment would clip — see "Virtualize lists" in TODO.md). */
+     paint containment would clip). */
   content-visibility: auto;
   contain-intrinsic-size: auto 2em;
 }
