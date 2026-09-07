@@ -197,11 +197,13 @@ body.platform-mac #tabs {
      edge equal its gap to the window's top edge. Those two are set by different
      things, so one has to be solved for: above the glyph sit the topbar's 2px
      padding-top plus (33 - 14) / 2 = 9.5px of centering slack in the 33px content
-     box — 11.5px. To its right, the 25px button already contributes
-     (25 - 14) / 2 = 5.5px of its own, so the bar owes the remaining 6px. Recompute
-     if the button (#miniplayer-btn, 25px), its icon (14px), or the bar's height
-     changes. The left value is interior spacing against the splitter — untouched. */
-  padding: 0 6px 0 0.5em;
+     box, less the 0.5px optical lift the cluster now carries (see
+     #playback-modes) — 11px. To its right, the 25px button already contributes
+     (25 - 14) / 2 = 5.5px of its own, so the bar owes the remaining 5.5px. Recompute
+     if the button (#miniplayer-btn, 25px), its icon (14px), the bar's height, or
+     that lift changes. The left value is interior spacing against the splitter —
+     untouched. */
+  padding: 0 5.5px 0 0.5em;
   min-width: 200px;
 }
 
@@ -294,6 +296,23 @@ body.platform-mac #tabs {
 #settings-back-btn:hover {
   background: none;
   text-decoration: underline;
+}
+
+/* Optical alignment for the right-hand icon cluster. Everything in the bar is
+   centered in the same 33px content box (see #topbar), which lines up the BOXES
+   but not the ink: a text run's ink sits above its line box's center, because
+   the box reserves descender space the word "Search..." never uses. Measured in
+   WKWebView: the search placeholder's ink (cap top through baseline) centers on
+   18.19, the tab labels on 18.38, while these glyphs — whose art is vertically
+   symmetric — center on the box's own 18.50. Half a pixel up splits that
+   difference and, on a 2x display, is exactly one device pixel, so the strokes
+   stay crisp rather than smearing across two rows. A full pixel overshoots: it
+   would leave the glyphs sitting higher above the text than they now sit below.
+   Re-measure if the bar's height/padding or the type size changes. */
+#playback-modes,
+#miniplayer-btn {
+  position: relative;
+  top: -1.5px;
 }
 
 /* Files-only playback-mode toggles: Folder, Shuffle, Repeat. Each is an
@@ -390,11 +409,15 @@ body.platform-mac #tabs {
   line-height: 1;
   background: transparent
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='10.5' r='7'/%3E%3Cline x1='16.5' y1='16' x2='21' y2='20.5'/%3E%3C/svg%3E")
-    no-repeat 0.5em center;
-  /* The glyph above is translated 0.5 units up from where it was drawn: its ink
+    no-repeat 0.5em calc(50% - 0.5px);
+  /* Two separate half-pixel corrections, don't collapse them. Inside the data
+     URI the glyph is translated 0.5 units up from where it was drawn: its ink
      (circle top through the handle's tip) spanned 3–22 of the 24 viewBox, half a
      unit low, so background-position:center placed the visible magnifier below
-     the centerline every other icon in the bar sits on. */
+     the centerline every other icon in the bar sits on. The calc() then lifts
+     the whole image another 0.5px off that centerline, for the same reason the
+     shuffle/repeat/mini-player glyphs are lifted (see #playback-modes): the box
+     center is not where the placeholder's ink sits. */
   background-size: 1em;
   color: var(--text-muted);
   border: 1px solid transparent;
