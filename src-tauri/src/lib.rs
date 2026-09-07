@@ -103,7 +103,7 @@ struct ViewMenu {
 // (set_save_playlist_enabled), "Move Playlist File..." is enabled only while a
 // playlist is open — browsed or playing (set_move_playlist_enabled) — and the
 // "Open Recent" submenu is rebuilt from the frontend's persisted recents list
-// (set_recent_playlists).
+// (set_recent_items).
 struct PlaylistMenu {
     save_as: MenuItem<Wry>,
     move_file: MenuItem<Wry>,
@@ -121,12 +121,25 @@ struct EditMenu {
     redo: MenuItem<Wry>,
 }
 
-// One entry the frontend hands set_recent_playlists to rebuild the Open Recent
-// submenu (most-recent first).
+// The two Open Recent row glyphs as PNG bytes, keyed by RecentItem::kind. The
+// frontend rasterizes them from the app's own CSS icons and hands them over at
+// boot (set_recent_icons), so the menu and the track/playlist rows in the tree
+// can never show two different drawings of the same thing. Empty until then,
+// which only costs the rows their icons.
+#[derive(Default)]
+struct RecentIcons {
+    png: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+// One entry the frontend hands set_recent_items to rebuild the Open Recent
+// submenu (most-recent first). `kind` is "playlist" or "track" and only picks the
+// row's icon — the click relays the path and the frontend re-derives the verb from
+// the extension, so an absent/unknown kind is cosmetic, never wrong behavior.
 #[derive(Deserialize)]
-struct RecentPlaylist {
+struct RecentItem {
     path: String,
     name: String,
+    kind: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1684,14 +1697,36 @@ fn set_edit_undo_state(menu: State<EditMenu>, undo: bool, redo: bool) {
     let _ = menu.redo.set_enabled(redo);
 }
 
-// Rebuild the Open Recent submenu from the frontend's persisted recents
-// (most-recent first). Each row's id carries its path (playlist-recent:<path>)
-// so the click handler can relay it; an empty list shows a disabled placeholder.
+// Receive the Open Recent row glyphs (base64 PNG, one per kind). Called once at
+// boot, before the first set_recent_items, which is what draws them.
 #[tauri::command]
-fn set_recent_playlists(
+fn set_recent_icons(
+    icons: State<RecentIcons>,
+    playlist: String,
+    track: String,
+) -> Result<(), String> {
+    let decode = |b64: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| e.to_string())
+    };
+    let (playlist, track) = (decode(&playlist)?, decode(&track)?);
+    let mut png = icons.png.lock().map_err(|_| "recent icons poisoned".to_string())?;
+    png.insert("playlist".to_string(), playlist);
+    png.insert("track".to_string(), track);
+    Ok(())
+}
+
+// Rebuild the Open Recent submenu from the frontend's persisted recents
+// (most-recent first). Each row's id carries its path (recent:<path>) so the
+// click handler can relay it; an empty list shows a disabled placeholder. The
+// icon pass runs last, over the rows this just built.
+#[tauri::command]
+fn set_recent_items(
     app: AppHandle,
     menu: State<PlaylistMenu>,
-    items: Vec<RecentPlaylist>,
+    icons: State<RecentIcons>,
+    items: Vec<RecentItem>,
 ) -> Result<(), String> {
     let sub = &menu.recent;
     let count = sub.items().map_err(|e| e.to_string())?.len();
@@ -1699,7 +1734,7 @@ fn set_recent_playlists(
         sub.remove_at(0).map_err(|e| e.to_string())?;
     }
     if items.is_empty() {
-        let empty = MenuItemBuilder::with_id("playlist-recent-empty", "No Recent Playlists")
+        let empty = MenuItemBuilder::with_id("recent-empty", "No Recent Items")
             .enabled(false)
             .build(&app)
             .map_err(|e| e.to_string())?;
@@ -1707,18 +1742,92 @@ fn set_recent_playlists(
         return Ok(());
     }
     for it in &items {
-        let item = MenuItemBuilder::with_id(format!("playlist-recent:{}", it.path), &it.name)
+        let item = MenuItemBuilder::with_id(format!("recent:{}", it.path), &it.name)
             .build(&app)
             .map_err(|e| e.to_string())?;
         sub.append(&item).map_err(|e| e.to_string())?;
     }
     let sep = PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
     sub.append(&sep).map_err(|e| e.to_string())?;
-    let clear = MenuItemBuilder::with_id("playlist-recent-clear", "Clear Recent")
+    let clear = MenuItemBuilder::with_id("recent-clear", "Clear Menu")
         .build(&app)
         .map_err(|e| e.to_string())?;
     sub.append(&clear).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    set_recent_item_icons(&items, &icons);
     Ok(())
+}
+
+// Draw the app's own playlist / track glyph beside every Open Recent row, so the
+// two kinds sharing one list are told apart at a glance, in the same drawing the
+// tree uses for them.
+//
+// Done by hand against AppKit rather than through muda's IconMenuItem, because
+// that never marks the NSImage as a template: macOS would paint our glyph in the
+// fixed colors it was rasterized with, leaving it dark against the blue highlight
+// and wrong in dark mode. Marked as a template, the image is drawn from its alpha
+// alone and AppKit tints it with the row's text color — the same relationship the
+// CSS mask has with `background-color` in the tree.
+//
+// Reaching the NSMenuItems means walking down from NSApp: muda hands out no
+// native handle, so match on the two submenu titles, which are ours (see the menu
+// build in setup) and therefore stable. Every bail leaves rows that are perfectly
+// usable, just unadorned.
+#[cfg(target_os = "macos")]
+fn set_recent_item_icons(items: &[RecentItem], icons: &RecentIcons) {
+    use objc2::AllocAnyThread;
+    use objc2_app_kit::{NSApplication, NSImage, NSMenu};
+    use objc2_foundation::{MainThreadMarker, NSData, NSSize};
+
+    // The bitmaps are 2x (see ICON_PX); declaring the logical size scales them
+    // back down and lets AppKit spend the extra pixels on a retina display.
+    const ICON_POINTS: f64 = 16.0;
+
+    fn submenu_titled(menu: &NSMenu, title: &str) -> Option<objc2::rc::Retained<NSMenu>> {
+        (0..menu.numberOfItems())
+            .filter_map(|i| menu.itemAtIndex(i))
+            .filter_map(|item| item.submenu())
+            .find(|sub| sub.title().to_string() == title)
+    }
+
+    let Ok(png) = icons.png.lock() else {
+        return;
+    };
+    if png.is_empty() {
+        return; // boot hasn't handed them over yet; the next sync will draw them
+    }
+    // AppKit is main-thread-only; a sync command lands there (same thread that
+    // just mutated the submenu above), and the marker checks that rather than
+    // assuming it. A miss below is silent and cosmetic, so say so in the log.
+    let recent = MainThreadMarker::new()
+        .and_then(|mtm| NSApplication::sharedApplication(mtm).mainMenu())
+        .and_then(|main_menu| submenu_titled(&main_menu, "File"))
+        .and_then(|file| submenu_titled(&file, "Open Recent"));
+    let Some(recent) = recent else {
+        log::warn!("could not reach the Open Recent submenu; rows drawn without icons");
+        return;
+    };
+    // Index-aligned with the loop above: rows first, then the separator and Clear
+    // Menu, which get no icon.
+    for (i, it) in items.iter().enumerate() {
+        let Some(row) = recent.itemAtIndex(i as isize) else {
+            continue;
+        };
+        let kind = match it.kind.as_deref() {
+            Some("track") => "track",
+            _ => "playlist",
+        };
+        let Some(bytes) = png.get(kind) else {
+            continue;
+        };
+        let Some(image) = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(bytes))
+        else {
+            continue;
+        };
+        image.setSize(NSSize::new(ICON_POINTS, ICON_POINTS));
+        image.setTemplate(true);
+        row.setImage(Some(&image));
+    }
 }
 
 // Append tracks to the tail of the current queue without disturbing the
@@ -2349,6 +2458,7 @@ pub fn run() {
         .manage(PendingOpen {
             inner: Mutex::new(PendingState::default()),
         })
+        .manage(RecentIcons::default())
         // Single-instance must be the first plugin. When a second launch happens
         // (e.g. user double-clicks another mp3 on Windows/Linux), this callback
         // fires in the running instance with the new process's argv.
@@ -2477,16 +2587,24 @@ pub fn run() {
                         let _ = app.emit("menu:autoadvance", enabled);
                     }
                 }
-                // File ▸ Open File...: show the native picker, then hand the result
-                // to deliver_open_file, so opening from the menu and opening from
-                // the Finder are literally the same code path (audio plays, a
-                // playlist opens for browsing). Non-blocking form — this handler
-                // runs on the main thread, where a blocking panel would deadlock.
+                // File ▸ Open...: show the native picker, then hand the result to
+                // deliver_open_file, so opening from the menu and opening from the
+                // Finder are literally the same code path (audio plays, a playlist
+                // opens for browsing). That one command covers both file kinds,
+                // which is why there is no separate Open Playlist. Non-blocking
+                // form — this handler runs on the main thread, where a blocking
+                // panel would deadlock.
                 "open-file-dialog" => {
                     let handle = app.clone();
+                    let every_ext = [AUDIO_EXTS, playlist::PLAYLIST_EXTS].concat();
                     app.dialog()
                         .file()
-                        .set_title("Open File")
+                        .set_title("Open")
+                        // The combined filter leads so both kinds are selectable
+                        // under the default choice; the named two follow for
+                        // platforms that show a format popup (macOS flattens them
+                        // all into one allowed set, so order is moot there).
+                        .add_filter("Music and Playlists", &every_ext)
                         .add_filter("Audio", AUDIO_EXTS)
                         .add_filter("Playlist", playlist::PLAYLIST_EXTS)
                         .pick_file(move |file| {
@@ -2498,14 +2616,11 @@ pub fn run() {
                             }
                         });
                 }
-                // Playlist menu — the frontend owns the dialogs, writes, and
-                // recents, so these relay the intent. Recent items carry their
-                // path in the id (playlist-recent:<path>).
+                // The rest of the File menu — the frontend owns these dialogs,
+                // writes, and the recents list, so these relay the intent. Recent
+                // rows carry their path in the id (recent:<path>).
                 "playlist-new" => {
                     let _ = app.emit("menu:playlist", "new");
-                }
-                "playlist-open" => {
-                    let _ = app.emit("menu:playlist", "open");
                 }
                 "playlist-save" => {
                     let _ = app.emit("menu:playlist", "save");
@@ -2513,12 +2628,12 @@ pub fn run() {
                 "playlist-move" => {
                     let _ = app.emit("menu:playlist", "move");
                 }
-                "playlist-recent-clear" => {
-                    let _ = app.emit("menu:playlist", "recent-clear");
+                "recent-clear" => {
+                    let _ = app.emit("menu:recent-clear", ());
                 }
-                other if other.starts_with("playlist-recent:") => {
-                    let path = other.trim_start_matches("playlist-recent:");
-                    let _ = app.emit("menu:playlist-open-path", path.to_string());
+                other if other.starts_with("recent:") => {
+                    let path = other.trim_start_matches("recent:");
+                    let _ = app.emit("menu:open-recent", path.to_string());
                 }
                 _ => {}
             }
@@ -2774,29 +2889,30 @@ pub fn run() {
                 zen_mode,
             });
 
-            // File menu. Open File... (⌘O) is the in-app equivalent of
-            // double-clicking a track in the Finder. Its picker is native (owned by
-            // the backend, unlike the playlist dialogs below) so the choice can go
-            // straight into deliver_open_file — the very same path an "Open With"
-            // Apple Event takes, extension gate and all.
-            let open_file = MenuItemBuilder::with_id("open-file-dialog", "Open File...")
+            // File menu. Open... (⌘O) is the in-app equivalent of double-clicking a
+            // file in the Finder, and takes either kind Pudding can open — a track
+            // or a playlist — so there is one Open, not two. Its picker is native
+            // (owned by the backend, unlike the playlist dialogs below) so the
+            // choice can go straight into deliver_open_file — the very same path an
+            // "Open With" Apple Event takes, extension gate and all.
+            let open_file = MenuItemBuilder::with_id("open-file-dialog", "Open...")
                 .accelerator("CmdOrCtrl+O")
                 .build(app)?;
-            // Playlist menu: New / Open... / Open Recent ▸ then Save Queue as Playlist
-            // (⌘S) and Move Playlist File.... Every item relays to the frontend
-            // (menu:playlist / menu:playlist-open-path), which owns the dialogs,
-            // file writes, and recents list. "Save Queue as Playlist" starts disabled
-            // (only an ephemeral queue can be converted) and Open Recent starts
-            // with a placeholder; the frontend syncs both after load.
+            // Open Recent ▸ sits with it and mixes both kinds, since both arrive
+            // through that one Open. It is filled only by actual openings — never by
+            // browsing the library, which would crowd out the openings worth
+            // returning to. Starts as a placeholder; the frontend syncs it after
+            // load (set_recent_items, which also gives each row its icon).
+            let recent_submenu = SubmenuBuilder::new(app, "Open Recent").build()?;
+            let recent_placeholder = MenuItemBuilder::with_id("recent-empty", "No Recent Items")
+                .enabled(false)
+                .build(app)?;
+            // The rest is playlist document handling: New (there is no "new track"),
+            // Save Queue as Playlist (⌘S) and Move Playlist File.... Each relays to
+            // the frontend, which owns the dialogs and file writes. Save starts
+            // disabled — only an ephemeral queue can be converted.
             let new_playlist =
                 MenuItemBuilder::with_id("playlist-new", "New Playlist...").build(app)?;
-            let open_playlist =
-                MenuItemBuilder::with_id("playlist-open", "Open Playlist...").build(app)?;
-            let recent_submenu = SubmenuBuilder::new(app, "Open Recent Playlist").build()?;
-            let recent_placeholder =
-                MenuItemBuilder::with_id("playlist-recent-empty", "No Recent Playlists")
-                    .enabled(false)
-                    .build(app)?;
             recent_submenu.append(&recent_placeholder)?;
             let save_as = MenuItemBuilder::with_id("playlist-save", "Save Queue as Playlist...")
                 .accelerator("CmdOrCtrl+S")
@@ -2807,10 +2923,9 @@ pub fn run() {
                 .build(app)?;
             let playlist_menu = SubmenuBuilder::new(app, "File")
                 .item(&open_file)
+                .item(&recent_submenu)
                 .separator()
                 .item(&new_playlist)
-                .item(&open_playlist)
-                .item(&recent_submenu)
                 .separator()
                 .item(&save_as)
                 .item(&move_file)
@@ -2924,7 +3039,8 @@ pub fn run() {
             set_save_playlist_enabled,
             set_move_playlist_enabled,
             set_edit_undo_state,
-            set_recent_playlists,
+            set_recent_items,
+            set_recent_icons,
             audio_append,
             audio_stop,
             audio_set_volume,

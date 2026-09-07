@@ -40,5 +40,10 @@
     "license": "MIT",
     "source": "https://github.com/HEnquist/realfft",
     "note": "Upstream declares MIT in Cargo.toml and the README but publishes no license file and no copyright notice, so there is no notice to reproduce."
+  },
+  "Lucide": {
+    "license": "ISC AND MIT",
+    "file": "lucide-isc-mit.txt",
+    "source": "https://github.com/lucide-icons/lucide/blob/main/LICENSE"
   }
 }

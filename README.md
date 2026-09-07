@@ -60,10 +60,10 @@ These features are bog standard for streaming service apps, but rare for file-ba
 ### Playlists
 
 - Playlists are plain `.m3u8` files on disk. No lock-in, hand-editable and readable by any other player, and they autosave on every change
-- Start one from the Playlist menu, or turn the current queue into a saved playlist with Save Queue as Playlist (⌘S)
+- Start one from the File menu, or turn the current queue into a saved playlist with Save Queue as Playlist (⌘S)
 - Right-click any track and use "Add to playlist" to file it into an existing list or a new one
-- Single-click a playlist in the tree to browse it, double-click to play; rename, move, or delete it from the tree or the Playlist menu
-- Recent playlists live under Playlist ▸ Open Recent, and every `.m3u` / `.m3u8` under your library is searchable
+- Single-click a playlist in the tree to browse it, double-click to play; rename, move, or delete it from the tree or the File menu
+- File ▸ Open Recent lists what you have actually opened — playlists and loose tracks alike — and every `.m3u` / `.m3u8` under your library is searchable
 
 ### Internet radio
 
@@ -129,7 +129,7 @@ A few things that aren't obvious:
 - Rust backend with [rusqlite](https://github.com/rusqlite/rusqlite) for the metadata cache, [lofty](https://github.com/Serial-ATA/lofty-rs) for reading and writing tags, and [notify](https://github.com/notify-rs/notify) for live library watching
 - TypeScript frontend built with [Vite](https://vitejs.dev/) - no UI framework, reactivity via [Preact signals](https://github.com/preactjs/signals)
 - Native Rust audio engine ([symphonia](https://github.com/pdeljanov/Symphonia) + [cpal](https://github.com/RustAudio/cpal)) for gapless file playback and internet radio with in-band ICY now-playing metadata
-- Help > Licenses lists every bundled dependency and its license text, generated from the real cargo and pnpm dependency graphs by `scripts/gen-licenses.mjs` (run by `pnpm dev` and `pnpm build`). It covers the statically linked Rust standard library too, and the build fails if any dependency would ship without attribution
+- Help > Licenses lists every bundled dependency and its license text, generated from the real cargo and pnpm dependency graphs by `scripts/gen-licenses.mjs` (run by `pnpm dev` and `pnpm build`). It covers the statically linked Rust standard library and vendored artwork such as the Lucide icons too, and the build fails if any dependency would ship without attribution
 
 ## AI Disclaimer
 

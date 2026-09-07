@@ -3,7 +3,7 @@
 // verbatim from main.ts (see plan.md). The shared context-menu builders that
 // call these (addToPlaylistItem, show*ContextMenu) stay in main.ts.
 import { invoke } from "@tauri-apps/api/core";
-import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { confirm, save } from "@tauri-apps/plugin-dialog";
 import type {
   PlaylistData,
   SearchTrack,
@@ -12,6 +12,7 @@ import type {
   PlaylistRef,
   TrackProvider,
 } from "./types";
+import { addRecentItem, removeRecentItem, updateRecentItem } from "./recents";
 import {
   activeQueue,
   currentNodePath,
@@ -44,11 +45,6 @@ import {
   libraryRootPaths,
   UNTITLED_PLAYLIST_TITLE,
 } from "./main";
-
-// Persisted store key + cap for the Open Recent list (moved here with the
-// recents ops that own them; main.ts imports KEY_RECENT_PLAYLISTS to hydrate).
-export const KEY_RECENT_PLAYLISTS = "recentPlaylists";
-const RECENT_PLAYLISTS_MAX = 10;
 
 // The playable rows of a playlist as SearchTracks (dropping missing files),
 // ready for the queue/engine machinery.
@@ -116,7 +112,7 @@ export async function playPlaylistPath(path: string): Promise<void> {
     // The file is gone (moved/deleted outside the app). Self-heal: tell the
     // user and drop it from the recents so the dead entry stops reappearing.
     console.error("read_playlist failed", path, e);
-    removeRecentPlaylist(path);
+    removeRecentItem(path);
     toast("Playlist no longer available");
     return;
   }
@@ -135,7 +131,6 @@ export async function playPlaylistPath(path: string): Promise<void> {
     },
     `queue:playlist:${path}`,
   );
-  addRecentPlaylist(data.path, data.name);
 }
 
 // Single-click: browse the playlist (view its tracks) without changing what's
@@ -168,7 +163,7 @@ function flashPlaylistHeader(): void {
 
 export async function browsePlaylistPath(
   path: string,
-  opts?: { flash?: boolean },
+  opts?: { flash?: boolean; recent?: boolean },
 ): Promise<void> {
   let data: PlaylistData;
   try {
@@ -177,7 +172,7 @@ export async function browsePlaylistPath(
     // The file is gone (moved/deleted outside the app). Self-heal: tell the
     // user and drop it from the recents so the dead entry stops reappearing.
     console.error("read_playlist failed", path, e);
-    removeRecentPlaylist(path);
+    removeRecentItem(path);
     toast("Playlist no longer available");
     return;
   }
@@ -196,7 +191,9 @@ export async function browsePlaylistPath(
     sourcePath: data.path,
   };
   listFaceOpen.value = true;
-  addRecentPlaylist(data.path, data.name);
+  // Only an *opening* is recorded (Open..., Finder, an Open Recent row, or a
+  // playlist we just created). A tree click browsing the library is not.
+  if (opts?.recent) addRecentItem(data.path, data.name, "playlist");
   if (opts?.flash) flashPlaylistHeader();
 }
 
@@ -219,12 +216,12 @@ export async function addPlaylistToQueue(
   }
 }
 
-// --- OS Playlist menu ---
-// The Playlist menu (New / Open... / Open Recent ▸ / Save Queue as Playlist / Move) is
-// built in Rust and relays intents here; the frontend owns the dialogs, file
-// writes, and the recents list (persisted in the settings store, mirrored into
-// the native Open Recent submenu via set_recent_playlists).
-
+// --- OS File menu ---
+// The File menu (Open... / Open Recent ▸ / New Playlist / Save Queue as Playlist /
+// Move) is built in Rust and relays intents here; the frontend owns these dialogs
+// and the file writes. Open... itself is the exception — it stays in Rust so the
+// menu and a Finder double-click are one code path (see deliver_open_file) — and
+// it takes playlists as well as audio, which is why there is no Open Playlist.
 
 
 // --- Playlist index (phase 4) ---
@@ -274,32 +271,6 @@ export function defaultPlaylistDir(): string | null {
   return libraryRootPaths()[0] ?? null;
 }
 
-export async function persistRecentPlaylists(): Promise<void> {
-  await app.store.set(KEY_RECENT_PLAYLISTS, app.recentPlaylists);
-  await app.store.save();
-}
-
-// Push a playlist to the front of the recents (most-recent first, deduped by
-// path, capped), persist, and rebuild the native Open Recent submenu.
-export function addRecentPlaylist(path: string, name: string): void {
-  app.recentPlaylists = [
-    { path, name },
-    ...app.recentPlaylists.filter((r) => r.path !== path),
-  ].slice(0, RECENT_PLAYLISTS_MAX);
-  void persistRecentPlaylists();
-  syncRecentPlaylistsMenu();
-}
-
-export function removeRecentPlaylist(path: string): void {
-  app.recentPlaylists = app.recentPlaylists.filter((r) => r.path !== path);
-  void persistRecentPlaylists();
-  syncRecentPlaylistsMenu();
-}
-
-export function syncRecentPlaylistsMenu(): void {
-  void invoke("set_recent_playlists", { items: app.recentPlaylists });
-}
-
 // New Playlist...: save dialog → write an empty .m3u8 → open it ready to fill.
 export async function menuNewPlaylist(): Promise<void> {
   const dir = defaultPlaylistDir();
@@ -317,18 +288,7 @@ export async function menuNewPlaylist(): Promise<void> {
     return;
   }
   await refreshLibrary();
-  await browsePlaylistPath(path);
-}
-
-// Open...: native dialog filtered to playlists; may live outside the library.
-export async function menuOpenPlaylist(): Promise<void> {
-  const selected = await open({
-    directory: false,
-    multiple: false,
-    defaultPath: defaultPlaylistDir() ?? undefined,
-    filters: [{ name: "Playlist", extensions: ["m3u", "m3u8"] }],
-  });
-  if (typeof selected === "string") await browsePlaylistPath(selected);
+  await browsePlaylistPath(path, { recent: true });
 }
 
 // Save Queue as Playlist (⌘S): convert the ephemeral queue into an autosaving
@@ -373,7 +333,7 @@ export async function saveQueueAsPlaylist(path: string): Promise<void> {
   }
   toast(`Saved playlist "${name}"`);
   await refreshLibrary();
-  await browsePlaylistPath(path);
+  await browsePlaylistPath(path, { recent: true });
 }
 
 // Move Playlist File...: relocate the open playlist on disk (rewriting relative
@@ -405,7 +365,7 @@ export async function menuMovePlaylist(): Promise<void> {
   if (isPlaylistSource(active) && active!.sourcePath === src) {
     activeQueue.value = { ...active!, sourcePath: dest };
   }
-  removeRecentPlaylist(src);
+  updateRecentItem(src, { path: dest });
   await refreshLibrary();
   await browsePlaylistPath(dest);
 }
@@ -435,7 +395,7 @@ export async function renameOpenPlaylist(input: string): Promise<void> {
     toast("Couldn't rename playlist");
     return;
   }
-  addRecentPlaylist(path, name);
+  updateRecentItem(path, { name });
   await refreshLibrary();
 }
 
@@ -477,7 +437,7 @@ async function commitPlaylistRename(path: string, name: string): Promise<boolean
     toast("Couldn't rename playlist");
     return false;
   }
-  addRecentPlaylist(path, name);
+  updateRecentItem(path, { name });
   return true;
 }
 
@@ -537,7 +497,7 @@ export async function deletePlaylistPath(path: string, name: string): Promise<vo
     toast("Couldn't delete playlist");
     return;
   }
-  removeRecentPlaylist(path);
+  removeRecentItem(path);
   // Drop any curation-undo history for the file — a lingering snapshot must not be
   // able to re-save (resurrect) it on a later ⌘Z.
   forgetCurationHistory(path);
@@ -581,7 +541,7 @@ export async function newPlaylistWithTracks(getTracks: TrackProvider): Promise<v
     return;
   }
   await refreshLibrary();
-  await browsePlaylistPath(path);
+  await browsePlaylistPath(path, { recent: true });
 }
 
 // Append tracks to an existing playlist. If it's the open list (browsed or the

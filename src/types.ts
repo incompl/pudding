@@ -326,9 +326,16 @@ export interface PlaylistData {
   tracks: PlaylistTrack[];
 }
 
-export interface RecentPlaylist {
+// A row of the Open Recent submenu. The list is mixed: `kind` says whether the
+// path is a playlist (opening browses it) or a loose audio file (opening plays
+// it), which picks the row's icon and its open verb. Optional so entries stored
+// before tracks joined the list still parse — see hydrateRecentItems.
+export type RecentKind = "playlist" | "track";
+
+export interface RecentItem {
   path: string;
   name: string;
+  kind?: RecentKind;
 }
 
 export interface PlaylistRef {

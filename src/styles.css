@@ -26,9 +26,19 @@
   --accent: #b5d17a;
   --accent-dim: #7e9152;
   --danger: #f87171;
-  /* Line-art folder used as a mask in the search dropdown. Same 24x24 /
-     stroke-width-2 recipe as the search-input magnifier; color comes from the
-     element's background-color, so the stroke color here is arbitrary. */
+  /* The glyphs below are Lucide icons (lucide.dev), inlined as mask data URLs
+     rather than installed — a few frozen strings, and no package ships them in
+     this form. Some are verbatim, some hand-drawn to match the house recipe: a
+     24x24 viewBox, fill:none, stroke-width 2, round caps and joins. Because they
+     are vendored rather than depended on, no dependency graph mentions them, so
+     the attribution is declared explicitly in scripts/gen-licenses.mjs
+     (lucideComponent) and shows up under Help > Licenses like everything else.
+     Adding another Lucide icon here needs no change there; drawing on a new
+     third-party set does.
+
+     Line-art folder used as a mask in the search dropdown. Same recipe as the
+     search-input magnifier; color comes from the element's background-color, so
+     the stroke color here is arbitrary. */
   --folder-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E");
   /* Same stroked recipe as the folder icon (color from background-color): a
      person for artist rows, a disc for album rows in the search dropdown. */
@@ -39,9 +49,9 @@
   /* Radio icon for stream rows — same stroked recipe as the folder icons,
      tinted via the element's background-color. */
   --radio-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.9 19.1C1 15.2 1 8.8 4.9 4.9'/%3E%3Cpath d='M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3Cpath d='M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5'/%3E%3Cpath d='M19.1 4.9C23 8.8 23 15.2 19.1 19.1'/%3E%3C/svg%3E");
-  /* Playlist icon (Lucide list-video): three rows plus a play triangle,
-     distinguishing a playlist from folders and tracks. Same stroked/tinted
-     recipe. */
+  /* Playlist icon (Lucide list-music): three rows plus a single note — stem and
+     notehead — distinguishing a playlist from folders and tracks. Same
+     stroked/tinted recipe. */
   --playlist-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15V6'/%3E%3Cpath d='M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z'/%3E%3Cpath d='M12 12H3'/%3E%3Cpath d='M16 6H3'/%3E%3Cpath d='M12 18H3'/%3E%3C/svg%3E");
 
   /* Filled triangle for the per-row hover play button in the track gutter. The

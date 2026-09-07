@@ -169,7 +169,34 @@ function npmComponents() {
   });
 }
 
-const components = [...cargoComponents(), ...npmComponents()].sort(
+// --- Vendored icon artwork -------------------------------------------------
+//
+// The glyphs in src/styles.css are Lucide icon paths, inlined as CSS mask data
+// URLs rather than installed — a handful of frozen strings, consumed in a form no
+// package ships. That makes them the same blind spot as the Rust standard library
+// below: their artwork is in what we ship while neither dependency graph mentions
+// them, so `pnpm list --prod` can never surface it. Named here instead.
+//
+// "ISC AND MIT", not just ISC: Lucide inherited some icons from Feather, which
+// stay under Cole Bemis's MIT, and Pudding uses icons from both halves (music,
+// lock and radio are Feather's; list-music, folder, user and disc are Lucide's).
+// The upstream LICENSE carries both notices, which is what the supplement holds.
+function lucideComponent() {
+  return {
+    name: "Lucide",
+    version: "icon artwork",
+    ecosystem: "vendored",
+    license: "ISC AND MIT",
+    url: "https://lucide.dev",
+    text: -1,
+  };
+}
+
+// lucideComponent joins the list here, before the supplement pass below, so its
+// notice is attached the same way every other text-less component's is. (The Rust
+// standard library is pushed after that pass — it recovers its text from the
+// toolchain and needs no supplement.)
+const components = [...cargoComponents(), ...npmComponents(), lucideComponent()].sort(
   (a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version),
 );
 

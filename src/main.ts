@@ -47,7 +47,7 @@ import type {
   NavState,
   PaneView,
   PlaylistData,
-  RecentPlaylist,
+  RecentItem,
   TrackProvider,
   LeafListContext,
 } from "./types";
@@ -231,15 +231,20 @@ import {
   curationHistoryVersion,
 } from "./queue";
 import {
-  KEY_RECENT_PLAYLISTS,
+  KEY_RECENT_ITEMS,
+  hydrateRecentItems,
+  primeRecentIcons,
+  addRecentItem,
+  removeRecentItem,
+  persistRecentItems,
+  syncRecentItemsMenu,
+} from "./recents";
+import {
   playlistPlayableTracks,
   playPlaylistPath,
   browsePlaylistPath,
   refreshPlaylistIndex,
-  persistRecentPlaylists,
-  syncRecentPlaylistsMenu,
   menuNewPlaylist,
-  menuOpenPlaylist,
   menuSavePlaylist,
   queueCanSaveAsPlaylist,
   saveQueueAsPlaylist,
@@ -1554,16 +1559,13 @@ export function playQueueTrack(poolIndex: number): void {
   playFile(node, parent, poolIndex);
 }
 
-// Plays a file from outside the library (passed in via OS file association).
-// Intentionally leaves currentNode/currentParent null so the tree is not
-// touched, no row is highlighted, and album-advance on end is a no-op. The
-// next library or stream selection replaces this state entirely.
-// Routes a file delivered by an OS file association (Finder double-click, "open
-// with", cold-start arg). A playlist opens for browsing (view + curate) like a
-// tree single-click; any other file is an audio track and plays.
+// The single "open a file" entry point: ⌘O, a Finder double-click / "Open With",
+// a launch argument, and an Open Recent row all land here. The extension decides
+// the verb — a playlist opens for browsing, audio plays — and both branches
+// record the open in the recents list (the only thing that does).
 function openAssociatedFile(path: string): void {
   if (/\.m3u8?$/i.test(path)) {
-    void browsePlaylistPath(path);
+    void browsePlaylistPath(path, { recent: true });
   } else {
     void openExternalFile(path);
   }
@@ -1574,7 +1576,11 @@ async function openExternalFile(path: string): Promise<void> {
   try {
     meta = await invoke<TrackMeta>("prepare_external_file", { path });
   } catch (e) {
+    // Unreadable or gone (moved/deleted outside the app). Self-heal the same way
+    // browsePlaylistPath does for a dead playlist: drop it from the recents so a
+    // stale row doesn't sit there forever.
     console.error("prepare_external_file failed", path, e);
+    removeRecentItem(path);
     return;
   }
   // Leaves currentParent null so the tree is untouched, no row is highlighted,
@@ -1594,6 +1600,9 @@ async function openExternalFile(path: string): Promise<void> {
   app.lastIndex = 0;
   resetShuffleState();
   const fallback = path.split(/[\\/]/).pop() ?? path;
+  // The read above is the proof the file is really there, so record the open now
+  // — under the same title the transport is about to show.
+  addRecentItem(path, meta.title ?? fallback, "track");
   setNowPlaying(meta.title ?? fallback, meta.artist, meta.album);
   void loadArt(path);
   void engine.play([path], 0);
@@ -2347,7 +2356,7 @@ function setupSettings(restoredEq: EqState | null): void {
 interface LicenseComponent {
   name: string;
   version: string;
-  ecosystem: "cargo" | "npm" | "rust";
+  ecosystem: "cargo" | "npm" | "rust" | "vendored";
   license: string;
   url: string;
   text: number;
@@ -3542,10 +3551,12 @@ async function init(): Promise<void> {
     void invoke("set_replaygain_checked", { mode });
   });
 
-  // Recent playlists → the OS "Open Recent ▸" submenu. Load the persisted list
-  // and push it into the native menu.
-  app.recentPlaylists = (await app.store.get<RecentPlaylist[]>(KEY_RECENT_PLAYLISTS)) ?? [];
-  syncRecentPlaylistsMenu();
+  // Recently opened playlists and tracks → the OS "Open Recent ▸" submenu. Hand
+  // the native menu its row glyphs first, so the first draw below already has
+  // them, then load the persisted list and push it over.
+  await primeRecentIcons();
+  hydrateRecentItems(await app.store.get<RecentItem[]>(KEY_RECENT_ITEMS));
+  syncRecentItemsMenu();
 
   // The last Files-tab place, handed to the navigator below to restore on launch.
   const navLocation = (await app.store.get<NavStep[]>(KEY_NAV_LOCATION)) ?? [];
@@ -3611,15 +3622,12 @@ async function init(): Promise<void> {
   document.addEventListener("focusin", refreshEditingText);
   document.addEventListener("focusout", refreshEditingText);
 
-  // Playlist menu intents (New / Open... / Save / Move / Clear Recent), plus a
-  // recent item carrying its own path.
+  // File menu intents (New Playlist / Save Queue as Playlist / Move Playlist File).
+  // Open... is handled in Rust; Open Recent has its own events below.
   await listen<string>("menu:playlist", (event) => {
     switch (event.payload) {
       case "new":
         void menuNewPlaylist();
-        break;
-      case "open":
-        void menuOpenPlaylist();
         break;
       case "save":
         void menuSavePlaylist();
@@ -3627,15 +3635,18 @@ async function init(): Promise<void> {
       case "move":
         void menuMovePlaylist();
         break;
-      case "recent-clear":
-        app.recentPlaylists = [];
-        void persistRecentPlaylists();
-        syncRecentPlaylistsMenu();
-        break;
     }
   });
-  await listen<string>("menu:playlist-open-path", (event) => {
-    void browsePlaylistPath(event.payload);
+  // An Open Recent row carries its own path. It routes through the same opener as
+  // ⌘O and the Finder, so a playlist row browses, a track row plays, and clicking
+  // one bumps it back to the top of the list.
+  await listen<string>("menu:open-recent", (event) => {
+    openAssociatedFile(event.payload);
+  });
+  await listen("menu:recent-clear", () => {
+    app.recentItems = [];
+    void persistRecentItems();
+    syncRecentItemsMenu();
   });
 
   setupTabs();

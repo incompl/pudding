@@ -15,7 +15,7 @@ import type {
   TreeNode,
   Stream,
   SearchTrack,
-  RecentPlaylist,
+  RecentItem,
   PlaylistRef,
 } from "./types";
 
@@ -60,7 +60,7 @@ export interface AppState {
   // Throttle tell for pushPlayback ticks.
   lastPlaybackPush: number;
   pendingQueueScrollIndex: number | null;
-  recentPlaylists: RecentPlaylist[];
+  recentItems: RecentItem[];
   playlistIndex: PlaylistRef[];
   // Whether the playlist index has completed its first build (distinguishes a
   // genuinely empty library from "not walked yet" so the navigator can show a
@@ -113,7 +113,7 @@ export const app: AppState = {
   shuffleHistory: [],
   lastPlaybackPush: 0,
   pendingQueueScrollIndex: null,
-  recentPlaylists: [],
+  recentItems: [],
   playlistIndex: [],
   playlistIndexLoaded: false,
   navLeafTracks: [],
