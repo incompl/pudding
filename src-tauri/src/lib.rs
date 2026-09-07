@@ -20,6 +20,7 @@ use tauri::menu::{
     PredefinedMenuItem, Submenu, SubmenuBuilder,
 };
 use tauri::{AppHandle, Emitter, Manager, State, Wry};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
 
@@ -2476,6 +2477,27 @@ pub fn run() {
                         let _ = app.emit("menu:autoadvance", enabled);
                     }
                 }
+                // File ▸ Open File...: show the native picker, then hand the result
+                // to deliver_open_file, so opening from the menu and opening from
+                // the Finder are literally the same code path (audio plays, a
+                // playlist opens for browsing). Non-blocking form — this handler
+                // runs on the main thread, where a blocking panel would deadlock.
+                "open-file-dialog" => {
+                    let handle = app.clone();
+                    app.dialog()
+                        .file()
+                        .set_title("Open File")
+                        .add_filter("Audio", AUDIO_EXTS)
+                        .add_filter("Playlist", playlist::PLAYLIST_EXTS)
+                        .pick_file(move |file| {
+                            let Some(path) = file.and_then(|f| f.into_path().ok()) else {
+                                return;
+                            };
+                            if let Some(s) = path.to_str() {
+                                deliver_open_file(&handle, s.to_string());
+                            }
+                        });
+                }
                 // Playlist menu — the frontend owns the dialogs, writes, and
                 // recents, so these relay the intent. Recent items carry their
                 // path in the id (playlist-recent:<path>).
@@ -2752,6 +2774,14 @@ pub fn run() {
                 zen_mode,
             });
 
+            // File menu. Open File... (⌘O) is the in-app equivalent of
+            // double-clicking a track in the Finder. Its picker is native (owned by
+            // the backend, unlike the playlist dialogs below) so the choice can go
+            // straight into deliver_open_file — the very same path an "Open With"
+            // Apple Event takes, extension gate and all.
+            let open_file = MenuItemBuilder::with_id("open-file-dialog", "Open File...")
+                .accelerator("CmdOrCtrl+O")
+                .build(app)?;
             // Playlist menu: New / Open... / Open Recent ▸ then Save Queue as Playlist
             // (⌘S) and Move Playlist File.... Every item relays to the frontend
             // (menu:playlist / menu:playlist-open-path), which owns the dialogs,
@@ -2776,6 +2806,8 @@ pub fn run() {
                 .enabled(false)
                 .build(app)?;
             let playlist_menu = SubmenuBuilder::new(app, "File")
+                .item(&open_file)
+                .separator()
                 .item(&new_playlist)
                 .item(&open_playlist)
                 .item(&recent_submenu)

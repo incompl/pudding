@@ -26,7 +26,7 @@ use tauri::State;
 
 use crate::{fetch_meta, DbHandle};
 
-const PLAYLIST_EXTS: &[&str] = &["m3u", "m3u8"];
+pub const PLAYLIST_EXTS: &[&str] = &["m3u", "m3u8"];
 
 pub fn is_playlist_path(s: &str) -> bool {
     Path::new(s)

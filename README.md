@@ -109,6 +109,7 @@ On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to g
 - `⌘↑` / `⌘↓` (or `+` / `-`) - volume up / down (10%)
 - `M` - mute / unmute
 - `←` / `→` - seek back / forward 10s (files only)
+- `⌘O` - open a file or playlist
 - `⌘F` / `Ctrl+F` - focus search
 - `⌘S` - save the current queue as a playlist
 - `⌘T` - toggle the visualizer
