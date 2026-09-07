@@ -136,7 +136,7 @@ This app was created using AI development tools. If you're not into that, no jud
 
 Some more questions and answers on the topic:
 
-**How much of it is AI-written?** Most of the code. I specified every feature, reviewed the changes, agonized about margins, and tested the results. I don't ship things I don't understand.
+**How much of it is AI-written?** Most of the code. I specified every feature, reviewed changes, debated architecture, agonized about margins, and tested the results. I'm an professional software engineer with multimedia experience and I don't ship things I don't understand. 
 
 **Does the app itself use AI?** No. There's no model in Pudding, no AI features, and no telemetry. The only network traffic is the radio streams you add yourself.
 
