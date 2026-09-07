@@ -70,7 +70,7 @@ export interface AppState {
   // to rows by view index).
   navLeafTracks: SearchTrack[];
   // The synthetic pool path (ctx.syntheticPath) of that leaf list. The now-playing
-  // accent lights a leaf row when this equals the live pool (app.currentParent.path)
+  // accent lights a leaf row when this equals the live pool (currentPoolPath)
   // — i.e. the list you're looking AT is the one feeding playback — covering both
   // lone play from the leaf and an explicit Play album/artist of the same set. Null
   // when no leaf list is shown.
@@ -94,6 +94,19 @@ export interface AppState {
   pendingResume: { time: number } | null;
 }
 
+// The audible pool's *identity*, as a signal. `app.currentParent` itself stays a
+// plain field — the playback paths read it constantly and must not subscribe — but
+// its setter mirrors the path here, so an effect can depend on "which pool is
+// feeding playback" without polling. Needed because a pool change doesn't always
+// move the track: replaying the song you're already hearing from a different list
+// leaves currentNodePath untouched, and the highlight would otherwise never
+// repaint (see the navigator leaf-row effect). Never assign this directly —
+// writing app.currentParent keeps the two in step.
+export const currentPoolPath = signal<string | null>(null);
+
+// Backing field for the app.currentParent accessor below.
+let currentParentNode: TreeNode | null = null;
+
 export const app: AppState = {
   store: undefined as unknown as Store, // assigned in init(), like the old `let`
   rootNode: null,
@@ -103,7 +116,16 @@ export const app: AppState = {
   lastSelectionPane: null,
   allStreams: [],
   currentStreamName: null,
-  currentParent: null,
+  get currentParent(): TreeNode | null {
+    return currentParentNode;
+  },
+  set currentParent(node: TreeNode | null) {
+    currentParentNode = node;
+    // Same path, new node object (a rescan re-binding the same folder, or a leaf
+    // list replayed from itself) is not a pool change: the signal's own equality
+    // check drops it, so no highlight repaint is triggered.
+    currentPoolPath.value = node?.path ?? null;
+  },
   artRequestId: 0,
   lastQueue: [],
   lastIndex: 0,

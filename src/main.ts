@@ -66,6 +66,7 @@ import {
   volume,
   volumePopoverOpen,
   currentNodePath,
+  currentPoolPath,
   currentStreamUrl,
   selectedStreamUrl,
   settingsOpen,
@@ -1458,7 +1459,7 @@ export function renderLeafTrackList(
     // stays dark when some other / reordered / ad-hoc pool owns the playhead even if
     // the same track happens to appear in this list.
     if (
-      app.currentParent?.path === ctx.syntheticPath &&
+      currentPoolPath.peek() === ctx.syntheticPath &&
       currentNodePath.peek() === t.path
     ) {
       row.classList.add("playing");
@@ -3174,15 +3175,16 @@ function setupEffects(): void {
 
   // The navigator's leaf rows pick up the now-playing accent (+ the equalizer glyph):
   // repaint mounted rows when the current track moves. Light a row only when the leaf
-  // list on screen IS the live pool — its stashed synthetic path equals
-  // currentParent's — matching the build-time paint above (lone play from the leaf or
-  // an explicit Play album/artist of the same set light up; a foreign / reordered /
-  // ad-hoc pool leaves them plain). currentParent is non-reactive, but every pool
-  // change moves the track too, so the currentNodePath read keeps this in step.
+  // list on screen IS the live pool — its stashed synthetic path equals the pool's —
+  // matching the build-time paint above (lone play from the leaf or an explicit Play
+  // album/artist of the same set light up; a foreign / reordered / ad-hoc pool leaves
+  // them plain). The pool is read through currentPoolPath (not the non-reactive
+  // app.currentParent) so a pool change alone repaints: replaying the track you're
+  // already hearing from a different list leaves currentNodePath untouched.
   effect(() => {
     const path = currentNodePath.value;
     const heroShows = heroVisible.value;
-    const isLivePool = app.navLeafPoolPath === (app.currentParent?.path ?? null);
+    const isLivePool = app.navLeafPoolPath === currentPoolPath.value;
     document
       .querySelectorAll<HTMLElement>("#library-nav .nav-track-row")
       .forEach((el) => {
@@ -3918,6 +3920,10 @@ async function init(): Promise<void> {
       duration: duration.value,
       title: npTitle.value,
       currentNodePath: currentNodePath.value,
+      // The audible pool's identity and the leaf list on screen: equal means the
+      // list you're looking at is the one feeding playback (its rows light up).
+      currentPoolPath: currentPoolPath.value,
+      navLeafPoolPath: app.navLeafPoolPath,
       queuePlayingIndex: queuePlayingIndex.value,
       shuffle: shuffleMode.value,
       repeat: repeatMode.value,
