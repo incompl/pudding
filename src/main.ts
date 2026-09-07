@@ -327,9 +327,13 @@ interface PersistedSession {
   duration: number; // the track's duration, so the scrubber shows a full bar before play
 }
 
-// Below this logical (CSS-px) height the layout collapses to the mini player.
-// Mirrors the `max-height` breakpoint in styles.css — keep the two in sync.
-const MINI_MAX_HEIGHT = 480;
+// At or below EITHER of these logical (CSS-px) bounds the layout collapses to
+// the mini player: the full layout needs room in both directions (a left pane
+// beside a right one, a list with a nav bar under it), so a window too small on
+// either axis falls back to the bar rather than cramming. Mirrors the
+// media-query breakpoints in styles.css — keep the two in sync.
+const MINI_MAX_HEIGHT = 360;
+const MINI_MAX_WIDTH = 600;
 const DEFAULT_NORMAL_SIZE = { width: 800, height: 600 };
 const DEFAULT_MINI_SIZE = { width: 367, height: 168 };
 
@@ -1960,12 +1964,12 @@ function setupSplitter(initialWidth: string | null): void {
 let normalSize = { ...DEFAULT_NORMAL_SIZE };
 let miniSize = { ...DEFAULT_MINI_SIZE };
 
-// The layout mode is derived purely from the current viewport height, so a
+// The layout mode is derived purely from the current viewport size, so a
 // manual resize past the breakpoint and the double-click toggle land on the
-// exact same CSS state. window.innerHeight is logical px (matches the media
-// query and MINI_MAX_HEIGHT) regardless of display scale factor.
+// exact same CSS state. window.inner* is logical px (matches the media queries
+// and the MINI_MAX_* bounds) regardless of display scale factor.
 function isMiniViewport(): boolean {
-  return window.innerHeight <= MINI_MAX_HEIGHT;
+  return window.innerHeight <= MINI_MAX_HEIGHT || window.innerWidth <= MINI_MAX_WIDTH;
 }
 
 // Double-click handler for the now-playing area: jump across the breakpoint to
@@ -2014,13 +2018,18 @@ async function setupWindowSize(
   const storedNormal = await app.store.get<{ width: number; height: number }>(
     KEY_WINDOW_SIZE_NORMAL,
   );
-  if (storedNormal && storedNormal.width > 0 && storedNormal.height > MINI_MAX_HEIGHT) {
+  if (storedNormal && storedNormal.height > MINI_MAX_HEIGHT && storedNormal.width > MINI_MAX_WIDTH) {
     normalSize = storedNormal;
   }
   const storedMini = await app.store.get<{ width: number; height: number }>(
     KEY_WINDOW_SIZE_MINI,
   );
-  if (storedMini && storedMini.width > 0 && storedMini.height > 0 && storedMini.height <= MINI_MAX_HEIGHT) {
+  if (
+    storedMini &&
+    storedMini.width > 0 &&
+    storedMini.height > 0 &&
+    (storedMini.height <= MINI_MAX_HEIGHT || storedMini.width <= MINI_MAX_WIDTH)
+  ) {
     miniSize = storedMini;
   }
   // Always start in normal mode. Mini hides the library/settings, so launching

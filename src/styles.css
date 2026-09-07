@@ -1191,7 +1191,7 @@ body.np-zen.np-idle #nav-bar {
    Base state is the hero: #now-playing-main (flex: 1, centered) owns the whole
    pane; the list and nav bar are hidden. `.show-list` swaps the list in for the
    hero; `.has-nav` reveals the nav bar (a list exists, either face). Both are
-   scoped to the full view below — the mini bar (max-height: 480px) never shows
+   scoped to the full view below — the mini bar (short *or* narrow) never shows
    the list or nav bar and always keeps the card. */
 #queue-view {
   display: none;
@@ -1251,7 +1251,10 @@ body.np-zen.np-idle #nav-bar {
   background: var(--surface-hover);
 }
 
-@media (min-height: 481px) {
+/* The full view: everything that is not the mini bar. The mini query below is
+   an OR of the two bounds, so its complement is an AND — the window has to
+   clear both to get the full layout. */
+@media (min-height: 361px) and (min-width: 601px) {
   /* List face: the list takes the pane in place of the hero card. */
   .show-list #queue-view {
     display: flex;
@@ -2127,8 +2130,10 @@ body.playback-paused .queue-row.playing .eq-bars {
    double-click toggle or a manual resize — the library, tabs, search, and
    settings collapse and the now-playing panel becomes a compact horizontal
    bar (album art on the left if present, then title/artist, over a full-width
-   controls row). The breakpoint mirrors MINI_MAX_HEIGHT in main.ts. */
-@media (max-height: 480px) {
+   controls row). Either bound alone is enough — too short or too narrow both
+   leave the full layout without the room it needs. The breakpoints mirror
+   MINI_MAX_HEIGHT / MINI_MAX_WIDTH in main.ts. */
+@media (max-height: 360px), (max-width: 600px) {
   #tabs,
   #search,
   #miniplayer-btn,
@@ -2179,7 +2184,7 @@ body.playback-paused .queue-row.playing .eq-bars {
 
   /* The list and nav bar are unusable in the thin mini bar, so they never show
      here: the .show-list / .has-nav rules that reveal them are scoped to the
-     full-view (min-height: 481px) media query, leaving the base
+     full-view (min-height: 361px) and (min-width: 601px) media query, leaving the base
      `#queue-view { display: none }`, `#nav-bar { display: none }`, and
      `#now-playing-main { flex: 1 }` to govern — the full now-playing card. The
      queue stays active (still drives playback); expanding the window brings the
