@@ -20,11 +20,11 @@ In the spirit of Winamp but with modern nicities.
 
 These features are bog standard for streaming service apps, but rare for file-based media players:
 
-* No import step. You pick your library folders and they are automatically watched: no need for import or rescan.
+* No import step. You pick your library folders and they are automatically watched. No need for manual rescan.
 * Relational navigation eg "Go to album"
 * Search-based navigation: ⌘F, type album name, hit enter.
 * First class queue. Right click anything to build one.
-* Playlists are autosaved files, not something you import/export.
+* Playlists are autosaved m3u8 files. No lock-in.
 * Full macOS integration. Light / dark mode, media keys, lock screen with album art, control center.
 * Art forward presentation. We love album covers.
 
