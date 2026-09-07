@@ -1711,20 +1711,36 @@ body.playback-paused .queue-row.playing .eq-bars {
   min-width: 0;
   font: inherit;
   color: var(--text);
-  padding: 0.05em 0.3em;
+  padding: 0 0.3em;
   border-radius: 4px;
   border: 1px solid var(--accent);
   background: var(--bg);
   /* The input's padding + border would make it taller than the text label it
      replaces, growing the header and shoving the rest of the panel down while
-     editing. Pull that extra height back out with a matching negative vertical
-     margin so the input's margin-box is exactly as tall as the label was. */
+     editing. Absorb that inward instead of with a negative margin: pin the
+     border box to one line box (`1lh` = the inherited line-height the label
+     laid out on) so the field occupies exactly the label's space. A negative
+     margin painted the border *outside* the element's own box, which the
+     playlist title's field can't afford — its header sits flush against the top
+     of #right's `overflow: auto` content box, so the top border was shaved off.
+     WebKit centers the input's text in the box, so no vertical padding needed. */
   box-sizing: border-box;
-  margin-block: calc(-0.05em - 1px);
+  height: 1lh;
 }
 
 .inline-edit:focus {
   outline: none;
+}
+
+/* Playlist title only: outdent the field by its own inner inset (1px border +
+   0.3em padding) so the name's glyphs keep the exact x they had as a label —
+   otherwise the title visibly slides right the moment you click to rename. The
+   box grows leftward into #right's own left padding (14px of room at the default
+   splitter width, against the 6.25px needed), so nothing is clipped. Not applied
+   to the tree rows' rename, where the same outdent would ride over the row's
+   gutter icon. */
+#queue-title > .inline-edit {
+  margin-inline-start: calc(-0.3em - 1px);
 }
 
 @property --live-color {
