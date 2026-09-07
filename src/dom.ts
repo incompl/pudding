@@ -62,7 +62,7 @@ export function h<K extends keyof HTMLElementTagNameMap>(
 
 // The animated "now playing" equalizer glyph (Apple Music / Spotify style): three
 // bars that bounce on their own staggered timers. Purely decorative — CSS drives
-// the motion (see .eq-bars) and freezes it while playback is paused (body.playback
+// the motion (see .eq-bars) and hides it while playback is paused (body.playback
 // -paused). Every track gutter (tree, queue, nav leaf list) builds one, hidden
 // until its row is the playing one, so the glyph is a shared, uniform detail.
 export function eqBars(): HTMLElement {
