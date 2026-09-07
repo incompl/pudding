@@ -2478,6 +2478,21 @@ pub fn run() {
                     Target::new(TargetKind::Webview),
                 ])
                 .level(log::LevelFilter::Info)
+                // Media-parsing crates warn about conditions that are normal in
+                // a real library and that we never act on: symphonia logs
+                // "invalid main_data_begin" on every MP3 seek (the bit
+                // reservoir is empty by definition after a seek), and lofty
+                // warns per-file about legacy-but-valid tags, so one library
+                // scan can bury everything else. Genuine failures don't come
+                // from these lines anyway — symphonia signals them through
+                // Result, and we log those ourselves with the file path
+                // attached ("audio: probe ... failed", "audio: decode error").
+                .level_for("symphonia_bundle_mp3", log::LevelFilter::Error)
+                .level_for("symphonia_bundle_flac", log::LevelFilter::Error)
+                .level_for("symphonia_format_isomp4", log::LevelFilter::Error)
+                .level_for("symphonia_format_ogg", log::LevelFilter::Error)
+                .level_for("symphonia_metadata", log::LevelFilter::Error)
+                .level_for("lofty", log::LevelFilter::Error)
                 .build(),
         )
         .plugin(tauri_plugin_store::Builder::new().build())
