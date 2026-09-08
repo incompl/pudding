@@ -64,6 +64,60 @@ async function handle(
       return (el(String(a.selector)) as unknown as Record<string, unknown>)[
         String(a.name)
       ];
+    case "layout": {
+      // Geometry + the computed properties that decide where type lands, for a
+      // batch of selectors. scripts/caliper.mjs maps these boxes onto the real
+      // rasterized pixels of a screencapture, so it needs the numbers and the
+      // viewport scale from the same instant.
+      //
+      // Missing selectors come back as null rather than throwing: one call can
+      // then name elements from states that never coexist (the mini player's
+      // expand button alongside the full bar's tabs).
+      const out: Record<string, unknown> = {};
+      for (const sel of a.selectors as string[]) {
+        const found = document.querySelector(sel);
+        if (!found) {
+          out[sel] = null;
+          continue;
+        }
+        const cs = getComputedStyle(found);
+        out[sel] = {
+          rect: found.getBoundingClientRect().toJSON(),
+          font: cs.font,
+          fontSize: cs.fontSize,
+          fontWeight: cs.fontWeight,
+          fontFamily: cs.fontFamily,
+          lineHeight: cs.lineHeight,
+          color: cs.color,
+          paddingTop: cs.paddingTop,
+          paddingBottom: cs.paddingBottom,
+          borderTopWidth: cs.borderTopWidth,
+          borderBottomWidth: cs.borderBottomWidth,
+        };
+      }
+      return {
+        elements: out,
+        dpr: window.devicePixelRatio,
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+      };
+    }
+    case "css": {
+      // Add or remove a <style> by id. Two jobs for caliper: freezing the app
+      // (transitions/animations off) so a capture is reproducible, and injecting
+      // a candidate rule to A/B a fix in the real engine without a rebuild.
+      // Narrow and typed rather than a generic eval, matching this bridge's
+      // "pure #id selectors, never arbitrary script" design.
+      const id = String(a.id);
+      document.getElementById(id)?.remove();
+      if (a.text != null) {
+        const style = document.createElement("style");
+        style.id = id;
+        style.textContent = String(a.text);
+        document.head.appendChild(style);
+      }
+      return true;
+    }
     case "probe":
       return probe();
     case "invoke":

@@ -15,7 +15,8 @@
     "test:unit": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test test/*.test.ts",
     "test:e2e": "node --import tsx --test --test-concurrency=1 e2e/tests/*.test.ts",
     "e2e": "pnpm build:e2e && pnpm test:e2e",
-    "drive": "node e2e/drive.mjs --dev"
+    "drive": "node e2e/drive.mjs --dev",
+    "caliper": "node scripts/caliper.mjs"
   },
   "dependencies": {
     "@preact/signals-core": "^1.14.2",
