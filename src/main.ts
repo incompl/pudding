@@ -10,7 +10,24 @@ import { load } from "@tauri-apps/plugin-store";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect } from "@preact/signals-core";
 import { engine } from "./engine-glue";
-import { h, eqBars } from "./dom";
+import { h, eqBars, append } from "./dom";
+import {
+  activeColumns,
+  buildCells,
+  buildHeaderCells,
+  columnHeaders,
+  columnsMenuItem,
+  gridTemplate,
+  gridClasses,
+  librarySort,
+  loadColumnPrefs,
+  nextSort,
+  persist as persistColumnPrefs,
+  setColumnRepaint,
+  sortTracks,
+  NAV_CELLS,
+  type ColumnId,
+} from "./columns";
 import { windowedList } from "./windowed-list";
 import { maybeStartE2eBridge } from "./e2e-bridge";
 import { createVisualizer } from "./visualizer";
@@ -161,8 +178,9 @@ import {
 
   toastEl,
 } from "./dom-refs";
-import { showContextMenu, contextMenuOpen } from "./context-menu";
+import { showContextMenu } from "./context-menu";
 import { startTrackDrag } from "./drag-drop";
+import { attachOverflowTitles } from "./overflow-title";
 import { setupSearch } from "./search";
 import {
   refreshTree,
@@ -1194,7 +1212,7 @@ async function addProviderToQueue(
 function showArtistContextMenu(x: number, y: number, name: string): void {
   const getTracks: TrackProvider = () =>
     invoke<SearchTrack[]>("artist_tracks", { artist: name });
-  showContextMenu(x, y, [
+  void showContextMenu(x, y, [
     { label: "Play", action: () => void openArtistQueue(name) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
@@ -1209,7 +1227,7 @@ function showAlbumContextMenu(
 ): void {
   const getTracks: TrackProvider = () =>
     invoke<SearchTrack[]>("album_tracks", { album, albumArtist });
-  showContextMenu(x, y, [
+  void showContextMenu(x, y, [
     { label: "Play", action: () => void openAlbumQueue(album, albumArtist) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
@@ -1231,7 +1249,7 @@ function showPlaylistContextMenu(
 ): void {
   const getTracks: TrackProvider = async () =>
     playlistPlayableTracks(await invoke<PlaylistData>("read_playlist", { path }));
-  showContextMenu(x, y, [
+  void showContextMenu(x, y, [
     { label: "Play", action: () => void playPlaylistPath(path) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
@@ -1290,12 +1308,19 @@ function fieldVaries(
 }
 
 export function renderLeafTrackList(
-  tracks: SearchTrack[],
+  inputTracks: SearchTrack[],
   ctx: LeafListContext,
 ): HTMLElement {
+  // A library list has a *sort* (sticky, indicated in the header), unlike a queue,
+  // which has an order the user owns. Sorting up front means the play pool, the
+  // keyboard order, and the row indices are all built from what's on screen.
+  const tracks = sortTracks(inputTracks, librarySort.peek());
   app.navLeafTracks = tracks;
   app.navLeafPoolPath = ctx.syntheticPath;
-  const ul = h("div", { class: "nav-list" });
+  // The query container for this list's header row. The windowed row block inside
+  // declares its own `listcol` container at the identical width, so header and rows
+  // switch into column mode together.
+  const ul = h("div", { class: "nav-list col-host" });
 
   // Show a field in the dimmed suffix only when the list's tracks disagree about it
   // (mirrors the browse tree's per-folder showArtist). A field that's the same on
@@ -1307,6 +1332,16 @@ export function renderLeafTrackList(
   // LeafListContext) and additionally drops the artist as constant, leaving bare titles.
   const showArtist = fieldVaries(tracks, (t) => t.artist);
   const showAlbum = !ctx.hideAlbum && fieldVaries(tracks, (t) => t.album);
+  // fieldVaries is now the *default*, not an override: it decides the automatic
+  // column set, and the moment the user picks their own set through `Columns ▸`
+  // that set is taken literally — constant fields and all. "You made the mess."
+  const autoCols: ColumnId[] = [
+    "title",
+    ...(showArtist ? (["artist"] as ColumnId[]) : []),
+    ...(showAlbum ? (["album"] as ColumnId[]) : []),
+    "duration",
+  ];
+  const cols = activeColumns("library", autoCols);
 
   // Play from `index` in context (cf. playTreeTrack): select the row so it stays
   // highlighted, drop the queue-row highlight, dismiss any queue/playlist chrome
@@ -1355,36 +1390,17 @@ export function renderLeafTrackList(
       rowPlayButton(() => playAt(t, i)),
     );
 
-    // Single line, left-aligned (matching the browse tree): the title, then the
-    // artist/album inline and dimmed after a separator. Every row is one line at
-    // any width, so the height never varies — the uniform height the window
-    // positions rows by (row i at i * rowHeight). The suffix is appended only when
-    // present, so a metadata-less row is just the bare title (still one-line height)
-    // rather than a reserved blank; the whole cell truncates with one ellipsis.
-    const secondaryText = [showArtist ? t.artist : null, showAlbum ? t.album : null]
-      .filter(Boolean)
-      .join(" · ");
-    const cell = h(
-      "span",
-      { class: "nav-cell" },
-      h("span", {
-        class: "nav-primary",
-        text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
-      }),
-    );
-    if (secondaryText) {
-      cell.appendChild(h("span", { class: "nav-secondary", text: secondaryText }));
-    }
-
-    // Trailing runtime, right-aligned and dimmed. Shown only past the two-column
-    // breakpoint (see .row-dur) — where there's room — and only when the track's
-    // duration is known (out-of-library / undecodable rows carry none, so the slot
-    // is simply absent rather than a blank cell). One inline element on the same
-    // line, so the row stays its uniform windowed height.
-    const dur =
-      t.duration != null && t.duration > 0
-        ? h("span", { class: "row-dur", text: formatTime(t.duration) })
-        : null;
+    // One cell per column, in the field table's order. The same DOM serves both
+    // layouts: past the pane's 28rem breakpoint `.col-grid` becomes a grid and each
+    // cell is a track; below it the cells fold back into a single inline
+    // `title · artist · album` line via the `· ` separators in CSS. Every row is one
+    // line at any width either way, so the height never varies — the uniform height
+    // the window positions rows by (row i at i * rowHeight).
+    const cell = h("span", {
+      class: gridClasses("library", "nav-cell"),
+      style: { "--cols": gridTemplate(cols) },
+    });
+    append(cell, buildCells(t, cols, NAV_CELLS));
 
     const row = h(
       "div",
@@ -1416,21 +1432,26 @@ export function renderLeafTrackList(
             if (!navSel.signal.peek().has(t)) navSel.single(t);
             const sel = navSel.resolveIn(tracks);
             if (sel.length > 1) {
-              showContextMenu(e.clientX, e.clientY, [
+              void showContextMenu(e.clientX, e.clientY, [
                 ...queueMenuItems((sink) => sink(sel), sel.length),
                 addToPlaylistItem(() => sel),
                 showInFinderItem(sel[0].path),
+                columnsMenuItem("library", autoCols),
               ]);
             } else {
               // Double-click plays the row, so the menu skips a redundant Play (as in
               // the tree and queue menus): it leads with the list-building verbs, then
               // the per-track navigation (Go to artist / album when tagged).
-              showContextMenu(e.clientX, e.clientY, [
+              void showContextMenu(e.clientX, e.clientY, [
                 ...queueMenuItems((sink) => sink([t])),
                 addToPlaylistItem(() => [t]),
                 ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: t.albumArtist }),
                 editMetadataItem(t.path),
                 showInFinderItem(t.path),
+                // Right-clicking a row scopes the picker to that row's pane
+                // implicitly, so it needs no "Library ▸" label and no
+                // focused-pane guesswork.
+                columnsMenuItem("library", autoCols),
               ]);
             }
           },
@@ -1447,7 +1468,6 @@ export function renderLeafTrackList(
       },
       num,
       cell,
-      dur,
     );
     if (navSel.signal.peek().has(t)) row.classList.add("selected");
     // A reveal's one-shot wash, applied at build time (like the selection and
@@ -1508,6 +1528,34 @@ export function renderLeafTrackList(
     return ul;
   }
 
+  // The optional header row, built as a real .nav-track-row — same padding, same
+  // gutter width, same --cols template — so it lines up with the rows by
+  // construction rather than by a second set of matched numbers. It is
+  // display:none outside column mode, gated by the *same* container query as the
+  // columns, so a header can never appear above a folded row.
+  if (columnHeaders.library.peek()) {
+    const headCells = h("span", {
+      class: "nav-cell col-grid",
+      style: { "--cols": gridTemplate(cols) },
+    });
+    append(
+      headCells,
+      buildHeaderCells(cols, librarySort.peek(), (id) => {
+        librarySort.value = nextSort(librarySort.peek(), id);
+        void persistColumnPrefs();
+        renderNav();
+      }),
+    );
+    ul.appendChild(
+      h(
+        "div",
+        { class: "nav-track-row colhead" },
+        h("span", { class: "nav-num" }),
+        headCells,
+      ),
+    );
+  }
+
   // Window the rows: only the on-screen slice is mounted over a full-height spacer,
   // so a whole-library Songs list costs a screenful of DOM instead of one node per
   // track. Native scroll/inertia are unchanged (real scroll pane, full height). The
@@ -1537,6 +1585,11 @@ export function renderLeafTrackList(
   }
   return ul;
 }
+
+// A column-set / header / sort change has to rebuild the pane's rows, and no
+// signal the nav render path tracks covers that — so the picker re-renders it
+// explicitly. renderNav() rebuilds the current drill pane in place.
+setColumnRepaint("library", () => renderNav());
 
 // Plays a queue row by its index (not path, so a duplicated track resolves to
 // the clicked instance). This is the sole way to (re)enter the queue: it makes
@@ -2740,10 +2793,9 @@ function setupPlayerControls(): void {
     }
 
     if (e.key === "Escape") {
-      // An open context menu owns Escape first (its own listener dismisses it), so
-      // one Esc closes the menu without also dropping the selection; a second Esc
-      // then clears the highlight.
-      if (contextMenuOpen()) return;
+      // No guard for an open context menu: it's a native menu, which takes the
+      // keyboard while it's up, so its Esc never reaches this listener. One Esc
+      // closes the menu, a second clears the highlight — as before, but AppKit's.
       // Bail out of keyboard navigation: drop the active surface's highlight (and
       // Enter's target with it).
       if (clearKbdSelection()) e.preventDefault();
@@ -3380,6 +3432,48 @@ async function init(): Promise<void> {
     document.body.classList.add("platform-mac");
   }
 
+  // Right-click fall-through. Every meaningful target builds its own menu (the
+  // contextmenu handlers on rows), but anything else — padding, the topbar, an
+  // empty pane — drops through to WebKit's built-in menu. Release builds compile
+  // devtools out, so that menu is a lone "Reload" that silently restarts the
+  // frontend: never what a music player's user wants. Suppress it, keeping the
+  // one exception macOS itself makes — real text has a menu, chrome doesn't.
+  //
+  // Two passes, because "real text" has to win at both ends. Capture runs ahead
+  // of the row handlers and hands editable fields straight to WebKit: the inline
+  // playlist rename field lives inside a row that opens its own menu, so without
+  // this, right-clicking mid-rename offers Play/Delete instead of Paste.
+  document.addEventListener(
+    "contextmenu",
+    (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true']")) {
+        e.stopPropagation();
+      }
+    },
+    true,
+  );
+  // Bubble is the backstop for whatever no row claimed. Selected prose keeps its
+  // native menu (Copy / Look Up / Services) — the selectable set is the
+  // user-select: text opt-in list in styles.css — and dev keeps the default menu
+  // outright, so Inspect Element stays one right-click away.
+  if (!import.meta.env.DEV) {
+    document.addEventListener("contextmenu", (e) => {
+      const target = e.target as HTMLElement | null;
+      const prose = target?.closest(
+        "#now-playing-title, #now-playing-artist, #now-playing-album, #now-playing-stream-meta",
+      );
+      const sel = window.getSelection();
+      const selected =
+        !!prose &&
+        !!sel &&
+        !sel.isCollapsed &&
+        sel.rangeCount > 0 &&
+        sel.getRangeAt(0).intersectsNode(prose);
+      if (!selected) e.preventDefault();
+    });
+  }
+
   const appWindow = getCurrentWindow();
   document.addEventListener("mousedown", (e) => {
     const target = e.target as HTMLElement | null;
@@ -3468,6 +3562,12 @@ async function init(): Promise<void> {
   queueListEl.addEventListener("click", (e) => {
     if (!(e.target as HTMLElement).closest(".queue-row")) queueSel.clear();
   });
+  // Hover-to-read for whatever the columns had to clip, in both table panes. Armed
+  // on the two hosts that outlive their lists — the navigator replaces its list on
+  // every drill, and both panes window their rows — so no rebuild has to remember
+  // to re-arm it. See overflow-title.ts.
+  attachOverflowTitles(document.querySelector("#library-nav") as HTMLElement);
+  attachOverflowTitles(queueListEl);
   queueCloseBtn.addEventListener("click", closeQueue);
   // Clicking anywhere on the title — the text or the hover pencil — starts an
   // inline rename; startTitleEdit no-ops when the header isn't a playlist.
@@ -3479,6 +3579,11 @@ async function init(): Promise<void> {
   app.store = await bootStep("load-store", () =>
     load(STORE_FILE, { defaults: {}, autoSave: false }),
   );
+
+  // Per-pane column sets, header visibility, and the library sort. Loaded before
+  // anything renders, so the first paint is already the user's layout — no flash
+  // of the automatic columns followed by a rebuild.
+  await loadColumnPrefs();
 
   app.libraryRoots = (await app.store.get<string[]>(KEY_LIBRARY_ROOTS)) ?? [];
   // First run (key never set): adopt the default stream list the backend seeds

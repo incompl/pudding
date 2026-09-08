@@ -193,7 +193,7 @@ export function setupSearch(): void {
             });
           }
           menu.push(addToPlaylistItem(provider));
-          showContextMenu(e.clientX, e.clientY, menu);
+          void showContextMenu(e.clientX, e.clientY, menu);
         });
       }
       searchResultsEl.appendChild(row);

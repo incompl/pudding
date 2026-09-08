@@ -1,112 +1,74 @@
-// Cursor-positioned context menu (tree rows, queue rows, search results). A
-// self-contained leaf: its own open-menu stack + listener-installed flag, the
-// `h` DOM builder, and the ContextMenuItem type — nothing else. Only
-// showContextMenu is public; the rest is internal machinery.
+// Cursor-positioned context menu (tree rows, queue rows, search results) — drawn
+// by the OS. A thin adapter and nothing more: it maps our declarative
+// ContextMenuItem tree onto the payloads @tauri-apps/api/menu accepts, then pops
+// the result at the click. Every behavior the old DOM menu hand-rolled —
+// dismissal on an outside press, Escape, scroll and resize, hover-opened
+// flyouts, viewport clamping, keyboard navigation, type-select — is AppKit's.
+// Only showContextMenu is public.
 
-import { h } from "./dom";
+import { Menu, type MenuOptions } from "@tauri-apps/api/menu";
+import { LogicalPosition } from "@tauri-apps/api/dpi";
 import type { ContextMenuItem } from "./types";
 
-// The open menu stack: index 0 is the root, deeper entries are flyouts. Kept so
-// dismissal removes every level and a hover can close menus below a given depth.
-let contextMenus: HTMLElement[] = [];
-let contextMenuListenersInstalled = false;
+// One entry of a native menu, as the plugin's untagged payload. Which kind of
+// item the Rust side builds is inferred from the fields present, in this order:
+// `item` → predefined (our separators), `checked` → check item, `items` →
+// submenu, otherwise a plain item. That ordering is why `checked` must never
+// appear beside `items`: the pair would deserialize as a check item and the
+// submenu would silently vanish. ContextMenuItem's submenu variant carries no
+// `checked` for exactly that reason.
+type NativeItem = NonNullable<MenuOptions["items"]>[number];
 
-function hideContextMenu(): void {
-  for (const m of contextMenus) m.remove();
-  contextMenus = [];
-}
+// The last menu we popped, still holding its native resource. See showContextMenu.
+let previous: Menu | null = null;
 
-function contextMenusContain(target: Node): boolean {
-  return contextMenus.some((m) => m.contains(target));
-}
-
-// Whether a context menu is currently open. Lets the global Escape handler defer
-// to the menu's own Esc-dismiss (below) rather than also clearing a selection —
-// so one Esc closes the menu, a second clears the highlight.
-export function contextMenuOpen(): boolean {
-  return contextMenus.length > 0;
-}
-
-// Close every flyout deeper than `depth`, leaving that menu and its ancestors up.
-function closeSubmenusBelow(depth: number): void {
-  while (contextMenus.length > depth + 1) {
-    contextMenus.pop()?.remove();
-  }
-}
-
-function ensureContextMenuListeners(): void {
-  if (contextMenuListenersInstalled) return;
-  contextMenuListenersInstalled = true;
-  // A press anywhere outside the menu(s) dismisses; items run on click, which
-  // fires after this mousedown. Capture phase so it fires even if a descendant
-  // (e.g. the search input's native shadow DOM) swallows the bubbling event.
-  document.addEventListener(
-    "mousedown",
-    (e) => {
-      if (!contextMenusContain(e.target as Node)) hideContextMenu();
-    },
-    true,
-  );
-  // Focus moving out of the menu also dismisses it — covers focusing the search
-  // box (or any control) by click or keyboard.
-  document.addEventListener("focusin", (e) => {
-    if (!contextMenusContain(e.target as Node)) hideContextMenu();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") hideContextMenu();
-  });
-  window.addEventListener("resize", hideContextMenu);
-  // Capture so a scroll in any container (e.g. the tree) closes the menu, since
-  // its fixed position would otherwise detach from the row.
-  window.addEventListener("scroll", hideContextMenu, true);
-}
-
-// Clamp a menu to the viewport so an edge row doesn't push it offscreen.
-function positionContextMenu(menu: HTMLElement, x: number, y: number): void {
-  const rect = menu.getBoundingClientRect();
-  const left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4));
-  const top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4));
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
-}
-
-// Build one menu level (root or flyout) at `depth`. Hovering any row closes
-// deeper flyouts; a `submenu` row then opens its own flyout beside itself.
-function buildContextMenu(items: ContextMenuItem[], depth: number): HTMLElement {
-  const menu = h("div", { class: "context-menu" });
-  for (const item of items) {
-    const row = h("div", { class: "context-menu-item", text: item.label });
+// Ids are derived from the item's position in the tree ("ctx:1.0.3") rather than
+// left to Tauri's generator. Tauri keys each item's action channel by menu-item
+// id in a map it never evicts, so a fresh id per right-click would grow that map
+// for the life of the process; a positional id makes the next popup overwrite the
+// same slot. The "ctx:" prefix keeps them clear of the menubar's ids, which the
+// Rust on_menu_event handler matches by name (src-tauri/src/lib.rs).
+function toNative(items: ContextMenuItem[], path: string): NativeItem[] {
+  return items.map((item, i): NativeItem => {
+    if ("separator" in item) return { item: "Separator" };
+    const id = `ctx:${path}${i}`;
+    const enabled = item.disabled !== true;
     if ("submenu" in item) {
-      row.classList.add("has-submenu");
-      const submenu = item.submenu;
-      row.addEventListener("mouseenter", () => {
-        closeSubmenusBelow(depth);
-        const child = buildContextMenu(submenu, depth + 1);
-        document.body.appendChild(child);
-        contextMenus.push(child);
-        // Open to the row's right, aligned to its top; positionContextMenu flips
-        // it left if it would overflow.
-        const r = row.getBoundingClientRect();
-        positionContextMenu(child, r.right - 2, r.top);
-      });
-    } else {
-      const action = item.action;
-      row.addEventListener("mouseenter", () => closeSubmenusBelow(depth));
-      row.addEventListener("click", () => {
-        hideContextMenu();
-        action();
-      });
+      // A submenu may be a thunk so its level can be built against live state
+      // (the Columns picker's checkmarks). Native menus are built whole, up
+      // front, so it resolves here rather than on hover — still per right-click,
+      // so the checkmarks are as fresh as they ever were.
+      const sub = typeof item.submenu === "function" ? item.submenu() : item.submenu;
+      return { id, text: item.label, enabled, items: toNative(sub, `${path}${i}.`) };
     }
-    menu.appendChild(row);
-  }
-  return menu;
+    const action = item.action;
+    if (item.checked === undefined) return { id, text: item.label, enabled, action };
+    return { id, text: item.label, enabled, checked: item.checked, action };
+  });
 }
 
-export function showContextMenu(x: number, y: number, items: ContextMenuItem[]): void {
-  ensureContextMenuListeners();
-  hideContextMenu();
-  const menu = buildContextMenu(items, 0);
-  document.body.appendChild(menu);
-  contextMenus.push(menu);
-  positionContextMenu(menu, x, y);
+// Pop a menu at (x, y) — viewport CSS pixels, i.e. a click's clientX/clientY.
+// The window has a full-size content view (titleBarStyle "Overlay"), so the
+// webview sits at its origin and those coordinates are the window coordinates
+// the native side positions against.
+//
+// Resolves once the menu is dismissed; the chosen item's action runs on its own
+// channel and is not awaited here. Call sites are contextmenu listeners, which
+// can't await, so they discard the promise with `void`.
+export async function showContextMenu(
+  x: number,
+  y: number,
+  items: ContextMenuItem[],
+): Promise<void> {
+  const menu = await Menu.new({ items: toNative(items, "") });
+  // Free the *previous* popup's native resource, not this one's on dismissal: an
+  // item's action arrives over a channel and can land after popup() resolves, so
+  // a menu is kept alive until the next right-click replaces it.
+  const stale = previous;
+  previous = menu;
+  try {
+    await menu.popup(new LogicalPosition(x, y));
+  } finally {
+    if (stale) void stale.close().catch((e) => console.error("menu close failed", e));
+  }
 }

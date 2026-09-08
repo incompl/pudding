@@ -66,8 +66,24 @@ events → signals → DOM). Fixtures live in `e2e/fixtures/` (`tone*.m4a`).
 
 ## Stop it
 
-Kill the background daemon job — its `--dev`/`--bundle` child process group
-(vite, cargo, the app window) is torn down with it.
+Kill the background daemon job. **Its children do NOT reliably die with it** —
+vite, the tauri CLI and the app window routinely survive, and the orphaned app
+stays connected to the dead socket. The next daemon you start then sits at
+`{"connected":false}` forever, because the app that would dial in is already
+running and pointed somewhere else. Two sessions were lost to this before it was
+written down.
+
+Plain SIGTERM is also not always enough for the daemon itself. What actually
+clears everything:
+
+```bash
+lsof -t -iTCP:9010,9011,1420 -sTCP:LISTEN | xargs kill -9
+pkill -9 -f 'target/debug/pudding'; pkill -9 -f 'tauri.js dev'
+```
+
+Symptom to recognise: `/health` returns `{"ok":true,"connected":false}` and stays
+that way. That is never a slow start — it is an orphan, and waiting will not fix
+it. (`pnpm caliper` detects this case and prints the cleanup for you.)
 
 ## Notes
 

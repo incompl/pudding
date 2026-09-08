@@ -1404,6 +1404,49 @@ fn e2e_port() -> Option<u16> {
         .and_then(|s| s.parse().ok())
 }
 
+// Dev/e2e only: this window's CGWindowID, so `screencapture -l <id>` can grab
+// exactly this window's real rasterized pixels.
+//
+// Why this exists at all: sub-pixel alignment cannot be measured in a headless
+// browser. Headless WebKit and the WKWebView we ship disagree by a whole device
+// pixel on boxes that land off the device grid (measured 2026-09-07 on the topbar
+// search field), so the only honest source is the window as macOS actually drew
+// it. Capturing by window id rather than by screen region means the capture is
+// immune to occlusion, needs no focus stealing, and arrives already cropped to
+// the window — see scripts/caliper.mjs.
+//
+// An NSWindow's `windowNumber` IS its CGWindowID. Env-gated like e2e_port above
+// so it stays inert in normal runs.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn window_number(window: tauri::Window) -> Option<u32> {
+    use objc2_app_kit::NSWindow;
+    use objc2_foundation::MainThreadMarker;
+
+    std::env::var("PUDDING_E2E_PORT").ok()?;
+    // AppKit is main-thread-only, and both `ns_window()` and `windowNumber` are
+    // AppKit. Tauri runs non-async commands on the main thread, so this holds
+    // today — the marker is what keeps it holding: adding `async` to this
+    // signature would otherwise move it off-thread silently, and the same guard
+    // is how the other objc2 call sites in this file open.
+    MainThreadMarker::new()?;
+    let ptr = window.ns_window().ok()?;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Tauri hands back this window's live NSWindow pointer, we are on the
+    // main thread per the marker above, and `windowNumber` is a plain property
+    // read that neither mutates the window nor escapes the borrow.
+    let number = unsafe { (*(ptr as *const NSWindow)).windowNumber() };
+    u32::try_from(number).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn window_number() -> Option<u32> {
+    None
+}
+
 // Tags for an externally-opened file, read directly from the file (it may not
 // be in the library DB).
 #[tauri::command]
@@ -3034,6 +3077,7 @@ pub fn run() {
             get_stream_image,
             frontend_ready,
             e2e_port,
+            window_number,
             prepare_external_file,
             write_tags,
             read_file_tags,

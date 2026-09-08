@@ -197,13 +197,35 @@ export interface TrackSelection {
   rangeTo(t: SearchTrack, tracks: SearchTrack[]): void;
 }
 
-// Lightweight cursor-positioned context menu for tree rows. Styled like the
-// search dropdown (dark lifted surface). A leaf item runs an action; a `submenu`
-// item opens a flyout to the right on hover (used by "Add to playlist ▸").
-// Dismisses on any outside press, Escape, scroll, or resize.
+// The declarative description of a row's context menu. A leaf item runs an
+// action; a `submenu` item opens a flyout (used by "Add to playlist ▸"). The OS
+// draws it — see context-menu.ts, which maps this onto a native menu — so the
+// look, the flyouts, and dismissal on an outside press, Escape, or scroll are
+// AppKit's, not ours.
 export type ContextMenuItem =
-  | { label: string; action: () => void }
-  | { label: string; submenu: ContextMenuItem[] };
+  // `checked` makes the item a native check item, so a menu can carry toggles —
+  // the Columns picker — beside ordinary verbs. `disabled` greys the item and
+  // swallows the click, for a toggle that is on but not the user's to turn off
+  // (the Title column). Clicking any item dismisses the menu: a native menu
+  // can't be held open across a run of toggles, so ticking four columns is four
+  // right-clicks.
+  | {
+      label: string;
+      action: () => void;
+      checked?: boolean;
+      disabled?: boolean;
+    }
+  // A submenu may be a thunk, so a level that shows live state (checkmarks) is
+  // built against that state at the moment the menu is raised. No `checked`
+  // here: the native payload infers a check item from that field and would drop
+  // the submenu (see NativeItem in context-menu.ts).
+  | {
+      label: string;
+      submenu: ContextMenuItem[] | (() => ContextMenuItem[]);
+      disabled?: boolean;
+    }
+  // A horizontal rule between groups. Carries no label and no behavior.
+  | { separator: true };
 
 // A reusable field editor: a small stacked form of labeled text inputs plus
 // Cancel/Save. Both callers mount it in the right-pane editor face (track

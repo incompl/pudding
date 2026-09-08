@@ -10,6 +10,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { h } from "./dom";
 import type { ActiveDrag, DragPayload, SearchTrack, Stream } from "./types";
 import { queueListEl, streamsContainer, streamListPathInput } from "./dom-refs";
+
+// The queue list's *track* rows. `:not(.colhead)` excludes the sticky column
+// header, which shares the .queue-row shell (so it lines up with the rows by
+// construction) but is not a drop target and owns no view index.
+const QUEUE_ROW_SEL = "li.queue-row:not(.colhead)";
 import { streamListWritable, app } from "./state";
 import { queueSel, selectedListTracks } from "./main";
 import { reorderCuratedTracks, insertCuratedTracks } from "./queue";
@@ -26,7 +31,7 @@ let activeDrag: ActiveDrag | null = null;
 // track(s) to insert; the drag only engages past the movement threshold. Drops
 // land in the open queue/playlist list.
 export function startTrackDrag(e: PointerEvent, tracks: SearchTrack[]): void {
-  beginPointerDrag(e, { kind: "tracks", tracks }, null, queueListEl, "li.queue-row");
+  beginPointerDrag(e, { kind: "tracks", tracks }, null, queueListEl, QUEUE_ROW_SEL);
 }
 
 // Arm a drag from a pointerdown on a drag source (a list row, or a tree track).
@@ -161,7 +166,7 @@ function updateDropTarget(x: number, y: number): number | null {
   // index must come from each row's own view index (data-row-index) and the total
   // row count on the list, not from the mounted rows' positions. Non-windowed lists
   // (streams) mount every row in order, so indexOf / rows.length are exact for them.
-  const windowed = d.rowSelector === "li.queue-row";
+  const windowed = d.rowSelector === QUEUE_ROW_SEL;
   const el = document.elementFromPoint(x, y) as HTMLElement | null;
   const row = el?.closest(d.rowSelector) as HTMLElement | null;
   if (row && d.listEl.contains(row)) {
@@ -206,7 +211,7 @@ export function attachRowReorder(li: HTMLElement, track: SearchTrack): void {
     // multi-selection reorders as one block instead of only the grabbed row.
     const sel = queueSel.signal.peek();
     const tracks = sel.has(track) && sel.size > 1 ? selectedListTracks() : [track];
-    beginPointerDrag(e, { kind: "reorder", tracks }, li, queueListEl, "li.queue-row");
+    beginPointerDrag(e, { kind: "reorder", tracks }, li, queueListEl, QUEUE_ROW_SEL);
   });
 }
 

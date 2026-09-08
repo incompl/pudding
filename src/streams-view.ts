@@ -73,7 +73,7 @@ export function renderStreams(streams: Stream[]): void {
           { label: "Delete", action: () => void deleteStream(stream) },
         );
       }
-      showContextMenu(e.clientX, e.clientY, items);
+      void showContextMenu(e.clientX, e.clientY, items);
     });
     const li = h("li", { class: "stream-row" }, label);
     attachStreamReorder(li, stream);

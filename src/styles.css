@@ -36,6 +36,11 @@
      Adding another Lucide icon here needs no change there; drawing on a new
      third-party set does.
 
+     This recipe applies to the masks below and to icons in list rows, which are
+     sized against row height. The topbar's six glyphs do NOT use it — they are
+     cropped per icon so their INK matches the type beside them; see the topbar
+     icon recipe on .mode-btn svg before adding an icon up there.
+
      Line-art folder used as a mask in the search dropdown. Same recipe as the
      search-input magnifier; color comes from the element's background-color, so
      the stroke color here is arbitrary. */
@@ -161,6 +166,17 @@ textarea,
   padding-top: 2px;
   padding-bottom: 1px;
   height: 36px;
+  /* There is deliberately no optical-drop variable here. A previous version of
+     this file carried `--cap-drop: 0.25px`, meant to nudge a glyph below the box
+     centre onto the type's cap band. It could not work, and measurement showed it
+     did not: at dpr 2 a 0.25px offset is half a device pixel, and WebKit snaps it
+     to a whole one, so the correction lands at 4x its intended size. Its only
+     consumer was the search magnifier, where it was the entire cause of that
+     glyph reading a device pixel low.
+
+     The drop is carried by ink height instead — see the topbar icon recipe on
+     .mode-btn svg. That is the only lever at this scale that can express a
+     fraction of a device pixel. */
 }
 
 #tabs {
@@ -196,13 +212,12 @@ body.platform-mac #tabs {
   /* The right value makes the gap from the collapse glyph to the window's right
      edge equal its gap to the window's top edge. Those two are set by different
      things, so one has to be solved for: above the glyph sit the topbar's 2px
-     padding-top plus (33 - 14) / 2 = 9.5px of centering slack in the 33px content
-     box, less the 0.5px optical lift the cluster now carries (see
-     #playback-modes) — 11px. To its right, the 25px button already contributes
-     (25 - 14) / 2 = 5.5px of its own, so the bar owes the remaining 5.5px. Recompute
-     if the button (#miniplayer-btn, 25px), its icon (14px), the bar's height, or
-     that lift changes. The left value is interior spacing against the splitter —
-     untouched. */
+     padding-top plus (33 - 26) / 2 = 3.5px of centering slack in the 33px content
+     box, plus the button's own (26 - 12.5) / 2 = 6.75px ring around the ink —
+     12.25px. To its right, that same 6.75px ring already applies, so the bar owes
+     the remaining 5.5px. Recompute if the button box (26px), the icon ink
+     (12.5px), or the bar's height changes. The left value is interior spacing against the
+     splitter — untouched. */
   padding: 0 5.5px 0 0.5em;
   min-width: 200px;
 }
@@ -225,11 +240,11 @@ body.platform-mac #tabs {
      this is a plain window-resize action, not a persistent "on" toggle, so it
      shouldn't wear the accent that shuffle/repeat reserve for .active. */
   color: var(--text-muted);
-  /* 25px box matching .mode-btn's side padding (28px box, 15px icon) so the
-     whitespace beside the mini-player glyph equals the whitespace around the
-     shuffle/repeat glyphs. */
-  width: 25px;
-  height: 25px;
+  /* Same 26px box as .mode-btn. Every topbar glyph now carries identical 12px
+     ink (see the recipe on .mode-btn svg), so one box size gives every glyph the
+     same 7px whitespace ring — no per-button compensation. */
+  width: 26px;
+  height: 26px;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -243,15 +258,16 @@ body.platform-mac #tabs {
 }
 
 #miniplayer-btn svg {
-  /* Matches the mini player's expand button (14px arrows) — this is its
-     mirror image, collapsing full view back down to the mini bar. */
-  width: 14px;
-  height: 14px;
+  /* 12.5px ink like every other stroked topbar glyph; matches the mini player's
+     expand button, of which this is the mirror image. */
+  width: 12.5px;
+  height: 12.5px;
   display: block;
 }
 
 #settings-back-btn {
-  font-size: 0.95em;
+  /* Same 14px as .tab / #search-input — it sits on the same row. */
+  font-size: 14px;
   padding: 0.35em;
 }
 
@@ -281,8 +297,13 @@ body.platform-mac #tabs {
 }
 
 #expand-btn svg {
-  width: 14px;
-  height: 14px;
+  /* 12.5px ink, same as every other stroked topbar glyph. The button box stays
+     24px rather than the 26px the full-view buttons use: in mini the whole topbar
+     is only 26px tall. Mini hides the tabs and the search field, so there is no
+     type on that row and nothing for this to align to — it is pinned near the top
+     by the media query rather than centered. */
+  width: 12.5px;
+  height: 12.5px;
   display: block;
 }
 
@@ -298,22 +319,22 @@ body.platform-mac #tabs {
   text-decoration: underline;
 }
 
-/* Optical alignment for the right-hand icon cluster. Everything in the bar is
-   centered in the same 33px content box (see #topbar), which lines up the BOXES
-   but not the ink: a text run's ink sits above its line box's center, because
-   the box reserves descender space the word "Search..." never uses. Measured in
-   WKWebView: the search placeholder's ink (cap top through baseline) centers on
-   18.19, the tab labels on 18.38, while these glyphs — whose art is vertically
-   symmetric — center on the box's own 18.50. Half a pixel up splits that
-   difference and, on a 2x display, is exactly one device pixel, so the strokes
-   stay crisp rather than smearing across two rows. A full pixel overshoots: it
-   would leave the glyphs sitting higher above the text than they now sit below.
-   Re-measure if the bar's height/padding or the type size changes. */
-#playback-modes,
-#miniplayer-btn {
-  position: relative;
-  top: -1.5px;
-}
+/* Where the icon cluster's optical correction lives — which is nowhere near
+   here, and that is the point. Two things make that possible: every topbar glyph
+   carries the same 12.5px of ink (the recipe on .mode-btn svg), and every glyph's
+   ink is centered in its own viewBox by its crop. So the cluster has ONE thing to
+   get right instead of five, and it is the ink, not a position.
+
+   An earlier version of this file lifted the cluster -1.5px, and no amount of
+   tuning ever made it look right, because a positional nudge cannot express what
+   this needs: at 2x, any offset under half a CSS pixel snaps to a whole device
+   pixel and overshoots. An ink height of an ODD number of device pixels lands on
+   the cap band exactly and stays crisp, which is why TARGET_INK carries the drop.
+
+   So there is no positioning rule anywhere on these buttons, and the file is
+   meant to stay that way. A nudge reappearing here is the signal that someone
+   changed TARGET_INK to an even number of device pixels and started compensating.
+   Change the ink, not the position. */
 
 /* Files-only playback-mode toggles: Folder, Shuffle, Repeat. Each is an
    independent on/off. "Off" is dimmed (muted stroke); "on" is the accent
@@ -328,8 +349,8 @@ body.platform-mac #tabs {
   background: none;
   border: none;
   border-radius: 6px;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -340,9 +361,82 @@ body.platform-mac #tabs {
   transition: background 200ms ease, color 200ms ease, opacity 200ms ease;
 }
 
+/* THE TOPBAR ICON RECIPE. The general house recipe (24x24 viewBox, stroke-width
+   2 — see :root) normalises the BOX, but Lucide's art fills a different amount
+   of that box per icon: shuffle and repeat span 20 of the 24 units, the
+   mini-player and expand arrows 18, the magnifier 17. Sized by their boxes they
+   therefore render at three different optical sizes — 13.75px, 11.67px and
+   11.08px of ink for a nominally "15px" and "14px" cluster — which reads as
+   icons that don't belong to each other or to the type beside them, no matter
+   where they are positioned.
+
+   So the topbar normalises the INK instead. Every glyph here is cropped to its
+   own art and rendered at one size, giving one optical weight and — because a
+   crop centred on the art puts the ink at the box's centre — one centreline that
+   plain align-items:center finds for free.
+
+     TARGET_INK    = 12.5px
+     TARGET_STROKE = 1.2px
+
+   TARGET_INK was originally derived as 1.35x the 9.25px cap height of 13px bar
+   type. The bar moved to 14px on 2026-09-07 and 12.5px was DELIBERATELY kept, so
+   the ratio is now ~1.26 rather than 1.35 — the glyphs are a touch small against
+   the type by the original standard. That is the price of the grid, and it was
+   measured, not assumed: 12.5px is 25 device px of ink, an odd number, so it
+   centres on the half device pixel where 14px type's cap band centre lands. Every
+   larger size tried drifts straight back off it (`pnpm caliper`, dpr 2):
+       12.5px  ->  -0.03 / +0.04 / -0.00   (25 device px ink, odd)
+       13.5px  ->  +0.84 / +0.91 / +0.99   (26, even — cannot reach a half pixel)
+       13.75px ->  +0.99 / +1.08 / +1.22
+       14px    ->  +1.47 / +1.51 / +1.50
+   So do not "fix" the ratio by scaling these up. If the ink ever has to grow, the
+   next size that can land correctly is the next ODD device-pixel ink height, and
+   it must be re-measured rather than computed — the arithmetic above predicts the
+   ink, not the rounding.
+
+   For a glyph whose art spans `g` of the 24 units, centred on (cx, cy):
+
+     stroke-width = TARGET_STROKE * g / (TARGET_INK - TARGET_STROKE)
+     extent  E    = g + stroke-width
+     viewBox      = (cx - E/2) (cy - E/2) E E
+     width/height = TARGET_INK
+
+   which yields exactly 12.50px of ink for all six stroked topbar glyphs, counting
+   the repeat-one state:
+
+     g=20  shuffle, repeat      viewBox="0.938 0.938 22.124 22.124"  stroke-width 2.124
+     g=18  mini-player, expand  viewBox="2.044 2.044 19.912 19.912"  stroke-width 1.912
+     g=17  search magnifier     viewBox="3.098 3.098 18.805 18.805"  stroke-width 1.805
+
+   The magnifier is a background-image rather than an <svg>, so its numbers live in
+   the data URI and its background-size on #search-input — same arithmetic, and it
+   measures with the rest of the cluster.
+
+   TARGET_INK IS 12.5 AND NOT 12 FOR A REASON, and it is the reason this cluster
+   sits right. A glyph box centred in this bar lands on the same centre whatever
+   size you make it, and that centre is half a device pixel off where the type's
+   cap band centres. You cannot correct that by nudging the box: at 2x, an offset
+   under half a CSS pixel snaps to a whole device pixel, so the nudge overshoots.
+   (That is not a prediction. `--cap-drop: 0.25px` used to sit on the magnifier for
+   exactly this purpose, and measurement showed 0.25px and 0.50px rendering
+   byte-identically, both a full device pixel — which was the entire reason that
+   glyph read low. It is gone.) What does work is the ink height: 12.5px is an ODD
+   number of device pixels at 2x (25), so the ink can come to rest centred on a HALF
+   device pixel, which is where the cap band centre falls. An even ink height
+   (12px = 24) can only ever centre on a whole one, never between.
+
+   Any nominal arithmetic about where the cap band sits is suspect — the figures
+   this comment used to quote came from scripts/ruler.mjs in headless WebKit, which
+   places this bar a whole device pixel away from the shipping WKWebView. The
+   mechanism survives; trust `pnpm caliper` numbers over derivation.
+
+   Adding a topbar icon means running that arithmetic on its art, NOT copying a
+   24x24 viewBox from elsewhere in this file. Icons outside the topbar still use
+   the plain house recipe; they are masks in list rows, sized against row height
+   rather than against type. */
 .mode-btn svg {
-  width: 15px;
-  height: 15px;
+  width: 12.5px;
+  height: 12.5px;
   display: block;
 }
 
@@ -379,46 +473,120 @@ body.platform-mac #tabs {
 }
 
 #search-input {
-  /* Wide enough for the "Search..." placeholder. Only ~55px of that is text: an
-     <input type="search"> reserves ~15px at its right edge for WebKit's clear
-     button whether or not the field holds a value, and that reserve clips the
-     placeholder before the declared padding does. Measured in WKWebView: at
-     100px the last dot was cut off. Re-measure if the placeholder text changes. */
+  /* 108px IS THE MINIMUM, NOT A ROUND NUMBER, AND THERE IS NO SLACK LEFT. At 107px
+     the last dot of "Search..." is already cut; at 100px, two of them. Measured in
+     the shipping WKWebView with `pnpm caliper` at dpr 2, in 1px ink bands across
+     the field.
+
+     What clips is not the padding. An <input type="search"> reserves room at its
+     right edge for WebKit's clear button whether or not the field holds a value,
+     and that reserve — about 13.5px here — bites well before the declared 8px
+     padding-right does. The numbers, as x offsets from the field's left edge:
+
+         29     content box starts (1px border + 28px padding-left)
+         29..85 the placeholder's ink, "S" through the last dot
+         85.5   where the clear-button reserve starts clipping
+         99     content box ends — never reached
+
+     So the ~14px of apparent trailing room is not room, and reading it as room is
+     how this gets broken. Widening the field to 240px adds no ink, which is the
+     proof it is not clipping today: half a pixel of margin, and no more.
+
+     That means anything touching the placeholder's rendered width — its text, the
+     type size, the family or weight — clips silently and must be re-measured here.
+     The 13px -> 14px bump on 2026-09-07 spent whatever slack this used to have.
+
+     Held at 108px rather than grown: the field is a fixed anchor in the bar's
+     composition and expands to 240px on focus anyway. */
   width: 108px;
-  /* An <input>'s inner text hangs from its TOP padding edge — it is never
-     centered in the box, and giving the box an explicit height does not move the
-     glyphs (measured: forcing height:24px/26px leaves the placeholder exactly
-     where it was). So the asymmetric top/bottom values here ARE the text's
-     vertical position, not decoration: half a pixel off the top and onto the
-     bottom lifts the placeholder onto the same baseline as the tab labels, while
-     the box height — and so the hover/focus outline — stays centered in the bar.
-     The 0.5px is WebKit's offset, measured in WKWebView (what Tauri ships). A
-     dev-server Chromium wants 1px here and will render the placeholder half a
-     pixel low; trust the WebKit number, it's the one users see. */
-  padding: calc(0.4em - 0.5px) 0.6em calc(0.4em + 0.5px) 2em;
+  /* THE 1px TOP/BOTTOM ASYMMETRY IS LOAD-BEARING. It is the placeholder's vertical
+     position, not decoration, and the field will render a device pixel low without
+     it. Read this before tidying these numbers into a symmetric shorthand.
+
+     Two facts, both measured in the real WKWebView with `pnpm caliper` at dpr 2:
+
+     1. SYMMETRIC PADDING IS INERT HERE. An <input>'s inner text hangs from its top
+        padding edge, but this box is vertically centred in the bar, so raising the
+        padding pushes the box up by exactly what it pushes the text down. Every
+        symmetric value lands the text in the same place — 5px, 5.5px, 4.75px, 6px
+        and the old 0.4em all gave a content-box top of 10.5000 CSS px. Tidying the
+        em fraction away changed the text position by nothing at all. The only
+        lever is the DIFFERENCE: (padding-bottom - padding-top) of 1px lifts the
+        text 0.5 CSS px, which at 2x is exactly one device pixel.
+
+     2. THE LIFT IS NEEDED BECAUSE WKWebView PLACES INPUT TEXT LOW. It puts an
+        <input>'s inner text one device pixel below flex-centred block text of the
+        same font, so the placeholder sits a pixel under the tab labels beside it.
+        That is not a grid artifact and no type size corrects it — it measured +1
+        at 12px, 13px, 14px and 16px alike. It needs this explicit compensation.
+
+     So: 5 top / 6 bottom is 5.5 symmetric with the half-pixel taken off the top.
+     Left is the magnifier's gutter, and these are flat px rather than em fractions
+     of a 14px body so the box height stays a whole number.
+
+     An earlier comment here concluded the opposite — that an asymmetric split just
+     mirrored the error — and made these symmetric. That was measured with
+     scripts/ruler.mjs in headless WebKit, which places this bar's type a device
+     pixel away from where WKWebView does, so it was reading its own engine's
+     offset. Verified in the shipping engine: with this padding the placeholder's
+     ink is 25..47, byte-identical to the tab labels' 25..47. */
+  padding: 5px 8px 6px 28px;
   font: inherit;
-  /* Same size as .tab: with one text size on the row, the cap tops and baselines
-     of "Files"/"Streams" and the search placeholder line up exactly instead of
-     splitting the difference around a shared centerline. */
-  font-size: 0.95em;
+  /* Same size as .tab (see there for why 14px): one text size on the row means the
+     cap tops and baselines of "Files"/"Streams" and the search placeholder line up
+     instead of splitting the difference around a shared centerline.
+     NOTE: sharing the size is necessary but NOT sufficient. WKWebView places an
+     <input>'s inner text one device pixel below flex-centred block text whatever
+     size both are, so the type size alone leaves the placeholder low. What
+     corrects it is the 1px padding asymmetry above — see that comment before
+     changing either value. */
+  font-size: 14px;
   /* Not what it looks like: unlike on .tab, this does NOT make the box
-     text-tight — the field measures 28.63px tall with it or with `normal`,
-     because an input's inner editor uses the font's own line box. Kept because it
-     still shifts the text ~0.5px once the field holds a value, and the padding
-     above is tuned with it in place. Re-measure the padding if you drop it. */
+     text-tight — the field measures the same with it or with `normal`, because an
+     input's inner editor uses the font's own line box. (30.000px tall at the
+     current 14px and flat-px padding; it was 28.63px back at 13px with em
+     padding.) Kept because it still shifts the text ~0.5px once the field holds a
+     value, and the padding above is tuned with it in place. Re-measure the padding
+     if you drop it.
+     CAVEAT: that "shifts once the field holds a value" claim is inherited and has
+     NOT been re-verified in the shipping engine — the bridge has no verb to type
+     into the field, so every alignment number in this block was measured against
+     the PLACEHOLDER. If you touch this, check the field with a value in it. */
   line-height: 1;
+  /* Cropped and stroked by the topbar icon recipe (see .mode-btn svg), which this
+     glyph now follows like the other five: art spanning g=17 units centred on
+     (12.5, 12.5), so stroke-width 1.2*17/(12.5-1.2) = 1.805 and a viewBox of
+     18.805 units centred on that same point, rendered at 12.5px.
+
+     PLAIN `50%`, AND IT MUST STAY THAT WAY. The crop centres the ink and the odd
+     ink height (12.5px = 25 device px) lands it on the cap band, so there is
+     nothing left to correct. Measured in the shipping WKWebView (`pnpm caliper`,
+     dpr 2): mass centroid 36.56 against the mode glyphs' 36.47 / 36.54 / 36.50,
+     i.e. +0.06 off the row's type.
+
+     This glyph used to read a device pixel low (+1.03), and the cause was the
+     nudge that was there to prevent it: `calc(50% + var(--cap-drop) + 0.25px)`,
+     which WebKit snapped to a full device pixel. Measured, 0.25px and 0.50px
+     produced byte-identical rasters — so the nudge was 4x its intended size and
+     the extra literal was doing nothing at all. Deleting the whole calc moved the
+     glyph up exactly one device row and changed nothing else in the bar.
+
+     Two dead ends recorded so it is not re-litigated. The lopsided mass — heavy
+     circle up-left, thin handle down-right — was blamed for needing its own
+     correction; it does not, the centroid lands on the band with no offset. And
+     12px ink was held as a deliberate exception "buying" the alignment; measured
+     at 12.5px with no offset it is +0.07 against 12px's +0.06, so the size bought
+     nothing and the glyph is now the same 12.5px as everything else up here.
+
+     Judge any change by the mass centroid, not the bounding box; caliper prints
+     both and judges anything marked `icon:` by the centroid.
+     NOTE: the stroke colour is hard-coded to the dark theme's --text-muted; a
+     background-image can't read currentColor. It renders too light in light mode.
+     Pre-existing, and unrelated to alignment. */
   background: transparent
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aaa' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='10.5' r='7'/%3E%3Cline x1='16.5' y1='16' x2='21' y2='20.5'/%3E%3C/svg%3E")
-    no-repeat 0.5em calc(50% - 0.5px);
-  /* Two separate half-pixel corrections, don't collapse them. Inside the data
-     URI the glyph is translated 0.5 units up from where it was drawn: its ink
-     (circle top through the handle's tip) spanned 3–22 of the 24 viewBox, half a
-     unit low, so background-position:center placed the visible magnifier below
-     the centerline every other icon in the bar sits on. The calc() then lifts
-     the whole image another 0.5px off that centerline, for the same reason the
-     shuffle/repeat/mini-player glyphs are lifted (see #playback-modes): the box
-     center is not where the placeholder's ink sits. */
-  background-size: 1em;
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12.5' height='12.5' viewBox='3.098 3.098 18.805 18.805' fill='none' stroke='%23aaa' stroke-width='1.805' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cline x1='16.5' y1='16.5' x2='21' y2='21'/%3E%3C/svg%3E")
+    no-repeat 0.5em 50%;
+  background-size: 12.5px;
   color: var(--text-muted);
   border: 1px solid transparent;
   border-radius: 6px;
@@ -559,66 +727,15 @@ body.platform-mac #tabs {
   font-style: italic;
 }
 
-/* Cursor-positioned row context menu (and its "Add to playlist ▸" flyouts). Same
-   lifted dark surface as the search dropdown; fixed so it can be placed at the
-   click point regardless of scroll. Each level is its own positioned element. */
-.context-menu {
-  position: fixed;
-  min-width: 140px;
-  background: var(--surface-raised);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  z-index: 30;
-  /* Same as #search-results: no vertical padding on the card, so a hovered
-     first/last item's fill reaches the rounded edge instead of stopping short of
-     a strip of card background, and every item keeps the same 0.2em above and
-     below its label. */
-  padding: 0;
-  /* A long playlist list scrolls rather than running off-screen. */
-  max-height: 60vh;
-  overflow-y: auto;
-}
-
-/* Light-mode elevation for the floating cards (search dropdown + context menus
-   and their flyouts). In dark mode a raised surface lifts by being LIGHTER than
-   the near-black bg; in light mode --surface-raised is the same white as --bg,
-   so there's no tonal step and the card only has the shadow — and a 0.4 black
-   shadow tuned for pure black reads as a muddy smear on white. So lift with an
-   edge instead: a hairline border plus a softer, tighter shadow. */
-html[data-mode="light"] #search-results,
-html[data-mode="light"] .context-menu {
+/* Light-mode elevation for the search dropdown. In dark mode a raised surface
+   lifts by being LIGHTER than the near-black bg; in light mode --surface-raised
+   is the same white as --bg, so there's no tonal step and the card only has the
+   shadow — and a 0.4 black shadow tuned for pure black reads as a muddy smear on
+   white. So lift with an edge instead: a hairline border plus a softer, tighter
+   shadow. */
+html[data-mode="light"] #search-results {
   border: 1px solid rgba(0, 0, 0, 0.1);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
-}
-
-.context-menu-item {
-  padding: 0.2em 1em;
-  color: var(--text);
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.context-menu-item:hover {
-  background: var(--surface-hover);
-  color: var(--accent);
-}
-
-/* Submenu parent ("Add to playlist ▸") carries a trailing chevron and reserves
-   room for it so the label never collides with the mark. */
-.context-menu-item.has-submenu {
-  position: relative;
-  padding-right: 1.6em;
-}
-
-.context-menu-item.has-submenu::after {
-  content: "›";
-  position: absolute;
-  right: 0.7em;
-  color: var(--text-muted);
-}
-
-.context-menu-item.has-submenu:hover::after {
-  color: var(--accent);
 }
 
 #main-view {
@@ -1493,34 +1610,6 @@ body.np-zen.np-idle #nav-bar {
   content: " · ";
 }
 
-/* Two-column rows once the pane is wide enough (container query on #queue-list's
-   inline size). The artist leaves the inline title line for its own column, so a
-   long title truncates within its track instead of shoving the artist off the end,
-   and the artists line up as a scannable second column. Below the breakpoint the
-   rows stay the inline title · artist form above. Gated on :has(.queue-secondary)
-   so a row with no artist keeps its title on the full width instead of truncating
-   at the mid-column with an empty artist cell. */
-@container listcol (min-width: 28rem) {
-  .queue-text:has(.queue-secondary) {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    column-gap: 1.5em;
-    align-items: baseline;
-    /* Each cell truncates on its own now, so the cell as a whole must not clip. */
-    overflow: visible;
-  }
-  .queue-text:has(.queue-secondary) .queue-primary,
-  .queue-text:has(.queue-secondary) .queue-secondary {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* The column gap is the separator now — drop the inline middot. */
-  .queue-secondary::before {
-    content: none;
-  }
-}
 
 /* Trailing per-track runtime, shared by the queue/playlist rows and the left-pane
    library-view leaf lists (both sit inside a `listcol` container). Hidden by default and
@@ -1533,21 +1622,177 @@ body.np-zen.np-idle #nav-bar {
    known duration omit the span entirely (see the row builders), so a blank slot
    never appears. */
 .row-dur {
-  display: none;
-  flex: none;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
-}
-@container listcol (min-width: 28rem) {
-  .row-dur {
-    display: block;
-  }
 }
 /* On the playing row the runtime tints like the row's dimmed secondary, so the
    whole row reads as one accented unit rather than a dim time trailing a lit row. */
 .queue-row.playing .row-dur,
 .nav-track-row.open .row-dur {
   color: var(--accent-dim);
+}
+
+/* ===========================================================================
+   Columns — src/columns.ts
+   ===========================================================================
+
+   One row markup, two layouts, one breakpoint.
+
+   Below 28rem of *pane* width the cells are plain inline text and the middots on
+   .queue-secondary / .nav-secondary fold them into a single
+   `Title · Artist · Album` line, exactly as the rows always read when narrow.
+   Past it, .col-grid becomes a grid and every cell takes its own track. Nothing
+   is added or removed at the switch — which is why it costs no JS at all, and why
+   each pane can sit on its own side of the breakpoint independently.
+
+   The track list comes from the row itself, as --cols (see gridTemplate): text
+   fields get minmax(0, Wfr) and fixed fields get max-content. The `0` minimum is
+   the whole policy in one token — an over-full row gets thin and ellipsizes
+   rather than overflowing the pane, so adding a tenth column is legible, obvious,
+   and self-inflicted. No horizontal scrollbar, no fields silently dropped. */
+.col-grid > .col-cell {
+  /* Folded: cells run together as inline text, separated by the ::before middots
+     the secondary classes already carry. */
+  min-width: 0;
+}
+.col-cell.col-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- The folded row's two-field cap ---------------------------------------
+
+   Folded, the row is one line. A line carrying more than two fields doesn't show
+   a third — it truncates mid-word at the right edge, having already spent the
+   title's width on a field the reader never sees. So cut at two deliberately,
+   where the reader can see where the row ends, instead of letting the ellipsis
+   cut at a random character. The columns themselves are never dropped: past the
+   breakpoint (below) every cell comes back, which is what the pane is for.
+
+   Cheap by construction — the cells are all built either way, so the cap lifts on
+   a drag of the pane divider with no rebuild and no JS. */
+.col-grid > .col-cell:nth-child(n + 3) {
+  display: none;
+}
+/* Automatic mode keeps the runtime out of the folded row entirely: it is an
+   affordance a *wide* pane can afford, not one of the two fields a dense row
+   spends its line on — the behavior these rows shipped with. The cap alone would
+   almost do it (the runtime is third or fourth in every automatic set), but this
+   is stated against .row-dur directly so it also holds for the one automatic set
+   where it lands second: a queue whose rows carry no artist at all. Picked
+   explicitly it is an ordinary field again, and shows when it is one of the two
+   the folded row has room for. */
+.col-grid.col-auto > .row-dur {
+  display: none;
+}
+@container listcol (min-width: 28rem) {
+  /* Named against both hosts rather than on .col-grid alone: .nav-cell's own
+     overflow rule sits further down the sheet and would win the tie at equal
+     weight. */
+  .queue-text.col-grid,
+  .nav-cell.col-grid {
+    display: grid;
+    grid-template-columns: var(--cols, minmax(0, 1fr));
+    column-gap: 1.5em;
+    align-items: baseline;
+    /* Each cell truncates on its own now, so the cell as a whole must not clip. */
+    overflow: visible;
+  }
+  .col-grid > .col-cell {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Both folded-row rules are lifted here: in column mode nothing is dropped,
+     however many fields are crowded in, and the runtime is exactly what the wide
+     pane had the room for. Same selectors and specificities as the two rules above,
+     later in the sheet, so they win. The runtime needs its own reset rather than
+     riding the cap's — when it lands second the cap never matched it. */
+  .col-grid > .col-cell:nth-child(n + 3) {
+    display: inline;
+  }
+  .col-grid.col-auto > .row-dur {
+    display: inline;
+  }
+  /* The column gap is the separator now — drop every inline middot. */
+  .col-grid > .col-cell::before {
+    content: none;
+  }
+  /* Numbers right-align into a clean column of digits. */
+  .col-grid > .col-cell.col-num {
+    text-align: right;
+  }
+  /* Queue rows reserve the hover ✕'s slot at the right edge in column mode: with
+     one trailing runtime it could overlay the time and swap in on hover, but it
+     can't overlay an arbitrary last column, so it gets its own space. */
+  .queue-row .col-grid {
+    padding-right: 1.1em;
+  }
+}
+
+/* --- The optional header row ---------------------------------------------
+
+   Off by default, per pane. It is a real row — same shell, same padding, same
+   gutter, same --cols — so it lines up with the rows by construction rather than
+   by a second set of matched numbers.
+
+   It is display:none outside column mode, gated by the *same* container query as
+   the columns themselves, so a header can never appear above a folded row. That
+   is the one failure that would make it a lie. */
+.colhead {
+  display: none;
+  cursor: default;
+  /* Sticky over the rows it labels. Each pane names its own ground, since the
+     right pane sits on --bg and the left pane on its rounded --panel card. */
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--list-bg, var(--bg));
+  border-bottom: 1px solid var(--surface-hover);
+}
+#queue-list {
+  --list-bg: var(--bg);
+}
+.nav-list {
+  --list-bg: var(--panel);
+}
+@container listcol (min-width: 28rem) {
+  .colhead {
+    display: flex;
+  }
+}
+.colhead:hover {
+  background: var(--list-bg, var(--bg));
+}
+/* Quiet by default: smaller, faintest ink, no fill and no vertical rules. The
+   header is a label for the columns, not a toolbar — at rest it should read as
+   part of the list's typography rather than as chrome sitting on top of it. */
+.colhead-cell {
+  font-size: 0.88em;
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+.colhead-cell.sortable {
+  cursor: pointer;
+}
+.colhead-cell.sortable:hover {
+  color: var(--text-dim);
+}
+/* The sorted column lifts to full --text and carries a caret. Deliberately NOT
+   the accent: accent text already means "this is open in the right pane"
+   everywhere else in the app, and a sorted header is not that. */
+.colhead-cell.sorted {
+  color: var(--text);
+}
+/* In the left pane the header stacks *under* the sticky Back bar rather than over
+   it. The bar pins at top:-0.1em over a 2em box (see .nav-back, which matches a
+   row's box exactly), so its bottom edge lands 1.9em down the scrollport; the
+   header pins there, and takes a lower z-index so the bar wins any overlap during
+   the scroll. A leaf track list is always drilled into, so the bar is always
+   there. */
+.nav-list.col-host .colhead {
+  top: 1.9em;
+  z-index: 1;
 }
 
 /* The playing row picks up the accent, matching the tree's .playing highlight;
@@ -1638,9 +1883,17 @@ body.playback-paused .queue-row.playing .eq-bars {
 }
 /* Hover swaps the runtime out for the ✕ that takes its place, so the two never
    collide at the edge. Queue rows only — the library-view leaf lists have no ✕, so their
-   runtime stays put on hover. */
+   runtime stays put on hover. Folded rows only: in column mode the ✕ has a
+   reserved slot of its own (see .queue-row .col-grid's padding-right), and the
+   last column there isn't necessarily the runtime anyway, so ducking it would
+   just make an arbitrary cell blink. */
 .queue-row:hover .row-dur {
   opacity: 0;
+}
+@container listcol (min-width: 28rem) {
+  .queue-row:hover .col-grid .row-dur {
+    opacity: 1;
+  }
 }
 
 .queue-remove:hover {
@@ -2432,7 +2685,21 @@ body.dragging-noselect * {
   padding: 0 1em;
   cursor: pointer;
   font: inherit;
-  font-size: 0.95em;
+  /* 14px flat, shared with #search-input and #settings-back-btn.
+     Was 13px (the macOS system control size). Changed 2026-09-07 because the type
+     size is what decides where the row's cap band lands, and the band is what every
+     icon in the bar is aligned to. Measured with `pnpm caliper` at dpr 2, against
+     the topbar glyphs' fixed 12.5px ink:
+         12px -> band centre 36.0 device px, glyphs +0.47 / +0.54 / +0.50
+         13px -> band centre 36.0,           glyphs +0.47 / +0.54 / +0.50
+         14px -> band centre 36.5,           glyphs -0.03 / +0.04 / -0.00
+         16px -> band centre 37.0,           glyphs -0.53 / -0.46 / -0.50
+     The glyphs' 25 device px of ink (12.5px, odd — see the recipe on .mode-btn svg)
+     can only centre on a half device pixel, and only at 14px does the cap band
+     centre land on one too. So this buys exact icon alignment for free, without
+     touching a single glyph. Not an em fraction of the body: an em fraction of the
+     14px body would reintroduce the fractional sizes this is here to avoid. */
+  font-size: 14px;
   /* Compact UI: collapse the document's 1.5 line-height so the label's line box
      is only as tall as the text itself. That's what the centering above acts on,
      so the label centers on its glyphs rather than on inherited leading. */
@@ -3971,6 +4238,15 @@ body.playback-paused .node-label.playing .icon.playlist .eq-bars,
   container: listcol / inline-size;
 }
 
+/* A leaf track list that can carry a column header declares the container one
+   level up, on the list itself, so the header — which sits outside the windowed
+   row block — is inside the same container the rows are. The .nav-window inside
+   is a plain full-width block child, so both containers resolve to the identical
+   inline size and header and rows switch into column mode on the same pixel. */
+.nav-list.col-host {
+  container: listcol / inline-size;
+}
+
 /* Two-column view rows past the breakpoint, mirroring the queue (see the
    .queue-text block). The subtitle (artist·album on Songs, artist on Albums) leaves
    the inline title line for its own column, so a long title truncates within its
@@ -3979,7 +4255,11 @@ body.playback-paused .node-label.playing .icon.playlist .eq-bars,
    is just a name) keep the full width for the primary instead of truncating it at
    the mid-column with an empty second cell. */
 @container listcol (min-width: 28rem) {
-  .nav-cell:has(.nav-secondary) {
+  /* Drill rows (Artists / Albums) only: their two parts are a name and one
+     optional subtitle, not a column set, so they keep the original fixed
+     half-and-half split. The leaf track lists carry .col-grid and are laid out
+     from their own --cols template instead (see the .col-grid block). */
+  .nav-cell:not(.col-grid):has(.nav-secondary) {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     column-gap: 1.5em;
@@ -3987,8 +4267,8 @@ body.playback-paused .node-label.playing .icon.playlist .eq-bars,
     /* Each cell truncates on its own now, so the cell as a whole must not clip. */
     overflow: visible;
   }
-  .nav-cell:has(.nav-secondary) .nav-primary,
-  .nav-cell:has(.nav-secondary) .nav-secondary {
+  .nav-cell:not(.col-grid):has(.nav-secondary) .nav-primary,
+  .nav-cell:not(.col-grid):has(.nav-secondary) .nav-secondary {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;

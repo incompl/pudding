@@ -329,7 +329,7 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   if (node.isPlaylist) {
     label.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      showContextMenu(e.clientX, e.clientY, [
+      void showContextMenu(e.clientX, e.clientY, [
         { label: "Play", action: () => void playPlaylist(node) },
         ...queueMenuItems((sink) => void addPlaylistToQueue(node, sink)),
         addToPlaylistItem(async () =>
@@ -345,7 +345,7 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   } else if (node.isFolder) {
     label.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      showContextMenu(e.clientX, e.clientY, [
+      void showContextMenu(e.clientX, e.clientY, [
         {
           label: "Play folder",
           action: () => {
@@ -409,7 +409,7 @@ function renderTreeRow(row: TreeRow): HTMLElement {
         items.push(editMetadataItem(node.path));
         items.push(showInFinderItem(node.path));
       }
-      showContextMenu(e.clientX, e.clientY, items);
+      void showContextMenu(e.clientX, e.clientY, items);
     });
     // A track can be dragged out of the tree into an open playlist/queue list to
     // add it at a position (the tree itself accepts no drops). The payload is the
