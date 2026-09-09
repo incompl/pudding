@@ -1,7 +1,15 @@
 mod audio;
+// pub so examples/sandbox_check.rs can link it: the only honest test of a
+// security-scoped bookmark runs inside a signed, sandboxed .app, which means a
+// separate binary. See tools/sandbox-check.sh.
+pub mod bookmarks;
 mod icy;
 mod now_playing;
 mod playlist;
+// Who holds the sandbox grant for each library root, and for how long. The
+// primitive it drives is bookmarks.rs; pub for the same reason bookmarks is —
+// examples/sandbox_check.rs drives this exact code inside a real sandbox.
+pub mod root_access;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -1079,6 +1087,30 @@ fn ensure_default_stream_list(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+// The folder a fresh install starts with: the user's ~/Music, when it exists.
+// Canonicalized deliberately — sandboxed, `home_dir` is the app's container and
+// the music folder reaches the real one through the container's `Music` symlink
+// (that link is what com.apple.security.assets.music.read-write grants against).
+// Storing the container path would leak an implementation detail into Settings and
+// break the moment the container is rebuilt, so resolve the link here and persist
+// the real path, which the entitlement covers just the same. Unsandboxed the
+// canonicalize is a no-op beyond tidying the string.
+//
+// `None` means "no obvious default" — the frontend then falls back to the
+// get-started prompt exactly as it did before there was a default at all. It never
+// creates the folder: a missing ~/Music is a user with their music elsewhere, and
+// seeding an empty one would just replace one empty state with another.
+#[tauri::command]
+fn default_library_root(app: AppHandle) -> Option<String> {
+    let home = app.path().home_dir().ok()?;
+    let music = home.join("Music");
+    if !music.is_dir() {
+        return None;
+    }
+    let resolved = std::fs::canonicalize(&music).unwrap_or(music);
+    Some(normalize_root(&resolved.to_string_lossy()))
+}
+
 #[tauri::command]
 fn default_stream_list_path(app: AppHandle) -> Result<String, String> {
     Ok(ensure_default_stream_list(&app)?
@@ -1537,6 +1569,17 @@ fn image_mime_from_ext(path: &str) -> &'static str {
 // Audio extensions we accept via OS file associations. Must match the
 // fileAssociations list in tauri.conf.json so the registered handlers and the
 // runtime gate agree.
+//
+// This list is also what keeps Apple Music out of the library. Under the sandbox
+// the assets.music entitlement grants all of ~/Music, so a user whose root is
+// ~/Music hands us ~/Music/Music/Media.localized as well — and everything Apple
+// Music downloads under a subscription is FairPlay-protected .m4p, with protected
+// audiobooks as .m4b. Neither is here, so the walk never collects them, nothing
+// unplayable reaches the tree, and Finder never offers Pudding as a handler for
+// one. Purchases have been DRM-free .m4a since 2009 and play normally.
+//
+// So: do not add "m4p" or "m4b" without first handling decode failure as
+// something better than an unplayable row. See audio_extensions_exclude_drm.
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aiff", "aif",
 ];
@@ -2299,6 +2342,155 @@ async fn search_folders(
 // grouped by album, then disc/track, so an album folder plays in track order
 // and an artist folder plays album by album. Backs the "play a folder from
 // search" action.
+// A track row for a file the library index has never seen: the same shape a DB
+// row produces, read straight off the file. Only the drop path needs this —
+// everything else in the app is looking at indexed files by construction.
+fn track_from_disk(path: PathBuf) -> SearchResult {
+    let tags = read_tags(&path);
+    let (created, modified) = match std::fs::metadata(&path) {
+        Ok(m) => {
+            let secs = |t: std::io::Result<std::time::SystemTime>| {
+                t.ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+            };
+            (secs(m.created()), secs(m.modified()))
+        }
+        Err(_) => (None, None),
+    };
+    SearchResult {
+        path: path.to_string_lossy().into_owned(),
+        title: tags.title,
+        artist: tags.artist,
+        album: tags.album,
+        album_artist: tags.album_artist,
+        // Unlike the flat library lists, a dropped folder is one contiguous run of
+        // files, so the metadata track/disc numbers are meaningful and worth keeping
+        // — they are also what the sort below reads.
+        track: tags.track,
+        disc: tags.disc,
+        year: tags.year,
+        genre: tags.genre,
+        duration: tags.duration,
+        bitrate: tags.bitrate,
+        sample_rate: tags.sample_rate,
+        bit_depth: tags.bit_depth,
+        gain: tags.rg_track_gain,
+        created,
+        modified,
+    }
+}
+
+// Flatten what the user dropped on the window into a playable list of tracks, in
+// the order the drop implies: dropped items in the order they were handed to us,
+// and each dropped folder's own files in listening order.
+//
+// Deliberately not `folder_tracks`. That one answers the same question out of the
+// library index, so it only knows about folders *inside* a configured root — and a
+// drop can carry any folder on the disk, including one from a library the user
+// hasn't set up yet. So this walks the filesystem instead (walk_audio, the same
+// recursive, symlink-loop-safe walk the scanner uses) and reads tags off any file
+// the index has never seen. Indexed files still come from the DB: dropping an album
+// out of your own library shouldn't cost a full tag re-read.
+#[tauri::command]
+async fn dropped_tracks(
+    paths: Vec<String>,
+    db: State<'_, DbHandle>,
+) -> Result<Vec<SearchResult>, String> {
+    db.read(move |conn| {
+        // One `visited` across the whole drop, so dropping a folder together with
+        // its own parent yields each file once rather than twice; `seen` does the
+        // same for a file dropped alongside the folder that contains it.
+        let mut visited: HashSet<PathBuf> = HashSet::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        // Each dropped item's files, kept as its own group: a folder is sorted
+        // internally, while the groups stay in drop order.
+        let mut groups: Vec<Vec<PathBuf>> = Vec::new();
+        for p in &paths {
+            let path = Path::new(p);
+            // Follows symlinks (unlike a dirent's file_type), so a dropped alias to
+            // a folder expands like the folder it points at.
+            let Ok(meta) = std::fs::metadata(path) else {
+                continue;
+            };
+            let mut group: Vec<PathBuf> = Vec::new();
+            if meta.is_dir() {
+                // Left in readdir order for now — arbitrary, and a queue's order
+                // is not. Sorted properly once the tags are read, below.
+                walk_audio(path, &mut group, &mut visited);
+            } else if meta.is_file() && is_audio_path(p) {
+                group.push(path.to_path_buf());
+            }
+            group.retain(|f| seen.insert(f.clone()));
+            if !group.is_empty() {
+                groups.push(group);
+            }
+        }
+
+        let all: Vec<String> = groups
+            .iter()
+            .flatten()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let meta_map = fetch_meta(conn, &all)?;
+
+        let mut out: Vec<SearchResult> = Vec::with_capacity(all.len());
+        for group in groups {
+            let mut rows: Vec<SearchResult> = group
+                .into_iter()
+                .map(|p| {
+                    let full = p.to_string_lossy().into_owned();
+                    match meta_map.get(&full) {
+                        Some(m) => SearchResult {
+                            path: full,
+                            title: m.title.clone(),
+                            artist: m.artist.clone(),
+                            album: m.album.clone(),
+                            album_artist: m.album_artist.clone(),
+                            track: m.track,
+                            disc: m.disc,
+                            year: m.year,
+                            genre: m.genre.clone(),
+                            duration: m.duration,
+                            bitrate: m.bitrate,
+                            sample_rate: m.sample_rate,
+                            bit_depth: m.bit_depth,
+                            gain: m.gain,
+                            created: m.created,
+                            modified: m.modified,
+                        },
+                        None => track_from_disk(p),
+                    }
+                })
+                .collect();
+            // Listening order, now that disc/track are known: the same (disc, track,
+            // name) list_dir sorts a folder by, under a leading key of the containing
+            // folder — so a drop spanning several album folders plays album by album
+            // rather than every track 1 first.
+            rows.sort_by_cached_key(|r| {
+                let path = Path::new(&r.path);
+                let dir = path
+                    .parent()
+                    .map(|d| d.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                (
+                    dir,
+                    r.disc.unwrap_or(1),
+                    r.track.unwrap_or(u32::MAX),
+                    name,
+                )
+            });
+            out.extend(rows);
+        }
+        Ok(out)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn folder_tracks(path: String, db: State<'_, DbHandle>) -> Result<Vec<SearchResult>, String> {
     db.read(move |conn| {
@@ -2729,9 +2921,30 @@ pub fn run() {
             inner: Mutex::new(PendingState::default()),
         })
         .manage(RecentIcons::default())
+        // The security-scoped grants for the library roots. Managed on the builder
+        // so the guards outlive every scan, watcher and tag write that depends on
+        // them; see root_access.rs.
+        .manage(root_access::RootAccess::default())
         // Single-instance must be the first plugin. When a second launch happens
         // (e.g. user double-clicks another mp3 on Windows/Linux), this callback
         // fires in the running instance with the new process's argv.
+        //
+        // Under the App Sandbox (the Mac App Store build only — see
+        // src-tauri/MAS-BUILD.md) this plugin is INERT, deliberately. Its rendezvous
+        // socket is hardcoded to /tmp, which a sandboxed process may neither write
+        // nor read; the bind fails, the plugin logs and lets the app launch normally.
+        // That costs nothing here, because macOS never gives a bundled app a second
+        // instance to begin with: Launch Services activates the running one and
+        // delivers the file as an Apple Event, which arrives as RunEvent::Opened and
+        // is handled below. The plugin only ever mattered for Windows and Linux, and
+        // for `open -n` on a developer's machine, which is unsandboxed anyway.
+        //
+        // The failure mode that would matter is the plugin CONNECTING and calling
+        // exit(0), which would be a launch that silently does nothing. It cannot: a
+        // sandboxed connect to /tmp is denied, so the plugin takes its
+        // "launching normally" branch. tools/sandbox-check.sh asserts exactly that,
+        // and asserts that the container's own tmp would accept the socket — which
+        // is where it would have to move if single-instance is ever wanted here.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_focus();
@@ -3299,6 +3512,7 @@ pub fn run() {
             list_dir,
             read_stream_list,
             default_stream_list_path,
+            default_library_root,
             add_stream,
             update_stream,
             delete_stream,
@@ -3309,6 +3523,7 @@ pub fn run() {
             search_tracks,
             search_folders,
             folder_tracks,
+            dropped_tracks,
             search_artists,
             search_albums,
             artist_tracks,
@@ -3360,6 +3575,8 @@ pub fn run() {
             playlist::rename_playlist,
             playlist::delete_playlist,
             playlist::list_all_playlists,
+            root_access::bookmark_root,
+            root_access::hold_library_roots,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -3384,6 +3601,24 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_extensions_exclude_drm() {
+        // A regression guard on a decision, not on a behaviour: FairPlay containers
+        // are excluded by being absent from AUDIO_EXTS, which is easy to undo by
+        // accident when adding a format. If this fails, Apple Music subscription
+        // downloads are about to start appearing as rows that cannot play.
+        for drm in [
+            "Song.m4p",
+            "/Users/x/Music/Music/Media.localized/A/B/Track.m4p",
+            "Book.m4b",
+        ] {
+            assert!(!is_audio_path(drm), "{drm} must not be scanned or opened");
+            assert!(!is_openable_path(drm), "{drm} must not be an association");
+        }
+        // The DRM-free sibling of the same container format still plays.
+        assert!(is_audio_path("Purchase.m4a"));
+    }
 
     #[test]
     fn m3u_stream_list_named_and_bare_entries() {

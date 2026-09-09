@@ -113,6 +113,7 @@ import {
   streamListPathSet,
   streamListWritable,
   libraryHasContent,
+  libraryTreeLoaded,
   treeSelection,
   paneEditor,
   openActiveQueue,
@@ -185,11 +186,13 @@ import {
 } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
 import { startTrackDrag } from "./drag-drop";
+import { initFileDrop } from "./file-drop";
 import { attachOverflowTitles } from "./overflow-title";
 import { setupSearch } from "./search";
 import {
   refreshTree,
   refreshLibrary,
+  holdLibraryRoots,
   setLibraryRoots,
   renderLibraryRootRows,
   setStreamListPath,
@@ -295,6 +298,10 @@ import {
 
 const STORE_FILE = "settings.json";
 export const KEY_LIBRARY_ROOTS = "libraryRoots";
+// Security-scoped bookmarks for those roots, base64 keyed by path. A separate key
+// rather than a field on each root: the path stays the root's identity everywhere
+// (tracks.root, the tree, playlist scanning), and the blob is data hanging off it.
+export const KEY_ROOT_BOOKMARKS = "libraryRootBookmarks";
 // Value stays "manifestPath" (the pre-rename key) so existing saved settings survive.
 export const KEY_STREAM_LIST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
@@ -1655,10 +1662,11 @@ export function playQueueTrack(poolIndex: number): void {
 }
 
 // The single "open a file" entry point: ⌘O, a Finder double-click / "Open With",
-// a launch argument, and an Open Recent row all land here. The extension decides
-// the verb — a playlist opens for browsing, audio plays — and both branches
-// record the open in the recents list (the only thing that does).
-function openAssociatedFile(path: string): void {
+// a launch argument, an Open Recent row, and a lone file dropped on the window
+// (see file-drop.ts) all land here. The extension decides the verb — a playlist
+// opens for browsing, audio plays — and both branches record the open in the
+// recents list (the only thing that does).
+export function openAssociatedFile(path: string): void {
   if (/\.m3u8?$/i.test(path)) {
     void browsePlaylistPath(path, { recent: true });
   } else {
@@ -3299,12 +3307,16 @@ function setupEffects(): void {
     document.getElementById("tab-streams")?.classList.toggle("hidden", tab !== "streams");
   });
 
-  // Until a library folder is configured, the whole Files panel is a get-started
-  // prompt instead of the view springboard. render() owns hiding the navigator,
-  // folder tree and create button (it already gates those), so just re-render it
-  // when the root-set state flips.
+  // While the Files panel has nothing to browse, the whole thing is a get-started
+  // prompt instead of the view springboard — both when no library folder is
+  // configured AND when one is but holds no music, which used to fall through to
+  // an empty springboard that read as a broken app. render() owns hiding the
+  // navigator, folder tree and create button (it already gates those), so just
+  // re-render it when either input flips.
   effect(() => {
     libraryRootSet.value;
+    libraryHasContent.value;
+    libraryTreeLoaded.value;
     renderNav();
   });
 
@@ -3723,7 +3735,34 @@ async function init(): Promise<void> {
   // of the automatic columns followed by a rebuild.
   await loadColumnPrefs();
 
-  app.libraryRoots = (await app.store.get<string[]>(KEY_LIBRARY_ROOTS)) ?? [];
+  // First run (key never set): start on ~/Music instead of an empty panel, the
+  // way every other player does — a fresh install should have the user's music in
+  // it, not a sentence about settings. Backend-resolved (default_library_root) so
+  // the sandboxed build persists the real folder rather than its container link,
+  // and returns null when there is no ~/Music, which falls back to the
+  // get-started prompt exactly as before. An explicit [] — the user removed every
+  // folder — is respected, not reseeded, mirroring the stream-list path below.
+  const storedRoots = await app.store.get<string[]>(KEY_LIBRARY_ROOTS);
+  app.libraryRoots = storedRoots ?? [];
+  if (storedRoots === undefined) {
+    try {
+      const fallback = await invoke<string | null>("default_library_root");
+      if (fallback) {
+        app.libraryRoots = [fallback];
+        await app.store.set(KEY_LIBRARY_ROOTS, app.libraryRoots);
+        await app.store.save();
+      }
+    } catch (e) {
+      console.error("default_library_root failed", e);
+    }
+  }
+  app.rootBookmarks =
+    (await app.store.get<Record<string, string>>(KEY_ROOT_BOOKMARKS)) ?? {};
+  // Reclaim the sandbox grant on each root before anything reads one. Everything
+  // downstream — the tree listing, the scan, the watchers, playback — opens plain
+  // paths, which is only true because the backend is holding those grants by the
+  // time they run. See holdLibraryRoots.
+  await bootStep("hold-roots", () => holdLibraryRoots());
   // First run (key never set): adopt the default stream list the backend seeds
   // in the app data dir, and persist it so it shows in settings and can be
   // repointed. An explicit "" (user cleared the path) is respected, not reseeded.
@@ -4023,7 +4062,17 @@ async function init(): Promise<void> {
     showPlaylistMenu: showPlaylistContextMenu,
     startPlaylistRename: startNavPlaylistRename,
     persistLocation: persistNavLocation,
-    libraryRootSet: () => libraryRootSet.value,
+    // Mid-refresh nothing is known yet, so claim the panel is fine and let the
+    // tree show its own "Loading..." — the prompt appearing and vanishing on every
+    // boot would be worse than a beat of springboard.
+    libraryEmpty: () =>
+      !libraryTreeLoaded.value
+        ? null
+        : !libraryRootSet.value
+          ? "no-root"
+          : !libraryHasContent.value
+            ? "empty"
+            : null,
     setBrowseActive,
     markNavFocused: () => {
       app.lastSelectionPane = "nav";
@@ -4186,6 +4235,13 @@ async function init(): Promise<void> {
   });
   await listen("menu:mute", () => toggleMute());
   await listen("menu:miniplayer", () => void toggleMiniPlayer());
+
+  // Make the window a target for music dragged out of Finder. Independent of the
+  // curation drag in drag-drop.ts — that one is pointer-based precisely because
+  // this native handler exists — so the two never contend for a gesture.
+  await bootStep("init-file-drop", () =>
+    initFileDrop().catch((e) => console.error("initFileDrop failed", e)),
+  );
 
   // Drain any file passed at launch (cold start). Must happen after the
   // open-file listener is registered so the ready-flag race is closed.

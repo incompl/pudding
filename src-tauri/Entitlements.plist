@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  App Sandbox entitlements. Applied only by the Mac App Store build
+  (tauri.mas.conf.json, `pnpm build:mas`) — the default `tauri build` and
+  `tauri dev` stay unsandboxed, because direct distribution does not require the
+  sandbox and running it there would cost users access for nothing.
+
+  Entitlements are code-signature flags: they take effect only when the bundle is
+  signed, and they are what the kernel reads. Nothing below is a "temporary
+  exception", so none of it needs a written justification at review.
+
+  Everything here is exercised by tools/sandbox-check.sh under a real signed
+  sandbox. Do not add an entitlement without a phase in that script that fails
+  when it is removed — an untested entitlement is indistinguishable from an
+  unnecessary one.
+-->
+<plist version="1.0">
+<dict>
+  <!-- Turns the sandbox on. Without this the rest are inert. -->
+  <key>com.apple.security.app-sandbox</key>
+  <true/>
+
+  <!-- The folder picker's grant. Read-write because Pudding writes back into the
+       library: tag edits via lofty, and autosaved .m3u8 playlists. -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+
+  <!-- Lets that grant be frozen into a security-scoped bookmark and resolved on a
+       later launch. Without it the picker's grant dies with the process and the
+       library comes back empty on relaunch. See src-tauri/src/bookmarks.rs. -->
+  <key>com.apple.security.files.bookmarks.app-scope</key>
+  <true/>
+
+  <!-- Recursive read-write on ~/Music with no picker and no prompt, so the common
+       case never sees a dialog at all. A standard entitlement, not an exception. -->
+  <key>com.apple.security.assets.music.read-write</key>
+  <true/>
+
+  <!-- Outbound TCP for the radio streams (ureq). Gates loopback too, so it is not
+       optional for anything that opens a socket. -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+</dict>
+</plist>

@@ -456,3 +456,15 @@ export interface LeafListContext {
   // Default (unset) keeps the fieldVaries rule.
   hideAlbum?: boolean;
 }
+
+// One library root as `hold_library_roots` reports it back, after the backend has
+// taken (and kept) the sandbox grant for it. `path` is where the folder actually
+// is — a bookmark follows a folder the user moved, so it can differ from what was
+// stored. `bookmark` is a blob to write down, and null means "keep the stored one"
+// rather than "drop it". `error` is advisory: the root stays configured and simply
+// fails to list, exactly like a folder that went missing.
+export interface HeldRoot {
+  path: string;
+  bookmark: string | null;
+  error: string | null;
+}

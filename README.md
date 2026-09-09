@@ -54,6 +54,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 - Columns: pick the fields a track list shows — title, artist, album, album artist, disc, genre, year, kind, time, bit rate, sample rate, bit depth, gain, date created/modified — or leave it automatic and the pane picks them per list. Turn on the header to sort by any column and drag the dividers to set your own widths; narrow panes fold back to one line
 - Edit an audio file's metadata tags right in the app.
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
+- Drag music from Finder onto the window: a file or playlist opens, a folder or a multi-file drop plays as a queue
 
 ### Playback queue
 

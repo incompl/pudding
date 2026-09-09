@@ -6,11 +6,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { h } from "./dom";
-import type { DirListing, TreeNode, Stream } from "./types";
+import type { DirListing, TreeNode, Stream, HeldRoot } from "./types";
 import {
   app,
   libraryHasContent,
   libraryRootSet,
+  libraryTreeLoaded,
   streamListPathSet,
   streamListPathValid,
   streamListWritable,
@@ -29,6 +30,7 @@ import {
   setEmpty,
   queueIsActivePool,
   KEY_LIBRARY_ROOTS,
+  KEY_ROOT_BOOKMARKS,
   KEY_STREAM_LIST_PATH,
 } from "./main";
 import { refreshPlaylistIndex } from "./playlists";
@@ -68,6 +70,10 @@ function makeRootFolderNode(path: string, name: string, listing: DirListing): Tr
 export async function refreshTree(roots: string[]): Promise<void> {
   app.rootNode = null;
   libraryHasContent.value = false;
+  // Mid-refresh the two signals above say "nothing" without meaning it, so the
+  // get-started prompt must not read them until this flips back (both exits below
+  // set it). Otherwise the prompt flashes over "Loading..." on every boot.
+  libraryTreeLoaded.value = false;
   libraryRootSet.value = roots.length > 0;
   app.invalidLibraryRoots = new Set();
   if (roots.length === 0) {
@@ -75,6 +81,7 @@ export async function refreshTree(roots: string[]): Promise<void> {
     // the tree stays empty behind it.
     setEmpty(treeContainer, "No library folder set");
     renderLibraryRootRows();
+    libraryTreeLoaded.value = true;
     return;
   }
   setEmpty(treeContainer, "Loading...", "loading");
@@ -121,6 +128,7 @@ export async function refreshTree(roots: string[]): Promise<void> {
     };
   }
   libraryHasContent.value = app.rootNode.children.length > 0;
+  libraryTreeLoaded.value = true;
   await bootStep("  renderTree", () => renderTree());
 }
 
@@ -237,6 +245,11 @@ export async function refreshLibrary(): Promise<void> {
         app.refreshDeferredWhileEditing = true;
         break;
       }
+      // A reconcile can be the moment a library stops (or starts) being empty —
+      // first files copied into a fresh ~/Music, or the last ones removed — and the
+      // get-started prompt is gated on this, so recompute it here as refreshTree
+      // does rather than leaving it at whatever the last full rebuild decided.
+      libraryHasContent.value = app.rootNode.children.length > 0;
       // renderTree reuses the live window (repaint in place), which keeps scrollTop
       // and the measured row height — so a scan/watcher refresh no longer jumps the
       // browsed tree to the top.
@@ -286,16 +299,71 @@ export async function refreshStreams(streamListPath: string): Promise<void> {
   }
 }
 
+// The one form a root path is ever stored or keyed under. Trailing separators are
+// stripped so a folder typed with or without a slash is one root, matching the key
+// the backend stamps each track with (normalize_root) — and, since rootBookmarks is
+// keyed by path, so that a blob minted from a picker result is findable later.
+export function normalizeRootPath(path: string): string {
+  return path.trim().replace(/\/+$/, "");
+}
+
+// Take — and keep — the OS-level grant for every configured library root.
+//
+// Sandboxed, a path string carries no permission of its own: the grant the user
+// gave through the picker dies with the process, and only a security-scoped
+// bookmark brings it back. The backend holds one guard per root for as long as that
+// folder stays configured (src-tauri/src/root_access.rs), which is why nothing else
+// in the app had to change — the scanner, the watchers, the tag writer and the
+// playlist writer all keep opening plain paths. But it has to run *before* any of
+// them, or they read an unreadable folder and the library comes back empty.
+//
+// Returns nothing; its effects are on `app.libraryRoots` (a folder the user moved
+// comes back at its new path) and on the persisted blobs.
+export async function holdLibraryRoots(): Promise<void> {
+  const before = app.libraryRoots;
+  let held: HeldRoot[];
+  try {
+    held = await invoke<HeldRoot[]>("hold_library_roots", {
+      roots: before.map((path) => ({ path, bookmark: app.rootBookmarks[path] ?? null })),
+    });
+  } catch (e) {
+    // Nothing here is load-bearing when the app isn't sandboxed, so a failure means
+    // carrying on with what's configured — never blanking the library over it.
+    console.error("hold_library_roots failed", e);
+    return;
+  }
+
+  const paths: string[] = [];
+  const bookmarks: Record<string, string> = {};
+  let changed = false;
+  held.forEach((root, i) => {
+    // A fresh blob comes back when one was minted or the old one is aging out;
+    // null means keep what's stored, which is also the answer when the folder was
+    // unreachable — an unplugged drive shouldn't cost the user their grant.
+    const blob = root.bookmark ?? app.rootBookmarks[before[i]];
+    if (root.bookmark || root.path !== before[i]) changed = true;
+    paths.push(root.path);
+    if (blob) bookmarks[root.path] = blob;
+    if (root.error) console.warn("library root unavailable:", root.path, root.error);
+  });
+
+  app.libraryRoots = paths;
+  app.rootBookmarks = bookmarks;
+  if (changed) {
+    await app.store.set(KEY_LIBRARY_ROOTS, paths);
+    await app.store.set(KEY_ROOT_BOOKMARKS, bookmarks);
+    await app.store.save();
+  }
+}
+
 // Commit a new set of library folders: persist, re-render the settings rows,
 // rescan + (re)watch the whole set, and rebuild the tree. Empty paths and
 // duplicates are dropped so the array stays clean. Passing [] tears every
 // watcher down and returns the Files panel to its get-started prompt.
 export async function setLibraryRoots(paths: string[]): Promise<void> {
-  // Trailing separators stripped so a folder typed with or without a slash is one
-  // root, and matches the key the backend stamps each track with (normalize_root).
   const seen = new Set<string>();
   const cleaned = paths
-    .map((p) => p.trim().replace(/\/+$/, ""))
+    .map(normalizeRootPath)
     .filter((p) => p && !seen.has(p) && seen.add(p));
   // Drop any root nested inside another kept root: a track under it would otherwise
   // belong to two roots, making its owning-root attribution (and thus which scan
@@ -303,8 +371,18 @@ export async function setLibraryRoots(paths: string[]): Promise<void> {
   app.libraryRoots = cleaned.filter(
     (p) => !cleaned.some((q) => q !== p && p.startsWith(q + "/")),
   );
+  // Blobs are keyed by path, so a root that just left the set takes its grant with
+  // it; keeping it would resurrect access to a folder the user removed.
+  app.rootBookmarks = Object.fromEntries(
+    app.libraryRoots.flatMap((p) => (app.rootBookmarks[p] ? [[p, app.rootBookmarks[p]]] : [])),
+  );
   await app.store.set(KEY_LIBRARY_ROOTS, app.libraryRoots);
+  await app.store.set(KEY_ROOT_BOOKMARKS, app.rootBookmarks);
   await app.store.save();
+  // Before the rescan and the tree rebuild below, and before renderLibraryRootRows
+  // draws paths that a moved folder may have changed. Also releases the grants for
+  // roots that just left the set.
+  await holdLibraryRoots();
   renderLibraryRootRows();
   if (app.libraryRoots.length) {
     void invoke("rescan_libraries", { paths: app.libraryRoots });
@@ -384,9 +462,19 @@ export async function browseLibraryRoot(index?: number): Promise<void> {
     defaultPath: (index != null ? app.libraryRoots[index] : undefined) || undefined,
   });
   if (typeof selected !== "string") return;
+  const path = normalizeRootPath(selected);
+  // Freeze the grant now, while it exists. Sandboxed, the picker's grant lasts
+  // only until quit and cannot be re-derived afterwards without asking again, so
+  // this is the single moment a bookmark can be made. Null just means there was no
+  // grant to freeze (unsandboxed), which costs nothing.
+  const blob = await invoke<string | null>("bookmark_root", { path }).catch((e) => {
+    console.error("bookmark_root failed", e);
+    return null;
+  });
+  if (blob) app.rootBookmarks[path] = blob;
   const next = [...app.libraryRoots];
-  if (index != null) next[index] = selected;
-  else next.push(selected);
+  if (index != null) next[index] = path;
+  else next.push(path);
   await setLibraryRoots(next);
 }
 

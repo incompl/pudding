@@ -69,11 +69,12 @@
     <main id="main-view">
       <section id="left">
         <div class="tab-panel" id="tab-files">
-          <!-- Get-started prompt shown across the whole Files panel until a
-               library folder is configured; hides the navigator/tree/footer.
-               Toggled by the files-empty effect in src/main.ts. -->
+          <!-- Get-started prompt shown across the whole Files panel whenever it
+               has nothing to browse — no library folder configured, or one that
+               holds no music — hiding the navigator/tree/footer. The lead span
+               says which of the two it is; see library-nav's render(). -->
           <div id="files-empty" class="panel-empty hidden">
-            To see files, add a library folder in
+            <span id="files-empty-lead">To see files, add a library folder in</span>
             <button id="files-empty-settings" type="button" class="link-btn">settings</button>.
           </div>
           <!-- Library browse-mode navigator (Replace + back): the root mode menu
@@ -287,5 +288,12 @@
       </section>
     </main>
     <div id="toast" aria-live="polite"></div>
+    <!-- OS file-drop affordance: covers the whole window while music is dragged
+         over it from Finder. Shown/hidden by src/file-drop.ts, which also owns
+         what a drop actually does. pointer-events:none so it can never intercept
+         the drop it is advertising. -->
+    <div id="drop-overlay" class="hidden" aria-hidden="true">
+      <div id="drop-overlay-inner">Drop to play</div>
+    </div>
   </body>
 </html>

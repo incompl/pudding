@@ -47,6 +47,8 @@ interface Fixture {
   container: FakeEl;
   folderTree: FakeEl;
   createBtn: FakeEl;
+  filesEmpty: FakeEl;
+  filesEmptyLead: FakeEl;
   calls: Call[];
   leafCtx: LeafListContext[];
   // The track lists handed to each renderLeafTrackList call, in order — so a test
@@ -64,7 +66,8 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
   const container = doc.registerRoot("library-nav");
   const folderTree = doc.registerRoot("folder-tree");
   const createBtn = doc.registerRoot("create-playlist-btn");
-  doc.registerRoot("files-empty");
+  const filesEmpty = doc.registerRoot("files-empty");
+  const filesEmptyLead = doc.registerRoot("files-empty-lead");
 
   const calls: Call[] = [];
   const leafCtx: LeafListContext[] = [];
@@ -100,7 +103,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
         : [{ album: "Split", artist: "Various" }],
     artistTracks: async () => [],
     albumTracks: async () => songs,
-    libraryRootSet: () => true,
+    libraryEmpty: () => null,
     renderLeafTrackList: (tracks, ctx) => {
       leafCtx.push(ctx);
       leafTracks.push(tracks);
@@ -122,7 +125,18 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
   };
 
   initLibraryNav(deps, initial);
-  return { container, folderTree, createBtn, calls, leafCtx, leafTracks, saved, deps };
+  return {
+    container,
+    folderTree,
+    createBtn,
+    filesEmpty,
+    filesEmptyLead,
+    calls,
+    leafCtx,
+    leafTracks,
+    saved,
+    deps,
+  };
 }
 
 // Find a nav-row by its primary label, searching the whole rendered subtree.
@@ -150,6 +164,40 @@ beforeEach(() => {
   // escape hatch renderLeafTrackList uses so those views render every row eagerly,
   // letting the tests assert on real drill rows.
   (globalThis as { __noWindowing?: boolean }).__noWindowing = true;
+});
+
+// The get-started prompt covers BOTH dead ends, not just the configured-folder
+// one: a library folder that holds no music used to fall through to a springboard
+// whose every view was empty, which reads as a broken app rather than one waiting
+// for input. Both cases must also suppress the springboard, the folder tree and
+// the create button — every one of them is a dead end here.
+test("an empty library shows the get-started prompt, not an empty springboard", async () => {
+  const { container, filesEmpty, filesEmptyLead, folderTree, createBtn } = setup({
+    libraryEmpty: () => "empty",
+  });
+  await flush();
+  assert.ok(!filesEmpty.classList.contains("hidden"), "prompt must show for an empty library");
+  assert.match(filesEmptyLead.textContent, /No music in your library folder/);
+  assert.equal(labels(container).length, 0, "springboard must not be built");
+  assert.ok(folderTree.classList.contains("hidden"), "folder tree is a dead end here");
+  assert.ok(createBtn.classList.contains("hidden"), "create button is a dead end here");
+});
+
+test("no library folder shows the prompt, worded for the unconfigured case", async () => {
+  const { container, filesEmpty, filesEmptyLead } = setup({ libraryEmpty: () => "no-root" });
+  await flush();
+  assert.ok(!filesEmpty.classList.contains("hidden"), "prompt must show with no root set");
+  assert.match(filesEmptyLead.textContent, /add a library folder in$/);
+  assert.equal(labels(container).length, 0, "springboard must not be built");
+});
+
+// The third state: mid-refresh nothing is known yet, and main.ts reports null so
+// the prompt cannot flash over the tree's own "Loading...".
+test("a library with content hides the prompt and builds the springboard", async () => {
+  const { container, filesEmpty } = setup();
+  await flush();
+  assert.ok(filesEmpty.classList.contains("hidden"), "prompt must stay hidden");
+  assert.deepEqual(labels(container).slice(0, 4), ["Browse", "Songs", "Artists", "Albums"]);
 });
 
 test("root menu lists the four views, then the cached playlist index", async () => {

@@ -34,6 +34,11 @@ export interface AppState {
   // The library tree root (Files tab). Null until the first scan populates it.
   rootNode: TreeNode | null;
   libraryRoots: string[];
+  // The security-scoped bookmark for each library root, base64, keyed by the root
+  // path. Sandboxed, this — not the path — is what survives a relaunch; see
+  // src-tauri/src/root_access.rs. Sparse: a root reachable without one (~/Music
+  // via its entitlement, or any path at all when unsandboxed) has no entry.
+  rootBookmarks: Record<string, string>;
   invalidLibraryRoots: Set<string>;
   // File-tree multi-select Shift-range pivot (path of the last click).
   selectionAnchor: string | null;
@@ -111,6 +116,7 @@ export const app: AppState = {
   store: undefined as unknown as Store, // assigned in init(), like the old `let`
   rootNode: null,
   libraryRoots: [],
+  rootBookmarks: {},
   invalidLibraryRoots: new Set<string>(),
   selectionAnchor: null,
   lastSelectionPane: null,
@@ -394,7 +400,15 @@ export const streamListWritable = signal(false);
 // Whether the file tree has at least one top-level entry to start from. Drives
 // the idle play button: with content, an idle play "starts the library" (plays
 // the first entry) instead of sitting disabled, so the button reads ready-to-go.
+// Also half of the Files get-started prompt's condition — but only once
+// libraryTreeLoaded says the answer is real. See that signal.
 export const libraryHasContent = signal(false);
+// Whether the tree has finished its first (or latest) build — false for the
+// window between refreshTree clearing the old answer and the listing coming back.
+// Without this the get-started prompt would flash on every boot and every library
+// change: libraryRootSet and libraryHasContent are both false mid-refresh, which
+// is indistinguishable from "no library" unless something says "not known yet".
+export const libraryTreeLoaded = signal(false);
 
 export const treeSelection = signal<Set<string>>(new Set());
 

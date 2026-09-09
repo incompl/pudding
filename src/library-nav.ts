@@ -99,10 +99,14 @@ export interface LibraryNavDeps {
   // so it can be restored on the next launch. Fire-and-forget; called on every
   // navigation change from render().
   persistLocation: (steps: NavStep[]) => void;
-  // Whether a library folder has been configured. When false the panel shows a
-  // get-started prompt (#files-empty) instead of the view springboard; main.ts
-  // re-renders (renderNav) whenever this flips.
-  libraryRootSet: () => boolean;
+  // Why the Files panel has nothing to browse, or null when it has something.
+  // "no-root" is a fresh install with no library folder configured; "empty" is a
+  // configured folder holding no music — a ~/Music that happens to be empty (the
+  // default seeded on first run), or a drive that didn't mount. Both are dead ends
+  // for every view and for the folder tree, so both swap the whole panel for the
+  // get-started prompt (#files-empty); only the prompt's wording differs. main.ts
+  // re-renders (renderNav) whenever this changes.
+  libraryEmpty: () => "no-root" | "empty" | null;
   // Tell the Browse folder tree whether it's the active view. The tree defers its
   // (costly) DOM build while hidden, so entering Browse flushes any pending build.
   // Injected rather than imported so this module never pulls in tree-view/main.
@@ -136,6 +140,7 @@ let container: HTMLElement;
 let folderTree: HTMLElement;
 let createBtn: HTMLElement;
 let filesEmpty: HTMLElement;
+let filesEmptyLead: HTMLElement;
 const stack: Pane[] = [];
 // Set for a single navigateTo when the caller wants the landing detail's Back-bar
 // title to flash — the "here it is" cue for album/artist search hits, which (unlike
@@ -841,12 +846,16 @@ function render(): void {
   // here so a still-loading or empty pane doesn't inherit the previous list.
   registerNavList(null);
 
-  // No library folder yet: the whole panel is a get-started prompt. Every view
-  // and the folder tree would be dead ends, so hide them and bail before the
-  // springboard is built.
-  const hasRoot = deps.libraryRootSet();
-  filesEmpty.classList.toggle("hidden", hasRoot);
-  if (!hasRoot) {
+  // Nothing to browse — no library folder, or one with no music in it: the whole
+  // panel is a get-started prompt. Every view and the folder tree would be dead
+  // ends, so hide them and bail before the springboard is built.
+  const empty = deps.libraryEmpty();
+  filesEmpty.classList.toggle("hidden", empty === null);
+  if (empty !== null) {
+    filesEmptyLead.textContent =
+      empty === "no-root"
+        ? "To see files, add a library folder in"
+        : "No music in your library folder. Drop files here, or pick another in";
     folderTree.classList.add("hidden");
     createBtn.classList.add("hidden");
     return;
@@ -928,6 +937,7 @@ export function initLibraryNav(d: LibraryNavDeps, initial?: NavStep[]): void {
   folderTree = document.getElementById("folder-tree") as HTMLElement;
   createBtn = document.getElementById("create-playlist-btn") as HTMLElement;
   filesEmpty = document.getElementById("files-empty") as HTMLElement;
+  filesEmptyLead = document.getElementById("files-empty-lead") as HTMLElement;
 
   // Restore the last place (empty / malformed → root menu), then render once.
   if (initial) restoreLocation(initial);
