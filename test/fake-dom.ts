@@ -36,6 +36,11 @@ interface ModeledElement {
   readonly isConnected: boolean;
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | null;
+  // data-* attributes, the way `h` writes them (el.dataset.col = "artist").
+  // Modeled as a proxy over the attribute map, so a value written through
+  // dataset reads back through getAttribute("data-col") and vice versa —
+  // src/columns.ts writes one way and the tests read the other.
+  readonly dataset: Record<string, string>;
   addEventListener(type: string, fn: Listener): void;
   // Tree + classList ops are modeled in the fake's own terms (FakeEl, not a
   // generic Node), so they're contract-checked for existence but not against
@@ -74,6 +79,10 @@ type _AssertTrue<T extends true> = T;
 // Exported only so it counts as "used" (noUnusedLocals); its job is to fail to
 // compile — via the _AssertTrue<false> constraint — if _FaithfulEl drifts.
 export type _FaithfulElCheck = _AssertTrue<_FaithfulEl>;
+
+function datasetAttrName(key: string): string {
+  return `data-${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
+}
 
 export class FakeEl implements ModeledElement {
   readonly tagName: string;
@@ -132,6 +141,16 @@ export class FakeEl implements ModeledElement {
     if (i >= 0) this.children.splice(i, 1);
     child.parentNode = null;
   }
+
+  // camelCase dataset key <-> data-kebab-case attribute name, per the DOM rule.
+  readonly dataset: Record<string, string> = new Proxy({} as Record<string, string>, {
+    get: (_t, key: string) => this.attributes.get(datasetAttrName(key)),
+    set: (_t, key: string, value: string) => {
+      this.attributes.set(datasetAttrName(key), String(value));
+      return true;
+    },
+    has: (_t, key: string) => this.attributes.has(datasetAttrName(String(key))),
+  });
 
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);

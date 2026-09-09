@@ -6,7 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { signal } from "@preact/signals-core";
-import { h, eqBars } from "./dom";
+import { h, eqBars, append } from "./dom";
 import type { Queue, SearchTrack, SearchFolder, TreeNode, ContextMenuItem } from "./types";
 import {
   app,
@@ -41,6 +41,23 @@ import {
   queueRenameBtn,
 } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
+import {
+  activeColumns,
+  buildCells,
+  buildHeaderCells,
+  columnHeaders,
+  columnsMenuItem,
+  showColumnsMenuAt,
+  gridTemplate,
+  gridClasses,
+  isSortedBy,
+  nextSort,
+  setColumnRepaint,
+  sortTracks,
+  QUEUE_CELLS,
+  type ColumnId,
+  type SortState,
+} from "./columns";
 import { windowedList, type WindowedList } from "./windowed-list";
 import { attachRowReorder } from "./drag-drop";
 import { engine } from "./engine-glue";
@@ -67,7 +84,6 @@ import {
   addToPlaylistItem,
   toast,
   clearArt,
-  formatTime,
   UNTITLED_PLAYLIST_TITLE,
 } from "./main";
 
@@ -91,6 +107,84 @@ let queueWin: WindowedList | null = null;
 let renderedQueue: Queue | null = null;
 let renderedIsSource = false;
 
+// --- columns (right pane) ---------------------------------------------------
+//
+// The queue's automatic set is what it shipped with: the title, the track's own
+// artist, and the trailing runtime — deliberately never the album, since a queue
+// is an arbitrary mixed-source list and the album repeats as noise more often than
+// it distinguishes. The artist column is dropped when *no* row in the list carries
+// one, so a list of untagged files gives its whole width to the titles instead of
+// splitting it against a column of blanks.
+function autoQueueColumns(tracks: SearchTrack[]): ColumnId[] {
+  const anyArtist = tracks.some((t) => !t.missing && !!t.artist);
+  return anyArtist ? ["title", "artist", "duration"] : ["title", "duration"];
+}
+
+// The queue has an *order*, not a sort: the list is the play order, and the user
+// owns it. So a header click here is an edit — a one-shot reorder pushed through
+// applyCuration, which means it autosaves a playlist, reconciles the live engine
+// pool, and (crucially) lands on the existing ⌘Z stack like any other curation.
+//
+// The header still carries the same arrow the library's does, because the arrow
+// says what the rows *are*, and after that edit they really are in that order.
+// What it can't be here is a remembered click: the very next drag, add, remove or
+// ⌘Z leaves the order something else, and none of those paths should have to know
+// a header exists. So the click is remembered only as a candidate, and every paint
+// re-derives whether it still holds (isSortedBy, one pass over the rows). The mark
+// dies on its own the moment the order stops matching it.
+let lastQueueSort: SortState = null;
+
+// The arrow to draw over the queue's rows: the last click, but only while the rows
+// are still in that order.
+function queueSortMark(tracks: SearchTrack[]): SortState {
+  return isSortedBy(tracks, lastQueueSort) ? lastQueueSort : null;
+}
+
+function sortQueueBy(id: ColumnId): void {
+  const list = curatedList();
+  if (!list) return;
+  // Cycle from the mark the user can see, not from the last click: if the order
+  // has drifted since (so the arrow is gone), clicking that header again means
+  // "sort by this", ascending — the same thing it means on a header that was never
+  // clicked at all.
+  const next = nextSort(queueSortMark(list.tracks), id);
+  lastQueueSort = next;
+  // Third click: leave the order where the second click put it — but drop the
+  // arrow, since the rows are now in an order the user owns rather than one the
+  // header is claiming. Nothing else changed, so only the header needs repainting.
+  if (!next) {
+    repaintQueueList();
+    return;
+  }
+  applyCuration(sortTracks(list.tracks, next));
+}
+
+// The header row, when the pane's headers are switched on. Built as a real
+// .queue-row — same padding, same gutter width, same --cols template — so it lines
+// up with the rows by construction rather than by a second set of matched numbers.
+// It is display:none outside column mode, gated by the *same* container query as
+// the columns, so a header can never appear above a folded row.
+function buildQueueHeader(cols: ColumnId[], template: string, tracks: SearchTrack[]): HTMLElement {
+  const cells = h("span", {
+    class: "queue-text col-grid",
+    style: { "--cols": template },
+  });
+  append(cells, buildHeaderCells("queue", cols, queueSortMark(tracks), sortQueueBy));
+  return h(
+    "li",
+    {
+      class: "queue-row colhead",
+      // Right-clicking the header is the other way to reach the picker the row
+      // menu carries under `Columns ▸` — the header is the columns, so it opens
+      // them flat. Its own handler, not the row menu's: a header is not a track,
+      // and Play / Add to queue would have nothing to act on.
+      on: { contextmenu: (e) => showColumnsMenuAt(e, "queue", autoQueueColumns(tracks)) },
+    },
+    h("span", { class: "queue-num" }),
+    cells,
+  );
+}
+
 // view index → playable-pool index (queuePlayingIndex space, which excludes missing
 // rows), or -1 for a missing row. Lets a row map its playing highlight and click
 // back to its pool position without re-walking the list per row.
@@ -112,6 +206,8 @@ function buildQueueRow(
   queue: Queue,
   isSource: boolean,
   viewToPool: number[],
+  cols: ColumnId[],
+  template: string,
   i: number,
 ): HTMLElement {
   const t = queue.tracks[i];
@@ -136,24 +232,47 @@ function buildQueueRow(
       style: label.length > 3 ? { "font-size": `${3 / label.length}em` } : {},
     }),
   );
+  // One cell per column, in the field table's order. The same DOM serves both
+  // layouts: past the pane's 28rem breakpoint `.col-grid` becomes a grid and each
+  // cell is a track; below it the cells fold back into one inline `title · a · b`
+  // line via the `· ` separators in CSS. Either way the row is a single line, so
+  // the windowed row geometry (each slot placed at i * rowHeight, from one probe
+  // row) stays uniform.
+  const text = h("span", {
+    class: gridClasses("queue", "queue-text"),
+    style: { "--cols": template },
+  });
+  append(text, buildCells(t, cols, QUEUE_CELLS));
   // A missing playlist row is shown but can't be played: dim it, label it, and
-  // skip the click handler so it reads as unavailable rather than dropped.
-  const secondaryText = t.missing ? "Missing file" : (t.artist ?? "");
-  // Single line, matching the browse tree's track rows: the title, then the
-  // track's artist inline (dimmed, after a middot) — never the album. The line
-  // truncates with one trailing ellipsis, so a long title pushes the artist off
-  // the end; the row is one line at every width, so the windowed row geometry
-  // (each slot placed at i * rowHeight, from one probe row) stays uniform.
-  const text = h(
-    "span",
-    { class: "queue-text" },
-    h("span", {
-      class: "queue-primary",
-      text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
-    }),
-  );
-  if (secondaryText) {
-    text.appendChild(h("span", { class: "queue-secondary", text: secondaryText }));
+  // skip the click handler so it reads as unavailable rather than dropped. The
+  // label rides *inside* the title cell rather than taking over a column of its
+  // own: it is a fact about the row, not a value of any field, and the cell it
+  // would otherwise land in is whichever column happens to come second — the
+  // runtime, in an automatic set whose tracks carry no artist, which the folded
+  // row then hides outright, losing the marker entirely. Inside the title it
+  // survives every column set and both layouts, and no column loses its value.
+  //
+  // It trails the title, in parens, rather than reading as one more
+  // middot-separated value. A title is a phrase, and a dim phrase after a middot
+  // is exactly what an artist or an album looks like here, so a track actually
+  // *called* "Missing File" made the row read as two values of the same kind.
+  // Brackets say "aside about the row above" in ordinary type, which no column
+  // value here is ever wearing.
+  //
+  // Trailing costs the marker the ellipsis fight it used to win by leading, so
+  // the cell takes the header's shape instead — the title in its own box, the
+  // marker flex: none beside it (see .queue-primary.has-missing). The title
+  // ellipsizes *around* the marker, and the row keeps its explanation at every
+  // column width.
+  if (t.missing) {
+    const primary = text.querySelector<HTMLElement>(".queue-primary") ?? text;
+    const label = primary.textContent ?? "";
+    primary.textContent = "";
+    primary.classList.add("has-missing");
+    append(primary, [
+      h("span", { class: "queue-title-text", text: label }),
+      h("span", { class: "queue-missing", text: "(Missing file)" }),
+    ]);
   }
   // Row remove (curation): strips this row from the list (and file, if a
   // playlist). Stops propagation so it never counts as a play/commit click.
@@ -168,18 +287,10 @@ function buildQueueRow(
       },
     },
   });
-  // Trailing runtime, right-aligned and dimmed, sitting just left of the hover ✕.
-  // Shown only past the two-column breakpoint (see .row-dur) and only when the
-  // track's duration is known — a missing/out-of-library row carries none, so the
-  // slot is simply absent rather than a blank cell.
-  const dur =
-    !t.missing && t.duration != null && t.duration > 0
-      ? h("span", { class: "row-dur", text: formatTime(t.duration) })
-      : null;
   // The view index, so the reactive selection effect (and the drag-drop drop-index
   // math) can map back to the full list without relying on a unique path (duplicates
   // share one) — essential once the list is windowed and only a slice is mounted.
-  const li = h("li", { class: "queue-row", data: { rowIndex: i } }, num, text, dur, remove);
+  const li = h("li", { class: "queue-row", data: { rowIndex: i } }, num, text, remove);
   if (isPlaying) li.classList.add("playing");
   // Multi-select background, reapplied on remount like .playing (the list selection
   // effect keeps it live between remounts as the window scrolls).
@@ -230,19 +341,23 @@ function buildQueueRow(
       if (!queueSel.signal.peek().has(t)) queueSel.single(t);
       const sel = selectedListTracks();
       if (sel.length > 1) {
-        showContextMenu(e.clientX, e.clientY, [
+        void showContextMenu(e.clientX, e.clientY, [
           ...queueMenuItems((sink) => sink(sel), sel.length),
           addToPlaylistItem(() => sel),
           {
             label: `Remove ${sel.length} from list`,
             action: () => removeCuratedTracks(sel),
           },
+          columnsMenuItem("queue", autoQueueColumns(queue.tracks)),
         ]);
       } else {
-        showContextMenu(e.clientX, e.clientY, [
+        void showContextMenu(e.clientX, e.clientY, [
           ...queueMenuItems((sink) => sink([t])),
           addToPlaylistItem(() => [t]),
           editMetadataItem(t.path),
+          // Right-clicking a row scopes the picker to that row's pane implicitly,
+          // so it needs no "Queue ▸" label and no focused-pane guesswork.
+          columnsMenuItem("queue", autoQueueColumns(queue.tracks)),
         ]);
       }
     });
@@ -261,6 +376,18 @@ function buildQueueRow(
 // DOM instead of a node per track. Native scroll is untouched (the spacer sizes the
 // real #queue-list scroll pane). Per-row listeners are re-created on each remount
 // (cheap at a screenful) rather than delegated — same trade the leaf lists make.
+// The margin every reveal into this list has to clear. The column header is
+// `position: sticky` at the top of the scroll box, so a row scrolled flush to the
+// top lands *underneath* it — visible to the layout, invisible to the reader. Read
+// off the DOM rather than passed down, because the reveals that need it come from
+// four different places (a render, a play-advance, keyboard navigation) and only
+// the list knows whether it currently has a header at all: offsetHeight is 0 when
+// the header is switched off or folded away by a narrow pane, which is exactly the
+// margin wanted then.
+function stickyMargin(): number {
+  return queueListEl.querySelector<HTMLElement>(".colhead")?.offsetHeight ?? 0;
+}
+
 export function renderQueue(queue: Queue | null, isSource: boolean): void {
   if (!queue) {
     queueListEl.replaceChildren();
@@ -303,29 +430,42 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
     queueWin &&
     queueListEl.contains(queueWin.el)
   ) {
-    queueListEl.querySelectorAll<HTMLElement>("li.queue-row").forEach((li) => {
+    queueListEl.querySelectorAll<HTMLElement>("li.queue-row:not(.colhead)").forEach((li) => {
       li.classList.toggle("playing", viewToPool[Number(li.dataset.rowIndex)] === playIdx);
     });
-    if (revealTo != null) queueWin.revealIndex(revealTo);
+    if (revealTo != null) queueWin.revealIndex(revealTo, stickyMargin());
     return;
   }
 
   renderedQueue = queue;
   renderedIsSource = isSource;
+  const cols = activeColumns("queue", autoQueueColumns(queue.tracks));
+  // One template for the whole list, computed here rather than per row: a fixed
+  // column's width is a fact about the list (see gridTemplate), and this is the
+  // only place that sees all of it — the rows below are built one at a time, as
+  // the window scrolls them in.
+  const showHeader = columnHeaders.queue.peek();
+  const template = gridTemplate(cols, queue.tracks, showHeader, "queue");
   // Row count, so the drag-drop drop-index math can resolve an insert-at-the-end
   // without every row being mounted (updateDropTarget reads it).
   queueListEl.dataset.rowCount = String(queue.tracks.length);
   queueListEl.replaceChildren();
+  // Sticky, inside #queue-list — which is the query container, so the header can
+  // be gated by the same @container rule the columns are.
+  const header = showHeader ? buildQueueHeader(cols, template, queue.tracks) : null;
+  if (header) queueListEl.appendChild(header);
 
   const buildRow = (i: number): HTMLElement =>
-    buildQueueRow(queue, isSource, viewToPool, i);
+    buildQueueRow(queue, isSource, viewToPool, cols, template, i);
 
   // Debug/e2e escape hatch: render every row eagerly (no measured-layout windowing)
   // so fake-DOM tests can assert on real rows. Mirrors renderLeafTrackList.
   if ((globalThis as { __noWindowing?: boolean }).__noWindowing) {
     queueWin = null;
     for (let i = 0; i < queue.tracks.length; i++) queueListEl.appendChild(buildRow(i));
-    const row = revealTo != null ? (queueListEl.children[revealTo] as HTMLElement | undefined) : undefined;
+    // Index among the *track* rows: the column header, when shown, is child 0.
+    const rows = queueListEl.querySelectorAll<HTMLElement>("li.queue-row:not(.colhead)");
+    const row = revealTo != null ? rows[revealTo] : undefined;
     if (row && typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "nearest" });
     return;
   }
@@ -337,15 +477,29 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
   // exist on this same tick — no one-frame blank flash, and a click synthesized
   // straight after a render (curation, tests) finds its row.
   win.flush();
-  if (revealTo != null) win.revealIndex(revealTo);
+  // Reveal past the sticky header, so a scrolled-to row never lands under it.
+  if (revealTo != null) win.revealIndex(revealTo, stickyMargin());
 }
+
+// Force a full rebuild of the list rows — the column set, header visibility, or
+// sort changed, none of which any signal the render effect tracks. renderQueue
+// short-circuits when handed the same Queue object, so clear that guard first.
+export function repaintQueueList(): void {
+  const q = renderedQueue;
+  if (!q) return;
+  const isSource = renderedIsSource;
+  renderedQueue = null;
+  renderQueue(q, isSource);
+}
+
+setColumnRepaint("queue", repaintQueueList);
 // Scroll a row of the open list (queue or browsed playlist) into view by its
 // view index — the equivalent of scrollIntoView({ block: "nearest" }). Backs
 // keyboard list navigation, whose selection move must keep the focused row on
 // screen (the selection-paint effect only repaints mounted rows). A no-op when
 // the list is torn down (queueWin null).
 export function revealQueueRow(viewIndex: number): void {
-  queueWin?.revealIndex(viewIndex);
+  queueWin?.revealIndex(viewIndex, stickyMargin());
 }
 
 // --- Curation (phase 3): reorder / remove / drag-in on the open list ---
@@ -608,9 +762,19 @@ export function reconcilePoolEdit(newTracks: SearchTrack[], playingObj: SearchTr
       // the edit deleted.
       app.shuffleBag = app.shuffleBag.filter((p) => poolPathsNew.includes(p));
       app.shuffleHistory = app.shuffleHistory.filter((p) => poolPathsNew.includes(p));
-    } else if (repeatMode.value !== "one" && autoadvanceEnabled()) {
+    } else if (repeatMode.value !== "one" && autoadvanceEnabled() && !app.pendingResume) {
       // Rebuild the gapless tail: drop the stale upcoming tracks, then re-append
       // the new order. Chained so the append can't race ahead of the clear.
+      //
+      // Not while a restored session is still armed (pendingResume): that state
+      // has a playhead — a highlighted row, a remembered position — but the engine
+      // holds no track and its queue is empty, so there is no upcoming order to
+      // fix. An append to a drained engine doesn't reorder anything, it *starts
+      // playback* (see engine.append), which is how curating a just-launched queue
+      // — a sort, a drag, a remove, a ⌘Z — used to blast audio on a launch the user
+      // hadn't pressed play on. Nothing is lost by skipping it: the first play
+      // seeds the engine from poolPaths() at app.lastIndex, and both were just
+      // refreshed above, so it starts in the edited order at the same track.
       const tail = poolPathsNew.slice(newPlayableIdx + 1);
       void engine.clearUpcoming().then(() => engine.append(tail));
     }
@@ -627,6 +791,21 @@ export function reconcilePoolEdit(newTracks: SearchTrack[], playingObj: SearchTr
 // skipNext's mode branches, but the target is the track that *took* the removed
 // slot (straight order), not slot+1.
 export function advanceAfterRemovedPlaying(pool: string[], slot: number): void {
+  // Same false premise as the tail rebuild above, reached the other way: a restored
+  // session that was never played has a playhead — a highlighted row, a remembered
+  // position — but no engine behind it, and that row has just been removed. Every
+  // branch below actively starts audio, which on a launch the user hasn't pressed
+  // play on is the same surprise. There is also nothing left to resume into, so
+  // holding the arming would resume the wrong track at the removed one's offset.
+  // Land on the resting state the ad-hoc queue already defines: no playhead, empty
+  // hero, and the next play starts the queue from the top.
+  if (app.pendingResume) {
+    app.pendingResume = null;
+    app.queueEnded = pool.length > 0;
+    app.lastIndex = 0;
+    stopAfterRemove();
+    return;
+  }
   if (pool.length === 0) {
     stopAfterRemove();
     return;
@@ -813,7 +992,21 @@ export function trackToNode(t: SearchTrack): TreeNode {
 }
 
 export function nodeToTrack(n: TreeNode): SearchTrack {
-  return { path: n.path, title: n.title, artist: n.artist, album: n.album, albumArtist: n.albumArtist };
+  return {
+    path: n.path,
+    title: n.title,
+    artist: n.artist,
+    album: n.album,
+    albumArtist: n.albumArtist,
+    disc: n.disc,
+    year: n.year,
+    genre: n.genre,
+    duration: n.duration,
+    bitrate: n.bitrate,
+    gain: n.gain,
+    created: n.created,
+    modified: n.modified,
+  };
 }
 
 export function appendTracksToActiveQueue(tracks: SearchTrack[]): void {

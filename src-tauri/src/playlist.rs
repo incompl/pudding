@@ -55,12 +55,21 @@ pub struct PlaylistTrack {
     album_artist: Option<String>,
     disc: Option<u32>,
     track: Option<u32>,
+    year: Option<u32>,
+    genre: Option<String>,
     #[serde(rename = "inLibrary")]
     in_library: bool,
     missing: bool,
     // Track length in seconds (None when unknown / out of library). Summed for
     // the playlist's runtime beside its track count.
     duration: Option<f64>,
+    // The remaining column fields. All None for an out-of-library track: they come
+    // from the scan cache, and a path outside every library root was never scanned.
+    // That is a real distinction the row shows rather than hides — see `in_library`.
+    bitrate: Option<u32>,
+    gain: Option<f64>,
+    created: Option<i64>,
+    modified: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -245,21 +254,25 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                 .to_string();
             let missing = !Path::new(&e.path).exists();
             match meta_map.get(&e.path).cloned() {
-                Some((title, artist, album, album_artist, disc, track, duration)) => {
-                    PlaylistTrack {
-                        path: e.path,
-                        name: basename,
-                        title,
-                        artist,
-                        album,
-                        album_artist,
-                        disc,
-                        track,
-                        in_library: true,
-                        missing,
-                        duration,
-                    }
-                }
+                Some(m) => PlaylistTrack {
+                    path: e.path,
+                    name: basename,
+                    title: m.title,
+                    artist: m.artist,
+                    album: m.album,
+                    album_artist: m.album_artist,
+                    disc: m.disc,
+                    track: m.track,
+                    year: m.year,
+                    genre: m.genre,
+                    in_library: true,
+                    missing,
+                    duration: m.duration,
+                    bitrate: m.bitrate,
+                    gain: m.gain,
+                    created: m.created,
+                    modified: m.modified,
+                },
                 None => PlaylistTrack {
                     // Out-of-library: no DB metadata; show the `#EXTINF` title
                     // if any, else the frontend falls back to the filename.
@@ -271,9 +284,15 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     album_artist: None,
                     disc: None,
                     track: None,
+                    year: None,
+                    genre: None,
                     in_library: false,
                     missing,
                     duration: None,
+                    bitrate: None,
+                    gain: None,
+                    created: None,
+                    modified: None,
                 },
             }
         })
@@ -303,7 +322,8 @@ fn serialize(
     let mut out = String::from("#EXTM3U\n");
     out.push_str(&format!("#PLAYLIST:{}\n", sanitize_line(name)));
     for t in tracks {
-        if let Some((title, artist, _, _, _, _, duration)) = meta_map.get(t) {
+        if let Some(m) = meta_map.get(t) {
+            let (title, artist, duration) = (&m.title, &m.artist, &m.duration);
             let display = match (artist, title) {
                 (Some(a), Some(ti)) => format!("{} - {}", a, ti),
                 (_, Some(ti)) => ti.clone(),
@@ -685,7 +705,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE tracks (path TEXT, title TEXT, artist TEXT, album TEXT, \
-             album_artist TEXT, disc INTEGER, track INTEGER, duration REAL);",
+             album_artist TEXT, disc INTEGER, track INTEGER, year INTEGER, genre TEXT, \
+             duration REAL, bitrate INTEGER, rg_track_gain REAL, created INTEGER, \
+             mtime INTEGER);",
         )
         .unwrap();
         conn

@@ -50,6 +50,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 - Cmd/Shift-click to select multiple tracks; every menu verb (play, queue, add to playlist) acts on the whole selection
 - Right-click a track to jump to its artist or album, or reveal it with Show in Finder
 - Embedded album art, and disc/track-number-aware sorting
+- Columns: pick the fields a track list shows — title, artist, album, album artist, disc, genre, year, kind, time, bit rate, gain, date created/modified — or leave it automatic and the pane picks them per list. Turn on the header to sort by any column and drag the dividers to set your own widths; narrow panes fold back to one line
 - Edit an audio file's metadata tags right in the app.
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
 

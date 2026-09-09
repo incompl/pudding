@@ -57,7 +57,14 @@ export function playlistPlayableTracks(data: PlaylistData): SearchTrack[] {
       artist: t.artist,
       album: t.album,
       albumArtist: t.albumArtist,
+      disc: t.disc,
+      year: t.year,
+      genre: t.genre,
       duration: t.duration,
+      bitrate: t.bitrate,
+      gain: t.gain,
+      created: t.created,
+      modified: t.modified,
     }));
 }
 
@@ -73,8 +80,15 @@ export function playlistViewTracks(data: PlaylistData): SearchTrack[] {
     artist: t.artist,
     album: t.album,
     albumArtist: t.albumArtist,
+    disc: t.disc,
+    year: t.year,
+    genre: t.genre,
     missing: t.missing,
     duration: t.duration,
+    bitrate: t.bitrate,
+    gain: t.gain,
+    created: t.created,
+    modified: t.modified,
   }));
 }
 

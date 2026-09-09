@@ -10,7 +10,28 @@ import { load } from "@tauri-apps/plugin-store";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect } from "@preact/signals-core";
 import { engine } from "./engine-glue";
-import { h, eqBars } from "./dom";
+import { h, eqBars, append } from "./dom";
+import {
+  activeColumns,
+  buildCells,
+  buildHeaderCells,
+  columnHeaders,
+  columnsMenuItem,
+  showColumnsMenuAt,
+  gridTemplate,
+  gridClasses,
+  librarySort,
+  loadColumnPrefs,
+  nextSort,
+  persist as persistColumnPrefs,
+  setColumnHost,
+  setColumnRepaint,
+  setColumnRoom,
+  sortTracks,
+  NAV_CELLS,
+  type ColumnId,
+  type ColumnPane,
+} from "./columns";
 import { windowedList } from "./windowed-list";
 import { maybeStartE2eBridge } from "./e2e-bridge";
 import { createVisualizer } from "./visualizer";
@@ -161,8 +182,9 @@ import {
 
   toastEl,
 } from "./dom-refs";
-import { showContextMenu, contextMenuOpen } from "./context-menu";
+import { showContextMenu } from "./context-menu";
 import { startTrackDrag } from "./drag-drop";
+import { attachOverflowTitles } from "./overflow-title";
 import { setupSearch } from "./search";
 import {
   refreshTree,
@@ -242,6 +264,7 @@ import {
 } from "./recents";
 import {
   playlistPlayableTracks,
+  playlistViewTracks,
   playPlaylistPath,
   browsePlaylistPath,
   refreshPlaylistIndex,
@@ -1194,7 +1217,7 @@ async function addProviderToQueue(
 function showArtistContextMenu(x: number, y: number, name: string): void {
   const getTracks: TrackProvider = () =>
     invoke<SearchTrack[]>("artist_tracks", { artist: name });
-  showContextMenu(x, y, [
+  void showContextMenu(x, y, [
     { label: "Play", action: () => void openArtistQueue(name) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
@@ -1209,7 +1232,7 @@ function showAlbumContextMenu(
 ): void {
   const getTracks: TrackProvider = () =>
     invoke<SearchTrack[]>("album_tracks", { album, albumArtist });
-  showContextMenu(x, y, [
+  void showContextMenu(x, y, [
     { label: "Play", action: () => void openAlbumQueue(album, albumArtist) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
@@ -1231,7 +1254,7 @@ function showPlaylistContextMenu(
 ): void {
   const getTracks: TrackProvider = async () =>
     playlistPlayableTracks(await invoke<PlaylistData>("read_playlist", { path }));
-  showContextMenu(x, y, [
+  void showContextMenu(x, y, [
     { label: "Play", action: () => void playPlaylistPath(path) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
@@ -1290,12 +1313,19 @@ function fieldVaries(
 }
 
 export function renderLeafTrackList(
-  tracks: SearchTrack[],
+  inputTracks: SearchTrack[],
   ctx: LeafListContext,
 ): HTMLElement {
+  // A library list has a *sort* (sticky, indicated in the header), unlike a queue,
+  // which has an order the user owns. Sorting up front means the play pool, the
+  // keyboard order, and the row indices are all built from what's on screen.
+  const tracks = sortTracks(inputTracks, librarySort.peek());
   app.navLeafTracks = tracks;
   app.navLeafPoolPath = ctx.syntheticPath;
-  const ul = h("div", { class: "nav-list" });
+  // The query container for this list's header row. The windowed row block inside
+  // declares its own `listcol` container at the identical width, so header and rows
+  // switch into column mode together.
+  const ul = h("div", { class: "nav-list col-host" });
 
   // Show a field in the dimmed suffix only when the list's tracks disagree about it
   // (mirrors the browse tree's per-folder showArtist). A field that's the same on
@@ -1307,6 +1337,22 @@ export function renderLeafTrackList(
   // LeafListContext) and additionally drops the artist as constant, leaving bare titles.
   const showArtist = fieldVaries(tracks, (t) => t.artist);
   const showAlbum = !ctx.hideAlbum && fieldVaries(tracks, (t) => t.album);
+  // fieldVaries is now the *default*, not an override: it decides the automatic
+  // column set, and the moment the user picks their own set through `Columns ▸`
+  // that set is taken literally — constant fields and all. "You made the mess."
+  const autoCols: ColumnId[] = [
+    "title",
+    ...(showArtist ? (["artist"] as ColumnId[]) : []),
+    ...(showAlbum ? (["album"] as ColumnId[]) : []),
+    "duration",
+  ];
+  const cols = activeColumns("library", autoCols);
+  // One template for the whole list, computed here rather than per row: a fixed
+  // column's width is a fact about the list (see gridTemplate), and this is the
+  // only place that sees all of it — the rows below are built one at a time, as
+  // the window scrolls them in.
+  const showHeader = columnHeaders.library.peek();
+  const colTemplate = gridTemplate(cols, tracks, showHeader, "library");
 
   // Play from `index` in context (cf. playTreeTrack): select the row so it stays
   // highlighted, drop the queue-row highlight, dismiss any queue/playlist chrome
@@ -1355,36 +1401,17 @@ export function renderLeafTrackList(
       rowPlayButton(() => playAt(t, i)),
     );
 
-    // Single line, left-aligned (matching the browse tree): the title, then the
-    // artist/album inline and dimmed after a separator. Every row is one line at
-    // any width, so the height never varies — the uniform height the window
-    // positions rows by (row i at i * rowHeight). The suffix is appended only when
-    // present, so a metadata-less row is just the bare title (still one-line height)
-    // rather than a reserved blank; the whole cell truncates with one ellipsis.
-    const secondaryText = [showArtist ? t.artist : null, showAlbum ? t.album : null]
-      .filter(Boolean)
-      .join(" · ");
-    const cell = h(
-      "span",
-      { class: "nav-cell" },
-      h("span", {
-        class: "nav-primary",
-        text: t.title ?? (t.path.split(/[\\/]/).pop() ?? t.path),
-      }),
-    );
-    if (secondaryText) {
-      cell.appendChild(h("span", { class: "nav-secondary", text: secondaryText }));
-    }
-
-    // Trailing runtime, right-aligned and dimmed. Shown only past the two-column
-    // breakpoint (see .row-dur) — where there's room — and only when the track's
-    // duration is known (out-of-library / undecodable rows carry none, so the slot
-    // is simply absent rather than a blank cell). One inline element on the same
-    // line, so the row stays its uniform windowed height.
-    const dur =
-      t.duration != null && t.duration > 0
-        ? h("span", { class: "row-dur", text: formatTime(t.duration) })
-        : null;
+    // One cell per column, in the field table's order. The same DOM serves both
+    // layouts: past the pane's 28rem breakpoint `.col-grid` becomes a grid and each
+    // cell is a track; below it the cells fold back into a single inline
+    // `title · artist · album` line via the `· ` separators in CSS. Every row is one
+    // line at any width either way, so the height never varies — the uniform height
+    // the window positions rows by (row i at i * rowHeight).
+    const cell = h("span", {
+      class: gridClasses("library", "nav-cell"),
+      style: { "--cols": colTemplate },
+    });
+    append(cell, buildCells(t, cols, NAV_CELLS));
 
     const row = h(
       "div",
@@ -1416,21 +1443,26 @@ export function renderLeafTrackList(
             if (!navSel.signal.peek().has(t)) navSel.single(t);
             const sel = navSel.resolveIn(tracks);
             if (sel.length > 1) {
-              showContextMenu(e.clientX, e.clientY, [
+              void showContextMenu(e.clientX, e.clientY, [
                 ...queueMenuItems((sink) => sink(sel), sel.length),
                 addToPlaylistItem(() => sel),
                 showInFinderItem(sel[0].path),
+                columnsMenuItem("library", autoCols),
               ]);
             } else {
               // Double-click plays the row, so the menu skips a redundant Play (as in
               // the tree and queue menus): it leads with the list-building verbs, then
               // the per-track navigation (Go to artist / album when tagged).
-              showContextMenu(e.clientX, e.clientY, [
+              void showContextMenu(e.clientX, e.clientY, [
                 ...queueMenuItems((sink) => sink([t])),
                 addToPlaylistItem(() => [t]),
                 ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: t.albumArtist }),
                 editMetadataItem(t.path),
                 showInFinderItem(t.path),
+                // Right-clicking a row scopes the picker to that row's pane
+                // implicitly, so it needs no "Library ▸" label and no
+                // focused-pane guesswork.
+                columnsMenuItem("library", autoCols),
               ]);
             }
           },
@@ -1447,7 +1479,6 @@ export function renderLeafTrackList(
       },
       num,
       cell,
-      dur,
     );
     if (navSel.signal.peek().has(t)) row.classList.add("selected");
     // A reveal's one-shot wash, applied at build time (like the selection and
@@ -1508,6 +1539,41 @@ export function renderLeafTrackList(
     return ul;
   }
 
+  // The optional header row, built as a real .nav-track-row — same padding, same
+  // gutter width, same --cols template — so it lines up with the rows by
+  // construction rather than by a second set of matched numbers. It is
+  // display:none outside column mode, gated by the *same* container query as the
+  // columns, so a header can never appear above a folded row.
+  if (showHeader) {
+    const headCells = h("span", {
+      class: "nav-cell col-grid",
+      style: { "--cols": colTemplate },
+    });
+    append(
+      headCells,
+      buildHeaderCells("library", cols, librarySort.peek(), (id) => {
+        librarySort.value = nextSort(librarySort.peek(), id);
+        void persistColumnPrefs();
+        renderNav();
+      }),
+    );
+    ul.appendChild(
+      h(
+        "div",
+        {
+          class: "nav-track-row colhead",
+          // Right-clicking the header is the other way to reach the picker the
+          // row menu carries under `Columns ▸` — the header is the columns, so it
+          // opens them flat. Its own handler, not the row menu's: a header is not
+          // a track, and Play / Add to queue would have nothing to act on.
+          on: { contextmenu: (e) => showColumnsMenuAt(e, "library", autoCols) },
+        },
+        h("span", { class: "nav-num" }),
+        headCells,
+      ),
+    );
+  }
+
   // Window the rows: only the on-screen slice is mounted over a full-height spacer,
   // so a whole-library Songs list costs a screenful of DOM instead of one node per
   // track. Native scroll/inertia are unchanged (real scroll pane, full height). The
@@ -1516,7 +1582,14 @@ export function renderLeafTrackList(
   const win = windowedList({ count: tracks.length, renderRow: buildRow });
   win.el.classList.add("nav-window");
   ul.appendChild(win.el);
-  registerLeafKbd((i) => win.revealIndex(i));
+  // Reveal past the sticky column header (see queue.ts's stickyMargin): a row
+  // scrolled flush to the top of the scroll box otherwise lands underneath it, so
+  // walking the selection up off the top of the viewport parks the focused row out
+  // of sight. offsetHeight is 0 when the header is off or folded away by a narrow
+  // pane, which is exactly the margin wanted then.
+  const headMargin = (): number =>
+    ul.querySelector<HTMLElement>(".colhead")?.offsetHeight ?? 0;
+  registerLeafKbd((i) => win.revealIndex(i, headMargin()));
   // Clicking the now-playing title parks the playing track's path here so the list
   // it navigates to scrolls straight to it (the row already paints .playing via the
   // currentNodePath match above). Consume it: scroll if this list actually holds the
@@ -1532,11 +1605,24 @@ export function renderLeafTrackList(
       // the click doing nothing at all. Armed before the window's first paint, so
       // the row mounts already washing (see row-flash).
       startRowFlash(revealPath);
-      win.revealIndex(idx);
+      win.revealIndex(idx, headMargin());
     }
   }
   return ul;
 }
+
+// A column-set / header / sort change has to rebuild the pane's rows, and no
+// signal the nav render path tracks covers that — so the picker re-renders it
+// explicitly. renderNav() rebuilds the current drill pane in place.
+setColumnRepaint("library", () => renderNav());
+// Both panes' "make room" hooks are registered here, not one per module: the
+// divider between them is a single number, and main.ts is what owns it.
+setColumnRoom("library", () => ensureColumnRoom("library"));
+setColumnRoom("queue", () => ensureColumnRoom("queue"));
+// The same containers a "make room" nudge measures are the ones a divider drag
+// repaints, so both hooks are answered by the one lookup.
+setColumnHost("library", () => columnContainer("library"));
+setColumnHost("queue", () => columnContainer("queue"));
 
 // Plays a queue row by its index (not path, so a duplicated track resolves to
 // the clicked instance). This is the sole way to (re)enter the queue: it makes
@@ -1840,35 +1926,74 @@ function setupSessionPersistence(): void {
   });
 }
 
+// A saved session carries the queue's rows as they stood at quit. For an
+// ephemeral queue that snapshot IS the queue — there's nowhere else to read it
+// from — but a real playlist has a backing .m3u8 that outranks it: the file can
+// be edited by another app (or by hand) while we're closed, and it's re-read on
+// every browse/play anyway, so restoring the stale snapshot is the one path that
+// shows out-of-date rows until you navigate away and back. Re-read it here.
+// A failed read (the file moved or was deleted) keeps the snapshot, so the
+// session still restores rather than vanishing.
+async function refreshPlaylistSnapshot(queue: Queue): Promise<Queue> {
+  if (!queue.sourcePath) return queue;
+  try {
+    const data = await invoke<PlaylistData>("read_playlist", { path: queue.sourcePath });
+    // Missing rows included, marked — same view the browse path builds.
+    const tracks = playlistViewTracks(data);
+    return {
+      ...queue,
+      title: data.name,
+      subtitle: trackCountSubtitle(tracks),
+      tracks,
+      sourcePath: data.path,
+    };
+  } catch (e) {
+    console.error("read_playlist failed", queue.sourcePath, e);
+    return queue;
+  }
+}
+
 // Rebuild the queue + playhead saved by the previous session, paused. The engine
 // holds no track yet — app.pendingResume arms the first play to seed it here and
 // seek to the saved position (togglePlayPause), so launch never blasts audio.
 async function restorePlaybackSession(): Promise<void> {
   const s = await app.store.get<PersistedSession>(KEY_PLAYBACK_SESSION);
   if (!s?.queue || !Array.isArray(s.queue.tracks)) return;
+  const queue = await refreshPlaylistSnapshot(s.queue);
   // The engine pool is playable rows only (missing files stay in the view but
   // never reach the engine), mirroring playQueue/playQueueTrack.
-  const playable = s.queue.tracks.filter((t) => !t.missing);
+  const playable = queue.tracks.filter((t) => !t.missing);
   if (playable.length === 0) return;
-  const idx = Math.min(Math.max(0, Math.trunc(s.index)), playable.length - 1);
+  // Re-anchor the playhead on the saved *path*, not just its index: a re-read
+  // playlist may have gained or lost rows above it. The saved index wins when it
+  // still names that track (a playlist can hold the same file twice, and only the
+  // index says which row was live); otherwise fall back to the first row with that
+  // path, and to the clamped index when the track is gone from the playlist.
+  const clamped = Math.min(Math.max(0, Math.trunc(s.index)), playable.length - 1);
+  const found = playable.findIndex((t) => t.path === s.path);
+  const idx = playable[clamped]?.path === s.path ? clamped : found >= 0 ? found : clamped;
   const track = playable[idx];
+  // The saved position belongs to the saved track; if that track is gone, the row
+  // we landed on starts from the top rather than inheriting a stranger's playhead.
+  const sameTrack = track.path === s.path;
 
   // A synthetic queue: parent so queueIsActivePool() is true and the same pool
   // seeds the engine on the first play. A real playlist reuses its file-keyed path.
-  const syntheticPath = s.queue.sourcePath
-    ? `queue:playlist:${s.queue.sourcePath}`
+  const syntheticPath = queue.sourcePath
+    ? `queue:playlist:${queue.sourcePath}`
     : "queue:restored";
-  app.currentParent = syntheticParent(syntheticPath, s.queue.title, playable);
-  openActiveQueue(s.queue);
+  app.currentParent = syntheticParent(syntheticPath, queue.title, playable);
+  openActiveQueue(queue);
   currentNodePath.value = track.path;
   queuePlayingIndex.value = idx;
   app.lastQueue = playable.map((t) => t.path);
   app.lastIndex = idx;
   app.queueEnded = false;
 
-  const time = typeof s.time === "number" && s.time > 0 ? s.time : 0;
+  const time = sameTrack && typeof s.time === "number" && s.time > 0 ? s.time : 0;
   currentTime.value = time;
-  duration.value = typeof s.duration === "number" ? s.duration : track.duration ?? 0;
+  duration.value =
+    sameTrack && typeof s.duration === "number" ? s.duration : track.duration ?? 0;
   const fallback = track.path.split(/[\\/]/).pop() ?? track.path;
   setNowPlaying(track.title ?? fallback, track.artist, track.album);
   void loadArt(track.path);
@@ -1922,6 +2047,68 @@ function setupPlaybackModes(): void {
   });
 }
 
+// The splitter's own limits, in px: the left pane never shrinks past a usable
+// navigator, and never grows so far that the right pane can't hold a queue. Every
+// write of --left-width goes through here, so a drag and a programmatic nudge
+// (ensureColumnRoom) can't disagree about how far the divider may go.
+function setLeftWidth(px: number): void {
+  const mainEl = document.getElementById("main-view") as HTMLElement;
+  const max = mainEl.getBoundingClientRect().width - 200;
+  document.documentElement.style.setProperty(
+    "--left-width",
+    `${Math.max(120, Math.min(max, px))}px`,
+  );
+}
+
+async function persistLeftWidth(): Promise<void> {
+  const final = getComputedStyle(document.documentElement).getPropertyValue("--left-width").trim();
+  if (!final) return;
+  await app.store.set(KEY_SPLITTER_WIDTH, final);
+  await app.store.save();
+}
+
+// The pane widths the column layout is keyed off: the element each pane declares
+// its `listcol` query container on (see styles.css), which is the pane's list
+// *inside* the panel's insets — so the width read here is the one the container
+// query compares, insets already discounted, rather than the pane's outer box.
+function columnContainer(pane: ColumnPane): HTMLElement | null {
+  return pane === "queue" ? queueListEl : document.querySelector(".nav-list.col-host");
+}
+
+// Matches `@container listcol (min-width: 28rem)` in styles.css — the fold gate.
+// Resolved against the root font size the query itself resolves it against, so the
+// two stay the same width rather than the same number.
+const COLUMN_GATE_REM = 28;
+
+// Move the divider until `pane` is wide enough for column mode, if it isn't.
+// Registered with columns.ts as the pane's "make room" hook: below the gate the
+// rows are one folded line and a header has nothing to label, so a "Show header"
+// tick would otherwise be a switch with nothing behind it.
+//
+// Only ever in the direction that helps, and only by the shortfall — the pane
+// lands exactly on the gate rather than at some remembered width, so the nudge is
+// the smallest one that answers the request. setLeftWidth clamps it, so a window
+// too narrow to give either pane 28rem moves as far as it can and the header stays
+// hidden rather than squeezing the other pane out of existence.
+function ensureColumnRoom(pane: ColumnPane): void {
+  const box = columnContainer(pane);
+  if (!box) return;
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+  const short = COLUMN_GATE_REM * rem - box.getBoundingClientRect().width;
+  if (short <= 0) return;
+  const leftEl = document.getElementById("left");
+  if (!leftEl) return;
+  const left = leftEl.getBoundingClientRect().width;
+  // The left pane makes room by growing; the right pane by taking that width off
+  // the left, which is the same divider in the other direction. A pixel past the
+  // gate rather than exactly on it: the container's used inline size is fractional
+  // and `min-width` compares that, so landing on the boundary can round to the
+  // wrong side of it and the tick would do nothing after all.
+  const room = short + 1;
+  setLeftWidth(pane === "library" ? left + room : left - room);
+  void persistLeftWidth();
+}
+
 function setupSplitter(initialWidth: string | null): void {
   if (initialWidth) {
     document.documentElement.style.setProperty("--left-width", initialWidth);
@@ -1935,23 +2122,14 @@ function setupSplitter(initialWidth: string | null): void {
     splitterEl.classList.add("dragging");
 
     const onMove = (ev: MouseEvent) => {
-      const min = 120;
-      const max = mainEl.getBoundingClientRect().width - 200;
-      const width = Math.max(min, Math.min(max, ev.clientX - mainLeft));
-      document.documentElement.style.setProperty("--left-width", `${width}px`);
+      setLeftWidth(ev.clientX - mainLeft);
     };
     const onUp = async () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.body.classList.remove("dragging");
       splitterEl.classList.remove("dragging");
-      const final = getComputedStyle(document.documentElement)
-        .getPropertyValue("--left-width")
-        .trim();
-      if (final) {
-        await app.store.set(KEY_SPLITTER_WIDTH, final);
-        await app.store.save();
-      }
+      await persistLeftWidth();
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
@@ -2740,10 +2918,9 @@ function setupPlayerControls(): void {
     }
 
     if (e.key === "Escape") {
-      // An open context menu owns Escape first (its own listener dismisses it), so
-      // one Esc closes the menu without also dropping the selection; a second Esc
-      // then clears the highlight.
-      if (contextMenuOpen()) return;
+      // No guard for an open context menu: it's a native menu, which takes the
+      // keyboard while it's up, so its Esc never reaches this listener. One Esc
+      // closes the menu, a second clears the highlight — as before, but AppKit's.
       // Bail out of keyboard navigation: drop the active surface's highlight (and
       // Enter's target with it).
       if (clearKbdSelection()) e.preventDefault();
@@ -3380,6 +3557,48 @@ async function init(): Promise<void> {
     document.body.classList.add("platform-mac");
   }
 
+  // Right-click fall-through. Every meaningful target builds its own menu (the
+  // contextmenu handlers on rows), but anything else — padding, the topbar, an
+  // empty pane — drops through to WebKit's built-in menu. Release builds compile
+  // devtools out, so that menu is a lone "Reload" that silently restarts the
+  // frontend: never what a music player's user wants. Suppress it, keeping the
+  // one exception macOS itself makes — real text has a menu, chrome doesn't.
+  //
+  // Two passes, because "real text" has to win at both ends. Capture runs ahead
+  // of the row handlers and hands editable fields straight to WebKit: the inline
+  // playlist rename field lives inside a row that opens its own menu, so without
+  // this, right-clicking mid-rename offers Play/Delete instead of Paste.
+  document.addEventListener(
+    "contextmenu",
+    (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true']")) {
+        e.stopPropagation();
+      }
+    },
+    true,
+  );
+  // Bubble is the backstop for whatever no row claimed. Selected prose keeps its
+  // native menu (Copy / Look Up / Services) — the selectable set is the
+  // user-select: text opt-in list in styles.css — and dev keeps the default menu
+  // outright, so Inspect Element stays one right-click away.
+  if (!import.meta.env.DEV) {
+    document.addEventListener("contextmenu", (e) => {
+      const target = e.target as HTMLElement | null;
+      const prose = target?.closest(
+        "#now-playing-title, #now-playing-artist, #now-playing-album, #now-playing-stream-meta",
+      );
+      const sel = window.getSelection();
+      const selected =
+        !!prose &&
+        !!sel &&
+        !sel.isCollapsed &&
+        sel.rangeCount > 0 &&
+        sel.getRangeAt(0).intersectsNode(prose);
+      if (!selected) e.preventDefault();
+    });
+  }
+
   const appWindow = getCurrentWindow();
   document.addEventListener("mousedown", (e) => {
     const target = e.target as HTMLElement | null;
@@ -3468,6 +3687,12 @@ async function init(): Promise<void> {
   queueListEl.addEventListener("click", (e) => {
     if (!(e.target as HTMLElement).closest(".queue-row")) queueSel.clear();
   });
+  // Hover-to-read for whatever the columns had to clip, in both table panes. Armed
+  // on the two hosts that outlive their lists — the navigator replaces its list on
+  // every drill, and both panes window their rows — so no rebuild has to remember
+  // to re-arm it. See overflow-title.ts.
+  attachOverflowTitles(document.querySelector("#library-nav") as HTMLElement);
+  attachOverflowTitles(queueListEl);
   queueCloseBtn.addEventListener("click", closeQueue);
   // Clicking anywhere on the title — the text or the hover pencil — starts an
   // inline rename; startTitleEdit no-ops when the header isn't a playlist.
@@ -3479,6 +3704,11 @@ async function init(): Promise<void> {
   app.store = await bootStep("load-store", () =>
     load(STORE_FILE, { defaults: {}, autoSave: false }),
   );
+
+  // Per-pane column sets, header visibility, and the library sort. Loaded before
+  // anything renders, so the first paint is already the user's layout — no flash
+  // of the automatic columns followed by a rebuild.
+  await loadColumnPrefs();
 
   app.libraryRoots = (await app.store.get<string[]>(KEY_LIBRARY_ROOTS)) ?? [];
   // First run (key never set): adopt the default stream list the backend seeds
@@ -3679,29 +3909,57 @@ async function init(): Promise<void> {
     listAllSongs: () =>
       perfTimed("list_all_songs", async () => {
         // Columnar wire format (see the Rust SongRow): rows arrive as positional
-        // [path, title, artist, album, albumArtist, duration] tuples, not keyed
-        // objects, so the JSON doesn't repeat the field names once per row (a large
-        // share of the payload + parse cost at the scale target). The tuple order
-        // must match the Rust SongRow SELECT in lockstep. Re-key here at the
-        // boundary; the rest of the app still works in SearchTrack objects. track is
-        // always null for this flat list (the gutter shows a positional index).
+        // tuples, not keyed objects, so the JSON doesn't repeat the field names once
+        // per row (a large share of the payload + parse cost at the scale target).
+        // The tuple order must match the Rust SongRow SELECT in lockstep. Re-key here
+        // at the boundary; the rest of the app still works in SearchTrack objects.
+        // track is always null for this flat list (the gutter shows a positional
+        // index), which is why it isn't in the tuple.
         type SongRow = [
-          string,
-          string | null,
-          string | null,
-          string | null,
-          string | null,
-          number | null,
+          path: string,
+          title: string | null,
+          artist: string | null,
+          album: string | null,
+          albumArtist: string | null,
+          disc: number | null,
+          year: number | null,
+          genre: string | null,
+          duration: number | null,
+          bitrate: number | null,
+          gain: number | null,
+          created: number | null,
+          modified: number | null,
         ];
         const rows = await invoke<SongRow[]>("list_all_songs");
         return rows.map(
-          ([path, title, artist, album, albumArtist, duration]): SearchTrack => ({
+          ([
             path,
             title,
             artist,
             album,
             albumArtist,
+            disc,
+            year,
+            genre,
             duration,
+            bitrate,
+            gain,
+            created,
+            modified,
+          ]): SearchTrack => ({
+            path,
+            title,
+            artist,
+            album,
+            albumArtist,
+            disc,
+            year,
+            genre,
+            duration,
+            bitrate,
+            gain,
+            created,
+            modified,
             track: null,
           }),
         );
