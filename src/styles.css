@@ -69,6 +69,11 @@
      like --play-icon, and at nearly the same aspect ratio, so the mask lands on the
      same column at the same optical size — the glyph swaps in place. */
   --pause-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='6 4 12 16' fill='%23fff'%3E%3Cpath d='M6 4h4v16H6zM14 4h4v16h-4z'/%3E%3C/svg%3E");
+  /* The column-header sort indicator: a small filled triangle with rounded
+     corners (stroke of the same color as the fill, joined round), point up. The
+     descending mark is this one rotated 180deg — one token, two directions, so
+     the two can never drift apart in weight or size. */
+  --sort-arrow-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 7' fill='%23fff' stroke='%23fff' stroke-width='1.2' stroke-linejoin='round'%3E%3Cpath d='M5 1.7 8.6 5.7H1.4z'/%3E%3C/svg%3E");
   /* The two-note glyph for the Songs navigator (.nav-songs). */
   --note-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18V5l12-2v13'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Ccircle cx='18' cy='16' r='3'/%3E%3C/svg%3E");
   /* A single eighth note (filled head, straight stem, flag) in that same stroke
@@ -1632,6 +1637,22 @@ body.np-zen.np-idle #nav-bar {
   color: var(--accent-dim);
 }
 
+/* The space between two columns, and — since a divider is centred on the boundary
+   the gap draws — half of where every divider sits. Registered as a <length> rather
+   than left an ordinary custom property so `1.5em` is computed *here*, at the
+   grid's own type, and inherits down as an absolute length. A plain custom property
+   would carry the token `1.5em` to wherever it was used and resolve it there, and
+   the place it is used is inside a header cell at 0.88em — which would put every
+   divider 12% shy of the boundary it is supposed to be sitting on. */
+@property --col-gap {
+  syntax: "<length>";
+  inherits: true;
+  /* A registered property's initial value has to be computationally independent, so
+     it can't be the `em` the gap is actually stated in — that lives on the grid
+     itself, below, which is the element whose type it means. */
+  initial-value: 0px;
+}
+
 /* ===========================================================================
    Columns — src/columns.ts
    ===========================================================================
@@ -1645,11 +1666,20 @@ body.np-zen.np-idle #nav-bar {
    is added or removed at the switch — which is why it costs no JS at all, and why
    each pane can sit on its own side of the breakpoint independently.
 
-   The track list comes from the row itself, as --cols (see gridTemplate): text
-   fields get minmax(0, Wfr) and fixed fields get max-content. The `0` minimum is
-   the whole policy in one token — an over-full row gets thin and ellipsizes
-   rather than overflowing the pane, so adding a tenth column is legible, obvious,
-   and self-inflicted. No horizontal scrollbar, no fields silently dropped. */
+   The track list arrives as --cols (see gridTemplate), computed once for the whole
+   list: text fields get minmax(0, Wfr) and fixed fields (times, kinds) a width in
+   ch. The `0` minimum is the whole policy in one token — an over-full row gets
+   thin and ellipsizes rather than overflowing the pane, so adding a tenth column
+   is legible, obvious, and self-inflicted. No horizontal scrollbar, no fields
+   silently dropped. And nothing in the template is measured against a row's own
+   text: every row here is a separate grid (so is the header), and only a track
+   whose width is a fact about the *list* makes them line up with each other.
+
+   A column the user has dragged carries their number in place of the computed one,
+   in the same unit and the same kind of track — a weight for a text field, a `ch`
+   count for a fixed one. So a resized table is still a table dividing the pane's
+   width by shares: it reflows with the splitter, and none of the above stops being
+   true because a boundary was moved. See .colhead-grip for the divider itself. */
 .col-grid > .col-cell {
   /* Folded: cells run together as inline text, separated by the ::before middots
      the secondary classes already carry. */
@@ -1669,8 +1699,17 @@ body.np-zen.np-idle #nav-bar {
    breakpoint (below) every cell comes back, which is what the pane is for.
 
    Cheap by construction — the cells are all built either way, so the cap lifts on
-   a drag of the pane divider with no rebuild and no JS. */
-.col-grid > .col-cell:nth-child(n + 3) {
+   a drag of the pane divider with no rebuild and no JS.
+
+   Header cells are excluded from the cap *and* from its column-mode reset below.
+   The cap is a rule about a folded row, and a header is never folded — it is
+   display:none outside column mode. But both halves of the cap set `display` at a
+   specificity a bare .colhead-cell can't reach, so without the :not() they would
+   also decide the header cell's own layout, and a header cell is a flex box of two
+   parts (its label and its sort mark). That reset landing on the third column
+   onward is exactly what an `inline` sort mark looks like: width and height stop
+   applying, and the triangle vanishes from every column but the first two. */
+.col-grid > .col-cell:nth-child(n + 3):not(.colhead-cell) {
   display: none;
 }
 /* Automatic mode keeps the runtime out of the folded row entirely: it is an
@@ -1692,7 +1731,8 @@ body.np-zen.np-idle #nav-bar {
   .nav-cell.col-grid {
     display: grid;
     grid-template-columns: var(--cols, minmax(0, 1fr));
-    column-gap: 1.5em;
+    --col-gap: 1.5em;
+    column-gap: var(--col-gap);
     align-items: baseline;
     /* Each cell truncates on its own now, so the cell as a whole must not clip. */
     overflow: visible;
@@ -1702,12 +1742,28 @@ body.np-zen.np-idle #nav-bar {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* ...except a header cell, which has to reach outside its track: its divider sits
+     in the middle of the column gap, where the boundary the reader sees actually is.
+     Nothing is lost by unclipping it — a header cell's own text is ellipsized by
+     .colhead-label, one box further in, and the sort mark is flex: none. */
+  .col-grid > .col-cell.colhead-cell {
+    overflow: visible;
+  }
+  /* A missing row's title cell splits the same way a header does, and for the same
+     reason: the cell's own ellipsis would eat the trailing "Missing file" badge, so
+     the title gets its own clipping box (.queue-title-text) and the badge sits
+     beside it at flex: none. Column mode only — see .queue-missing for why the
+     folded row leaves this inline. */
+  .col-grid > .queue-primary.has-missing {
+    display: flex;
+    align-items: baseline;
+  }
   /* Both folded-row rules are lifted here: in column mode nothing is dropped,
      however many fields are crowded in, and the runtime is exactly what the wide
      pane had the room for. Same selectors and specificities as the two rules above,
      later in the sheet, so they win. The runtime needs its own reset rather than
      riding the cap's — when it lands second the cap never matched it. */
-  .col-grid > .col-cell:nth-child(n + 3) {
+  .col-grid > .col-cell:nth-child(n + 3):not(.colhead-cell) {
     display: inline;
   }
   .col-grid.col-auto > .row-dur {
@@ -1716,6 +1772,25 @@ body.np-zen.np-idle #nav-bar {
   /* The column gap is the separator now — drop every inline middot. */
   .col-grid > .col-cell::before {
     content: none;
+  }
+  /* One ink for the data, one for the labels. Folded, the dimming *is* the
+     structure — it's what tells the reader where the title ends and the artist
+     begins in a single run of text. In column mode the gap and the header do that
+     job instead, so a dim artist is no longer a rank, just a field that's harder
+     to read than the one beside it. Every cell lifts to --text and the contrast
+     moves up a level: the header row is the quiet ink, the table is the loud one.
+     Header cells are excluded (they carry .colhead-cell and their own dim color,
+     which this selector's weight would otherwise override). */
+  .col-grid > .col-cell:not(.colhead-cell) {
+    color: var(--text);
+  }
+  /* Same flattening on an accented row: the playing queue row and the open leaf
+     row lit their title and dimmed the rest for exactly the reason above, so in
+     column mode the whole row takes the one accent. Weighted past the
+     .queue-row.playing .queue-secondary / .row-dur pairs, which are 3 classes. */
+  .queue-row.playing .col-grid > .col-cell,
+  .nav-track-row.open .col-grid > .col-cell {
+    color: var(--accent);
   }
   /* Numbers right-align into a clean column of digits. */
   .col-grid > .col-cell.col-num {
@@ -1737,17 +1812,33 @@ body.np-zen.np-idle #nav-bar {
 
    It is display:none outside column mode, gated by the *same* container query as
    the columns themselves, so a header can never appear above a folded row. That
-   is the one failure that would make it a lie. */
-.colhead {
+   is the one failure that would make it a lie.
+
+   It also carries the column dividers (see .colhead-grip), which is why turning
+   labels on is what makes a pane resizable: a divider is a grip on a boundary, and
+   a folded row has no boundaries to grip. */
+/* Stated against both hosts rather than on .colhead alone: each row class carries
+   its own `display: flex`, and .nav-track-row's sits further down the sheet — at
+   equal weight it wins the tie and pins the header visible. That is how a *folded*
+   left pane ends up with a header over inline rows, its cells (flex boxes, so
+   block-level) stacking one label per line. */
+.queue-row.colhead,
+.nav-track-row.colhead {
   display: none;
+}
+.colhead {
   cursor: default;
   /* Sticky over the rows it labels. Each pane names its own ground, since the
-     right pane sits on --bg and the left pane on its rounded --panel card. */
+     right pane sits on --bg and the left pane on its rounded --panel card. That
+     opaque ground is the whole separation — no rule under the header. A line here
+     would be saying a second time what the ink already says (dim labels over lit
+     rows), and it would say it permanently, including at the top of a list where
+     nothing has scrolled under it yet: a border that is always drawn is chrome,
+     and the header is meant to read as the list's own typography. */
   position: sticky;
   top: 0;
   z-index: 3;
   background: var(--list-bg, var(--bg));
-  border-bottom: 1px solid var(--surface-hover);
 }
 #queue-list {
   --list-bg: var(--bg);
@@ -1756,33 +1847,157 @@ body.np-zen.np-idle #nav-bar {
   --list-bg: var(--panel);
 }
 @container listcol (min-width: 28rem) {
-  .colhead {
+  .queue-row.colhead,
+  .nav-track-row.colhead {
     display: flex;
   }
 }
-.colhead:hover {
+/* Hover belongs to the individual header cells (each lights its own label), not
+   to the row: a whole-row fill would say "you are about to click this row", which
+   is not a thing a header row does. Stated against both hosts for the same reason
+   the display rule above is — .nav-track-row:hover sits further down the sheet and
+   would otherwise win the tie and paint the header like a track. */
+.queue-row.colhead:hover,
+.nav-track-row.colhead:hover {
   background: var(--list-bg, var(--bg));
 }
-/* Quiet by default: smaller, faintest ink, no fill and no vertical rules. The
+/* Quiet by default: smaller, dimmed ink, no fill and no vertical rules. The
    header is a label for the columns, not a toolbar — at rest it should read as
-   part of the list's typography rather than as chrome sitting on top of it. */
+   part of the list's typography rather than as chrome sitting on top of it. It
+   holds the *only* dim ink in a table: the cells below it are all --text (see the
+   .col-grid color rules), so the one step of contrast in the whole view is labels
+   against data, which is the distinction that's actually worth drawing.
+
+   Label and sort mark are two boxes, not one string, so the label can ellipsize
+   in a thin column without swallowing the mark. The label takes the leftover
+   width; the mark keeps its own and sits directly after the name it belongs to
+   (the system puts it beside the label, not adrift at the column's far edge).
+   Numeric columns are right-aligned, and text-align does nothing to flex items,
+   so the whole group is pushed to the trailing edge instead. */
 .colhead-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3em;
   font-size: 0.88em;
-  color: var(--text-faint);
+  color: var(--text-dim);
   letter-spacing: 0.02em;
   user-select: none;
+}
+/* The divider's containing block. */
+.colhead-cell {
+  position: relative;
 }
 .colhead-cell.sortable {
   cursor: pointer;
 }
 .colhead-cell.sortable:hover {
-  color: var(--text-dim);
-}
-/* The sorted column lifts to full --text and carries a caret. Deliberately NOT
-   the accent: accent text already means "this is open in the right pane"
-   everywhere else in the app, and a sorted header is not that. */
-.colhead-cell.sorted {
   color: var(--text);
+}
+.colhead-cell.col-num {
+  justify-content: flex-end;
+}
+.colhead-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The sorted column is marked by the triangle alone — no color change. Ink is
+   already spoken for here: every header is dim and every cell below it is --text,
+   so a lit label would read as "this column's data matters more" rather than "the
+   list is ordered by this". The mark says which column and which direction in one
+   glyph, and it's the only header that has one. (The accent is doubly out: accent
+   text already means "this is open in the right pane" everywhere else.) */
+/* Masked, so the ink is a background-color — currentColor, so the mark is always
+   exactly the ink of the label it follows: dim at rest, lit on hover, one piece of
+   type with a glyph on the end rather than a label and a separate mark that have
+   to be kept in step by hand. Sized in em for the same reason, so it rides the
+   header's 0.88em.
+
+   Centered on the label rather than baseline-aligned with it: an empty box has no
+   baseline of its own, so baseline alignment sits its *bottom edge* on the text
+   baseline and hangs the whole triangle above the line, reading as a mark floating
+   over the word rather than beside it. align-self keeps that to this one item —
+   the cell still aligns on the label's baseline, which is what lines the header up
+   with the other columns. */
+.colhead-arrow {
+  align-self: center;
+  flex: none;
+  width: 0.62em;
+  height: 0.44em;
+  background-color: currentColor;
+  -webkit-mask: var(--sort-arrow-icon) no-repeat center / contain;
+  mask: var(--sort-arrow-icon) no-repeat center / contain;
+}
+.colhead-arrow.desc {
+  transform: rotate(180deg);
+}
+
+/* --- The column divider ---------------------------------------------------
+
+   One per header but the last, centred on the boundary between its column and the
+   next — which is the middle of the 1.5em column gap, half a gap past this cell's
+   own trailing edge. Wider than the line it draws: the target is a pointer target
+   and wants ~10px, while the line is a hairline, so the two are sized separately
+   rather than the line being fattened to be grabbable.
+
+   Invisible at rest. The gap already separates the columns, and a permanent rule
+   down every boundary would be the vertical chrome the header block deliberately
+   goes without (see .colhead) — drawn eight times over, in a list whose one line of
+   contrast is meant to be labels against data. The col-resize cursor is what tells
+   the reader the boundary is draggable, exactly as it does over #splitter; the line
+   appears under the pointer to say which boundary is about to move. */
+.colhead-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* Centred on the boundary: half a gap past this cell's trailing edge, then back
+     by half the target's own width. */
+  right: calc(var(--col-gap) / -2 - 5px);
+  width: 10px;
+  cursor: col-resize;
+}
+.colhead-grip::after {
+  content: "";
+  position: absolute;
+  /* Centred on the target, which is centred on the boundary — so the hairline lands
+     on the boundary itself rather than half a pixel to one side of it. */
+  left: 50%;
+  transform: translateX(-50%);
+  /* Inset top and bottom so the line reads as a mark between two labels rather than
+     as a rule ruling off the header row. */
+  top: 0.1em;
+  bottom: 0.1em;
+  width: 1px;
+  background: var(--text-faint);
+  opacity: 0;
+}
+.colhead-grip:hover::after {
+  opacity: 1;
+}
+/* Held: the divider being dragged stays lit for as long as the mouse is down, and
+   every other one goes quiet — the pointer leaves the 10px target on the first few
+   pixels of the drag, so :hover alone would drop the line exactly when it is doing
+   its job, and light whichever divider the pointer happened to sweep past. Marked
+   with a class rather than :active because the mousedown handler preventDefaults
+   (to suppress the text selection a drag would otherwise start), which is enough to
+   cost the element its activation state. body.dragging is the splitter's own class,
+   and a divider drag is the same gesture. */
+body.dragging .colhead-grip:hover::after {
+  opacity: 0;
+}
+body.dragging .colhead-grip.col-resizing::after {
+  opacity: 1;
+  background: var(--text-dim);
+}
+
+/* The `0` probe a drag measures `ch` with (see chPx). Out of flow, so it is never
+   a grid item and the row it is measured inside never reflows around it. */
+.col-ch-probe {
+  position: absolute;
+  visibility: hidden;
+  width: 1ch;
+  height: 0;
 }
 /* In the left pane the header stacks *under* the sticky Back bar rather than over
    it. The bar pins at top:-0.1em over a 2em box (see .nav-back, which matches a
@@ -1854,6 +2069,50 @@ body.playback-paused .queue-row.playing .eq-bars {
 
 .queue-row.missing:hover {
   background: none;
+}
+
+/* The "Missing file" marker, after the title inside the primary cell (see
+   buildQueueRow). Nested one level down rather than being a cell of its own —
+   which is what keeps it out of the folded row's two-field cap, out of the
+   column-mode `::before { content: none }` reset that drops the inline middots
+   between *cells*, and out of the column-mode rule that lifts every cell to
+   --text. So it reads the same way at every pane width and in every column set.
+
+   Parenthesized, and with no middot in front of it. Dim-plus-middot is precisely
+   the costume every secondary *field* wears in these rows, so a title that happens
+   to read like a status ("Missing File") left the reader with two look-alike
+   phrases and no way to tell which was the row's name. The brackets mark the aside
+   as an aside in the one place the reader is already looking — no size, weight, or
+   casing of its own, so the row stays a row of plain type.
+
+   The brackets are in the span's text rather than on a ::before/::after pair,
+   unlike the middots they replace. They are not a separator between two things —
+   they belong to this phrase, and they travel with it into the hover tooltip,
+   which reads the row back off the DOM (see overflow-title.ts). */
+.queue-missing {
+  flex: none;
+  /* The space before it, as a margin rather than the flex box's `gap`: folded, the
+     cell is inline text and has no flex box to carry one, so the phrase would sit
+     flush against the title. A margin holds in both layouts. */
+  margin-left: 0.5em;
+  color: var(--text-dim);
+}
+
+/* Trailing, the marker is in the ellipsis's path — so the title cell takes the
+   header cell's shape (see .colhead-cell / .colhead-label): a flex box whose text
+   half clips on its own and whose chip is flex: none. The title then ellipsizes
+   *around* the marker instead of eating it, and a dim row still says why it's dim
+   in the narrowest Title column.
+
+   Column mode only. Folded, the cells are inline text that the line around them
+   (.queue-text) clips as a whole; an inline-flex box there would be atomic, so a
+   long title would hard-clip with no ellipsis at all. Inline, the folded row keeps
+   the one trailing ellipsis it has always had. */
+.queue-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Row remove (curation): a muted ✕ at the row's right edge, revealed on row hover
@@ -4269,6 +4528,10 @@ body.playback-paused .node-label.playing .icon.playlist .eq-bars,
   }
   .nav-cell:not(.col-grid):has(.nav-secondary) .nav-primary,
   .nav-cell:not(.col-grid):has(.nav-secondary) .nav-secondary {
+    /* Split out of the inline run into its own column, the subtitle stops being a
+       suffix and becomes a field — so it reads at --text like every other cell in
+       column mode (see the .col-grid block). */
+    color: var(--text);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;

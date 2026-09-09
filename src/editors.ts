@@ -24,7 +24,7 @@ import { reloadNavPane } from "./library-nav";
 import { findNode, refreshLibrary } from "./library";
 import { renderTree } from "./tree-view";
 import { renameOpenPlaylist } from "./playlists";
-import { renderQueue, curatedList } from "./queue";
+import { repaintQueueList, curatedList } from "./queue";
 
 export function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
   const form = h("form", { class: "inline-editor" });
@@ -263,6 +263,18 @@ export function editMetadataItem(path: string): ContextMenuItem {
 //     membership recomputes — an edited-away track drops out and the list re-sorts.
 //   - Open right-pane list (queue / browsed playlist): membership is by path
 //     (unchanged), so patch the matching rows' display fields in place and repaint.
+//     The repaint has to be repaintQueueList, not renderQueue: the tracks were
+//     edited *inside* the list object, so renderQueue is handed the same Queue it
+//     already rendered and takes its fast path, which only re-toggles the playing
+//     highlight. Every patched field below would sit at its pre-edit value until
+//     something else rebuilt the rows.
+//
+// Date Modified is patched alongside the tags, and is the one field here that the
+// user didn't type: writing tags rewrites the file, so its mtime moves on every save.
+// Without this the cell would sit at the pre-edit time until something forced a
+// rescan — which the mtime/size pre-sync in write_tags has deliberately stopped from
+// happening. (This is also why Date Created is the better "what did I just add"
+// sort of the two; see the column table.)
 function applyTagUpdate(path: string, tags: FileEntry): void {
   if (app.rootNode) {
     const found = findNode(app.rootNode, path);
@@ -286,8 +298,11 @@ function applyTagUpdate(path: string, tags: FileEntry): void {
       t.artist = tags.artist;
       t.album = tags.album;
       t.track = tags.track;
+      t.albumArtist = tags.albumArtist;
+      t.disc = tags.disc;
+      if (tags.modified != null) t.modified = tags.modified;
     }
-    renderQueue(list, browsedPlaylist.value === null);
+    repaintQueueList();
   }
 }
 // --- Inline rename editing ---

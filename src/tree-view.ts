@@ -112,6 +112,15 @@ export function nodesFromListing(
       albumArtist: f.albumArtist,
       disc: f.disc,
       track: f.track,
+      // Carried through the tree without being drawn, so a track queued from here
+      // reaches a column pane with the same cells it would have from Songs.
+      year: f.year,
+      genre: f.genre,
+      duration: f.duration,
+      bitrate: f.bitrate,
+      gain: f.gain,
+      created: f.created,
+      modified: f.modified,
       isFolder: false,
       loaded: true,
       expanded: false,

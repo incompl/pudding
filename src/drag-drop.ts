@@ -155,7 +155,8 @@ function suppressNextClick(): void {
 // Hit-test the pointer against the open list and paint the drop marker. Returns
 // the view index an insert would land at: before the row under the pointer (top
 // half) or after it (bottom half); the end of the list when the pointer is over
-// the list's empty area past the last row (or an empty list); null when the
+// the list's empty area past the last row (or an empty list); the top of the
+// visible list when the pointer is over the sticky column header; null when the
 // pointer is off the list entirely, which cancels the drop.
 function updateDropTarget(x: number, y: number): number | null {
   clearDropMarkers();
@@ -177,10 +178,36 @@ function updateDropTarget(x: number, y: number): number | null {
       windowed && row.dataset.rowIndex != null ? Number(row.dataset.rowIndex) : rows.indexOf(row);
     return viewIdx + (before ? 0 : 1);
   }
-  // Off the rows: an insert at the end while still within the list box, else cancel.
   const box = d.listEl.getBoundingClientRect();
   const inside = x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
   if (!inside) return null;
+  // The sticky column header is excluded from the row selector but still overlays
+  // the top of the list box, so a row dragged *upward* onto it hit-tests as "off
+  // the rows" — and the end-of-list fallback below would then send it to the
+  // bottom, the exact opposite of where the reader is reaching. Read the header as
+  // the list's leading edge instead: insert before the topmost row still visible
+  // beneath it (not view index 0 — the header is pinned to the viewport, so when
+  // the list is scrolled the row under it is somewhere in the middle).
+  const head = el?.closest<HTMLElement>(".colhead");
+  if (head && d.listEl.contains(head)) {
+    const headBottom = head.getBoundingClientRect().bottom;
+    let firstVisible: HTMLElement | null = null;
+    let firstTop = Infinity;
+    for (const r of rows) {
+      const top = r.getBoundingClientRect().top;
+      if (top >= headBottom - 1 && top < firstTop) {
+        firstTop = top;
+        firstVisible = r;
+      }
+    }
+    if (firstVisible) {
+      firstVisible.classList.add("drop-before");
+      return windowed && firstVisible.dataset.rowIndex != null
+        ? Number(firstVisible.dataset.rowIndex)
+        : rows.indexOf(firstVisible);
+    }
+  }
+  // Off the rows: an insert at the end while still within the list box.
   return windowed && d.listEl.dataset.rowCount != null
     ? Number(d.listEl.dataset.rowCount)
     : rows.length;

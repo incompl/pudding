@@ -6,6 +6,12 @@
 
 import type { Signal } from "@preact/signals-core";
 
+// Does double duty (matching the Rust struct): a row of a browse listing, and the
+// tag set the metadata editor is seeded from and hands back. The column fields are
+// populated only on the listing path — the editor deals in the six above them — so
+// they are optional here, and an editor response leaves them undefined rather than
+// null. write_tags is the one exception: it returns `modified`, because writing tags
+// rewrites the file and every open row's Date Modified goes stale.
 export interface FileEntry {
   name: string;
   title: string | null;
@@ -16,6 +22,13 @@ export interface FileEntry {
   albumArtist: string | null;
   disc: number | null;
   track: number | null;
+  year?: number | null;
+  genre?: string | null;
+  duration?: number | null;
+  bitrate?: number | null;
+  gain?: number | null;
+  created?: number | null;
+  modified?: number | null;
 }
 
 export interface TrackMeta {
@@ -46,6 +59,16 @@ export interface TreeNode {
   albumArtist: string | null;
   disc: number | null;
   track: number | null;
+  // Column fields, carried but never drawn by the tree itself: a track played or
+  // queued from here becomes a row in a pane that does draw them (see nodeToTrack).
+  // All absent on a folder or playlist node.
+  year?: number | null;
+  genre?: string | null;
+  duration?: number | null;
+  bitrate?: number | null;
+  gain?: number | null;
+  created?: number | null;
+  modified?: number | null;
   isFolder: boolean;
   // True for a .m3u/.m3u8 row. A playlist is a *source* like a folder, not a
   // track: its own icon and click action (single-click browses, double-click
@@ -82,9 +105,40 @@ export interface SearchTrack {
   // Set only for playlist browse rows whose file is absent on disk: shown in the
   // view (marked, per the plan's "keep the row") but never handed to the engine.
   missing?: boolean;
-  // Track length in seconds (absent/null when unknown). Not shown per-row; summed
-  // to display a total runtime beside a queue/playlist's track count.
+  // Track length in seconds (absent/null when unknown). Summed to display a total
+  // runtime beside a queue/playlist's track count, and drawn per-row by the Time
+  // column when the pane shows one.
   duration?: number | null;
+
+  // --- column fields ---
+  //
+  // Everything below exists to be drawn by the column table (see columns.ts) and
+  // nothing else reads it. All optional and all nullable, and the two mean the same
+  // thing to a cell — it draws blank — but they differ in provenance: absent means
+  // this row came from a path that never carries the field (an out-of-library
+  // playlist entry, a synthesized row), null means the file was scanned and the
+  // field wasn't there. Neither is a value, so both sort to the bottom (see isBlank).
+  //
+  // The metadata disc number. Its sibling `track` above is carried only where a
+  // within-album ordinal is meaningful, because the gutter draws that one; nothing
+  // draws disc, so it is carried everywhere.
+  disc?: number | null;
+  year?: number | null;
+  genre?: string | null;
+  // kbps, from the file's audio properties rather than a tag — so, like Kind, it is
+  // present even on a file with no tags at all.
+  bitrate?: number | null;
+  // REPLAYGAIN_TRACK_GAIN in dB exactly as the file states it, NOT the multiplier
+  // playback applies (the engine re-reads the tags and does its own clip-safe math).
+  // A blank cell is a file the ReplayGain setting cannot act on.
+  gain?: number | null;
+  // Unix seconds. `created` is the file's birth time, `modified` its mtime. Both are
+  // facts about the file rather than library bookkeeping, which Pudding does not keep
+  // — so they survive a cache wipe, and they stay true if the user reorganizes
+  // outside the app. Prefer created for "what did I just add": editing tags through
+  // Pudding rewrites the file and bumps modified.
+  created?: number | null;
+  modified?: number | null;
 }
 
 export interface SearchFolder {
@@ -337,9 +391,18 @@ export interface PlaylistTrack {
   albumArtist: string | null;
   disc: number | null;
   track: number | null;
+  year: number | null;
+  genre: string | null;
   inLibrary: boolean;
   missing: boolean;
   duration: number | null;
+  // The remaining column fields. All null for an out-of-library row: they come from
+  // the scan cache, and a path outside every library root was never scanned. See
+  // `inLibrary`, which is the row's own account of why its cells are empty.
+  bitrate: number | null;
+  gain: number | null;
+  created: number | null;
+  modified: number | null;
 }
 
 export interface PlaylistData {

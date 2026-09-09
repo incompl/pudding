@@ -37,7 +37,13 @@
 //   LINE  — the row's whole text, folded back into one `title · artist` line below
 //           the 28rem breakpoint. There the cells are inline and clip nothing
 //           themselves; the line around them is what ellipsizes.
-const FIELD = ".col-cell, .nav-primary, .nav-secondary";
+//
+// .queue-title-text is a field too, though it isn't a cell: a missing row's title
+// cell holds the title in its own clipping box beside its "(Missing file)" marker (see
+// buildQueueRow), so the cell around them clips nothing and a long title would
+// answer a hover with silence. Listed here, the innermost-first rule below picks
+// the box that is actually doing the clipping, exactly as it does for a cell.
+const FIELD = ".col-cell, .nav-primary, .nav-secondary, .queue-title-text";
 const LINE = ".nav-cell, .queue-text";
 
 // Both metrics are integers, and sub-pixel text metrics routinely leave scrollWidth
@@ -49,20 +55,41 @@ function isClipped(el: HTMLElement): boolean {
   return el.scrollWidth > el.clientWidth + 1;
 }
 
-// What the element says, as the reader would have read it. A cell is bare text; a
-// folded line is its cells, and the middots that separate them on screen are CSS
-// ::before content, so they are re-inserted here. Cells the fold dropped (the third
-// field onward, display:none) measure zero and are left out: the tooltip completes
-// the line the row is showing, it doesn't smuggle in fields the row deliberately
-// isn't.
+// What the element says, as the reader would have read it. A run of text ends up
+// as itself; a container of parts is its parts, and the middots that separate them
+// on screen are CSS ::before/::after content, so they are re-inserted here. Parts
+// the fold dropped (the third field onward, display:none) measure zero and are left
+// out: the tooltip completes the line the row is showing, it doesn't smuggle in
+// fields the row deliberately isn't.
+//
+// Recursive, and mixing text nodes with element ones, because a part is not always
+// a whole cell: a missing playlist row carries its "Missing file" marker as a span
+// *inside* the title cell, beside the title's own text (see buildQueueRow). Reading
+// only `children` there would return the marker and silently drop the title;
+// reading only `textContent` would run the two together with no separator. Walking
+// the child nodes in order gets both, in the order they are on screen, and costs
+// nothing extra on the ordinary rows — a bare cell still short-circuits on its
+// first line. (The missing marker is the one part with no middot of its own on
+// screen — it wears parens instead. The join gives it one here anyway: a tooltip
+// is a line of text with no layout to lean on, and one extra separator reads
+// better than "File GoneMissing file" would.)
 function readText(el: HTMLElement): string {
-  const parts = Array.from(el.children) as HTMLElement[];
-  if (parts.length === 0) return (el.textContent ?? "").trim();
-  return parts
-    .filter((p) => p.offsetWidth > 0)
-    .map((p) => (p.textContent ?? "").trim())
-    .filter((s) => s !== "")
-    .join(" · ");
+  if (el.children.length === 0) return (el.textContent ?? "").trim();
+  const parts: string[] = [];
+  for (const n of Array.from(el.childNodes)) {
+    // 3 = text node, 1 = element. Numeric rather than the Node.* names: this runs
+    // against the unit tests' fake DOM as well as a browser's.
+    if (n.nodeType === 3) {
+      const s = (n.textContent ?? "").trim();
+      if (s !== "") parts.push(s);
+    } else if (n.nodeType === 1) {
+      const child = n as HTMLElement;
+      if (child.offsetWidth === 0) continue;
+      const s = readText(child);
+      if (s !== "") parts.push(s);
+    }
+  }
+  return parts.join(" · ");
 }
 
 // Put the title on, or take a stale one off — a cell that was clipped before the

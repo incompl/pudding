@@ -142,7 +142,12 @@ struct RecentItem {
     kind: Option<String>,
 }
 
-#[derive(Serialize)]
+// Does double duty: a row of a browse listing (where the column fields below are
+// populated) and the tag set the metadata editor is seeded from and hands back
+// (where they are not — the editor deals only in the six fields it can write).
+// Default exists for that second use, so an editor path says what it isn't filling
+// in rather than listing seven Nones.
+#[derive(Serialize, Default)]
 struct FileEntry {
     name: String,
     title: Option<String>,
@@ -155,6 +160,19 @@ struct FileEntry {
     album_artist: Option<String>,
     disc: Option<u32>,
     track: Option<u32>,
+    // The column fields. The browse tree draws none of them — it shows title and a
+    // dimmed artist/album suffix — but a track queued or played *from* the tree
+    // becomes a row in a pane that does, so dropping them here would make the same
+    // file read blank in the queue and filled in the Songs list. fetch_meta already
+    // reads them, and a folder listing is bounded by one folder rather than by the
+    // library, so carrying them costs a little JSON on a small payload.
+    year: Option<u32>,
+    genre: Option<String>,
+    duration: Option<f64>,
+    bitrate: Option<u32>,
+    gain: Option<f64>,
+    created: Option<i64>,
+    modified: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -236,24 +254,75 @@ struct SearchResult {
     // view, search results) whose gutter shows a positional index instead. The
     // browse tree renders the same metadata number; see main.ts renderLeafTrackList.
     track: Option<u32>,
+    // The file's metadata disc number. Unlike `track` this is carried on every
+    // list: no gutter shows it, so the column is the only place it can appear.
+    disc: Option<u32>,
+    year: Option<u32>,
+    genre: Option<String>,
     // Track length in seconds (None when unknown). Summed per queue/playlist for
     // the runtime shown beside the track count; individual rows don't display it.
     duration: Option<f64>,
+    // kbps, from the file's audio properties rather than a tag.
+    bitrate: Option<u32>,
+    // REPLAYGAIN_TRACK_GAIN in dB as the file states it — see the schema comment
+    // for why this is the raw tag and not the multiplier playback applies.
+    gain: Option<f64>,
+    // Unix seconds. `created` is the file's birth time and `modified` its mtime;
+    // both are facts about the file, neither is library bookkeeping (Pudding keeps
+    // no such thing — the cache is disposable and the files are the truth).
+    created: Option<i64>,
+    modified: Option<i64>,
 }
 
-// Columnar wire row for the whole-library Songs list: (path, title, artist, album,
-// album_artist, duration). Serialized as a positional JSON array so the field names
-// aren't repeated once per row — at the library-scale target that key repetition is a
-// large share of the IPC + JSON.parse cost. The frontend re-keys it into a SearchTrack
-// (track is always null for this flat list). The tuple order must match the SELECT and
-// the frontend re-key in lockstep. See list_all_songs.
+// The SELECT list every track-producing query shares, and the mapping that reads a
+// row of it. One list rather than six hand-maintained ones: a column added here
+// reaches the browse tree, search, artist, album and playlist views at once, and a
+// pane can't end up showing a field that is blank only because one query forgot it.
+// Index-order coupling between the two lives in this one pair.
+const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist, disc, track, \
+                             year, genre, duration, bitrate, rg_track_gain, created, mtime";
+
+fn track_row(row: &rusqlite::Row) -> rusqlite::Result<SearchResult> {
+    Ok(SearchResult {
+        path: row.get(0)?,
+        title: row.get(1)?,
+        artist: row.get(2)?,
+        album: row.get(3)?,
+        album_artist: row.get(4)?,
+        disc: row.get(5)?,
+        track: row.get(6)?,
+        year: row.get(7)?,
+        genre: row.get(8)?,
+        duration: row.get(9)?,
+        bitrate: row.get(10)?,
+        gain: row.get(11)?,
+        created: row.get(12)?,
+        modified: row.get(13)?,
+    })
+}
+
+// Columnar wire row for the whole-library Songs list. Serialized as a positional
+// JSON array so the field names aren't repeated once per row — at the library-scale
+// target that key repetition is a large share of the IPC + JSON.parse cost, and it
+// is why this one list doesn't just send SearchResult like every other query.
+//
+// The field order is TRACK_COLUMNS minus `track` (always null for this flat list,
+// whose gutter shows a positional index). Three things must move together: this
+// tuple, the SELECT, and the frontend re-key in main.ts. See list_all_songs.
 type SongRow = (
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<f64>,
+    String,         // path
+    Option<String>, // title
+    Option<String>, // artist
+    Option<String>, // album
+    Option<String>, // album_artist
+    Option<u32>,    // disc
+    Option<u32>,    // year
+    Option<String>, // genre
+    Option<f64>,    // duration
+    Option<u32>,    // bitrate
+    Option<f64>,    // rg_track_gain
+    Option<i64>,    // created
+    Option<i64>,    // mtime
 );
 
 #[derive(Serialize)]
@@ -292,15 +361,24 @@ struct Tags {
     album_artist: Option<String>,
     disc: Option<u32>,
     track: Option<u32>,
+    year: Option<u32>,
+    genre: Option<String>,
     // Track length in seconds, read from the decoded file's properties (not a
     // tag). None when lofty can't determine it. Summed per queue/playlist to
     // show a total runtime beside the track count.
     duration: Option<f64>,
+    // The rest come from the same FileProperties as duration, so they are free:
+    // the file is already open and parsed by the time we read one of them.
+    bitrate: Option<u32>,
+    sample_rate: Option<u32>,
+    bit_depth: Option<u32>,
+    // REPLAYGAIN_TRACK_GAIN in dB as the file states it. See the schema comment.
+    rg_track_gain: Option<f64>,
 }
 
 // The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
 // and the next startup will drop and recreate it.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 6;
 
 // WAL lets the scan's write transaction run without blocking concurrent reads
 // (list_dir, get_metadata) on the main connection.
@@ -396,7 +474,24 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             album_artist TEXT,
             disc INTEGER,
             track INTEGER,
-            duration REAL
+            duration REAL,
+            created INTEGER,
+            year INTEGER,
+            genre TEXT,
+            bitrate INTEGER,
+            -- Cached but not yet surfaced as columns. They cost nothing to read
+            -- (read_tags already holds the FileProperties it takes duration from)
+            -- and they are what a future per-track output-rate switch will show,
+            -- so caching them now keeps that change frontend-only instead of
+            -- forcing a second full rescan on everyone.
+            sample_rate INTEGER,
+            bit_depth INTEGER,
+            -- The raw REPLAYGAIN_TRACK_GAIN figure in dB, NOT the playback
+            -- multiplier: the engine re-reads the tags at decode time and applies
+            -- its own clip-safe math (see replaygain_multiplier). This column
+            -- exists to *show* what the file carries — a blank cell is a file the
+            -- ReplayGain setting can't act on, which is otherwise invisible.
+            rg_track_gain REAL
         );",
     )?;
     // Each cached track carries its owning library root (the folder that was scanned
@@ -405,15 +500,21 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // path-prefix reconstruction the caller has to remember. Indexed so those deletes
     // don't scan the whole table.
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tracks_root ON tracks(root);")?;
-    // Covering index for the whole-library Songs list. Its column list mirrors that
+    // Sort index for the whole-library Songs list. Its column list mirrors that
     // query's ORDER BY exactly — including the leading `artist IS NULL` *expression*
     // (untagged tracks sort last) and the NOCASE collations — so SQLite reads the
-    // rows pre-sorted instead of sorting all N on every open. path + duration are
-    // appended so every SELECTed column lives in the index: the query is served
-    // entirely from it, with no per-row table lookup. Cost: the index roughly
-    // duplicates the table (path strings dominate) and is maintained on every scan
-    // insert — a read-speed-for-write-cost/disk trade we accept since opens are
-    // user-facing and scans are background. See list_all_songs.
+    // rows pre-sorted instead of sorting all N on every open. That sort avoidance is
+    // the whole value and it holds however wide the SELECT gets.
+    //
+    // It is NOT a covering index, despite path + duration being appended as payload:
+    // the Songs SELECT also reads album_artist, and now the column fields besides, so
+    // every row already costs a table lookup. Widening the index to close that gap
+    // would roughly duplicate the table a second time for a lookup SQLite does from
+    // the page cache anyway; the sort is the expensive part and it is already gone.
+    // Cost as it stands: the index roughly duplicates the table (path strings
+    // dominate) and is maintained on every scan insert — a read-speed-for-write-cost
+    // trade we accept since opens are user-facing and scans are background.
+    // See list_all_songs.
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_songs_sort ON tracks(
             (artist IS NULL),
@@ -440,19 +541,36 @@ fn read_tags(path: &std::path::Path) -> Tags {
         album_artist: None,
         disc: None,
         track: None,
+        year: None,
+        genre: None,
         duration: None,
+        bitrate: None,
+        sample_rate: None,
+        bit_depth: None,
+        rg_track_gain: None,
     };
     let Ok(tagged) = lofty::read_from_path(path) else {
         return empty;
     };
-    // The runtime comes from the decoded audio properties, not a tag, so it's
-    // available even for otherwise-untagged files.
+    // These come from the decoded audio properties, not from tags, so they are
+    // available even for a file carrying no tags at all — which is exactly why
+    // Kind and Bit Rate can never be blank while Genre and Year often are.
+    let props = tagged.properties();
     let duration = {
-        let secs = tagged.properties().duration().as_secs_f64();
+        let secs = props.duration().as_secs_f64();
         (secs > 0.0).then_some(secs)
     };
+    let bitrate = props.audio_bitrate();
+    let sample_rate = props.sample_rate();
+    let bit_depth = props.bit_depth().map(u32::from);
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
-        return Tags { duration, ..empty };
+        return Tags {
+            duration,
+            bitrate,
+            sample_rate,
+            bit_depth,
+            ..empty
+        };
     };
     let norm = |v: Option<std::borrow::Cow<'_, str>>| {
         v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -469,7 +587,24 @@ fn read_tags(path: &std::path::Path) -> Tags {
         ),
         disc: tag.disk(),
         track: tag.track(),
+        year: tag.year(),
+        genre: norm(tag.genre()),
         duration,
+        bitrate,
+        sample_rate,
+        bit_depth,
+        // A gain tag is a signed dB figure, usually suffixed " dB" (e.g. "-7.89 dB").
+        // Parsed the same way the engine parses it (see replaygain_multiplier) so the
+        // column can't disagree with what playback actually acts on.
+        rg_track_gain: tag
+            .get_string(&lofty::tag::ItemKey::ReplayGainTrackGain)
+            .and_then(|v| {
+                v.trim()
+                    .trim_end_matches(|c: char| c.is_alphabetic())
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+            }),
     }
 }
 
@@ -550,6 +685,16 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let size = meta.len() as i64;
+        // Birth time (APFS/HFS+ st_birthtime). Distinct from mtime and the more
+        // useful of the two for "what did I just add": Pudding's own metadata
+        // editor rewrites files (see write_tags), which bumps mtime — so a tagging
+        // pass would otherwise reshuffle a Date Modified sort into "files I recently
+        // edited". None on filesystems that don't record it.
+        let created = meta
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
         let path_str = file.to_string_lossy().to_string();
 
         let _ = tx.execute(
@@ -573,31 +718,47 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
 
         let tags = read_tags(file);
         let _ = tx.execute(
-            "INSERT INTO tracks (path, root, mtime, size, title, artist, album, album_artist, disc, track, duration)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO tracks (path, root, mtime, size, created, title, artist, album, album_artist,
+                                 disc, track, year, genre, duration, bitrate, sample_rate, bit_depth,
+                                 rg_track_gain)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(path) DO UPDATE SET
                  root = excluded.root,
                  mtime = excluded.mtime,
                  size = excluded.size,
+                 created = excluded.created,
                  title = excluded.title,
                  artist = excluded.artist,
                  album = excluded.album,
                  album_artist = excluded.album_artist,
                  disc = excluded.disc,
                  track = excluded.track,
-                 duration = excluded.duration",
+                 year = excluded.year,
+                 genre = excluded.genre,
+                 duration = excluded.duration,
+                 bitrate = excluded.bitrate,
+                 sample_rate = excluded.sample_rate,
+                 bit_depth = excluded.bit_depth,
+                 rg_track_gain = excluded.rg_track_gain",
             params![
                 path_str,
                 root_key,
                 mtime,
                 size,
+                created,
                 tags.title,
                 tags.artist,
                 tags.album,
                 tags.album_artist,
                 tags.disc,
                 tags.track,
-                tags.duration
+                tags.year,
+                tags.genre,
+                tags.duration,
+                tags.bitrate,
+                tags.sample_rate,
+                tags.bit_depth,
+                tags.rg_track_gain
             ],
         );
     }
@@ -692,17 +853,30 @@ fn scan_and_emit(root: PathBuf, db_path: PathBuf, app: AppHandle) {
     let _ = app.emit("library-scanned", payload);
 }
 
-type MetaRow = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<u32>,
-    Option<u32>,
-    Option<f64>,
-);
+// The cached metadata for one path, for callers that look tracks up by path rather
+// than querying a list (the browse tree, playlist expansion, M3U serialization).
+//
+// A struct rather than the tuple this used to be: it grew past the point where
+// positional destructuring at three call sites — each wanting a different subset —
+// stayed readable, and `..Default::default()` gives the out-of-library case a name.
+#[derive(Clone, Default)]
+pub(crate) struct MetaRow {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub disc: Option<u32>,
+    pub track: Option<u32>,
+    pub year: Option<u32>,
+    pub genre: Option<String>,
+    pub duration: Option<f64>,
+    pub bitrate: Option<u32>,
+    pub gain: Option<f64>,
+    pub created: Option<i64>,
+    pub modified: Option<i64>,
+}
 
-// Fetches (title, artist, album, disc, track) for many paths in one round trip
+// Fetches the cached metadata for many paths in one round trip
 // instead of a SELECT per path. SQLite caps bound parameters (default 999), so
 // paths are chunked. Paths missing from the cache simply don't appear in the
 // map; callers substitute a None-filled row.
@@ -711,23 +885,28 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
     for chunk in paths.chunks(900) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT path, title, artist, album, album_artist, disc, track, duration FROM tracks WHERE path IN ({})",
-            placeholders
+            "SELECT {TRACK_COLUMNS} FROM tracks WHERE path IN ({placeholders})"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params_from_iter(chunk), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    (
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                    ),
+                    MetaRow {
+                        title: row.get(1)?,
+                        artist: row.get(2)?,
+                        album: row.get(3)?,
+                        album_artist: row.get(4)?,
+                        disc: row.get(5)?,
+                        track: row.get(6)?,
+                        year: row.get(7)?,
+                        genre: row.get(8)?,
+                        duration: row.get(9)?,
+                        bitrate: row.get(10)?,
+                        gain: row.get(11)?,
+                        created: row.get(12)?,
+                        modified: row.get(13)?,
+                    },
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -783,20 +962,22 @@ async fn list_dir(path: String, db: State<'_, DbHandle>) -> Result<DirListing, S
         let meta_map = fetch_meta(conn, &fulls)?;
         let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
         for (name, full) in file_names.into_iter().zip(fulls.into_iter()) {
-            // The browse tree doesn't show per-track runtime, so the duration column
-            // fetch_meta now returns is ignored here.
-            let (title, artist, album, album_artist, disc, track, _duration) = meta_map
-                .get(&full)
-                .cloned()
-                .unwrap_or((None, None, None, None, None, None, None));
+            let m = meta_map.get(&full).cloned().unwrap_or_default();
             files.push(FileEntry {
                 name,
-                title,
-                artist,
-                album,
-                album_artist,
-                disc,
-                track,
+                title: m.title,
+                artist: m.artist,
+                album: m.album,
+                album_artist: m.album_artist,
+                disc: m.disc,
+                track: m.track,
+                year: m.year,
+                genre: m.genre,
+                duration: m.duration,
+                bitrate: m.bitrate,
+                gain: m.gain,
+                created: m.created,
+                modified: m.modified,
             });
         }
 
@@ -1488,6 +1669,8 @@ fn read_file_tags(path: String) -> Result<FileEntry, String> {
         album_artist: tags.album_artist,
         disc: tags.disc,
         track: tags.track,
+        // Editor seed: the six fields above are the whole of what it can write.
+        ..Default::default()
     })
 }
 
@@ -1609,6 +1792,13 @@ async fn write_tags(
             album_artist,
             disc,
             track,
+            // The one column field an edit changes. Writing tags rewrites the file,
+            // so every open row's Date Modified cell is stale the moment this
+            // returns; handing back the post-write mtime lets the caller patch it
+            // (see applyTagUpdate) instead of waiting for a rescan that the
+            // mtime/size pre-sync above has deliberately made a no-op.
+            modified: Some(mtime),
+            ..Default::default()
         })
     })
     .await
@@ -1966,31 +2156,26 @@ async fn search_tracks(
         }
         let like = format!("%{}%", escape_like(q));
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT path, title, artist, album, album_artist, duration FROM tracks
-                 WHERE title LIKE ?1 ESCAPE '\\'
-                    OR artist LIKE ?1 ESCAPE '\\'
-                    OR album LIKE ?1 ESCAPE '\\'
-                    OR path LIKE ?1 ESCAPE '\\'
-                 ORDER BY artist IS NULL, artist COLLATE NOCASE,
-                          album COLLATE NOCASE, disc, track,
-                          title COLLATE NOCASE
-                 LIMIT 50",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks
+             WHERE title LIKE ?1 ESCAPE '\\'
+                OR artist LIKE ?1 ESCAPE '\\'
+                OR album LIKE ?1 ESCAPE '\\'
+                OR path LIKE ?1 ESCAPE '\\'
+             ORDER BY artist IS NULL, artist COLLATE NOCASE,
+                      album COLLATE NOCASE, disc, track,
+                      title COLLATE NOCASE
+             LIMIT 50"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([&like], |row| {
+                // Flat/positional list: the gutter shows a row index, not a
+                // within-album ordinal, so the metadata track number is dropped.
+                // Everything else the column table can draw is carried as-is.
                 Ok(SearchResult {
-                    path: row.get(0)?,
-                    title: row.get(1)?,
-                    artist: row.get(2)?,
-                    album: row.get(3)?,
-                    album_artist: row.get(4)?,
-                    // Flat/positional list: the gutter shows a row index, not a
-                    // within-album ordinal, so no metadata track number is carried.
                     track: None,
-                    duration: row.get(5)?,
+                    ..track_row(row)?
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2079,26 +2264,21 @@ async fn folder_tracks(path: String, db: State<'_, DbHandle>) -> Result<Vec<Sear
         };
         let like = format!("{}%", escape_like(&prefix));
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT path, title, artist, album, album_artist, duration FROM tracks
-                 WHERE path LIKE ?1 ESCAPE '\\'
-                 ORDER BY album IS NULL, album COLLATE NOCASE,
-                          disc, track, path COLLATE NOCASE",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks
+             WHERE path LIKE ?1 ESCAPE '\\'
+             ORDER BY album IS NULL, album COLLATE NOCASE,
+                      disc, track, path COLLATE NOCASE"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([&like], |row| {
+                // Flat/positional list: the gutter shows a row index, not a
+                // within-album ordinal, so the metadata track number is dropped.
+                // Everything else the column table can draw is carried as-is.
                 Ok(SearchResult {
-                    path: row.get(0)?,
-                    title: row.get(1)?,
-                    artist: row.get(2)?,
-                    album: row.get(3)?,
-                    album_artist: row.get(4)?,
-                    // Flat/positional list: the gutter shows a row index, not a
-                    // within-album ordinal, so no metadata track number is carried.
                     track: None,
-                    duration: row.get(5)?,
+                    ..track_row(row)?
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2197,26 +2377,21 @@ async fn artist_tracks(
     db: State<'_, DbHandle>,
 ) -> Result<Vec<SearchResult>, String> {
     db.read(move |conn| {
-        let mut stmt = conn
-            .prepare(
-                "SELECT path, title, artist, album, album_artist, duration FROM tracks
-                 WHERE artist = ?1
-                 ORDER BY album IS NULL, album COLLATE NOCASE,
-                          disc, track, path COLLATE NOCASE",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks
+             WHERE artist = ?1
+             ORDER BY album IS NULL, album COLLATE NOCASE,
+                      disc, track, path COLLATE NOCASE"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([&artist], |row| {
+                // Flat/positional list: the gutter shows a row index, not a
+                // within-album ordinal, so the metadata track number is dropped.
+                // Everything else the column table can draw is carried as-is.
                 Ok(SearchResult {
-                    path: row.get(0)?,
-                    title: row.get(1)?,
-                    artist: row.get(2)?,
-                    album: row.get(3)?,
-                    album_artist: row.get(4)?,
-                    // Flat/positional list: the gutter shows a row index, not a
-                    // within-album ordinal, so no metadata track number is carried.
                     track: None,
-                    duration: row.get(5)?,
+                    ..track_row(row)?
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2241,7 +2416,7 @@ async fn album_tracks(
 ) -> Result<Vec<SearchResult>, String> {
     db.read(move |conn| {
         let sql = format!(
-            "SELECT path, title, artist, album, album_artist, track, duration FROM tracks
+            "SELECT {TRACK_COLUMNS} FROM tracks
              WHERE album = ?1 AND {expr} = ?2
              ORDER BY disc, track, path COLLATE NOCASE",
             expr = ALBUM_ARTIST_EXPR
@@ -2250,13 +2425,8 @@ async fn album_tracks(
         let rows = stmt
             .query_map(params![album, album_artist], |row| {
                 Ok(SearchResult {
-                    path: row.get(0)?,
-                    title: row.get(1)?,
-                    artist: row.get(2)?,
-                    album: row.get(3)?,
-                    album_artist: row.get(4)?,
-                    track: row.get(5)?,
-                    duration: row.get(6)?,
+                    track: row.get(6)?,
+                    ..track_row(row)?
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2282,14 +2452,17 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
         // compared to see where the Songs-open pause actually lives.
         let perf = std::env::var("PUDDING_PERF").is_ok();
         let t0 = std::time::Instant::now();
-        let mut stmt = conn
-            .prepare(
-                "SELECT path, title, artist, album, album_artist, duration FROM tracks
-                 ORDER BY artist IS NULL, artist COLLATE NOCASE,
-                          album COLLATE NOCASE, disc, track,
-                          title COLLATE NOCASE",
-            )
-            .map_err(|e| e.to_string())?;
+        // TRACK_COLUMNS without `track`: this list's gutter is a positional index,
+        // so the metadata ordinal would be dead weight on every row of the library.
+        let sql = format!(
+            "SELECT path, title, artist, album, album_artist, disc,
+                    year, genre, duration, bitrate, rg_track_gain, created, mtime
+             FROM tracks
+             ORDER BY artist IS NULL, artist COLLATE NOCASE,
+                      album COLLATE NOCASE, disc, track,
+                      title COLLATE NOCASE"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         // Columnar/tuple rows (see SongRow): the whole-library list is large enough
         // at the scale target that repeating the JSON field names per row dominates
         // the IPC + parse cost, so ship positional tuples and let the frontend
@@ -2303,6 +2476,13 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -2428,27 +2608,25 @@ async fn artist_albumless_tracks(
     db: State<'_, DbHandle>,
 ) -> Result<Vec<SearchResult>, String> {
     db.read(move |conn| {
-        let mut stmt = conn
-            .prepare(
-                "SELECT path, title, artist, album, duration FROM tracks
-                 WHERE artist = ?1 AND (album IS NULL OR album = '')
-                 ORDER BY title COLLATE NOCASE, path COLLATE NOCASE",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks
+             WHERE artist = ?1 AND (album IS NULL OR album = '')
+             ORDER BY title COLLATE NOCASE, path COLLATE NOCASE"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([&artist], |row| {
+                // Flat list: the gutter shows a row index, not a within-album
+                // ordinal, so the metadata track number is dropped.
+                //
+                // The album artist tag IS carried, though these tracks have no album.
+                // It used to be forced to None here because its only job was keying
+                // "go to album", which an albumless track can't do. It is now also a
+                // column, and a column reports what the file says — blanking it would
+                // make these rows claim the tag is absent when it may not be.
                 Ok(SearchResult {
-                    path: row.get(0)?,
-                    title: row.get(1)?,
-                    artist: row.get(2)?,
-                    album: row.get(3)?,
-                    // Albumless by definition — no album to navigate to, so no
-                    // album-artist key to carry.
-                    album_artist: None,
-                    // Flat list: the gutter shows a row index, not a within-album
-                    // ordinal, so no metadata track number is carried.
                     track: None,
-                    duration: row.get(4)?,
+                    ..track_row(row)?
                 })
             })
             .map_err(|e| e.to_string())?;
