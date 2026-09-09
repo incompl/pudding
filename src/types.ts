@@ -26,6 +26,8 @@ export interface FileEntry {
   genre?: string | null;
   duration?: number | null;
   bitrate?: number | null;
+  sampleRate?: number | null;
+  bitDepth?: number | null;
   gain?: number | null;
   created?: number | null;
   modified?: number | null;
@@ -66,6 +68,8 @@ export interface TreeNode {
   genre?: string | null;
   duration?: number | null;
   bitrate?: number | null;
+  sampleRate?: number | null;
+  bitDepth?: number | null;
   gain?: number | null;
   created?: number | null;
   modified?: number | null;
@@ -128,6 +132,11 @@ export interface SearchTrack {
   // kbps, from the file's audio properties rather than a tag — so, like Kind, it is
   // present even on a file with no tags at all.
   bitrate?: number | null;
+  // The other two audio-property facts: the rate the audio is at, and the bits per
+  // sample. Bit depth is absent on lossy formats, which have none — a blank cell
+  // there is itself the answer, the same way a blank Gain cell is.
+  sampleRate?: number | null;
+  bitDepth?: number | null;
   // REPLAYGAIN_TRACK_GAIN in dB exactly as the file states it, NOT the multiplier
   // playback applies (the engine re-reads the tags and does its own clip-safe math).
   // A blank cell is a file the ReplayGain setting cannot act on.
@@ -400,6 +409,8 @@ export interface PlaylistTrack {
   // the scan cache, and a path outside every library root was never scanned. See
   // `inLibrary`, which is the row's own account of why its cells are empty.
   bitrate: number | null;
+  sampleRate: number | null;
+  bitDepth: number | null;
   gain: number | null;
   created: number | null;
   modified: number | null;

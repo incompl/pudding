@@ -75,6 +75,8 @@ export type ColumnId =
   | "kind"
   | "duration"
   | "bitrate"
+  | "sampleRate"
+  | "bitDepth"
   | "gain"
   | "created"
   | "modified"
@@ -135,6 +137,18 @@ function fmtDate(seconds: number): string {
 // one date measures the column exactly, whatever the reader's locale orders the
 // fields into — see `widest` on the date columns below.
 const WIDEST_DATE = new Date(2026, 11, 30, 22, 58).getTime() / 1000;
+
+// A sample rate in kHz, trailing zeros trimmed: 44100 -> "44.1 kHz", 48000 ->
+// "48 kHz", 22050 -> "22.05 kHz". kHz rather than the raw hertz because that is
+// how every sleeve, DAC and preferences pane in the world writes it, and because
+// the whole point of the column is to be scanned down, where "44.1" and "48" tell
+// two rows apart faster than "44100" and "48000" do.
+function fmtSampleRate(hz: number): string {
+  const khz = hz / 1000;
+  // Up to three decimals covers the low rates exactly (11025 -> 11.025) without
+  // giving the common ones a tail of zeros.
+  return `${parseFloat(khz.toFixed(3))} kHz`;
+}
 
 // A ReplayGain figure, with its unit and an explicit sign. Both are deliberate:
 // headers are optional (see columnHeaders), so a bare "-7.89" in a column the reader
@@ -254,6 +268,35 @@ export const COLUMNS: ColumnDef[] = [
     numeric: true,
     get: (t) => (t.bitrate != null && t.bitrate > 0 ? `${t.bitrate} kbps` : ""),
     key: (t) => t.bitrate ?? 0,
+  },
+  // The two facts Bit Rate can't tell you apart. A CBR 320 MP3 reads "320 kbps"
+  // at 44.1 kHz and at 48 kHz alike, so with "Match Source Sample Rate"
+  // on, this is the column that says where the output device is about to change
+  // gear — a boundary between two different values here is a boundary the engine
+  // cannot join gaplessly. Both come from the audio properties like Bit Rate, so
+  // neither depends on the file being tagged.
+  {
+    id: "sampleRate",
+    label: "Sample Rate",
+    weight: 0,
+    fixed: true,
+    numeric: true,
+    get: (t) => (t.sampleRate != null && t.sampleRate > 0 ? fmtSampleRate(t.sampleRate) : ""),
+    key: (t) => t.sampleRate ?? 0,
+    blank: (t) => !(t.sampleRate != null && t.sampleRate > 0),
+  },
+  // Blank for MP3, AAC and every other lossy format: they carry no bit depth to
+  // report. That empty cell is information, not a gap — it is the column saying
+  // "lossy" — which is why it isn't backfilled with a 16 that nothing measured.
+  {
+    id: "bitDepth",
+    label: "Bit Depth",
+    weight: 0,
+    fixed: true,
+    numeric: true,
+    get: (t) => (t.bitDepth != null && t.bitDepth > 0 ? `${t.bitDepth} bit` : ""),
+    key: (t) => t.bitDepth ?? 0,
+    blank: (t) => !(t.bitDepth != null && t.bitDepth > 0),
   },
   // The raw REPLAYGAIN_TRACK_GAIN tag, not the multiplier playback applies — the
   // same "what does this file say" rule as Album Artist above, and for the same

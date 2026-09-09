@@ -67,6 +67,10 @@ pub struct PlaylistTrack {
     // from the scan cache, and a path outside every library root was never scanned.
     // That is a real distinction the row shows rather than hides — see `in_library`.
     bitrate: Option<u32>,
+    #[serde(rename = "sampleRate")]
+    sample_rate: Option<u32>,
+    #[serde(rename = "bitDepth")]
+    bit_depth: Option<u32>,
     gain: Option<f64>,
     created: Option<i64>,
     modified: Option<i64>,
@@ -269,6 +273,8 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     missing,
                     duration: m.duration,
                     bitrate: m.bitrate,
+                    sample_rate: m.sample_rate,
+                    bit_depth: m.bit_depth,
                     gain: m.gain,
                     created: m.created,
                     modified: m.modified,
@@ -290,6 +296,8 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     missing,
                     duration: None,
                     bitrate: None,
+                    sample_rate: None,
+                    bit_depth: None,
                     gain: None,
                     created: None,
                     modified: None,
@@ -704,10 +712,13 @@ mod tests {
     fn empty_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
+            // Mirrors the columns TRACK_COLUMNS selects (see lib.rs init_schema):
+            // fetch_meta reads that list, so a column missing here fails the query
+            // rather than returning a null.
             "CREATE TABLE tracks (path TEXT, title TEXT, artist TEXT, album TEXT, \
              album_artist TEXT, disc INTEGER, track INTEGER, year INTEGER, genre TEXT, \
-             duration REAL, bitrate INTEGER, rg_track_gain REAL, created INTEGER, \
-             mtime INTEGER);",
+             duration REAL, bitrate INTEGER, sample_rate INTEGER, bit_depth INTEGER, \
+             rg_track_gain REAL, created INTEGER, mtime INTEGER);",
         )
         .unwrap();
         conn

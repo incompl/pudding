@@ -118,6 +118,8 @@ export function nodesFromListing(
       genre: f.genre,
       duration: f.duration,
       bitrate: f.bitrate,
+      sampleRate: f.sampleRate,
+      bitDepth: f.bitDepth,
       gain: f.gain,
       created: f.created,
       modified: f.modified,

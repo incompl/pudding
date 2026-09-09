@@ -106,6 +106,7 @@ import {
   shuffleMode,
   repeatMode,
   replayGainMode,
+  followSampleRate,
   autoadvance,
   libraryRootSet,
   streamListPathValid,
@@ -316,6 +317,9 @@ const KEY_SHUFFLE = "shuffleMode";
 const KEY_REPEAT = "repeatMode";
 // ReplayGain (volume normalization) mode, remembered across launches.
 const KEY_REPLAYGAIN = "replayGainMode";
+// Whether the output device follows each file's sample rate. Remembered across
+// launches; defaults off (see the signal's note in state.ts).
+const KEY_FOLLOW_SAMPLE_RATE = "followSampleRate";
 // Which Now Playing hero view the user last chose (art vs. visualizer).
 const KEY_NOW_PLAYING_VIEW = "nowPlayingView";
 
@@ -2037,6 +2041,15 @@ function setReplayGainMode(mode: ReplayGainMode): void {
   void app.store.set(KEY_REPLAYGAIN, mode).then(() => app.store.save());
 }
 
+// Turn "match device to file sample rate" on or off and persist it. Like
+// ReplayGain, the engine picks it up at the next track it opens, so there's no
+// applyModeChange() and nothing to do to the track already playing.
+function setFollowSampleRate(enabled: boolean): void {
+  if (followSampleRate.value === enabled) return;
+  followSampleRate.value = enabled;
+  void app.store.set(KEY_FOLLOW_SAMPLE_RATE, enabled).then(() => app.store.save());
+}
+
 function setupPlaybackModes(): void {
   modeShuffleBtn.addEventListener("click", toggleShuffle);
   modeRepeatBtn.addEventListener("click", () => {
@@ -3755,6 +3768,10 @@ async function init(): Promise<void> {
   const storedRg = await app.store.get<ReplayGainMode>(KEY_REPLAYGAIN);
   replayGainMode.value = storedRg === "track" || storedRg === "album" ? storedRg : "off";
 
+  // Device sample-rate following (defaults off). Same effect-driven wiring as
+  // ReplayGain below: seeded into the engine and the menu on this initial set.
+  followSampleRate.value = (await app.store.get<boolean>(KEY_FOLLOW_SAMPLE_RATE)) ?? false;
+
   // Now Playing view (album art vs. visualizer), defaults to art. The reactive
   // sync effect in setupSettings re-checks the matching menu radio item.
   nowPlayingView.value =
@@ -3790,6 +3807,13 @@ async function init(): Promise<void> {
     const mode = replayGainMode.value;
     void invoke("audio_set_replaygain", { mode });
     void invoke("set_replaygain_checked", { mode });
+  });
+  // Sample-rate following: same shape as ReplayGain — push to the engine, check
+  // the menu box, on load and after any change.
+  effect(() => {
+    const enabled = followSampleRate.value;
+    void invoke("audio_set_follow_sample_rate", { enabled });
+    void invoke("set_follow_sample_rate_checked", { enabled });
   });
 
   // Recently opened playlists and tracks → the OS "Open Recent ▸" submenu. Hand
@@ -3926,6 +3950,8 @@ async function init(): Promise<void> {
           genre: string | null,
           duration: number | null,
           bitrate: number | null,
+          sampleRate: number | null,
+          bitDepth: number | null,
           gain: number | null,
           created: number | null,
           modified: number | null,
@@ -3943,6 +3969,8 @@ async function init(): Promise<void> {
             genre,
             duration,
             bitrate,
+            sampleRate,
+            bitDepth,
             gain,
             created,
             modified,
@@ -3957,6 +3985,8 @@ async function init(): Promise<void> {
             genre,
             duration,
             bitrate,
+            sampleRate,
+            bitDepth,
             gain,
             created,
             modified,
@@ -4147,6 +4177,9 @@ async function init(): Promise<void> {
     // already the active mode, setReplayGainMode is a no-op and the effect won't
     // fire, leaving the trio wrongly checked — re-sync explicitly.
     void invoke("set_replaygain_checked", { mode: replayGainMode.value });
+  });
+  await listen<boolean>("menu:follow-sample-rate", (event) => {
+    setFollowSampleRate(event.payload);
   });
   await listen<string>("menu:volume", (event) => {
     setVolume(volume.value + (event.payload === "up" ? 0.1 : -0.1));

@@ -78,6 +78,9 @@ struct PlaybackMenu {
     rg_off: CheckMenuItem<Wry>,
     rg_track: CheckMenuItem<Wry>,
     rg_album: CheckMenuItem<Wry>,
+    // "Match Source Sample Rate" (set_follow_sample_rate_checked). Off
+    // by default, unlike the rest: it reconfigures a system-wide device setting.
+    follow_sample_rate: CheckMenuItem<Wry>,
 }
 
 // The Window menu's "Mini Player" checkbox. The frontend derives mini mode from
@@ -170,6 +173,14 @@ struct FileEntry {
     genre: Option<String>,
     duration: Option<f64>,
     bitrate: Option<u32>,
+    // The other two audio-property facts, alongside `bitrate`: the rate the audio
+    // is actually at, and how many bits each sample carries. Lossy formats have no
+    // meaningful bit depth, so that one stays None for MP3/AAC — a blank cell that
+    // says "lossy" as plainly as a number could.
+    #[serde(rename = "sampleRate")]
+    sample_rate: Option<u32>,
+    #[serde(rename = "bitDepth")]
+    bit_depth: Option<u32>,
     gain: Option<f64>,
     created: Option<i64>,
     modified: Option<i64>,
@@ -264,6 +275,14 @@ struct SearchResult {
     duration: Option<f64>,
     // kbps, from the file's audio properties rather than a tag.
     bitrate: Option<u32>,
+    // The other two audio-property facts, alongside `bitrate`: the rate the audio
+    // is actually at, and how many bits each sample carries. Lossy formats have no
+    // meaningful bit depth, so that one stays None for MP3/AAC — a blank cell that
+    // says "lossy" as plainly as a number could.
+    #[serde(rename = "sampleRate")]
+    sample_rate: Option<u32>,
+    #[serde(rename = "bitDepth")]
+    bit_depth: Option<u32>,
     // REPLAYGAIN_TRACK_GAIN in dB as the file states it — see the schema comment
     // for why this is the raw tag and not the multiplier playback applies.
     gain: Option<f64>,
@@ -280,7 +299,8 @@ struct SearchResult {
 // pane can't end up showing a field that is blank only because one query forgot it.
 // Index-order coupling between the two lives in this one pair.
 const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist, disc, track, \
-                             year, genre, duration, bitrate, rg_track_gain, created, mtime";
+                             year, genre, duration, bitrate, sample_rate, bit_depth, \
+                             rg_track_gain, created, mtime";
 
 fn track_row(row: &rusqlite::Row) -> rusqlite::Result<SearchResult> {
     Ok(SearchResult {
@@ -295,9 +315,11 @@ fn track_row(row: &rusqlite::Row) -> rusqlite::Result<SearchResult> {
         genre: row.get(8)?,
         duration: row.get(9)?,
         bitrate: row.get(10)?,
-        gain: row.get(11)?,
-        created: row.get(12)?,
-        modified: row.get(13)?,
+        sample_rate: row.get(11)?,
+        bit_depth: row.get(12)?,
+        gain: row.get(13)?,
+        created: row.get(14)?,
+        modified: row.get(15)?,
     })
 }
 
@@ -320,6 +342,8 @@ type SongRow = (
     Option<String>, // genre
     Option<f64>,    // duration
     Option<u32>,    // bitrate
+    Option<u32>,    // sample_rate
+    Option<u32>,    // bit_depth
     Option<f64>,    // rg_track_gain
     Option<i64>,    // created
     Option<i64>,    // mtime
@@ -479,11 +503,11 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             year INTEGER,
             genre TEXT,
             bitrate INTEGER,
-            -- Cached but not yet surfaced as columns. They cost nothing to read
-            -- (read_tags already holds the FileProperties it takes duration from)
-            -- and they are what a future per-track output-rate switch will show,
-            -- so caching them now keeps that change frontend-only instead of
-            -- forcing a second full rescan on everyone.
+            -- Read for free alongside duration and bitrate (read_tags already
+            -- holds the FileProperties all four come from). Cached here before
+            -- anything displayed them, which is why surfacing them as the Sample
+            -- Rate and Bit Depth columns cost no schema bump and no rescan: every
+            -- existing library already had the values sitting in this table.
             sample_rate INTEGER,
             bit_depth INTEGER,
             -- The raw REPLAYGAIN_TRACK_GAIN figure in dB, NOT the playback
@@ -871,6 +895,8 @@ pub(crate) struct MetaRow {
     pub genre: Option<String>,
     pub duration: Option<f64>,
     pub bitrate: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u32>,
     pub gain: Option<f64>,
     pub created: Option<i64>,
     pub modified: Option<i64>,
@@ -903,9 +929,11 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
                         genre: row.get(8)?,
                         duration: row.get(9)?,
                         bitrate: row.get(10)?,
-                        gain: row.get(11)?,
-                        created: row.get(12)?,
-                        modified: row.get(13)?,
+                        sample_rate: row.get(11)?,
+                        bit_depth: row.get(12)?,
+                        gain: row.get(13)?,
+                        created: row.get(14)?,
+                        modified: row.get(15)?,
                     },
                 ))
             })
@@ -975,6 +1003,8 @@ async fn list_dir(path: String, db: State<'_, DbHandle>) -> Result<DirListing, S
                 genre: m.genre,
                 duration: m.duration,
                 bitrate: m.bitrate,
+                sample_rate: m.sample_rate,
+                bit_depth: m.bit_depth,
                 gain: m.gain,
                 created: m.created,
                 modified: m.modified,
@@ -1883,6 +1913,13 @@ fn set_replaygain_checked(menu: State<PlaybackMenu>, mode: String) {
     let _ = menu.rg_album.set_checked(mode == "album");
 }
 
+// Sync the "Match Source Sample Rate" checkmark to the frontend's
+// persisted setting, at startup and after each change.
+#[tauri::command]
+fn set_follow_sample_rate_checked(menu: State<PlaybackMenu>, enabled: bool) {
+    let _ = menu.follow_sample_rate.set_checked(enabled);
+}
+
 // Sync the "Mini Player" checkmark to the current mode (the frontend derives it
 // from the viewport height, on startup and on every resize).
 #[tauri::command]
@@ -2102,6 +2139,15 @@ fn audio_set_replaygain(mode: String, engine: State<audio::AudioEngine>) {
         _ => 0,
     };
     engine.set_replaygain(m);
+}
+
+// Turn follow-the-content output rate switching on or off. The frontend owns the
+// setting (persisted in its store, menu checkbox); the engine reads it as it
+// opens each track, so a change lands at the next track boundary rather than
+// interrupting the one playing. See audio::desired_output_rate.
+#[tauri::command]
+fn audio_set_follow_sample_rate(enabled: bool, engine: State<audio::AudioEngine>) {
+    engine.set_rate_follow(enabled);
 }
 
 // === System Now Playing (macOS Control Center / media keys) ===
@@ -2456,7 +2502,8 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
         // so the metadata ordinal would be dead weight on every row of the library.
         let sql = format!(
             "SELECT path, title, artist, album, album_artist, disc,
-                    year, genre, duration, bitrate, rg_track_gain, created, mtime
+                    year, genre, duration, bitrate, sample_rate, bit_depth,
+                    rg_track_gain, created, mtime
              FROM tracks
              ORDER BY artist IS NULL, artist COLLATE NOCASE,
                       album COLLATE NOCASE, disc, track,
@@ -2483,6 +2530,8 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
                     row.get(10)?,
                     row.get(11)?,
                     row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -2817,6 +2866,12 @@ pub fn run() {
                 // The checkbox auto-toggled its own state before this fires, so
                 // is_checked() reads the new value; relay it to the frontend,
                 // which owns the setting and persists it.
+                "follow-sample-rate" => {
+                    if let Some(menu) = app.try_state::<PlaybackMenu>() {
+                        let enabled = menu.follow_sample_rate.is_checked().unwrap_or(false);
+                        let _ = app.emit("menu:follow-sample-rate", enabled);
+                    }
+                }
                 "autoadvance" => {
                     if let Some(menu) = app.try_state::<PlaybackMenu>() {
                         let enabled = menu.autoadvance.is_checked().unwrap_or(true);
@@ -3056,6 +3111,16 @@ pub fn run() {
                 .item(&rg_track)
                 .item(&rg_album)
                 .build()?;
+            // Follow the file's sample rate: put the output device at the rate
+            // the music was made at instead of resampling everything to whatever
+            // the device is set to. Sits with the other audio-path settings
+            // (Equalizer, ReplayGain). Off by default and the only Playback
+            // checkbox that is — switching rates reconfigures the device for
+            // every app on the machine, and costs a short silence between two
+            // tracks that don't share a rate, so it's opt-in.
+            let follow_sample_rate =
+                CheckMenuItemBuilder::with_id("follow-sample-rate", "Match Source Sample Rate")
+                    .build(app)?;
             let playback_menu = SubmenuBuilder::new(app, "Playback")
                 .item(&play_pause)
                 .item(&previous)
@@ -3069,6 +3134,7 @@ pub fn run() {
                 .item(&mute)
                 .item(&equalizer)
                 .item(&replaygain_menu)
+                .item(&follow_sample_rate)
                 .separator()
                 .item(&autoadvance)
                 .build()?;
@@ -3082,6 +3148,7 @@ pub fn run() {
                 rg_off,
                 rg_track,
                 rg_album,
+                follow_sample_rate,
             });
 
             // View menu: presentation choices, as distinct from Playback's
@@ -3269,6 +3336,7 @@ pub fn run() {
             set_repeat_checked,
             set_mute_checked,
             set_replaygain_checked,
+            set_follow_sample_rate_checked,
             set_miniplayer_checked,
             set_now_playing_view_checked,
             set_zen_mode_checked,
@@ -3282,6 +3350,7 @@ pub fn run() {
             audio_set_volume,
             audio_set_eq,
             audio_set_replaygain,
+            audio_set_follow_sample_rate,
             now_playing_set_metadata,
             now_playing_set_playback,
             now_playing_clear,

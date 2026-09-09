@@ -1003,6 +1003,8 @@ export function nodeToTrack(n: TreeNode): SearchTrack {
     genre: n.genre,
     duration: n.duration,
     bitrate: n.bitrate,
+    sampleRate: n.sampleRate,
+    bitDepth: n.bitDepth,
     gain: n.gain,
     created: n.created,
     modified: n.modified,

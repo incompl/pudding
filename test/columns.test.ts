@@ -178,6 +178,8 @@ test("every offered field reads from the file, and none is fabricated", () => {
     year: 1998,
     duration: 225,
     bitrate: 320,
+    sampleRate: 44100,
+    bitDepth: 24,
     gain: -7.89,
     created,
     modified,
@@ -197,6 +199,8 @@ test("every offered field reads from the file, and none is fabricated", () => {
     "kind",
     "duration",
     "bitrate",
+    "sampleRate",
+    "bitDepth",
     "gain",
     "created",
     "modified",
@@ -229,6 +233,8 @@ test("every offered field reads from the file, and none is fabricated", () => {
       "FLAC",
       "3:45",
       "320 kbps",
+      "44.1 kHz",
+      "24 bit",
       "-7.89 dB",
       asDate(created),
       asDate(modified),
@@ -243,7 +249,7 @@ test("every offered field reads from the file, and none is fabricated", () => {
   const bare = buildCells(track("/m/x.mp3"), ids, NAV_CELLS);
   assert.deepEqual(
     bare.map((c) => c.textContent),
-    ["x.mp3", "", "", "", "", "", "", "MP3", "", "", "", "", "", "/m/x.mp3"],
+    ["x.mp3", "", "", "", "", "", "", "MP3", "", "", "", "", "", "", "", "/m/x.mp3"],
   );
 });
 
@@ -353,6 +359,56 @@ test("Gain shows the file's own figure, signed, and blank when the file has none
   // A file scanned as needing no change is a value, and reads as one.
   assert.equal(read(track("/m/c.mp3", { gain: 0 })), "+0.00 dB");
   assert.equal(read(track("/m/d.mp3")), "");
+});
+
+test("Sample Rate reads in kHz, and sorts as a number rather than as its text", () => {
+  // The column exists to be scanned down for the boundary where the rate changes
+  // — with "Match Device to File Sample Rate" on, that boundary is exactly where
+  // the engine cannot join two tracks gaplessly. So the cell is written the way
+  // sleeves and DACs write it, and the odd rates keep their real value instead of
+  // being rounded into agreement with the common ones.
+  const read = (t: SearchTrack): string | null =>
+    buildCells(t, ["sampleRate"], NAV_CELLS)[0].textContent;
+  assert.equal(read(track("/m/a.flac", { sampleRate: 44100 })), "44.1 kHz");
+  // A whole number of kHz doesn't wear a decimal point it doesn't need.
+  assert.equal(read(track("/m/b.flac", { sampleRate: 48000 })), "48 kHz");
+  assert.equal(read(track("/m/c.flac", { sampleRate: 96000 })), "96 kHz");
+  assert.equal(read(track("/m/d.flac", { sampleRate: 176400 })), "176.4 kHz");
+  // Low rates stay exact rather than collapsing to "22 kHz".
+  assert.equal(read(track("/m/e.m4a", { sampleRate: 22050 })), "22.05 kHz");
+  // Never scanned (an out-of-library row), so nothing to say.
+  assert.equal(read(track("/m/f.mp3")), "");
+
+  // Sorted on the number, not the string: as text "192 kHz" sorts before
+  // "44.1 kHz", which would file the highest rate in the library first and hide
+  // the very grouping the column is up to show.
+  const ts = [
+    track("/m/1.flac", { title: "high", sampleRate: 192000 }),
+    track("/m/2.flac", { title: "cd", sampleRate: 44100 }),
+    track("/m/3.flac", { title: "dvd", sampleRate: 48000 }),
+    track("/m/4.mp3", { title: "none" }),
+  ];
+  assert.deepEqual(
+    sortTracks(ts, { id: "sampleRate", dir: 1 }).map((t) => t.title),
+    ["cd", "dvd", "high", "none"],
+  );
+  // And the unscanned row sinks either way rather than reading as 0 Hz.
+  assert.deepEqual(
+    sortTracks(ts, { id: "sampleRate", dir: -1 }).map((t) => t.title),
+    ["high", "dvd", "cd", "none"],
+  );
+});
+
+test("Bit Depth stays blank on lossy files instead of inventing a 16", () => {
+  // MP3 and AAC have no bit depth to report — the scanner gets None from the file,
+  // not a zero — and the blank cell is the honest rendering of that. It is also the
+  // useful one: an empty Bit Depth beside a filled Sample Rate is the column pair
+  // saying "lossy", which nothing else in a list says.
+  const read = (t: SearchTrack): string | null =>
+    buildCells(t, ["bitDepth"], NAV_CELLS)[0].textContent;
+  assert.equal(read(track("/m/a.flac", { bitDepth: 16 })), "16 bit");
+  assert.equal(read(track("/m/b.flac", { bitDepth: 24 })), "24 bit");
+  assert.equal(read(track("/m/c.mp3")), "");
 });
 
 test("Album Artist shows the raw tag, and stays blank rather than inheriting", () => {

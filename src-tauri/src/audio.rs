@@ -8,9 +8,15 @@
 //                                                                                 |
 //                                                                       [position-emit thread] --> Tauri events
 //
-// The output stream is opened once at startup and stays open for the whole
-// session. Tracks are joined by adjacency in the ring buffer — track N's last
-// sample sits next to track N+1's first sample with nothing in between.
+// The output stream is opened once at startup and normally stays open for the
+// whole session. Tracks are joined by adjacency in the ring buffer — track N's
+// last sample sits next to track N+1's first sample with nothing in between.
+//
+// The one thing that ever reopens it is an optional, off-by-default rate switch:
+// with "Match Source Sample Rate" on, a track whose rate the device
+// isn't running gets the stream (and the ring) rebuilt at that rate, at the
+// track boundary and behind a drain barrier. See "Output rate switching" below.
+// Two tracks that share a rate never go near it and stay sample-adjacent.
 //
 // The audio callback is real-time: no allocation, no locking, no I/O, no logging.
 // It only reads samples out of the ring buffer, applies volume, and counts
@@ -65,6 +71,35 @@ const OUT_CHANNELS: usize = 2;
 // decode hiccup, small enough that the user-visible position lag at the
 // boundary between "what's been decoded" and "what's audible" is imperceptible.
 const RING_BUFFER_SECONDS: f32 = 1.0;
+
+// Follow-the-content output rate switching (Playback > "Match Device to File
+// Sample Rate", off by default). Switching means changing the output device's
+// nominal rate, which cpal can only do by building a stream at the new rate —
+// so the stream is torn down and rebuilt, and the device is silent while that
+// happens. It is therefore done at a track boundary, behind a drain barrier,
+// and only when the rate actually changes: a track that plays at the rate
+// already running never touches any of this and stays sample-adjacent to its
+// predecessor, which is the whole point of the engine.
+//
+// Silence pushed into the fresh ring ahead of the new track's first sample. Two
+// jobs: the rebuilt stream starts with a full buffer instead of underrunning
+// while the decode thread catches up, and external DACs that mute themselves
+// while re-locking to a new rate don't swallow the first note.
+const RATE_SWITCH_PREROLL_MS: u64 = 200;
+// The callback hands the device a buffer at a time, so an empty ring still has
+// frames in flight that haven't been heard. Wait this long after the ring
+// drains before tearing the stream down, or the previous track loses its tail.
+const RATE_SWITCH_SETTLE_MS: u64 = 30;
+// Ceiling on a followed rate. A 96 kHz file on a DAC that offers 384 kHz gains
+// nothing from the extra octaves and costs real decode-thread headroom.
+const MAX_FOLLOW_RATE: u32 = 192_000;
+// Bound on the drain barrier, so a device that has stopped consuming (asleep,
+// wedged, unplugged) can't hold the decode thread there forever.
+const RATE_SWITCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+// Bound on the rebuild round-trip. cpal's CoreAudio backend blocks up to a
+// second inside AudioObjectSetPropertyData waiting for the device to report its
+// new rate; this is that, plus room for the teardown and build either side.
+const RATE_SWITCH_REBUILD_TIMEOUT: Duration = Duration::from_secs(5);
 
 // Position events emitted ~20 Hz: smooth enough for a seekbar, cheap enough
 // to be free on the event loop.
@@ -212,10 +247,25 @@ pub struct SharedState {
     // decoded samples — so unlike the EQ (a live callback effect) a mode change
     // only takes effect on the next track opened, not the one already decoding.
     rg_mode: AtomicU8,
+    // The device rate currently running. Written by the decode thread (the only
+    // thread that changes it) after a rate switch, read by threads that need the
+    // rate without owning it. Position math does NOT read this — it uses the
+    // rate stamped on each origin, which stays correct for audio that was
+    // produced before a switch. See Origin::rate.
+    output_rate: AtomicU32,
+    // Follow-the-content rate switching, off by default. Read by the decode
+    // thread as it opens each track, so toggling it takes effect at the next
+    // track boundary rather than mid-track (like rg_mode).
+    rate_follow: AtomicBool,
+    // Set while the decode thread is deliberately letting the ring run dry to
+    // reach a rate switch's drain barrier. The callback reads it to keep that
+    // silence out of the underrun counters — the same role queue_exhausted and
+    // post_flush play for the other two by-design silences.
+    rate_switch_pending: AtomicBool,
 }
 
 impl SharedState {
-    fn new() -> Self {
+    fn new(output_rate: u32) -> Self {
         Self {
             frames_played: AtomicU64::new(0),
             total_drained: AtomicU64::new(0),
@@ -233,6 +283,9 @@ impl SharedState {
             underrun_events: AtomicU64::new(0),
             underrun_frames: AtomicU64::new(0),
             rg_mode: AtomicU8::new(0),
+            output_rate: AtomicU32::new(output_rate),
+            rate_follow: AtomicBool::new(false),
+            rate_switch_pending: AtomicBool::new(false),
         }
     }
 }
@@ -257,6 +310,12 @@ struct Origin {
     path: String,
     duration_seconds: f64,
     start_offset_seconds: f64,
+    // The device rate this origin's audio was produced at. Frame counts either
+    // side of a rate switch measure different amounts of time, so the divisor
+    // has to travel with the origin rather than being read live. A switch only
+    // ever happens at a track boundary — which always publishes a fresh origin
+    // — so no origin ever spans two rates.
+    rate: u32,
 }
 
 #[derive(Default)]
@@ -359,6 +418,13 @@ impl AudioEngine {
     pub fn set_replaygain(&self, mode: u8) {
         self.shared.rg_mode.store(mode, Ordering::Relaxed);
     }
+
+    // Follow-the-content output rate switching. Like ReplayGain, the engine
+    // reads this as it opens each track, so a change takes effect at the next
+    // track boundary and never interrupts the one playing.
+    pub fn set_rate_follow(&self, enabled: bool) {
+        self.shared.rate_follow.store(enabled, Ordering::Relaxed);
+    }
 }
 
 // === Equalizer DSP ===
@@ -453,7 +519,10 @@ impl EqChain {
             active: [0; EQ_BAND_COUNT],
             active_len: 0,
             sample_rate: sample_rate as f32,
-            last_gen: 0,
+            // Deliberately not 0: a chain built for a rebuilt stream (rate
+            // switch) must adopt whatever the user's EQ is set to on its first
+            // callback, and 0 is a gen it could legitimately match.
+            last_gen: u64::MAX,
         }
     }
 
@@ -550,6 +619,14 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     let output_rate = default_cfg.sample_rate().0;
     let sample_format = default_cfg.sample_format();
 
+    // The rates this device can be switched to, read once and cached: asking
+    // cpal instantiates an audio unit, which is far too costly to repeat per
+    // track. `default_rate` is where the device was found — the rate we fall
+    // back to for content whose own rate can't be followed, so that an odd file
+    // leaves the device where its owner had it rather than somewhere arbitrary.
+    let device_rates = Arc::new(device_output_rates(&device));
+    let default_rate = output_rate;
+
     let stream_cfg = StreamConfig {
         channels: OUT_CHANNELS as u16,
         sample_rate: SampleRate(output_rate),
@@ -559,32 +636,42 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     };
 
     log::info!(
-        "audio: device={} rate={} format={:?} channels={}",
+        "audio: device={} rate={} format={:?} channels={} switchable={:?}",
         device.name().unwrap_or_else(|_| "<unknown>".into()),
         output_rate,
         sample_format,
         OUT_CHANNELS,
+        device_rates,
     );
 
-    // Ring buffer in samples (not frames). Stereo → 2 samples per frame.
-    let ring_samples = (output_rate as f32 * RING_BUFFER_SECONDS) as usize * OUT_CHANNELS;
-    let (rb_producer, rb_consumer) = RingBuffer::<f32>::new(ring_samples);
+    // Ring buffer in samples (not frames). Stereo -> 2 samples per frame. Sized
+    // from the rate, so a rate switch rebuilds it (see perform_rate_switch).
+    let (rb_producer, rb_consumer) = RingBuffer::<f32>::new(ring_samples(output_rate));
 
     // Second ring for the visualizer tap: the audio callback pushes, the
     // spectrum thread drains. Sized to a handful of FFT windows so a slow
     // spectrum tick can't back-pressure the audio thread.
-    let viz_samples = WAVEFORM_WINDOW * OUT_CHANNELS * 4;
-    let (viz_producer, viz_consumer) = RingBuffer::<f32>::new(viz_samples);
+    let (viz_producer, viz_consumer) = RingBuffer::<f32>::new(viz_ring_samples());
 
-    let shared = Arc::new(SharedState::new());
+    let shared = Arc::new(SharedState::new(output_rate));
     let origins = Arc::new(Mutex::new(Origins::default()));
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<Command>();
+    // Rate-switch plumbing. `rebuild_tx` carries a request to rebuild the output
+    // stream at a new device rate (decode thread -> output thread); `viz_tx`
+    // carries the replacement visualizer ring the rebuilt stream will fill
+    // (output thread -> spectrum thread).
+    let (rebuild_tx, rebuild_rx) = crossbeam_channel::unbounded::<RebuildRequest>();
+    let (viz_tx, viz_rx) = crossbeam_channel::unbounded::<VizHandoff>();
 
     // Audio callback thread (cpal-owned). The closure captures rb_consumer +
     // a clone of shared and runs exclusively from cpal's output thread. The
-    // stream is parked on its own keeper thread because cpal::Stream is !Send
-    // on some backends (CoreAudio), so we can't store it in Tauri-managed
-    // state. The keeper thread holds it forever; the OS reclaims at exit.
+    // stream lives on its own thread because cpal::Stream is !Send on some
+    // backends (CoreAudio), so we can't store it in Tauri-managed state. That
+    // thread holds it for the life of the process; the OS reclaims at exit.
+    //
+    // It is also where rate switches are executed, for the same !Send reason:
+    // building a stream at a new rate is how the device's nominal rate gets
+    // changed, and only this thread may own a stream. See output_thread_loop.
     {
         let device = device.clone();
         let stream_cfg = stream_cfg.clone();
@@ -598,25 +685,21 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
                     &stream_cfg,
                     sample_format,
                     rb_consumer,
-                    shared,
+                    Arc::clone(&shared),
                     viz_producer,
                 ) {
                     Ok(s) => s,
-                        Err(e) => {
-                            let _ = ready_tx.send(Err(e));
-                            return;
-                        }
-                    };
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
                 if let Err(e) = stream.play() {
                     let _ = ready_tx.send(Err(format!("stream.play: {e}")));
                     return;
                 }
                 let _ = ready_tx.send(Ok(()));
-                // Park forever. Dropping the stream would tear the device
-                // down; we want the opposite.
-                loop {
-                    std::thread::park();
-                }
+                output_thread_loop(&device, sample_format, &shared, stream, rebuild_rx, viz_tx);
             })
             .map_err(|e| format!("spawn output thread: {e}"))?;
         ready_rx
@@ -629,6 +712,7 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
         let shared = Arc::clone(&shared);
         let origins = Arc::clone(&origins);
         let app = app.clone();
+        let device_rates = Arc::clone(&device_rates);
         std::thread::Builder::new()
             .name("audio-decode".into())
             .spawn(move || {
@@ -638,7 +722,17 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
                 // scheduled — otherwise Low Power Mode throttles and deprioritizes
                 // it, starving the buffer while the callback keeps draining.
                 raise_decode_thread_qos();
-                decode_loop(rb_producer, shared, origins, cmd_rx, app, output_rate);
+                decode_loop(
+                    rb_producer,
+                    shared,
+                    origins,
+                    cmd_rx,
+                    app,
+                    output_rate,
+                    device_rates,
+                    default_rate,
+                    rebuild_tx,
+                );
             })
             .map_err(|e| format!("spawn decode thread: {e}"))?;
     }
@@ -651,19 +745,21 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
         std::thread::Builder::new()
             .name("audio-position".into())
             .spawn(move || {
-                position_emit_loop(shared, origins, app, output_rate);
+                position_emit_loop(shared, origins, app);
             })
             .map_err(|e| format!("spawn position thread: {e}"))?;
     }
 
     // Spectrum (visualizer) thread. Drains the viz ring, runs the FFT, and
-    // emits bar frames. Owns the viz consumer; nothing else reads it.
+    // emits bar frames. Owns the viz consumer; nothing else reads it — until a
+    // rate switch rebuilds the stream, when it is handed a replacement over
+    // viz_rx along with the new rate its Goertzel coefficients depend on.
     {
         let app = app.clone();
         std::thread::Builder::new()
             .name("audio-spectrum".into())
             .spawn(move || {
-                waveform_emit_loop(viz_consumer, app, output_rate);
+                waveform_emit_loop(viz_consumer, app, output_rate, viz_rx);
             })
             .map_err(|e| format!("spawn spectrum thread: {e}"))?;
     }
@@ -707,13 +803,24 @@ fn build_stream(
     shared: Arc<SharedState>,
     viz: RbProducer<f32>,
 ) -> Result<cpal::Stream, String> {
+    // Seed the flush handshake from the live counter. A rebuilt stream gets a
+    // brand-new ConsumerState, and starting it at 0 while flush_gen has long
+    // since moved on would make the very first callback believe a flush is
+    // outstanding — draining the ring the decode thread just pre-filled and
+    // chopping the start of the track. (On the first build the counter is 0
+    // anyway, so this is a no-op there.)
+    let gen = shared.flush_gen.load(Ordering::Acquire);
+    shared.flush_gen_acked.store(gen, Ordering::Release);
     let mut state = ConsumerState {
         rb,
         shared,
-        last_flush_gen: 0,
+        last_flush_gen: gen,
         viz,
         eq: EqChain::new(cfg.sample_rate.0),
-        post_flush: false,
+        // The ring holds only what was pre-filled before this stream existed,
+        // and nothing has read it yet: the same "silence here is by design"
+        // state a flush leaves behind, so borrow its underrun suppression.
+        post_flush: true,
     };
 
     let err_fn = |err| {
@@ -815,17 +922,19 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
         state.post_flush = false;
     }
 
-    // Count the shortfall so it can be reported off the real-time thread. Two
-    // cases silence the ring by design rather than by starvation, and both are
+    // Count the shortfall so it can be reported off the real-time thread. Three
+    // cases silence the ring by design rather than by starvation, and all are
     // gated out here: once the decode thread has drained the queue the ring is
-    // *supposed* to empty (that's the end of playback, not starvation), and a
+    // *supposed* to empty (that's the end of playback, not starvation); a
     // seek deliberately empties it — the callback that performs the drain then
     // finds nothing to read, since the decode thread stays parked in
-    // flush_and_wait until we ack. Without post_flush every seek logged a
-    // one-callback underrun.
+    // flush_and_wait until we ack (without post_flush every seek logged a
+    // one-callback underrun); and a pending rate switch is the decode thread
+    // deliberately letting the ring run dry so the device can be rebuilt.
     if written < want
         && !state.shared.queue_exhausted.load(Ordering::Relaxed)
         && !state.post_flush
+        && !state.shared.rate_switch_pending.load(Ordering::Relaxed)
     {
         state.shared.underrun_events.fetch_add(1, Ordering::Relaxed);
         state
@@ -875,6 +984,16 @@ struct TrackReader {
     // when the first decoded packet reveals a different input rate/channel count
     // than the container metadata claimed (see spec_resolved).
     output_rate: u32,
+    // Whether the container actually declared its sample rate, as opposed to us
+    // defaulting to 44.1 kHz because it didn't. Only a declared rate may drive a
+    // device rate switch: reconfiguring the machine's output on a guess is worse
+    // than not following at all.
+    //
+    // A declaration can also be wrong (a 22.05 kHz ALAC declaring 44.1 — see
+    // spec_reconcile_tests), and that is fine: spec_resolved rebuilds the
+    // resampler from the decoded buffer's spec, so a bad declaration costs at
+    // worst a suboptimal device rate, never wrong-sounding audio.
+    input_rate_declared: bool,
     duration_seconds: f64,
     path: String,
     // Resampler kept across decode calls so internal state (sinc taps) carries
@@ -898,13 +1017,20 @@ struct TrackReader {
     spec_resolved: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_loop(
     mut rb: RbProducer<f32>,
     shared: Arc<SharedState>,
     origins: Arc<Mutex<Origins>>,
     cmd_rx: Receiver<Command>,
     app: AppHandle,
-    output_rate: u32,
+    // Mutable: the device rate can change under us when a track asks for one we
+    // can follow. This thread is the only writer (it also publishes the value on
+    // shared.output_rate for the threads that only read it).
+    mut output_rate: u32,
+    device_rates: Arc<Vec<u32>>,
+    default_rate: u32,
+    rebuild_tx: Sender<RebuildRequest>,
 ) {
     let mut queue: Vec<PathBuf> = Vec::new();
     // The *decode frontier*: the track being decoded into the ring buffer and
@@ -924,6 +1050,11 @@ fn decode_loop(
     // Producer-side cumulative stereo frames pushed since the last full reset
     // (Play command). Matches shared.total_produced.
     let mut producer_frames: u64 = 0;
+    // An armed rate switch waiting on its drain barrier. While this is Some the
+    // frontier track is open but NOTHING is decoded or pushed: the previous
+    // track's audio has to finish sounding before the device can be rebuilt at
+    // the new rate. See PendingSwitch and perform_rate_switch.
+    let mut pending_switch: Option<PendingSwitch> = None;
 
     loop {
         // Drain commands non-blocking. Most iterations have none; when a
@@ -945,7 +1076,7 @@ fn decode_loop(
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         emit_state(&app, true, true);
-                        frontier = advance_to_next_playable(
+                        let adv = advance_to_next_playable(
                             &queue,
                             &mut frontier_idx,
                             output_rate,
@@ -953,7 +1084,11 @@ fn decode_loop(
                             &shared,
                             &origins,
                             &app,
+                            &device_rates,
+                            default_rate,
                         );
+                        pending_switch = arm_rate_switch(&shared, adv.switch_to);
+                        frontier = adv.reader;
                         if frontier.is_none() {
                             shared.queue_exhausted.store(true, Ordering::Relaxed);
                             emit_state(&app, false, false);
@@ -963,6 +1098,10 @@ fn decode_loop(
                         queue.clear();
                         frontier_idx = 0;
                         frontier = None;
+                        // Radio never follows content rate (see decode_loop's
+                        // rate-switch notes), and the file the switch was armed
+                        // for is gone regardless.
+                        pending_switch = arm_rate_switch(&shared, None);
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         emit_state(&app, true, true);
@@ -1042,7 +1181,7 @@ fn decode_loop(
                                 // (A reset here would flush_and_wait the ring and
                                 // chop that tail.)
                                 shared.queue_exhausted.store(false, Ordering::Relaxed);
-                                frontier = advance_to_next_playable(
+                                let adv = advance_to_next_playable(
                                     &queue,
                                     &mut frontier_idx,
                                     output_rate,
@@ -1050,7 +1189,11 @@ fn decode_loop(
                                     &shared,
                                     &origins,
                                     &app,
+                                    &device_rates,
+                                    default_rate,
                                 );
+                                pending_switch = arm_rate_switch(&shared, adv.switch_to);
+                                frontier = adv.reader;
                                 if frontier.is_none() {
                                     shared.queue_exhausted.store(true, Ordering::Relaxed);
                                 }
@@ -1062,7 +1205,7 @@ fn decode_loop(
                                 producer_frames = 0;
                                 reset_for_new_playback(&shared, &origins);
                                 emit_state(&app, true, true);
-                                frontier = advance_to_next_playable(
+                                let adv = advance_to_next_playable(
                                     &queue,
                                     &mut frontier_idx,
                                     output_rate,
@@ -1070,7 +1213,11 @@ fn decode_loop(
                                     &shared,
                                     &origins,
                                     &app,
+                                    &device_rates,
+                                    default_rate,
                                 );
+                                pending_switch = arm_rate_switch(&shared, adv.switch_to);
+                                frontier = adv.reader;
                                 if frontier.is_none() {
                                     shared.queue_exhausted.store(true, Ordering::Relaxed);
                                     emit_state(&app, false, false);
@@ -1088,6 +1235,7 @@ fn decode_loop(
                         frontier_idx = 0;
                         frontier = None;
                         stream = None;
+                        pending_switch = arm_rate_switch(&shared, None);
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         shared.queue_exhausted.store(true, Ordering::Relaxed);
@@ -1115,6 +1263,11 @@ fn decode_loop(
                                 }
                             }
                         }
+                        // A seek acts on the track the user hears, which is
+                        // already playing at the running device rate. Any switch
+                        // armed for the *next* track is moot: the frontier has
+                        // just been re-seated onto the audible one.
+                        pending_switch = arm_rate_switch(&shared, None);
                         if let Some(ref mut tr) = frontier {
                             let target = secs.max(0.0).min(tr.duration_seconds);
                             // Reset resampler state — internal sinc taps from
@@ -1162,6 +1315,7 @@ fn decode_loop(
                                 &tr.path,
                                 tr.duration_seconds,
                                 target,
+                                output_rate,
                             );
                             // Resume if paused — seek implies the user wants
                             // to hear the new position.
@@ -1184,6 +1338,95 @@ fn decode_loop(
         // so idling here costs nothing.
         if shared.paused.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+
+        // Rate-switch drain barrier. The frontier track wants a device rate we
+        // aren't running, and rebuilding the device silences it — so hold here,
+        // pushing nothing, until every frame the previous track produced has
+        // been played (the same accounting queue-ended uses: produced frames are
+        // eventually either played or discarded by a flush). Commands keep being
+        // served at the top of the loop, so this stays responsive; a pause parks
+        // the barrier above rather than deadlocking on a callback that has
+        // stopped draining.
+        if let Some(ps) = pending_switch {
+            let produced = shared.total_produced.load(Ordering::Relaxed);
+            let played = shared.frames_played.load(Ordering::Relaxed);
+            let drained = shared.total_drained.load(Ordering::Relaxed);
+            let timed_out = Instant::now() >= ps.deadline;
+            if played + drained < produced && !timed_out {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            if timed_out {
+                // Whatever is still buffered dies with the ring the old stream
+                // was reading. Every produced frame is either played or
+                // discarded, so book the remainder as discarded — otherwise
+                // queue-ended waits forever on frames that no longer exist.
+                let lost = produced.saturating_sub(played + drained);
+                if lost > 0 {
+                    shared.total_drained.fetch_add(lost, Ordering::Relaxed);
+                }
+                log::warn!(
+                    "audio: rate-switch drain barrier timed out ({played}+{drained} of {produced} frames); dropping {lost} and switching anyway"
+                );
+            }
+            pending_switch = None;
+            match perform_rate_switch(&mut rb, ps.target_rate, output_rate, &rebuild_tx) {
+                Ok(switched) => {
+                    // The pre-roll silence is real produced audio and has to be
+                    // counted, or queue-ended would wait forever for frames that
+                    // were never accounted for. Counting it here also puts the
+                    // new track's origin past it, so position starts at the
+                    // track's first real sample rather than inside the silence.
+                    producer_frames += switched.preroll_frames;
+                    shared
+                        .total_produced
+                        .fetch_add(switched.preroll_frames, Ordering::Relaxed);
+                    output_rate = switched.rate;
+                    shared.output_rate.store(output_rate, Ordering::Relaxed);
+                    shared.rate_switch_pending.store(false, Ordering::Relaxed);
+                    if let Some(ref mut tr) = frontier {
+                        // Re-point the track at the rate now running. Nothing has
+                        // been decoded yet (the switch is armed the moment the
+                        // track is opened), so there is no in-flight resampler
+                        // state to preserve.
+                        tr.output_rate = output_rate;
+                        tr.resampler =
+                            make_resampler(tr.input_rate, output_rate, tr.input_channels);
+                        tr.pending_in = vec![Vec::new(); tr.input_channels];
+                        tr.flushed = false;
+                        publish_origin(
+                            &origins,
+                            &shared,
+                            producer_frames,
+                            frontier_idx,
+                            &tr.path,
+                            tr.duration_seconds,
+                            0.0,
+                            output_rate,
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Both the new rate and the rate we were running failed to
+                    // build: there is no output stream at all now. Stop rather
+                    // than decode into a ring nobody reads.
+                    log::error!("audio: rate switch failed: {e}");
+                    shared.rate_switch_pending.store(false, Ordering::Relaxed);
+                    if let Some(ref tr) = frontier {
+                        emit_error(
+                            &app,
+                            &PathBuf::from(&tr.path),
+                            &format!("audio output unavailable: {e}"),
+                        );
+                    }
+                    frontier = None;
+                    shared.queue_exhausted.store(true, Ordering::Relaxed);
+                    shared.paused.store(true, Ordering::Relaxed);
+                    emit_state(&app, false, false);
+                }
+            }
             continue;
         }
 
@@ -1210,7 +1453,7 @@ fn decode_loop(
             Ok(StepOutcome::Continue) => {}
             Ok(StepOutcome::TrackEnded) => {
                 frontier_idx += 1;
-                frontier = advance_to_next_playable(
+                let adv = advance_to_next_playable(
                     &queue,
                     &mut frontier_idx,
                     output_rate,
@@ -1218,7 +1461,11 @@ fn decode_loop(
                     &shared,
                     &origins,
                     &app,
+                    &device_rates,
+                    default_rate,
                 );
+                pending_switch = arm_rate_switch(&shared, adv.switch_to);
+                frontier = adv.reader;
                 if frontier.is_none() {
                     // Queue exhausted (or every remaining track failed to
                     // open). Leave frontier=None; the position-emit thread
@@ -1231,7 +1478,7 @@ fn decode_loop(
                 let path = tr.path.clone();
                 emit_error(&app, &PathBuf::from(&path), &e);
                 frontier_idx += 1;
-                frontier = advance_to_next_playable(
+                let adv = advance_to_next_playable(
                     &queue,
                     &mut frontier_idx,
                     output_rate,
@@ -1239,7 +1486,11 @@ fn decode_loop(
                     &shared,
                     &origins,
                     &app,
+                    &device_rates,
+                    default_rate,
                 );
+                pending_switch = arm_rate_switch(&shared, adv.switch_to);
+                frontier = adv.reader;
                 if frontier.is_none() {
                     shared.queue_exhausted.store(true, Ordering::Relaxed);
                 }
@@ -1437,6 +1688,7 @@ fn open_stream(
         .ok_or_else(|| "no decodable audio in stream".to_string())?;
     let track_id = track.id;
     let input_rate = track.codec_params.sample_rate.unwrap_or(44_100);
+    let input_rate_declared = track.codec_params.sample_rate.is_some();
     let input_channels = track
         .codec_params
         .channels
@@ -1456,6 +1708,7 @@ fn open_stream(
             input_rate,
             input_channels,
             output_rate,
+            input_rate_declared,
             duration_seconds: 0.0,
             path: url.to_string(),
             resampler,
@@ -1480,10 +1733,22 @@ fn emit_stream_metadata(app: &AppHandle, station: &Option<String>, title: &Optio
     );
 }
 
+// What advancing the decode frontier produced: the opened track, and the device
+// rate it wants if that isn't the one already running.
+//
+// A track that needs no rate change has its origin published during the advance,
+// exactly as before — the gapless path is untouched. A track that does need one
+// can't publish yet: its audio lands after a pre-roll whose length isn't known
+// until the switch actually happens, so the caller publishes once the rebuilt
+// device is running. See decode_loop's drain barrier.
+struct Advance {
+    reader: Option<TrackReader>,
+    switch_to: Option<u32>,
+}
+
 // Open the next playable track at or after frontier_idx, skipping (and reporting)
-// any that fail to open. Returns None when the queue is exhausted. On success,
-// publishes the new track's origin so the position-emit thread will pick it up
-// as soon as playback reaches it.
+// any that fail to open. Returns a reader of None when the queue is exhausted.
+#[allow(clippy::too_many_arguments)]
 fn advance_to_next_playable(
     queue: &[PathBuf],
     frontier_idx: &mut usize,
@@ -1492,11 +1757,28 @@ fn advance_to_next_playable(
     shared: &Arc<SharedState>,
     origins: &Arc<Mutex<Origins>>,
     app: &AppHandle,
-) -> Option<TrackReader> {
+    device_rates: &[u32],
+    default_rate: u32,
+) -> Advance {
     let rg_mode = shared.rg_mode.load(Ordering::Relaxed);
+    let follow = shared.rate_follow.load(Ordering::Relaxed);
     while *frontier_idx < queue.len() {
         match open_track(&queue[*frontier_idx], output_rate, rg_mode) {
             Some(reader) => {
+                let target = desired_output_rate(
+                    follow,
+                    reader.input_rate_declared,
+                    reader.input_rate,
+                    device_rates,
+                    output_rate,
+                    default_rate,
+                );
+                if target != output_rate {
+                    return Advance {
+                        reader: Some(reader),
+                        switch_to: Some(target),
+                    };
+                }
                 publish_origin(
                     origins,
                     shared,
@@ -1505,8 +1787,12 @@ fn advance_to_next_playable(
                     &reader.path,
                     reader.duration_seconds,
                     0.0,
+                    output_rate,
                 );
-                return Some(reader);
+                return Advance {
+                    reader: Some(reader),
+                    switch_to: None,
+                };
             }
             None => {
                 emit_error(app, &queue[*frontier_idx], "could not open");
@@ -1514,7 +1800,10 @@ fn advance_to_next_playable(
             }
         }
     }
-    None
+    Advance {
+        reader: None,
+        switch_to: None,
+    }
 }
 
 fn decode_and_push(
@@ -1619,6 +1908,13 @@ fn decode_and_push(
 fn push_blocking(rb: &mut RbProducer<f32>, samples: &[f32]) {
     let mut idx = 0;
     while idx < samples.len() {
+        if rb.is_abandoned() {
+            // The consumer went down with a torn-down output stream (a rate
+            // switch that failed to rebuild). Nothing will ever make room again,
+            // so dropping the samples beats spinning here for the life of the
+            // process. The decode thread stops playback on that path anyway.
+            return;
+        }
         let avail = rb.slots();
         if avail == 0 {
             std::thread::sleep(Duration::from_millis(5));
@@ -1643,6 +1939,311 @@ fn push_blocking(rb: &mut RbProducer<f32>, samples: &[f32]) {
             }
             Err(_) => {
                 std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+// === Output rate switching ===
+//
+// Optional, off by default (Playback > "Match Source Sample Rate").
+// Instead of resampling every file to whatever rate the output device happens to
+// be set to, put the device at the file's own rate and hand it the samples
+// untouched. cpal changes a device's nominal rate as a side effect of building a
+// stream at that rate, so a switch means dropping the output stream and building
+// another — and the device is silent in between.
+//
+// That silence is the whole reason for the drain barrier in decode_loop: a
+// switch happens only at a track boundary, and only once the previous track has
+// finished sounding. Two tracks at the same rate never reach this code at all,
+// so the sample-adjacent join between them is exactly what it always was.
+//
+// This does change a system-wide setting — every other app on the machine is
+// resampled by the HAL to the rate we picked, and the change outlives us —
+// which is why it ships off by default.
+
+// A switch armed at the moment the frontier track was opened, waiting for the
+// previous track to finish playing out.
+#[derive(Clone, Copy)]
+struct PendingSwitch {
+    target_rate: u32,
+    // Bound on the wait. A device that has stopped consuming (asleep, wedged,
+    // unplugged) must not hold the decode thread here forever.
+    deadline: Instant,
+}
+
+// A request to rebuild the output stream at a new device rate, decode thread ->
+// output thread. cpal::Stream is !Send on CoreAudio, so only the output thread
+// may own one, which makes it the only place a rate change can happen. The ring
+// buffer is rebuilt too (it's sized in frames, and a frame is a different amount
+// of time at a different rate), so its consumer travels with the request.
+struct RebuildRequest {
+    rate: u32,
+    rb: RbConsumer<f32>,
+    // The rate actually running when the dust settles, or why it isn't.
+    reply: Sender<Result<u32, String>>,
+}
+
+// The replacement visualizer ring a rebuilt stream fills, output thread ->
+// spectrum thread. The old producer died inside the old stream's closure, and
+// the spectrum thread's Goertzel coefficients depend on the rate, so both travel
+// together.
+struct VizHandoff {
+    rb: RbConsumer<f32>,
+    rate: u32,
+}
+
+// What a completed switch tells the decode thread.
+struct SwitchResult {
+    // The rate now running — the target, or the previous rate if the target
+    // failed to build and the fallback took.
+    rate: u32,
+    // Frames of pre-roll silence pushed ahead of the track. The caller counts
+    // these as produced audio (they are: the device will play them).
+    preroll_frames: u64,
+}
+
+// Ring buffer size in samples for a given output rate. Stereo -> 2 samples per
+// frame; RING_BUFFER_SECONDS of headroom either way.
+fn ring_samples(rate: u32) -> usize {
+    (rate as f32 * RING_BUFFER_SECONDS) as usize * OUT_CHANNELS
+}
+
+// The visualizer tap ring: a handful of FFT windows, so a slow spectrum tick
+// can't back-pressure the audio thread. Independent of the output rate.
+fn viz_ring_samples() -> usize {
+    WAVEFORM_WINDOW * OUT_CHANNELS * 4
+}
+
+fn preroll_frames(rate: u32) -> u64 {
+    rate as u64 * RATE_SWITCH_PREROLL_MS / 1000
+}
+
+// The discrete output rates this device can be switched to.
+//
+// cpal reports one config range per entry in the device's
+// AvailableNominalSampleRates, and its set_sample_rate only accepts a rate that
+// appears as a *discrete* entry (min == max) — so a continuous range is dropped
+// here rather than offered and then rejected at build time. Enumerating
+// instantiates an audio unit, so this is called once at startup, never per track.
+fn device_output_rates(device: &cpal::Device) -> Vec<u32> {
+    let mut rates: Vec<u32> = match device.supported_output_configs() {
+        Ok(configs) => configs
+            .filter(|c| c.sample_format() == SampleFormat::F32)
+            .filter(|c| c.min_sample_rate() == c.max_sample_rate())
+            .map(|c| c.min_sample_rate().0)
+            .collect(),
+        Err(e) => {
+            // Not fatal: an empty list simply means nothing is followable and
+            // the engine behaves exactly as it did before this feature.
+            log::warn!("audio: could not enumerate device sample rates: {e}");
+            Vec::new()
+        }
+    };
+    rates.sort_unstable();
+    rates.dedup();
+    rates
+}
+
+// Pick the device rate to play `content_rate` at, given the rates the device
+// offers (sorted, discrete):
+//
+//   1. The content's own rate, if the device has it. The point of the feature.
+//   2. Otherwise the smallest supported whole multiple (44.1 -> 88.2 / 176.4,
+//      48 -> 96 / 192): an exact integer ratio is the next best thing, and it
+//      keeps us inside the content's family rather than crossing 44.1 <-> 48.
+//   3. Otherwise the device's own default rate, so a file we can't follow leaves
+//      the device where its owner had it instead of somewhere arbitrary.
+//   4. Otherwise the lowest rate that isn't a downsample, else the highest on
+//      offer — last resorts for a device with an unusual rate list.
+//
+// Total and pure: with no usable rate list it returns `current`, which every
+// caller reads as "don't switch."
+fn choose_output_rate(rates: &[u32], content_rate: u32, current: u32, default_rate: u32) -> u32 {
+    if rates.is_empty() || content_rate == 0 {
+        return current;
+    }
+    if rates.contains(&content_rate) {
+        return content_rate;
+    }
+    if let Some(multiple) = rates
+        .iter()
+        .copied()
+        .find(|&r| r > content_rate && r % content_rate == 0 && r <= MAX_FOLLOW_RATE)
+    {
+        return multiple;
+    }
+    if rates.contains(&default_rate) {
+        return default_rate;
+    }
+    rates
+        .iter()
+        .copied()
+        .find(|&r| r >= content_rate)
+        .unwrap_or_else(|| rates[rates.len() - 1])
+}
+
+// The rate the frontier's next track wants, or `current` when nothing should
+// change. Every reason to suppress a switch funnels through here: the feature
+// being off, a container that never declared its rate (we would be reconfiguring
+// the machine's audio output on a guess), and a target that is already running.
+fn desired_output_rate(
+    follow: bool,
+    rate_declared: bool,
+    content_rate: u32,
+    rates: &[u32],
+    current: u32,
+    default_rate: u32,
+) -> u32 {
+    if !follow || !rate_declared {
+        return current;
+    }
+    choose_output_rate(rates, content_rate, current, default_rate)
+}
+
+// Arm (or cancel) the drain barrier for a switch, and tell the audio callback
+// that the silence about to appear in the ring is deliberate. Passing None is
+// how every ordinary advance clears a switch that is no longer wanted, so the
+// flag can't be left set.
+fn arm_rate_switch(shared: &SharedState, target: Option<u32>) -> Option<PendingSwitch> {
+    shared
+        .rate_switch_pending
+        .store(target.is_some(), Ordering::Relaxed);
+    target.map(|target_rate| PendingSwitch {
+        target_rate,
+        deadline: Instant::now() + RATE_SWITCH_DRAIN_TIMEOUT,
+    })
+}
+
+// Execute an armed switch. Called only once the drain barrier has cleared, so
+// the ring is empty and everything the previous track produced has sounded.
+//
+// The old ring dies with the old stream, so each attempt builds a fresh one,
+// pre-fills it with silence and hands the consumer over. A failed attempt can't
+// be retried with the same ring (the failed build consumed it), which is why the
+// fallback to the previous rate gets a ring of its own. If both attempts fail
+// there is no output stream at all and the caller stops playback.
+fn perform_rate_switch(
+    rb: &mut RbProducer<f32>,
+    target_rate: u32,
+    current_rate: u32,
+    rebuild_tx: &Sender<RebuildRequest>,
+) -> Result<SwitchResult, String> {
+    // An empty ring is not a silent device: the callback hands the device a
+    // buffer at a time, so the last frames read are still in flight. Tearing the
+    // stream down now would clip the end of the track that just finished.
+    std::thread::sleep(Duration::from_millis(RATE_SWITCH_SETTLE_MS));
+
+    let mut candidates = vec![target_rate];
+    if current_rate != target_rate {
+        candidates.push(current_rate);
+    }
+    let mut last_err = String::from("no rate to try");
+    for (attempt, rate) in candidates.into_iter().enumerate() {
+        if attempt > 0 {
+            log::warn!("audio: {target_rate} Hz failed ({last_err}); falling back to {rate} Hz");
+        }
+        let (mut producer, consumer) = RingBuffer::<f32>::new(ring_samples(rate));
+        let preroll = preroll_frames(rate);
+        // Fits by construction (RATE_SWITCH_PREROLL_MS is a fraction of
+        // RING_BUFFER_SECONDS), so this never blocks on a ring nobody reads yet.
+        push_blocking(&mut producer, &vec![0.0; preroll as usize * OUT_CHANNELS]);
+
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded::<Result<u32, String>>(1);
+        if rebuild_tx
+            .send(RebuildRequest {
+                rate,
+                rb: consumer,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return Err("output thread is gone".to_string());
+        }
+        match reply_rx.recv_timeout(RATE_SWITCH_REBUILD_TIMEOUT) {
+            Ok(Ok(actual)) => {
+                *rb = producer;
+                log::info!("audio: output rate {current_rate} -> {actual} Hz");
+                return Ok(SwitchResult {
+                    rate: actual,
+                    preroll_frames: preroll,
+                });
+            }
+            Ok(Err(e)) => last_err = e,
+            // The output thread may still be working on it. Requests are served
+            // in order, so a fallback queued now still ends up as the live
+            // stream — and the ring we hand it is the one we keep.
+            Err(_) => last_err = "output thread did not answer in time".to_string(),
+        }
+    }
+    Err(last_err)
+}
+
+// The output thread's steady state: hold the stream open, and serve rate
+// switches when they come.
+//
+// Parking forever was this thread's whole job before rate switching, and still
+// is whenever nobody asks for a new rate: dropping a stream tears the device
+// down, so the only reason to do it is to build another one.
+fn output_thread_loop(
+    device: &cpal::Device,
+    sample_format: SampleFormat,
+    shared: &Arc<SharedState>,
+    stream: cpal::Stream,
+    rebuild_rx: Receiver<RebuildRequest>,
+    viz_tx: Sender<VizHandoff>,
+) {
+    let mut stream = Some(stream);
+    loop {
+        let Ok(req) = rebuild_rx.recv() else {
+            // Nobody can ask for a switch any more (the decode thread is gone).
+            // Park holding the stream, exactly as this thread did before
+            // switching existed — returning would drop it and kill the device.
+            loop {
+                std::thread::park();
+            }
+        };
+        let RebuildRequest { rate, rb, reply } = req;
+        // Release the device before asking for a new nominal rate.
+        drop(stream.take());
+        let cfg = StreamConfig {
+            channels: OUT_CHANNELS as u16,
+            sample_rate: SampleRate(rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        // The old viz producer died with the old stream's closure; mint a fresh
+        // pair and give the spectrum thread the consumer side.
+        let (viz_producer, viz_consumer) = RingBuffer::<f32>::new(viz_ring_samples());
+        let built = match build_stream(
+            device,
+            &cfg,
+            sample_format,
+            rb,
+            Arc::clone(shared),
+            viz_producer,
+        ) {
+            Ok(s) => match s.play() {
+                Ok(()) => Ok(s),
+                Err(e) => Err(format!("stream.play: {e}")),
+            },
+            Err(e) => Err(e),
+        };
+        match built {
+            Ok(s) => {
+                stream = Some(s);
+                let _ = viz_tx.send(VizHandoff {
+                    rb: viz_consumer,
+                    rate,
+                });
+                let _ = reply.send(Ok(rate));
+            }
+            Err(e) => {
+                // The device is silent now: the old stream is gone and the new
+                // one never started. The decode thread retries at the rate that
+                // was working, with a ring of its own — this one went down with
+                // the failed build.
+                log::error!("audio: rebuild at {rate} Hz failed: {e}");
+                let _ = reply.send(Err(e));
             }
         }
     }
@@ -1690,6 +2291,7 @@ fn open_track(path: &std::path::Path, output_rate: u32, rg_mode: u8) -> Option<T
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)?;
     let track_id = default_track.id;
     let input_rate = default_track.codec_params.sample_rate.unwrap_or(44_100);
+    let input_rate_declared = default_track.codec_params.sample_rate.is_some();
     let input_channels = default_track
         .codec_params
         .channels
@@ -1717,6 +2319,7 @@ fn open_track(path: &std::path::Path, output_rate: u32, rg_mode: u8) -> Option<T
         input_rate,
         input_channels,
         output_rate,
+        input_rate_declared,
         duration_seconds,
         path: path.to_string_lossy().to_string(),
         resampler,
@@ -2053,6 +2656,7 @@ fn flush_and_wait(shared: &SharedState) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_origin(
     origins: &Arc<Mutex<Origins>>,
     shared: &Arc<SharedState>,
@@ -2061,6 +2665,7 @@ fn publish_origin(
     path: &str,
     duration_seconds: f64,
     start_offset_seconds: f64,
+    rate: u32,
 ) {
     let drained = shared.total_drained.load(Ordering::Relaxed);
     let at_consumer_frame = producer_frames.saturating_sub(drained);
@@ -2073,17 +2678,13 @@ fn publish_origin(
         path: path.to_string(),
         duration_seconds,
         start_offset_seconds,
+        rate,
     });
 }
 
 // === Position-emit thread ===
 
-fn position_emit_loop(
-    shared: Arc<SharedState>,
-    origins: Arc<Mutex<Origins>>,
-    app: AppHandle,
-    output_rate: u32,
-) {
+fn position_emit_loop(shared: Arc<SharedState>, origins: Arc<Mutex<Origins>>, app: AppHandle) {
     let mut last_emitted_position: f64 = -1.0;
     let mut last_emitted_path: Option<String> = None;
     let mut last_emitted_index: Option<usize> = None;
@@ -2104,7 +2705,11 @@ fn position_emit_loop(
             && last_underrun_log.elapsed() >= Duration::from_secs(1)
         {
             let underrun_frames = shared.underrun_frames.load(Ordering::Relaxed);
-            let ms = |frames: u64| frames as f64 * 1000.0 / output_rate as f64;
+            // Against the rate running now: a mid-session switch makes older
+            // frames a slightly different length, which is noise at the
+            // resolution of a diagnostic log line.
+            let rate = shared.output_rate.load(Ordering::Relaxed).max(1);
+            let ms = |frames: u64| frames as f64 * 1000.0 / rate as f64;
             log::warn!(
                 "audio: ring underrun +{} callbacks / {:.1}ms silence (total {} / {:.1}ms)",
                 underrun_events - reported_underrun_events,
@@ -2136,8 +2741,11 @@ fn position_emit_loop(
         match active_origin {
             Some(origin) => {
                 let delta_frames = frames_played.saturating_sub(origin.at_consumer_frame);
+                // origin.rate, not whatever is running now: frames counted
+                // against an origin published before a rate switch were produced
+                // at the earlier rate and are that many seconds long.
                 let position =
-                    origin.start_offset_seconds + delta_frames as f64 / output_rate as f64;
+                    origin.start_offset_seconds + delta_frames as f64 / origin.rate.max(1) as f64;
                 let position = position.min(origin.duration_seconds);
 
                 // Fire track-changed only when the audible *slot* changes — keyed
@@ -2219,7 +2827,18 @@ fn position_emit_loop(
 // most recent mono samples, and ~30 Hz emits that window decimated to a fixed
 // point count — a plain oscilloscope feed. All the look (glow, starfield,
 // feedback) lives in the frontend; this just delivers clean amplitudes.
-fn waveform_emit_loop(mut viz: RbConsumer<f32>, app: AppHandle, sample_rate: u32) {
+// Per-band Goertzel coefficient for a sample rate, recomputed whenever the
+// device rate changes under this thread.
+fn goertzel_coeffs(sample_rate: u32) -> [f32; EQ_BAND_COUNT] {
+    std::array::from_fn(|k| 2.0 * (std::f32::consts::TAU * EQ_FREQS[k] / sample_rate as f32).cos())
+}
+
+fn waveform_emit_loop(
+    mut viz: RbConsumer<f32>,
+    app: AppHandle,
+    sample_rate: u32,
+    swap_rx: Receiver<VizHandoff>,
+) {
     // Sliding window of the most recent mono samples.
     let mut mono: VecDeque<f32> = VecDeque::with_capacity(WAVEFORM_WINDOW);
     // Longer sliding window feeding the per-band spectrum (Goertzel needs several
@@ -2228,15 +2847,26 @@ fn waveform_emit_loop(mut viz: RbConsumer<f32>, app: AppHandle, sample_rate: u32
     let mut scratch: Vec<f32> = Vec::new();
     let zeros = vec![0.0f32; WAVEFORM_POINTS];
     let band_zeros = vec![0.0f32; EQ_BAND_COUNT];
-    // Precompute the Goertzel coefficient per band for this sample rate.
-    let coeffs: [f32; EQ_BAND_COUNT] = std::array::from_fn(|k| {
-        2.0 * (std::f32::consts::TAU * EQ_FREQS[k] / sample_rate as f32).cos()
-    });
+    // Precompute the Goertzel coefficient per band for this sample rate. Not
+    // const across the session: a rate switch rebuilds the output stream and
+    // hands this thread a new ring at a new rate (see VizHandoff).
+    let mut coeffs = goertzel_coeffs(sample_rate);
     // Decimation factor: average this many window samples per emitted point.
     let block = WAVEFORM_WINDOW / WAVEFORM_POINTS;
 
     loop {
         std::thread::sleep(Duration::from_millis(WAVEFORM_EMIT_INTERVAL_MS));
+
+        // A rate switch rebuilt the output stream, and with it the ring this
+        // thread drains. Adopt the replacement and recompute the coefficients
+        // for its rate. The windows hold samples at the old rate, so they're
+        // dropped rather than analyzed as one spliced signal.
+        while let Ok(handoff) = swap_rx.try_recv() {
+            viz = handoff.rb;
+            coeffs = goertzel_coeffs(handoff.rate);
+            mono.clear();
+            spec.clear();
+        }
 
         // Drain everything available. Keep an even count so interleaved stereo
         // stays pair-aligned across ticks (the odd leftover waits for next tick).
@@ -2371,7 +3001,7 @@ mod spec_reconcile_tests {
             "fixture={fixture} input_rate={} input_channels={} duration={:.3}",
             tr.input_rate, tr.input_channels, tr.duration_seconds
         );
-        let shared = Arc::new(SharedState::new());
+        let shared = Arc::new(SharedState::new(48_000));
         let (mut prod, mut cons) = RingBuffer::<f32>::new(1 << 20);
         let mut producer_frames: u64 = 0;
         // Drain consumer in a thread so push_blocking never wedges on a full ring.
@@ -2600,7 +3230,7 @@ mod eq_bypass_tests {
     use super::*;
 
     fn shared_with(gains: [f32; EQ_BAND_COUNT], preamp_db: f32) -> SharedState {
-        let shared = SharedState::new();
+        let shared = SharedState::new(48_000);
         shared.eq_enabled.store(true, Ordering::Relaxed);
         shared
             .eq_preamp_db
@@ -2724,5 +3354,221 @@ mod eq_bypass_tests {
         assert_eq!(eq.active_len, 0);
         assert_eq!(eq.bands[3].s1, [0.0; OUT_CHANNELS]);
         assert_eq!(eq.bands[3].s2, [0.0; OUT_CHANNELS]);
+    }
+}
+
+#[cfg(test)]
+mod rate_switch_tests {
+    //! Coverage for follow-the-content output rate switching. The switch itself
+    //! needs a real device (it is literally "build a cpal stream at another
+    //! rate"), so what's tested here is everything that decides *whether* and
+    //! *what to*, plus the sizing invariant the switch mechanism relies on:
+    //!
+    //!   * choose_output_rate's preference order, including the cases that must
+    //!     NOT switch (the whole feature is opt-in and must stay inert),
+    //!   * the gate in front of it (feature off, rate not declared by the file),
+    //!   * arm_rate_switch leaving the callback's underrun suppression flag in
+    //!     the right state — including on cancel, since a stuck flag would hide
+    //!     genuine underruns for the rest of the session,
+    //!   * and that the pre-roll always fits in the ring it is pushed into,
+    //!     which is what makes that push non-blocking on a ring with no reader.
+    use super::*;
+
+    // A typical Mac built-in output.
+    const BUILTIN: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+    // A DAC with a full ladder.
+    const LADDER: [u32; 7] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 384_000];
+    // A device that only does 48k family (plenty of USB interfaces, AirPlay).
+    const FORTY_EIGHT_ONLY: [u32; 3] = [48_000, 96_000, 192_000];
+
+    #[test]
+    fn exact_match_wins() {
+        // The point of the feature: 44.1 content on a device sitting at 48.
+        assert_eq!(choose_output_rate(&BUILTIN, 44_100, 48_000, 48_000), 44_100);
+        assert_eq!(choose_output_rate(&BUILTIN, 96_000, 44_100, 44_100), 96_000);
+        // Already there -> the same rate, which callers read as "don't switch".
+        assert_eq!(choose_output_rate(&BUILTIN, 44_100, 44_100, 48_000), 44_100);
+    }
+
+    #[test]
+    fn falls_back_to_the_smallest_whole_multiple() {
+        // 44.1 on a 48-only device: 88.2 is not there, so the family is lost;
+        // but 22.05k content has 44.1 available as an exact double on BUILTIN.
+        assert_eq!(choose_output_rate(&BUILTIN, 22_050, 48_000, 48_000), 44_100);
+        // Smallest multiple, not the largest: 24k -> 48k, not 96k or 192k.
+        assert_eq!(
+            choose_output_rate(&FORTY_EIGHT_ONLY, 24_000, 192_000, 192_000),
+            48_000
+        );
+        // A ladder device playing 11.025k content climbs only to 44.1.
+        assert_eq!(choose_output_rate(&LADDER, 11_025, 48_000, 48_000), 44_100);
+    }
+
+    #[test]
+    fn whole_multiples_are_capped() {
+        // A device offering only 44.1k and 384k, playing 48k content. 384k is a
+        // whole multiple of 48k, but past MAX_FOLLOW_RATE — the multiple rule
+        // declines it and the device is left at its default rather than driven
+        // to 8x for nothing. Without the ceiling this returns 384_000.
+        let capped = [44_100u32, 384_000];
+        assert_eq!(choose_output_rate(&capped, 48_000, 44_100, 44_100), 44_100);
+        // The same device still climbs where the ceiling isn't in the way: 44.1k
+        // is an exact double of 22.05k content.
+        assert_eq!(
+            choose_output_rate(&capped, 22_050, 384_000, 384_000),
+            44_100
+        );
+    }
+
+    #[test]
+    fn unfollowable_content_returns_to_the_device_default() {
+        // 44.1 on a device that has no 44.1 family at all: rather than picking
+        // 96k or 192k on a whim, leave the device where its owner had it.
+        assert_eq!(
+            choose_output_rate(&FORTY_EIGHT_ONLY, 44_100, 96_000, 48_000),
+            48_000
+        );
+        // Same file, different device default -> that default.
+        assert_eq!(
+            choose_output_rate(&FORTY_EIGHT_ONLY, 44_100, 48_000, 96_000),
+            96_000
+        );
+    }
+
+    #[test]
+    fn last_resorts_prefer_not_to_downsample() {
+        // Odd device whose list contains neither the content rate, a multiple,
+        // nor the reported default: take the lowest rate that isn't a
+        // downsample.
+        let odd = [32_000u32, 64_000];
+        assert_eq!(choose_output_rate(&odd, 44_100, 32_000, 48_000), 64_000);
+        // And if everything on offer is below the content rate, the highest.
+        let low = [8_000u32, 16_000];
+        assert_eq!(choose_output_rate(&low, 44_100, 8_000, 48_000), 16_000);
+    }
+
+    #[test]
+    fn no_usable_rate_list_never_switches() {
+        // A device cpal couldn't enumerate, or one that only reports ranges.
+        assert_eq!(choose_output_rate(&[], 44_100, 48_000, 48_000), 48_000);
+        // A file claiming a zero rate is nonsense; don't act on it.
+        assert_eq!(choose_output_rate(&BUILTIN, 0, 48_000, 48_000), 48_000);
+    }
+
+    #[test]
+    fn the_gate_keeps_the_feature_inert_when_it_should_be() {
+        // Feature off (the shipping default): never switch, however tempting.
+        assert_eq!(
+            desired_output_rate(false, true, 44_100, &BUILTIN, 48_000, 48_000),
+            48_000
+        );
+        // On, but the container never declared a rate — open_track guessed
+        // 44.1. Reconfiguring the machine's audio output on a guess is worse
+        // than not following at all.
+        assert_eq!(
+            desired_output_rate(true, false, 44_100, &BUILTIN, 48_000, 48_000),
+            48_000
+        );
+        // On, declared, and available: switch.
+        assert_eq!(
+            desired_output_rate(true, true, 44_100, &BUILTIN, 48_000, 48_000),
+            44_100
+        );
+        // On and declared, but it's what we're already running: no switch.
+        assert_eq!(
+            desired_output_rate(true, true, 48_000, &BUILTIN, 48_000, 48_000),
+            48_000
+        );
+    }
+
+    #[test]
+    fn arming_and_cancelling_track_the_callback_flag() {
+        let shared = SharedState::new(48_000);
+        assert!(!shared.rate_switch_pending.load(Ordering::Relaxed));
+
+        let armed = arm_rate_switch(&shared, Some(44_100));
+        assert_eq!(armed.map(|p| p.target_rate), Some(44_100));
+        assert!(shared.rate_switch_pending.load(Ordering::Relaxed));
+        // The barrier is bounded, not open-ended.
+        assert!(armed.unwrap().deadline > Instant::now());
+
+        // Cancelling must clear the flag: left set, it would suppress genuine
+        // underrun reporting for the rest of the session.
+        let cancelled = arm_rate_switch(&shared, None);
+        assert!(cancelled.is_none());
+        assert!(!shared.rate_switch_pending.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn preroll_always_fits_the_ring_it_is_pushed_into() {
+        // perform_rate_switch pushes the pre-roll into a ring whose consumer has
+        // not been handed to a stream yet, so nothing can make room: if it
+        // didn't fit, push_blocking would spin until the deadline. Guard the
+        // relationship rather than the two constants separately.
+        for rate in [44_100u32, 48_000, 88_200, 96_000, 176_400, 192_000] {
+            let capacity = ring_samples(rate);
+            let preroll = preroll_frames(rate) as usize * OUT_CHANNELS;
+            assert!(
+                preroll < capacity,
+                "{rate} Hz: pre-roll {preroll} samples does not fit ring of {capacity}"
+            );
+            // And it's actually the duration we asked for.
+            assert_eq!(
+                preroll_frames(rate),
+                rate as u64 * RATE_SWITCH_PREROLL_MS / 1000
+            );
+        }
+    }
+
+    #[test]
+    fn real_files_drive_the_decision_end_to_end() {
+        // The pure functions above can all be right while the wiring is wrong —
+        // an input_rate_declared that is never true would leave the feature
+        // silently inert. So run the real open_track over real files and decide
+        // from what it reports, exactly as advance_to_next_playable does.
+        let decide = |name: &str, follow: bool| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests-fixtures")
+                .join(name);
+            let tr = open_track(&path, 48_000, 0).expect("open_track");
+            assert!(
+                tr.input_rate_declared,
+                "{name}: rate not declared; the gate would block every switch"
+            );
+            desired_output_rate(
+                follow,
+                tr.input_rate_declared,
+                tr.input_rate,
+                &BUILTIN,
+                48_000,
+                48_000,
+            )
+        };
+
+        // Device sitting at 48k, file is 44.1k: follow it down. The everyday case.
+        assert_eq!(decide("mono44_aac.m4a", true), 44_100);
+        // 22.05k with no exact match on this device: the whole multiple wins over
+        // the 48k it would otherwise have been resampled to.
+        assert_eq!(decide("mono22_aac.m4a", true), 44_100);
+        // This one is 22.05k audio in a container that declares 44.1k (see
+        // spec_reconcile_tests — the container is not ground truth). We follow
+        // the declaration and land on 44.1k, which is where the true rate would
+        // have sent us anyway; the resampler is corrected from the decoded
+        // buffer's spec once the first packet arrives, so the audio is right
+        // either way. A mis-declared rate costs at worst a suboptimal device
+        // rate, never wrong-sounding audio.
+        assert_eq!(decide("mono22_alac.m4a", true), 44_100);
+
+        // And with the feature off — the shipping default — nothing is asked for.
+        assert_eq!(decide("mono44_aac.m4a", false), 48_000);
+        assert_eq!(decide("mono22_aac.m4a", false), 48_000);
+    }
+
+    #[test]
+    fn ring_is_sized_in_time_not_frames() {
+        // A frame is a different amount of time at a different rate, which is
+        // why the ring is rebuilt on a switch rather than reused.
+        assert!(ring_samples(96_000) > ring_samples(48_000));
+        assert_eq!(ring_samples(48_000) % OUT_CHANNELS, 0);
     }
 }

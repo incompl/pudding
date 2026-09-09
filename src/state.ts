@@ -365,6 +365,15 @@ export const autoadvance = signal(true);
 // reads each track's REPLAYGAIN_* tags as it opens it; untagged files play unchanged.
 export const replayGainMode = signal<ReplayGainMode>("off");
 
+// Whether the output device follows the sample rate of the file being played,
+// instead of resampling everything to the rate the device is set to. A global,
+// persistent preference set from the Playback menu (never the app UI). Defaults
+// OFF, unlike the other playback settings: the device's rate is a system-wide
+// setting shared with every other app, and changing it costs a short silence
+// between two tracks that don't share a rate. The engine reads it as it opens
+// each track, so toggling never interrupts what's playing.
+export const followSampleRate = signal(false);
+
 // Whether playback flows to the next track. One global setting now — no context
 // branching. Read at each advancement point and each engine hand-off.
 export function autoadvanceEnabled(): boolean {
