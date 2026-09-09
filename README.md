@@ -35,7 +35,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 - Custom Rust audio engine (symphonia + cpal) with gapless playback: tracks are joined sample-to-sample in a single continuous output stream
 - Plays MP3, FLAC, WAV, AAC/M4A, Ogg/Opus, and AIFF
 - High-quality sinc resampling to match your output device
-- Optional sample-rate switching (Playback ▸ Match Source Sample Rate): sets the output device to the file's own rate, so a 44.1 kHz track plays back at 44.1 kHz with no sample-rate conversion anywhere in the chain — a bit-perfect path to CoreAudio whenever volume is at 100% with the EQ and ReplayGain off. It does not seize the device (no hog mode, the macOS equivalent of WASAPI exclusive): other apps still mix in, and the rate it sets is the one they'll play at too, which is why it's off by default. Two tracks at different rates can't be joined gaplessly; tracks that share a rate stay gapless as always
+- Optional sample-rate switching (Playback > Match Source Sample Rate): sets the output device to the file's own rate, so a 44.1 kHz track plays back at 44.1 kHz with no sample-rate conversion anywhere in the chain: a bit-perfect path to CoreAudio whenever volume is at 100% with the EQ and ReplayGain off.
 - Shuffle and repeat (off / all / one), applied live without interrupting the current track
 - Autoadvance toggle in the Playback menu — turn it off and playback stops at the end of each track instead of rolling on
 - ReplayGain volume normalization (off / track / album) that honors standard gain tags, with peak-based clip prevention — untagged files play unchanged

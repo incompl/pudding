@@ -2942,6 +2942,13 @@ body.dragging-noselect * {
   justify-content: center;
   position: relative;
   padding: 0 1em;
+  /* Stop growing once each tab is wide enough. flex:1 alone lets two tabs eat the
+     whole left panel, so at a wide panel the labels drift far apart with a lake of
+     dead space around each one. The cap keeps them a fixed, readable size past this
+     point; the leftover width stays at the right of #tabs (default flex-start),
+     where it is still topbar drag region. Below the cap they share the panel as
+     before, so nothing changes at ordinary panel widths. */
+  max-width: 120px;
   cursor: pointer;
   font: inherit;
   /* 14px flat, shared with #search-input and #settings-back-btn.
