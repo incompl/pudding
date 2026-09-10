@@ -1,40 +1,33 @@
 {
   "name": "pudding",
   "private": true,
-  "version": "1.0.0",
   "type": "module",
   "license": "Apache-2.0",
+  "packageManager": "pnpm@10.20.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
-    "dev": "pnpm gen:licenses && vite",
-    "build": "pnpm gen:licenses && tsc && vite build",
-    "gen:licenses": "node scripts/gen-licenses.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.test.json",
-    "preview": "vite preview",
-    "tauri": "tauri",
-    "build:mas": "tauri build --config src-tauri/tauri.mas.conf.json",
-    "build:e2e": "tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
-    "test:unit": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test test/*.test.ts",
-    "test:e2e": "node --import tsx --test --test-concurrency=1 e2e/tests/*.test.ts",
-    "e2e": "pnpm build:e2e && pnpm test:e2e",
-    "drive": "node e2e/drive.mjs --dev",
-    "caliper": "node scripts/caliper.mjs"
-  },
-  "dependencies": {
-    "@preact/signals-core": "^1.14.2",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2.7.1",
-    "@tauri-apps/plugin-log": "^2",
-    "@tauri-apps/plugin-opener": "^2.5.4",
-    "@tauri-apps/plugin-store": "^2.4.3"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.62.1",
-    "@tauri-apps/cli": "^2",
-    "@types/node": "^22.10.0",
-    "@types/ws": "^8.5.13",
-    "tsx": "^4.19.2",
-    "typescript": "~5.6.2",
-    "vite": "^6.0.3",
-    "ws": "^8.18.0"
+    "dev": "pnpm --filter @pudding/desktop dev",
+    "build": "pnpm --filter @pudding/desktop build",
+    "gen:licenses": "pnpm --filter @pudding/desktop gen:licenses",
+    "typecheck": "pnpm --filter @pudding/desktop typecheck",
+    "preview": "pnpm --filter @pudding/desktop preview",
+    "tauri": "pnpm --filter @pudding/desktop tauri",
+    "build:mas": "pnpm --filter @pudding/desktop build:mas",
+    "build:e2e": "pnpm --filter @pudding/desktop build:e2e",
+    "test:unit": "pnpm --filter @pudding/desktop test:unit",
+    "test:e2e": "pnpm --filter @pudding/desktop test:e2e",
+    "e2e": "pnpm --filter @pudding/desktop e2e",
+    "drive": "pnpm --filter @pudding/desktop drive",
+    "caliper": "pnpm --filter @pudding/desktop caliper",
+    "desktop:dev": "pnpm --filter @pudding/desktop tauri dev",
+    "desktop:build": "pnpm --filter @pudding/desktop tauri build",
+    "desktop:test": "pnpm --filter @pudding/desktop test:unit",
+    "website:dev": "pnpm --filter @pudding/website dev",
+    "website:check": "pnpm --filter @pudding/website check",
+    "website:build": "pnpm --filter @pudding/website build",
+    "website:preview": "pnpm --filter @pudding/website preview",
+    "check": "pnpm --filter @pudding/desktop typecheck && pnpm website:check"
   }
 }

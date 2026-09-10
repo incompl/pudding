@@ -20,6 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = path.resolve(root, "../..");
 
 // Filenames a package might use for its license text. NOTICE is included because
 // Apache-2.0 requires redistributing it when present.
@@ -394,7 +395,7 @@ const out = {
     name: tauriConf.productName,
     version: tauriConf.version,
     license: appManifest.license,
-    text: intern(fs.readFileSync(path.join(root, "LICENSE"), "utf8")),
+    text: intern(fs.readFileSync(path.join(repositoryRoot, "LICENSE"), "utf8")),
   },
   components,
   texts,

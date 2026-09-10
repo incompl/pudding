@@ -5,6 +5,9 @@ description: Drive the live Pudding app to test a change — play tracks, click 
 
 # Drive the Pudding app
 
+Run commands in this skill from `apps/desktop` in the Pudding monorepo.
+All source, fixture, script, and output paths below are relative to that directory.
+
 Pudding is a Tauri app. Its WKWebView DOM is **not** in the macOS accessibility
 tree, so native drivers (Appium/XCUITest) can't see it. Instead we talk to the
 webview's built-in e2e bridge (`src/e2e-bridge.ts`) over a loopback WebSocket.

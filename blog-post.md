@@ -4,7 +4,7 @@ Draft / working notes — chronological history of an ongoing debugging session,
 
 ## The app
 
-Pudding is a small Tauri 2 + WKWebView music player I've been building. The gapless engine ([src/audio-engine.ts](src/audio-engine.ts)) landed in May (`1b8b381 — gapless playback (new engine)`). It uses the Web Audio API: fetch the MP3 bytes, `decodeAudioData` to a Float32 PCM buffer, schedule each track at the exact `ctx.currentTime` of the previous track's boundary so there's zero gap between tracks. Web Audio is the right tool for that — you can't get sample-accurate gapless from `<audio>` elements alone.
+Pudding is a small Tauri 2 + WKWebView music player I've been building. The gapless engine ([src/audio-engine.ts](apps/desktop/src/audio-engine.ts)) landed in May (`1b8b381 — gapless playback (new engine)`). It uses the Web Audio API: fetch the MP3 bytes, `decodeAudioData` to a Float32 PCM buffer, schedule each track at the exact `ctx.currentTime` of the previous track's boundary so there's zero gap between tracks. Web Audio is the right tool for that — you can't get sample-accurate gapless from `<audio>` elements alone.
 
 ## The bug
 
@@ -22,10 +22,10 @@ This turned out to be the most useful constraint of the whole investigation. Eve
 
 The first problem with a heisenbug-after-hours is that you can't watch devtools for hours. So the first work was log infrastructure, not the bug itself.
 
-- Added [`tauri-plugin-log`](https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/log) to the Rust side ([src-tauri/Cargo.toml](src-tauri/Cargo.toml)).
-- Added `@tauri-apps/plugin-log` to the JS side and a tiny `alog/awarn/aerr` wrapper that funnels diagnostics to disk and the console at once ([src/audio-engine.ts](src/audio-engine.ts)).
-- Configured rotation: `Target::new(TargetKind::LogDir { ... })`, 8 MB per file, `RotationStrategy::KeepAll`, and a 7-day prune in `setup()` ([src-tauri/src/lib.rs](src-tauri/src/lib.rs)) so disk doesn't accumulate forever.
-- Added `"log:default"` to the capability ([src-tauri/capabilities/default.json](src-tauri/capabilities/default.json)).
+- Added [`tauri-plugin-log`](https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/log) to the Rust side ([src-tauri/Cargo.toml](apps/desktop/src-tauri/Cargo.toml)).
+- Added `@tauri-apps/plugin-log` to the JS side and a tiny `alog/awarn/aerr` wrapper that funnels diagnostics to disk and the console at once ([src/audio-engine.ts](apps/desktop/src/audio-engine.ts)).
+- Configured rotation: `Target::new(TargetKind::LogDir { ... })`, 8 MB per file, `RotationStrategy::KeepAll`, and a 7-day prune in `setup()` ([src-tauri/src/lib.rs](apps/desktop/src-tauri/src/lib.rs)) so disk doesn't accumulate forever.
+- Added `"log:default"` to the capability ([src-tauri/capabilities/default.json](apps/desktop/src-tauri/capabilities/default.json)).
 
 No flag-guarding. The user explicitly accepted the disk cost in exchange for not having to remember to enable logging when the bug fires.
 

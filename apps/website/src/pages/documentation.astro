@@ -1,0 +1,27 @@
+---
+import Page from '../layouts/Page.astro';
+const repository = 'https://github.com/incompl/pudding';
+const shortcuts = [
+  ['Space', 'Play / pause'], ['⌘F', 'Search your library'], ['⌘O', 'Open a file or playlist'],
+  ['⌘S', 'Save queue as playlist'], ['← / →', 'Seek back / forward 10 seconds'],
+  ['⌘↑ / ⌘↓', 'Volume up / down'], ['M', 'Mute / unmute'],
+  ['⌘T', 'Toggle visualizer'], ['⌘⇧F', 'Toggle Zen Mode'],
+];
+---
+<Page title="Documentation — Pudding" description="Get started with Pudding for Mac: installation, local music, internet radio, playlists, and keyboard shortcuts.">
+  <header class="page-heading"><p class="eyebrow">Make yourself at home</p><h1>Documentation<span class="primary">.</span></h1><p class="intro">From your first album to your favorite late-night station.</p></header>
+  <div class="reading-layout">
+    <nav class="contents" aria-label="On this page"><a href="#installation">Get Pudding</a><a href="#library">Your music</a><a href="#radio">Internet radio</a><a href="#playlists">Queues &amp; playlists</a><a href="#shortcuts">Keyboard shortcuts</a></nav>
+    <div class="prose">
+      <section id="installation"><h2>Get Pudding</h2><p>Pudding is free and open source, made for macOS. <strong>Prebuilt downloads aren’t available yet.</strong> You can build it from source with Rust, Node.js, and pnpm installed.</p><p>Clone the repository, then run these commands from its root folder:</p><pre><code>git clone https://github.com/incompl/pudding.git
+cd pudding
+pnpm install
+pnpm tauri build</code></pre><p>When the disk image opens, drag Pudding into Applications. See the <a href={`${repository}/tree/main/apps/desktop#install`}>source installation guide</a> for prerequisites and build details.</p></section>
+      <section id="library"><h2>Bring your music</h2><p>Choose one or more library folders. Pudding reads your files where they are and watches for changes, so there’s no separate import or manual rescan.</p><p>Browse by folder, song, artist, or album. Use <kbd>⌘F</kbd> to search, or right-click a track to jump to its album or artist.</p><p>Supported formats include MP3, FLAC, WAV, AAC/M4A, Ogg/Opus, and AIFF. You can also drop files, folders, or playlists from Finder onto the window.</p></section>
+      <section id="radio"><h2>Tune into internet radio</h2><p>Open the <strong>Streams</strong> tab to add a station’s name and stream URL. Use a direct audio stream or a supported <code>.pls</code> or <code>.m3u</code> playlist URL, rather than the station’s homepage.</p><p>You can edit, reorder, and delete stations from the same tab. Stations are saved in a plain <code>.m3u8</code> playlist that you can edit or share.</p><p>Pausing a station disconnects from its stream. Pressing play reconnects you to the live broadcast.</p></section>
+      <section id="playlists"><h2>Make the next track yours</h2><p>Right-click tracks to create a queue, play something next, or add it to the end. Drag to reorder; use Delete to remove a selection.</p><p>Create a playlist from the File menu, or save the current queue with <kbd>⌘S</kbd>. Playlists autosave as ordinary <code>.m3u8</code> files. Right-click a track and choose <strong>Add to playlist</strong> to add it to a new or existing list.</p></section>
+      <section id="shortcuts"><h2>Keep your hands on the keys</h2><dl class="shortcut-list">{shortcuts.map(([key, action]) => <div><dt><kbd>{key}</kbd></dt><dd>{action}</dd></div>)}</dl></section>
+      <p>For the complete feature list and more tips, <a href={`${repository}/tree/main/apps/desktop`}>read the desktop README</a>.</p>
+    </div>
+  </div>
+</Page>

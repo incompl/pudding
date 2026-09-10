@@ -1,0 +1,22 @@
+---
+import { Image } from 'astro:assets';
+import Page from '../layouts/Page.astro';
+import screenshot from '../assets/desktop.png';
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+---
+
+<Page title="Pudding — Music on your terms" description="Own your music. Pay artists. Play it in Pudding. A free, open-source Mac player for your music files and favorite radio stations.">
+  <section class="hero" aria-labelledby="hero-title">
+    <h1 id="hero-title">Pay artists.<br /><span class="primary">Own your music.</span><br /><span class="accent">Play it in Pudding.</span></h1>
+    <div class="hero-bottom">
+      <p class="intro">Pudding is a music player for Mac, made for music you own and internet radio stations you love.</p>
+      <div class="hero-cta">
+        <a class="button" href={`${base}documentation/`}>Get Pudding <span aria-hidden="true">↗</span></a>
+        <p class="small-note">Free &amp; open source. Build from source today.</p>
+      </div>
+    </div>
+    <figure class="app-preview">
+      <Image src={screenshot} alt="Pudding Desktop in its dark theme, showing a music library, album artwork, and playback controls." widths={[640, 1200, 1956]} sizes="(max-width: 1184px) 94vw, 1120px" format="webp" />
+    </figure>
+  </section>
+</Page>

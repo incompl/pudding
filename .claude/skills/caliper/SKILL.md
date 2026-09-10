@@ -5,6 +5,9 @@ description: Measure and fix sub-pixel alignment between icons and type in Puddi
 
 # Caliper
 
+Run commands in this skill from `apps/desktop` in the Pudding monorepo.
+All source, fixture, script, and output paths below are relative to that directory.
+
 `scripts/caliper.mjs` drives the real app, captures the real window with
 `screencapture`, and maps the real DOM onto those pixels. It reports where each
 thing's ink actually landed, in **device rows**.

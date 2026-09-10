@@ -1,0 +1,60 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site) : undefined;
+const navigation = [
+  { label: 'Screenshots', path: 'screenshots/' },
+  { label: 'Documentation', path: 'documentation/' },
+  { label: 'Support', path: 'support/' },
+];
+const currentPath = Astro.url.pathname.replace(/\/?$/, '/');
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#000000" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    {canonical && <meta property="og:url" content={canonical} />}
+    {canonical && <link rel="canonical" href={canonical} />}
+    <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="shell">
+      <header class="site-header">
+        <a class="wordmark" href={base} aria-label="Pudding home">
+          <img src={`${base}favicon.svg`} width="38" height="38" alt="" />
+          pudding
+        </a>
+        <nav class="main-nav" aria-label="Main navigation">
+          {navigation.map(({ label, path }) => (
+            <a href={`${base}${path}`} aria-current={currentPath === `${base}${path}` ? 'page' : undefined}>{label}</a>
+          ))}
+        </nav>
+      </header>
+      <main id="main" tabindex="-1"><slot /></main>
+      <footer class="site-footer">
+        <div><a class="wordmark" href={base}>pudding</a><p>Copyright 2026 Greg Smith</p></div>
+        <nav aria-label="Footer navigation">
+          <a href={`${base}privacy/`} aria-current={currentPath === `${base}privacy/` ? 'page' : undefined}>Privacy policy</a>
+          <a href={`${base}support/`}>Support</a>
+          <a href="https://github.com/incompl/pudding">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </footer>
+    </div>
+  </body>
+</html>
