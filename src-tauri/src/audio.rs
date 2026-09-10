@@ -59,6 +59,7 @@ use tauri::{AppHandle, Emitter};
 
 use lofty::prelude::*;
 
+use crate::dataless;
 use crate::icy;
 
 // We force stereo output. Devices that don't support stereo are exotic enough
@@ -241,6 +242,13 @@ pub struct SharedState {
     // the stereo frames of silence inserted (severity, not just frequency).
     underrun_events: AtomicU64,
     underrun_frames: AtomicU64,
+    // The decoder is parked waiting for a cloud file to download (see Fetch).
+    // Read by the audio callback for one reason: the ring is *supposed* to be
+    // empty while we wait, exactly as it is at the end of a queue, so this joins
+    // queue_exhausted and friends in gating underrun accounting. Counting a
+    // deliberate wait as starvation would fill the log with a warning a second
+    // for the length of the download and make the real diagnostic useless.
+    fetching: AtomicBool,
     // ReplayGain (volume normalization) mode: 0 = off, 1 = track, 2 = album.
     // Read once per track when it's opened (open_track), where the file's
     // REPLAYGAIN_* tags are turned into a constant per-track gain baked into the
@@ -282,6 +290,7 @@ impl SharedState {
             eq_gen: AtomicU64::new(0),
             underrun_events: AtomicU64::new(0),
             underrun_frames: AtomicU64::new(0),
+            fetching: AtomicBool::new(false),
             rg_mode: AtomicU8::new(0),
             output_rate: AtomicU32::new(output_rate),
             rate_follow: AtomicBool::new(false),
@@ -930,11 +939,14 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
     // finds nothing to read, since the decode thread stays parked in
     // flush_and_wait until we ack (without post_flush every seek logged a
     // one-callback underrun); and a pending rate switch is the decode thread
-    // deliberately letting the ring run dry so the device can be rebuilt.
+    // deliberately letting the ring run dry so the device can be rebuilt; and a
+    // parked download is the decode thread with nothing it is allowed to decode
+    // yet (see Fetch), which is a wait, not a starve.
     if written < want
         && !state.shared.queue_exhausted.load(Ordering::Relaxed)
         && !state.post_flush
         && !state.shared.rate_switch_pending.load(Ordering::Relaxed)
+        && !state.shared.fetching.load(Ordering::Relaxed)
     {
         state.shared.underrun_events.fetch_add(1, Ordering::Relaxed);
         state
@@ -1043,6 +1055,17 @@ fn decode_loop(
     // the frontier directly would target the wrong track near a boundary.
     let mut frontier_idx: usize = 0;
     let mut frontier: Option<TrackReader> = None;
+    // This thread must never wait on a cloud file. It is the transport's command
+    // loop as much as it is the decoder, and the ring buffer it feeds holds one
+    // second: a read that blocks here stops Pause/Next/Stop from being processed
+    // AND cuts the currently playing track to silence, for however long a
+    // provider takes to hand over a file nobody asked it to fetch yet. Opted out,
+    // such a read fails instantly and `advance_to_next_playable` reports the
+    // track as needing a download instead. See dataless.rs.
+    dataless::never_materialize_on_this_thread();
+    // The download the decoder is parked on, when any. Set and cleared through
+    // seat_advance; polled below while the frontier is empty.
+    let mut fetching: Option<Fetch> = None;
     // Radio session. Mutually exclusive with `frontier`: Play and PlayStream
     // each clear the other mode before installing their own source.
     let mut stream: Option<StreamSession> = None;
@@ -1087,10 +1110,9 @@ fn decode_loop(
                             &device_rates,
                             default_rate,
                         );
-                        pending_switch = arm_rate_switch(&shared, adv.switch_to);
-                        frontier = adv.reader;
-                        if frontier.is_none() {
-                            shared.queue_exhausted.store(true, Ordering::Relaxed);
+                        let seat = seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
+                        pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                        if seat.exhausted {
                             emit_state(&app, false, false);
                         }
                     }
@@ -1098,6 +1120,7 @@ fn decode_loop(
                         queue.clear();
                         frontier_idx = 0;
                         frontier = None;
+                        cancel_fetch(&mut fetching, &shared, &app);
                         // Radio never follows content rate (see decode_loop's
                         // rate-switch notes), and the file the switch was armed
                         // for is gone regardless.
@@ -1161,8 +1184,16 @@ fn decode_loop(
                         // when the queue had drained (frontier_idx == old len).
                         queue.extend(tracks);
                         // While a track is decoding, we do nothing here —
-                        // auto-advance reaches the new tracks with no flush.
-                        if frontier.is_none() && stream.is_none() {
+                        // auto-advance reaches the new tracks with no flush. Same
+                        // for a track still being downloaded from the cloud: the
+                        // decode hasn't started, so `frontier` is None, but the
+                        // queue has NOT drained — the engine is parked on a fetch.
+                        // Taking the branch below would re-advance onto that same
+                        // track, and seat_advance cancels and restarts the fetch
+                        // unconditionally, throwing away the download in progress.
+                        // The fetch's own completion (see the poll below) advances
+                        // into whatever the queue holds by then, appends included.
+                        if frontier.is_none() && stream.is_none() && fetching.is_none() {
                             // The frontier drained (or never started). Whether we
                             // can flush hinges on whether anything is still
                             // *audible*: the frontier runs up to a full ring buffer
@@ -1192,11 +1223,9 @@ fn decode_loop(
                                     &device_rates,
                                     default_rate,
                                 );
-                                pending_switch = arm_rate_switch(&shared, adv.switch_to);
-                                frontier = adv.reader;
-                                if frontier.is_none() {
-                                    shared.queue_exhausted.store(true, Ordering::Relaxed);
-                                }
+                                let seat =
+                                    seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
+                                pending_switch = arm_rate_switch(&shared, seat.switch_to);
                             } else {
                                 // Nothing is audible (never started, or the tail has
                                 // fully drained): a full reset re-bases the frame
@@ -1216,10 +1245,10 @@ fn decode_loop(
                                     &device_rates,
                                     default_rate,
                                 );
-                                pending_switch = arm_rate_switch(&shared, adv.switch_to);
-                                frontier = adv.reader;
-                                if frontier.is_none() {
-                                    shared.queue_exhausted.store(true, Ordering::Relaxed);
+                                let seat =
+                                    seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
+                                pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                                if seat.exhausted {
                                     emit_state(&app, false, false);
                                 }
                             }
@@ -1234,6 +1263,7 @@ fn decode_loop(
                         queue.clear();
                         frontier_idx = 0;
                         frontier = None;
+                        cancel_fetch(&mut fetching, &shared, &app);
                         stream = None;
                         pending_switch = arm_rate_switch(&shared, None);
                         producer_frames = 0;
@@ -1422,6 +1452,7 @@ fn decode_loop(
                         );
                     }
                     frontier = None;
+                    cancel_fetch(&mut fetching, &shared, &app);
                     shared.queue_exhausted.store(true, Ordering::Relaxed);
                     shared.paused.store(true, Ordering::Relaxed);
                     emit_state(&app, false, false);
@@ -1443,6 +1474,42 @@ fn decode_loop(
         }
 
         if frontier.is_none() {
+            // Parked on a download: check it without blocking, then either play
+            // the track that just landed or give up on it and move along. The
+            // command drain at the top of the loop has been running throughout,
+            // so the transport stayed live the whole time the file was coming
+            // down — the user could have hit Next and never reached this.
+            if let Some(state) = fetching.as_ref().map(|f| f.state.load(Ordering::Acquire)) {
+                if state != FETCH_PENDING {
+                    let path = fetching.take().expect("checked above").path;
+                    shared.fetching.store(false, Ordering::Relaxed);
+                    emit_fetching(&app, None);
+                    // "Downloaded" but still dataless would send us straight back
+                    // to parking on the same track forever, so treat it exactly
+                    // like a failure: report it once and step past.
+                    if state == FETCH_FAILED || dataless::path_is_dataless(&path) {
+                        emit_error(&app, &path, "could not download");
+                        frontier_idx += 1;
+                    }
+                    let adv = advance_to_next_playable(
+                        &queue,
+                        &mut frontier_idx,
+                        output_rate,
+                        producer_frames,
+                        &shared,
+                        &origins,
+                        &app,
+                        &device_rates,
+                        default_rate,
+                    );
+                    let seat = seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
+                    pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                    if seat.exhausted {
+                        emit_state(&app, false, false);
+                    }
+                    continue;
+                }
+            }
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
@@ -1464,14 +1531,12 @@ fn decode_loop(
                     &device_rates,
                     default_rate,
                 );
-                pending_switch = arm_rate_switch(&shared, adv.switch_to);
-                frontier = adv.reader;
-                if frontier.is_none() {
-                    // Queue exhausted (or every remaining track failed to
-                    // open). Leave frontier=None; the position-emit thread
-                    // will fire queue-ended once playback drains.
-                    shared.queue_exhausted.store(true, Ordering::Relaxed);
-                }
+                let seat = seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
+                pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                // An exhausted queue leaves frontier=None (seat_advance sets the
+                // flag); the position-emit thread fires queue-ended once playback
+                // drains. A parked download leaves it None too, but not exhausted —
+                // that one resumes rather than ending.
             }
             Err(e) => {
                 log::warn!("audio: decode error: {e}");
@@ -1489,11 +1554,10 @@ fn decode_loop(
                     &device_rates,
                     default_rate,
                 );
-                pending_switch = arm_rate_switch(&shared, adv.switch_to);
-                frontier = adv.reader;
-                if frontier.is_none() {
-                    shared.queue_exhausted.store(true, Ordering::Relaxed);
-                }
+                let seat = seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
+                pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                // Exhaustion (and the parked-download case that is not it) is
+                // seat_advance's call; see the note above.
             }
         }
     }
@@ -1744,6 +1808,132 @@ fn emit_stream_metadata(app: &AppHandle, station: &Option<String>, title: &Optio
 struct Advance {
     reader: Option<TrackReader>,
     switch_to: Option<u32>,
+    // Set when the walk stopped on a cloud file that isn't downloaded. The track
+    // is not skipped and frontier_idx still points at it: the caller starts the
+    // download and parks until it lands. A reader of None with this set means
+    // "waiting", which is emphatically not "queue exhausted" — see seat_advance.
+    needs_fetch: Option<PathBuf>,
+}
+
+// A download in flight for the track the decoder is parked on.
+//
+// The decode thread cannot do this itself: it is the transport's command loop,
+// and a materializing read blocks for as long as the provider takes (~37s for an
+// 8 MB track over Proton Drive, unbounded in principle), during which Pause and
+// Next would go unprocessed and the one-second ring buffer would run dry mid-
+// track. So the wait happens here, on a thread that has not opted out of
+// materializing, and the decoder polls a flag while staying live.
+//
+// There is no cancel: a read blocked in the kernel cannot be interrupted. Stop
+// or a new Play simply drops the handle, and the orphaned thread finishes its
+// download into the page cache — where the file is exactly what the user would
+// have wanted next time — and exits.
+struct Fetch {
+    path: PathBuf,
+    state: Arc<AtomicU8>,
+}
+
+const FETCH_PENDING: u8 = 0;
+const FETCH_DONE: u8 = 1;
+const FETCH_FAILED: u8 = 2;
+
+fn start_fetch(path: PathBuf, app: &AppHandle) -> Fetch {
+    let state = Arc::new(AtomicU8::new(FETCH_PENDING));
+    let worker_state = Arc::clone(&state);
+    let worker_path = path.clone();
+    let worker_app = app.clone();
+    std::thread::spawn(move || {
+        let outcome = match crate::dataless::materialize(&worker_path) {
+            Ok(()) => FETCH_DONE,
+            Err(e) => {
+                log::warn!("audio: download {} failed: {e}", worker_path.display());
+                FETCH_FAILED
+            }
+        };
+        // The read can come back Ok with the file still dataless (the provider
+        // gave up, or handed back a placeholder); that is not a download, and the
+        // decode thread treats it as a failure below. Ask the filesystem rather
+        // than trusting the read, so nothing downstream is told the bytes landed
+        // when they didn't.
+        let landed = outcome == FETCH_DONE && !dataless::path_is_dataless(&worker_path);
+        // Read the file now that it is local: a header read, off the page cache the
+        // download just filled. The cache row and the rows the UI is holding are
+        // both describing this file as the scanner last saw it — untagged, because
+        // reading tags is what the scanner refused to do — and both are corrected
+        // from this one read.
+        let facts = landed.then(|| crate::read_disk_facts(&worker_path));
+        // Before the store, so the fresh row reaches the UI ahead of the
+        // fetching-cleared event the decode thread emits on seeing it. Both repaint
+        // the same row: out of order, it would blink back to a filename and a
+        // "(Not downloaded)" marker for a frame between them.
+        if let Some(f) = &facts {
+            emit_downloaded(&worker_app, &crate::row_from_facts(&worker_path, f));
+        }
+        worker_state.store(outcome, Ordering::Release);
+        // After the store, deliberately: correcting the scan cache takes the DB
+        // writer lock, which a running library scan can hold for the length of a
+        // whole walk. Playback has been waiting on this download for tens of
+        // seconds already and must not wait on a scan too.
+        if let Some(f) = &facts {
+            crate::reindex_downloaded(&worker_app, &worker_path, f);
+        }
+    });
+    emit_fetching(app, Some(&path));
+    Fetch { path, state }
+}
+
+// Stop waiting on a download, because whatever we were waiting *for* is gone —
+// the queue was torn down, replaced by a station, or the output died. The worker
+// thread is not interruptible and finishes on its own; dropping the handle is
+// what makes its result irrelevant.
+fn cancel_fetch(fetching: &mut Option<Fetch>, shared: &Arc<SharedState>, app: &AppHandle) {
+    if fetching.take().is_some() {
+        shared.fetching.store(false, Ordering::Relaxed);
+        emit_fetching(app, None);
+    }
+}
+
+// Seat whatever the walk came back with, and keep the three outcomes apart:
+// a reader (play it), a fetch (park on it — the queue is NOT exhausted, audio
+// resumes when the file lands), or nothing left (it really is). Returns the
+// rate switch to arm and whether the queue ran out, because two callers also
+// emit a stopped state on that.
+struct Seat {
+    switch_to: Option<u32>,
+    exhausted: bool,
+}
+
+fn seat_advance(
+    adv: Advance,
+    frontier: &mut Option<TrackReader>,
+    fetching: &mut Option<Fetch>,
+    shared: &Arc<SharedState>,
+    app: &AppHandle,
+) -> Seat {
+    // Any advance supersedes a park: whatever we were waiting for, we are not
+    // waiting for it now. Clearing before starting the new one also means Play
+    // and Stop get this for free rather than each remembering to.
+    cancel_fetch(fetching, shared, app);
+    *frontier = adv.reader;
+    if let Some(path) = adv.needs_fetch {
+        *fetching = Some(start_fetch(path, app));
+        shared.fetching.store(true, Ordering::Relaxed);
+        // Parked, not finished. Leaving this set would fire queue-ended and stop
+        // the transport under a download that is about to succeed.
+        shared.queue_exhausted.store(false, Ordering::Relaxed);
+        return Seat {
+            switch_to: adv.switch_to,
+            exhausted: false,
+        };
+    }
+    let exhausted = frontier.is_none();
+    if exhausted {
+        shared.queue_exhausted.store(true, Ordering::Relaxed);
+    }
+    Seat {
+        switch_to: adv.switch_to,
+        exhausted,
+    }
 }
 
 // Open the next playable track at or after frontier_idx, skipping (and reporting)
@@ -1763,6 +1953,18 @@ fn advance_to_next_playable(
     let rg_mode = shared.rg_mode.load(Ordering::Relaxed);
     let follow = shared.rate_follow.load(Ordering::Relaxed);
     while *frontier_idx < queue.len() {
+        // Ask before opening, because opening is the expensive question. This
+        // thread has opted out of materializing cloud files (see decode_loop), so
+        // open_track on one would come back as a plain failure and the track
+        // would be *skipped* — a file the user owns silently vanishing from its
+        // own queue. Stop here instead and let the caller fetch it.
+        if dataless::path_is_dataless(&queue[*frontier_idx]) {
+            return Advance {
+                reader: None,
+                switch_to: None,
+                needs_fetch: Some(queue[*frontier_idx].clone()),
+            };
+        }
         match open_track(&queue[*frontier_idx], output_rate, rg_mode) {
             Some(reader) => {
                 let target = desired_output_rate(
@@ -1777,6 +1979,7 @@ fn advance_to_next_playable(
                     return Advance {
                         reader: Some(reader),
                         switch_to: Some(target),
+                        needs_fetch: None,
                     };
                 }
                 publish_origin(
@@ -1792,6 +1995,7 @@ fn advance_to_next_playable(
                 return Advance {
                     reader: Some(reader),
                     switch_to: None,
+                    needs_fetch: None,
                 };
             }
             None => {
@@ -1803,6 +2007,7 @@ fn advance_to_next_playable(
     Advance {
         reader: None,
         switch_to: None,
+        needs_fetch: None,
     }
 }
 
@@ -2967,6 +3172,33 @@ fn waveform_emit_loop(
 
 fn emit_state(app: &AppHandle, playing: bool, has_track: bool) {
     let _ = app.emit("audio:state", StateEvent { playing, has_track });
+}
+
+// Which track, if any, playback is currently waiting on a download for. One
+// event carrying the whole answer — `None` means nothing is fetching — rather
+// than a start/stop pair, so the UI can never be left showing a spinner for a
+// download that ended while it wasn't listening.
+#[derive(Clone, serde::Serialize)]
+struct FetchingEvent {
+    path: Option<String>,
+}
+
+fn emit_fetching(app: &AppHandle, path: Option<&std::path::Path>) {
+    let _ = app.emit(
+        "audio:fetching",
+        FetchingEvent {
+            path: path.map(|p| p.to_string_lossy().to_string()),
+        },
+    );
+}
+
+// A track's bytes just came down, and here is what the file says about itself now
+// that it can be read. Separate from the fetching event going quiet, which says
+// only that the wait is over — it says nothing about whether the file arrived,
+// and it carries nothing to replace the row the UI has been drawing, which came
+// from the scan cache and is a description of a file that wasn't there.
+fn emit_downloaded(app: &AppHandle, track: &crate::SearchResult) {
+    let _ = app.emit("audio:downloaded", track);
 }
 
 fn emit_error(app: &AppHandle, path: &std::path::Path, message: &str) {

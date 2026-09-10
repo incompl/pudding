@@ -15,16 +15,14 @@ import {
   app,
   paneEditor,
   currentNodePath,
-  browsedPlaylist,
-  activeQueue,
   dismissRightPanel,
+  isNotDownloaded,
 } from "./state";
 import { paneEditorView, queueTitleEl } from "./dom-refs";
-import { reloadNavPane } from "./library-nav";
-import { findNode, refreshLibrary } from "./library";
-import { renderTree } from "./tree-view";
+import { refreshLibrary } from "./library";
 import { renameOpenPlaylist } from "./playlists";
-import { repaintQueueList, curatedList } from "./queue";
+import { curatedList } from "./queue";
+import { applyTagUpdate } from "./track-facts";
 
 export function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
   const form = h("form", { class: "inline-editor" });
@@ -239,9 +237,18 @@ function openMetadataEditor(path: string, seed: FileEntry): void {
 // partial row (a SearchTrack from Songs/album/artist lists has no album-artist or
 // disc), so seeding the editor from the row would let a save write those fields
 // back empty and wipe them. read_file_tags returns the whole tag set.
-export function editMetadataItem(path: string): ContextMenuItem {
+//
+// Greyed out while the file is still cloud-only. `read_file_tags` is synchronous
+// and reads the whole file, so on a dataless file it would materialize it — a
+// download, on the UI thread, with the window frozen for its duration and no way
+// to cancel. Playing such a track is the one action that downloads it (audio.rs
+// parks a worker thread on the fetch); once it lands, the row's "(Not
+// downloaded)" clears and this comes back with it.
+export function editMetadataItem(track: { path: string; notDownloaded?: boolean }): ContextMenuItem {
+  const path = track.path;
   return {
     label: "Edit metadata...",
+    disabled: isNotDownloaded(track),
     action: async () => {
       let seed: FileEntry;
       try {
@@ -255,56 +262,6 @@ export function editMetadataItem(path: string): ContextMenuItem {
   };
 }
 
-// Refresh every surface that might show a just-edited track, after write_tags. The
-// edit is decoupled from any one row, so each surface updates through its own path:
-//   - Tree: the fs watcher's own scan skips this row (write_tags pre-synced
-//     mtime/size), so patch the in-memory node and repaint the tree here.
-//   - Library nav views (Songs/Artists/Albums + detail): reload so tag-derived
-//     membership recomputes — an edited-away track drops out and the list re-sorts.
-//   - Open right-pane list (queue / browsed playlist): membership is by path
-//     (unchanged), so patch the matching rows' display fields in place and repaint.
-//     The repaint has to be repaintQueueList, not renderQueue: the tracks were
-//     edited *inside* the list object, so renderQueue is handed the same Queue it
-//     already rendered and takes its fast path, which only re-toggles the playing
-//     highlight. Every patched field below would sit at its pre-edit value until
-//     something else rebuilt the rows.
-//
-// Date Modified is patched alongside the tags, and is the one field here that the
-// user didn't type: writing tags rewrites the file, so its mtime moves on every save.
-// Without this the cell would sit at the pre-edit time until something forced a
-// rescan — which the mtime/size pre-sync in write_tags has deliberately stopped from
-// happening. (This is also why Date Created is the better "what did I just add"
-// sort of the two; see the column table.)
-function applyTagUpdate(path: string, tags: FileEntry): void {
-  if (app.rootNode) {
-    const found = findNode(app.rootNode, path);
-    if (found && !found.node.isFolder) {
-      const n = found.node;
-      n.title = tags.title;
-      n.artist = tags.artist;
-      n.album = tags.album;
-      n.albumArtist = tags.albumArtist;
-      n.disc = tags.disc;
-      n.track = tags.track;
-      renderTree();
-    }
-  }
-  reloadNavPane();
-  const list = browsedPlaylist.value ?? activeQueue.value;
-  if (list && list.tracks.some((t) => t.path === path)) {
-    for (const t of list.tracks) {
-      if (t.path !== path) continue;
-      t.title = tags.title;
-      t.artist = tags.artist;
-      t.album = tags.album;
-      t.track = tags.track;
-      t.albumArtist = tags.albumArtist;
-      t.disc = tags.disc;
-      if (tags.modified != null) t.modified = tags.modified;
-    }
-    repaintQueueList();
-  }
-}
 // --- Inline rename editing ---
 // Turns a label in place into a text input: the label's current content is hidden
 // and an input takes its slot. Commits on Enter or blur, cancels on Escape. This

@@ -182,6 +182,46 @@ export const duration = signal(0);
 export const volume = signal(1);
 export const volumePopoverOpen = signal(false);
 
+// The track playback is waiting on a download for, or null. A cloud file that
+// isn't on this Mac can't be decoded until the provider hands it over, which
+// takes as long as it takes (~37s for an 8 MB track on a slow provider); the
+// decode thread refuses to block on that, so this is what the wait looks like
+// from the outside. One path at a time: the engine parks on exactly one track.
+export const fetchingPath = signal<string | null>(null);
+
+// Paths whose bytes came down during this session.
+//
+// Every "(Not downloaded)" the UI can draw comes from a boolean copied off the
+// scan cache when the row was built — into a tree node, a queue row, a playlist
+// row, a nav list — and a download that finishes an hour later reaches none of
+// those copies. Read *through* this set (see rowStatus), any copy comes out
+// right: it is the later fact about the same path, so it wins.
+//
+// Most of the copies are patched directly and the cache row behind them is
+// rewritten (see applyDownloaded, and the backend's reindex_downloaded). This
+// covers the ones neither reaches — a library view list memoized before the
+// download, and any row later built from it.
+// Deliberately not a signal: nothing repaints off it. A row already on screen is
+// repainted by the patch that fills in the rest of its fields, and every row built
+// after that reads this as it is built.
+//
+// Known limitation: add-only, for the life of the session. A file the OS evicts
+// back to the cloud *after* we downloaded it keeps its downloaded status until
+// relaunch — the scan notices the re-eviction and corrects the cache row (see the
+// `was_dataless != dataless` refresh), but this set is read last and wins, so the
+// "(Not downloaded)" marker cannot come back. Accepted: eviction of a file played
+// this session is rare, and the cost is a missing marker on a file that still
+// plays, after a wait. The fix would be to drop the path here on that refresh.
+export const downloadedPaths = new Set<string>();
+
+// Whether a track is still cloud-only *right now*: the row's own flag, corrected
+// by the set above. The one place both readers agree — the "(Not downloaded)"
+// marker (rowStatus) and the greyed-out "Edit metadata..." (editMetadataItem),
+// which must match, since the marker is the whole explanation for the grey.
+export function isNotDownloaded(t: { path: string; notDownloaded?: boolean }): boolean {
+  return !!t.notDownloaded && !downloadedPaths.has(t.path);
+}
+
 export const currentNodePath = signal<string | null>(null);
 export const currentStreamUrl = signal<string | null>(null);
 // The stream row highlighted by a single click — a select, not a commit. Mirrors

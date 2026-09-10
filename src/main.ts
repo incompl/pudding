@@ -103,6 +103,7 @@ import {
   editingText,
   listFaceOpen,
   queuePlayingIndex,
+  fetchingPath,
   shuffleMode,
   repeatMode,
   replayGainMode,
@@ -209,8 +210,10 @@ import {
   revealFileInTree,
   revealTreeRow,
   setBrowseActive,
+  repaintTreeStatus,
 } from "./tree-view";
 import { applyRowFlash, startRowFlash } from "./row-flash";
+import { applyCellStatus, rowStatus } from "./row-status";
 import {
   closePaneEditor,
   editMetadataItem,
@@ -483,6 +486,21 @@ export function setEmpty(container: HTMLElement, message: string, kind: "empty" 
 // root(s)" — playlist scanning, default save dir, search context — reads this.
 export function libraryRootPaths(): string[] {
   return app.libraryRoots;
+}
+
+// Whether `path` sits inside a configured library folder, and so is covered by
+// that folder's security-scoped bookmark (root_access.rs) — the only access this
+// app holds across launches. Sandboxed, everything else (a Finder drop, an Open
+// With, a launch argument) is granted for this launch only, so this is the test
+// for "will still be openable next time", not "exists".
+function insideLibraryRoots(path: string): boolean {
+  return libraryRootPaths().some((root) => {
+    // A stored root can carry a trailing separator (typed by hand, or normalized
+    // only on the backend's side of the wire); left in, it would make every path
+    // in that library read as outside it, which fails in the quiet direction.
+    const r = root.replace(/[\\/]+$/, "");
+    return path === r || path.startsWith(r + "/");
+  });
 }
 
 // --- File-tree multi-select ---
@@ -1423,6 +1441,14 @@ export function renderLeafTrackList(
       style: { "--cols": colTemplate },
     });
     append(cell, buildCells(t, cols, NAV_CELLS));
+    // The same aside the queue's rows wear — "(Not downloaded)" for a cloud file,
+    // "(Downloading...)" while the engine is parked on one. It is a fact about the
+    // file, so it belongs to every list the file appears in, not just the one on
+    // the right (see row-status.ts). The live half — the marker moving from row to
+    // row as the download does — is repainted by the fetchingPath effect in
+    // setupEffects; the download *landing* rebuilds these rows outright
+    // (applyDownloaded), because it rewrites their fields and not just the marker.
+    applyCellStatus(cell, rowStatus(t, fetchingPath.peek()));
 
     const row = h(
       "div",
@@ -1468,7 +1494,7 @@ export function renderLeafTrackList(
                 ...queueMenuItems((sink) => sink([t])),
                 addToPlaylistItem(() => [t]),
                 ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: t.albumArtist }),
-                editMetadataItem(t.path),
+                editMetadataItem(t),
                 showInFinderItem(t.path),
                 // Right-clicking a row scopes the picker to that row's pane
                 // implicitly, so it needs no "Library ▸" label and no
@@ -1879,17 +1905,39 @@ let lastSessionWrite = 0;
 // every few seconds during lone (non-queue) playback — one clear is enough.
 let sessionPersisted = false;
 
+// Whether a queue is one we could honestly bring back next launch. Access is the
+// whole question: the library roots are the only paths we hold a bookmark for, so
+// a queue assembled from a Finder drop or an externally opened playlist has access
+// for this launch only, and restoring it would hand back rows that cannot be read
+// — the stale-and-unplayable case. A playlist is judged by its file, since that
+// file is what gets re-read on restore (refreshPlaylistSnapshot) and what its rows
+// come from; an ephemeral queue is judged by its rows, which are all it is.
+function queueIsRestorable(q: Queue): boolean {
+  return q.sourcePath
+    ? insideLibraryRoots(q.sourcePath)
+    : q.tracks.every((t) => insideLibraryRoots(t.path));
+}
+
+// Forget the saved session. Used both by the clear path below and by a restore
+// that rejects what it read, so a session we refuse to honor doesn't sit on disk
+// being re-read and re-rejected every launch.
+async function clearPersistedSession(): Promise<void> {
+  await app.store.set(KEY_PLAYBACK_SESSION, null);
+  await app.store.save();
+  sessionPersisted = false;
+}
+
 // Snapshot the current playback into the store, or clear it. Only a queue that is
-// the audible pool restores; everything else (lone track, stream, torn-down queue)
-// clears the key so relaunch doesn't resurrect a queue that isn't playing.
+// the audible pool and lives inside the library restores; everything else (lone
+// track, stream, torn-down queue, anything dropped in or opened from outside)
+// clears the key so relaunch doesn't resurrect a queue that isn't playing or
+// can't be opened.
 async function persistSessionNow(): Promise<void> {
   lastSessionWrite = performance.now();
   const q = activeQueue.value;
-  if (!q || !queueIsActivePool()) {
+  if (!q || !queueIsActivePool() || !queueIsRestorable(q)) {
     if (!sessionPersisted) return; // already clear — nothing to do
-    await app.store.set(KEY_PLAYBACK_SESSION, null);
-    await app.store.save();
-    sessionPersisted = false;
+    await clearPersistedSession();
     return;
   }
   const session: PersistedSession = {
@@ -1971,6 +2019,14 @@ async function refreshPlaylistSnapshot(queue: Queue): Promise<Queue> {
 async function restorePlaybackSession(): Promise<void> {
   const s = await app.store.get<PersistedSession>(KEY_PLAYBACK_SESSION);
   if (!s?.queue || !Array.isArray(s.queue.tracks)) return;
+  // Re-check reachability here and not just at write time, because the roots can
+  // change while we're closed (one removed in Settings) and because a session
+  // written by an older build predates the check entirely. Ordering matters: this
+  // runs after hold-roots, so the roots it reads are the ones we actually hold.
+  if (!queueIsRestorable(s.queue)) {
+    await clearPersistedSession();
+    return;
+  }
   const queue = await refreshPlaylistSnapshot(s.queue);
   // The engine pool is playable rows only (missing files stay in the view but
   // never reach the engine), mirroring playQueue/playQueueTrack.
@@ -3338,10 +3394,15 @@ function setupEffects(): void {
   // the nav bar whenever a list exists; `show-list` puts the list face up (else
   // the hero owns the pane). Reads queuePlayingIndex too so the highlighted/
   // scrolled row tracks advances (and clears when the queue is merely stashed),
-  // even when paneView's own fields are unchanged.
+  // even when paneView's own fields are unchanged. fetchingPath for the same
+  // reason: the row the engine is parked on wears a "(Downloading...)" marker
+  // that has to move with it (see rowStatus). The other end of that story — the
+  // download landing — repaints through applyDownloaded instead, because it
+  // rewrites the row's fields and not just its marker.
   effect(() => {
     const { list, isSource, showList, nav } = paneView.value;
     queuePlayingIndex.value;
+    fetchingPath.value;
     const hasList = list !== null;
     nowPlayingPanel.classList.toggle("has-nav", hasList && nav !== null);
     nowPlayingPanel.classList.toggle("show-list", hasList && showList);
@@ -3406,6 +3467,27 @@ function setupEffects(): void {
         // tree rule above.
         el.classList.toggle("playing", playing);
         el.classList.toggle("open", playing && heroShows);
+      });
+  });
+
+  // The left pane's two track lists follow the engine's parked download the way the
+  // queue does: the row it is fetching wears "(Downloading...)" and gives it back
+  // when the wait moves on (see rowStatus). Both panes in one effect because both
+  // read the one signal, and only the rows currently mounted need touching — a row
+  // scrolled in later reads fetchingPath as it is built.
+  //
+  // Only the marker. The download *finishing* is the other half of the story and
+  // goes through applyDownloaded, which rewrites the row's tags, times and rate as
+  // well, and so rebuilds these lists rather than patching a span.
+  effect(() => {
+    const fetching = fetchingPath.value;
+    repaintTreeStatus(fetching);
+    document
+      .querySelectorAll<HTMLElement>("#library-nav .nav-track-row:not(.colhead)")
+      .forEach((el) => {
+        const t = app.navLeafTracks[Number(el.dataset.rowIndex)];
+        const cell = el.querySelector<HTMLElement>(".nav-cell");
+        if (t && cell) applyCellStatus(cell, rowStatus(t, fetching));
       });
   });
 
@@ -3994,6 +4076,7 @@ async function init(): Promise<void> {
           gain: number | null,
           created: number | null,
           modified: number | null,
+          notDownloaded: boolean,
         ];
         const rows = await invoke<SongRow[]>("list_all_songs");
         return rows.map(
@@ -4013,6 +4096,7 @@ async function init(): Promise<void> {
             gain,
             created,
             modified,
+            notDownloaded,
           ]): SearchTrack => ({
             path,
             title,
@@ -4029,6 +4113,7 @@ async function init(): Promise<void> {
             gain,
             created,
             modified,
+            notDownloaded,
             track: null,
           }),
         );

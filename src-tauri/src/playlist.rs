@@ -60,6 +60,12 @@ pub struct PlaylistTrack {
     #[serde(rename = "inLibrary")]
     in_library: bool,
     missing: bool,
+    // A cloud file the provider hasn't put on this Mac yet. Distinct from
+    // `missing` in the one way that matters: the file exists and playing it will
+    // fetch it (see audio.rs), so the row stays playable — it just says so first,
+    // because that click costs a download the user should see coming.
+    #[serde(rename = "notDownloaded")]
+    not_downloaded: bool,
     // Track length in seconds (None when unknown / out of library). Summed for
     // the playlist's runtime beside its track count.
     duration: Option<f64>,
@@ -256,7 +262,11 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                 .and_then(|n| n.to_str())
                 .unwrap_or(&e.path)
                 .to_string();
-            let missing = !Path::new(&e.path).exists();
+            // One stat for both facts (`exists()` was already paying for it):
+            // absent, or present-but-not-downloaded.
+            let meta = std::fs::metadata(&e.path);
+            let missing = meta.is_err();
+            let not_downloaded = meta.map(|m| crate::dataless::is_dataless(&m)).unwrap_or(false);
             match meta_map.get(&e.path).cloned() {
                 Some(m) => PlaylistTrack {
                     path: e.path,
@@ -271,6 +281,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     genre: m.genre,
                     in_library: true,
                     missing,
+                    not_downloaded,
                     duration: m.duration,
                     bitrate: m.bitrate,
                     sample_rate: m.sample_rate,
@@ -294,6 +305,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     genre: None,
                     in_library: false,
                     missing,
+                    not_downloaded,
                     duration: None,
                     bitrate: None,
                     sample_rate: None,
@@ -718,7 +730,8 @@ mod tests {
             "CREATE TABLE tracks (path TEXT, title TEXT, artist TEXT, album TEXT, \
              album_artist TEXT, disc INTEGER, track INTEGER, year INTEGER, genre TEXT, \
              duration REAL, bitrate INTEGER, sample_rate INTEGER, bit_depth INTEGER, \
-             rg_track_gain REAL, created INTEGER, mtime INTEGER);",
+             rg_track_gain REAL, created INTEGER, mtime INTEGER, \
+             dataless INTEGER NOT NULL DEFAULT 0);",
         )
         .unwrap();
         conn

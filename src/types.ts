@@ -31,6 +31,10 @@ export interface FileEntry {
   gain?: number | null;
   created?: number | null;
   modified?: number | null;
+  // The scan cache's dataless flag, carried through the browse listing so a
+  // cloud file reads the same in the Files tree as it does in a playlist. See
+  // SearchTrack.notDownloaded.
+  notDownloaded?: boolean;
 }
 
 export interface TrackMeta {
@@ -73,6 +77,7 @@ export interface TreeNode {
   gain?: number | null;
   created?: number | null;
   modified?: number | null;
+  notDownloaded?: boolean;
   isFolder: boolean;
   // True for a .m3u/.m3u8 row. A playlist is a *source* like a folder, not a
   // track: its own icon and click action (single-click browses, double-click
@@ -109,6 +114,11 @@ export interface SearchTrack {
   // Set only for playlist browse rows whose file is absent on disk: shown in the
   // view (marked, per the plan's "keep the row") but never handed to the engine.
   missing?: boolean;
+  // A cloud file the provider hasn't downloaded yet. Marked like `missing` but
+  // NOT filtered out of what the engine gets: the file is real and playing it
+  // fetches it (see audio.rs). The marker is a warning about what the click
+  // costs, not a statement that the row is unplayable.
+  notDownloaded?: boolean;
   // Track length in seconds (absent/null when unknown). Summed to display a total
   // runtime beside a queue/playlist's track count, and drawn per-row by the Time
   // column when the pane shows one.
@@ -404,6 +414,7 @@ export interface PlaylistTrack {
   genre: string | null;
   inLibrary: boolean;
   missing: boolean;
+  notDownloaded: boolean;
   duration: number | null;
   // The remaining column fields. All null for an out-of-library row: they come from
   // the scan cache, and a path outside every library root was never scanned. See

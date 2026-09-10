@@ -55,6 +55,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 - Edit an audio file's metadata tags right in the app.
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
 - Drag music from Finder onto the window: a file or playlist opens, a folder or a multi-file drop plays as a queue
+- Cloud-friendly: point it at a library in iCloud Drive, Proton Drive, or Dropbox and it scans without downloading anything. Files whose bytes aren't on this Mac are marked "(Not downloaded)" and fetched only when you play them
 
 ### Playback queue
 

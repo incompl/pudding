@@ -3,6 +3,9 @@ mod audio;
 // security-scoped bookmark runs inside a signed, sandboxed .app, which means a
 // separate binary. See tools/sandbox-check.sh.
 pub mod bookmarks;
+// Cloud files that are not on disk yet, and which threads are allowed to wait
+// for one. Read it before touching the scanner's or the decode thread's I/O.
+mod dataless;
 mod icy;
 mod now_playing;
 mod playlist;
@@ -192,6 +195,11 @@ struct FileEntry {
     gain: Option<f64>,
     created: Option<i64>,
     modified: Option<i64>,
+    // The file's bytes were not on this Mac at scan time. Shown as a
+    // "(Not downloaded)" row marker, in the same slot as "(Missing file)" — but
+    // unlike missing, the row stays playable: clicking it fetches the file.
+    #[serde(rename = "notDownloaded")]
+    not_downloaded: bool,
 }
 
 #[derive(Serialize)]
@@ -299,6 +307,12 @@ struct SearchResult {
     // no such thing — the cache is disposable and the files are the truth).
     created: Option<i64>,
     modified: Option<i64>,
+    // See the `dataless` column: the file's bytes were not on this Mac when the
+    // scan walked past it. Shown as a "(Not downloaded)" row marker in the same
+    // slot as "(Missing file)" — but unlike missing, the row stays playable,
+    // because clicking it is what fetches the file.
+    #[serde(rename = "notDownloaded")]
+    not_downloaded: bool,
 }
 
 // The SELECT list every track-producing query shares, and the mapping that reads a
@@ -308,7 +322,7 @@ struct SearchResult {
 // Index-order coupling between the two lives in this one pair.
 const TRACK_COLUMNS: &str = "path, title, artist, album, album_artist, disc, track, \
                              year, genre, duration, bitrate, sample_rate, bit_depth, \
-                             rg_track_gain, created, mtime";
+                             rg_track_gain, created, mtime, dataless";
 
 fn track_row(row: &rusqlite::Row) -> rusqlite::Result<SearchResult> {
     Ok(SearchResult {
@@ -328,6 +342,7 @@ fn track_row(row: &rusqlite::Row) -> rusqlite::Result<SearchResult> {
         gain: row.get(13)?,
         created: row.get(14)?,
         modified: row.get(15)?,
+        not_downloaded: row.get(16)?,
     })
 }
 
@@ -355,6 +370,7 @@ type SongRow = (
     Option<f64>,    // rg_track_gain
     Option<i64>,    // created
     Option<i64>,    // mtime
+    bool,           // dataless
 );
 
 #[derive(Serialize)]
@@ -386,6 +402,10 @@ fn join_path(parent: &str, child: &str) -> String {
     }
 }
 
+// Default is "no tags at all", which two callers want by name: read_tags when
+// lofty can't open the file, and the drop path when it declines to open a cloud
+// file in the first place.
+#[derive(Default)]
 struct Tags {
     title: Option<String>,
     artist: Option<String>,
@@ -410,7 +430,7 @@ struct Tags {
 
 // The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
 // and the next startup will drop and recreate it.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 // WAL lets the scan's write transaction run without blocking concurrent reads
 // (list_dir, get_metadata) on the main connection.
@@ -523,7 +543,23 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             -- its own clip-safe math (see replaygain_multiplier). This column
             -- exists to *show* what the file carries — a blank cell is a file the
             -- ReplayGain setting can't act on, which is otherwise invisible.
-            rg_track_gain REAL
+            rg_track_gain REAL,
+            -- 1 when the file provider (iCloud Drive, Proton Drive) held this
+            -- file's metadata but none of its bytes at scan time. A fact about
+            -- the file rather than about its audio, cached here for the same
+            -- reason the rest of this table exists: the lists that show it run
+            -- to thousands of rows, and a stat per row on every open would put
+            -- the filesystem back in the render path.
+            --
+            -- Can go stale in one direction only. A row that is dataless has a
+            -- NULL duration (the tag read failed), so the scan always retries it
+            -- and downloading a track clears the flag; but a downloaded track the
+            -- provider later *evicts* keeps its tags, so the skip below refreshes
+            -- this column on its own when the stat disagrees. Nothing depends on
+            -- it being current to be correct: the engine re-checks the live file
+            -- before it plays anything (see audio.rs), so the column only decides
+            -- what the row says, never what playback does.
+            dataless INTEGER NOT NULL DEFAULT 0
         );",
     )?;
     // Each cached track carries its owning library root (the folder that was scanned
@@ -566,21 +602,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 fn read_tags(path: &std::path::Path) -> Tags {
-    let empty = Tags {
-        title: None,
-        artist: None,
-        album: None,
-        album_artist: None,
-        disc: None,
-        track: None,
-        year: None,
-        genre: None,
-        duration: None,
-        bitrate: None,
-        sample_rate: None,
-        bit_depth: None,
-        rg_track_gain: None,
-    };
+    let empty = Tags::default();
     let Ok(tagged) = lofty::read_from_path(path) else {
         return empty;
     };
@@ -728,70 +750,61 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
         let path_str = file.to_string_lossy().to_string();
+        // Free: the same stat that gave us mtime and size carries the flag.
+        let dataless = dataless::is_dataless(&meta);
 
         let _ = tx.execute(
             "INSERT OR IGNORE INTO scan_current (path) VALUES (?)",
             [&path_str],
         );
 
-        let existing: Option<(i64, i64)> = tx
+        // `duration IS NOT NULL` doubles as "we have actually read this file":
+        // it comes from the decoded audio properties rather than from a tag, so
+        // every file we could open has one, and a NULL row is one read_tags
+        // failed on — which, since the scan thread no longer waits for cloud
+        // files, is mostly "it wasn't downloaded when we walked past it".
+        //
+        // Those have to be retried on their own, because materializing a file
+        // changes NEITHER mtime NOR size (only ctime and st_blocks move), so the
+        // unchanged-file skip below would otherwise leave a track the user has
+        // since downloaded untagged forever. Retrying is free: a still-dataless
+        // read fails in ~0.00s, and a locally unreadable file (corrupt, DRM)
+        // costs one header read it might one day survive.
+        let existing: Option<(i64, i64, bool, bool)> = tx
             .query_row(
-                "SELECT mtime, size FROM tracks WHERE path = ?",
+                "SELECT mtime, size, duration IS NOT NULL, dataless FROM tracks WHERE path = ?",
                 [&path_str],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|e| format!("query existing row failed: {}", e))?;
-        if let Some((m, s)) = existing {
-            if m == mtime && s == size {
+        if let Some((m, s, read_before, was_dataless)) = existing {
+            if m == mtime && s == size && read_before {
+                // Nothing to re-read — but the provider may have evicted the file
+                // since, and eviction moves neither mtime nor size. Correct the one
+                // column the stat disagrees with rather than skipping blind; the
+                // write happens only on an actual change, so a steady library still
+                // does zero writes on a rescan.
+                if was_dataless != dataless {
+                    let _ = tx.execute(
+                        "UPDATE tracks SET dataless = ?1 WHERE path = ?2",
+                        params![dataless, path_str],
+                    );
+                }
                 continue;
             }
         }
 
         let tags = read_tags(file);
-        let _ = tx.execute(
-            "INSERT INTO tracks (path, root, mtime, size, created, title, artist, album, album_artist,
-                                 disc, track, year, genre, duration, bitrate, sample_rate, bit_depth,
-                                 rg_track_gain)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
-             ON CONFLICT(path) DO UPDATE SET
-                 root = excluded.root,
-                 mtime = excluded.mtime,
-                 size = excluded.size,
-                 created = excluded.created,
-                 title = excluded.title,
-                 artist = excluded.artist,
-                 album = excluded.album,
-                 album_artist = excluded.album_artist,
-                 disc = excluded.disc,
-                 track = excluded.track,
-                 year = excluded.year,
-                 genre = excluded.genre,
-                 duration = excluded.duration,
-                 bitrate = excluded.bitrate,
-                 sample_rate = excluded.sample_rate,
-                 bit_depth = excluded.bit_depth,
-                 rg_track_gain = excluded.rg_track_gain",
-            params![
-                path_str,
-                root_key,
-                mtime,
-                size,
-                created,
-                tags.title,
-                tags.artist,
-                tags.album,
-                tags.album_artist,
-                tags.disc,
-                tags.track,
-                tags.year,
-                tags.genre,
-                tags.duration,
-                tags.bitrate,
-                tags.sample_rate,
-                tags.bit_depth,
-                tags.rg_track_gain
-            ],
+        let _ = upsert_track(
+            &tx,
+            &path_str,
+            &root_key,
+            mtime,
+            size,
+            created,
+            &tags,
+            dataless,
         );
     }
 
@@ -808,6 +821,125 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
 
     tx.commit().map_err(|e| format!("commit failed: {}", e))?;
     Ok(())
+}
+
+// A cloud track's bytes just landed (see audio.rs's fetch thread), and the row the
+// scanner left behind describes the file as it was *before* that: flagged
+// dataless, and untagged — reading its tags is exactly what the scanner refused
+// to do, because doing it would have downloaded the file.
+//
+// The next scan cannot correct the flag on its own: materializing a file moves
+// neither mtime nor size (only ctime and st_blocks), and the incremental skip is
+// keyed on exactly those two. It would eventually re-read the tags, since a NULL
+// duration is the scanner's "never actually read this one" retry flag — but
+// "eventually" means the next rescan, and until then the Files tree keeps showing
+// a filename and a "(Not downloaded)" marker for a track the user is listening to.
+//
+// `facts` comes from the caller because it read the file already, to tell the UI
+// the same news (see audio.rs's fetch worker); reading it twice would be two
+// answers where there is one file.
+//
+// Only ever corrects a row that exists. A path outside every library root was
+// never indexed, so there is no stale row to fix and no `root` to invent for a new
+// one; the SELECT that finds neither is the whole decision.
+//
+// Blocks on the DB writer mutex, which a running scan holds for the length of a
+// whole walk, so only call this from a thread with nothing waiting on it.
+fn reindex_downloaded(app: &AppHandle, path: &Path, facts: &DiskFacts) {
+    let db = app.state::<DbHandle>();
+    // Poisoned only if another writer panicked mid-statement; this row's work is
+    // independent of theirs, so recover rather than propagate.
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let path_str = path.to_string_lossy().to_string();
+    let root: Option<String> = conn
+        .query_row(
+            "SELECT root FROM tracks WHERE path = ?",
+            [&path_str],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap_or(None);
+    let Some(root) = root else { return };
+    if let Err(e) = upsert_track(
+        &conn,
+        &path_str,
+        &root,
+        facts.modified.unwrap_or(0),
+        facts.size,
+        facts.created,
+        &facts.tags,
+        facts.not_downloaded,
+    ) {
+        log::warn!("could not re-index {} after download: {e}", path.display());
+    }
+}
+
+// The one statement that writes a track row, shared by the scanner and by the
+// post-download re-read below. Two callers, one column list: a column added to
+// the cache is written by both, or by neither — never by whichever of them
+// someone remembered.
+//
+// Upsert rather than update because the scanner is usually meeting the file for
+// the first time. The other caller only ever lands on the UPDATE half; it has
+// already established that the row exists (see reindex_downloaded).
+#[allow(clippy::too_many_arguments)]
+fn upsert_track(
+    conn: &Connection,
+    path: &str,
+    root: &str,
+    mtime: i64,
+    size: i64,
+    created: Option<i64>,
+    tags: &Tags,
+    dataless: bool,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO tracks (path, root, mtime, size, created, title, artist, album, album_artist,
+                             disc, track, year, genre, duration, bitrate, sample_rate, bit_depth,
+                             rg_track_gain, dataless)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                 ?19)
+         ON CONFLICT(path) DO UPDATE SET
+             root = excluded.root,
+             mtime = excluded.mtime,
+             size = excluded.size,
+             created = excluded.created,
+             title = excluded.title,
+             artist = excluded.artist,
+             album = excluded.album,
+             album_artist = excluded.album_artist,
+             disc = excluded.disc,
+             track = excluded.track,
+             year = excluded.year,
+             genre = excluded.genre,
+             duration = excluded.duration,
+             bitrate = excluded.bitrate,
+             sample_rate = excluded.sample_rate,
+             bit_depth = excluded.bit_depth,
+             rg_track_gain = excluded.rg_track_gain,
+             dataless = excluded.dataless",
+        params![
+            path,
+            root,
+            mtime,
+            size,
+            created,
+            tags.title,
+            tags.artist,
+            tags.album,
+            tags.album_artist,
+            tags.disc,
+            tags.track,
+            tags.year,
+            tags.genre,
+            tags.duration,
+            tags.bitrate,
+            tags.sample_rate,
+            tags.bit_depth,
+            tags.rg_track_gain,
+            dataless
+        ],
+    )
 }
 
 struct ScanCoalesce {
@@ -853,6 +985,13 @@ fn request_scan(root: PathBuf, db_path: PathBuf, app: AppHandle) {
         c.running = true;
     }
     std::thread::spawn(move || {
+        // Every scan runs on this thread, so opting out once here covers all of
+        // them. A tag read on a cloud file that isn't downloaded now fails
+        // instantly instead of pulling the file down: a library that lives in
+        // ProtonDrive/iCloud scans in seconds rather than blocking ~2s *per
+        // file*, and Pudding stops silently materializing folders the user never
+        // asked it to. See dataless.rs.
+        dataless::never_materialize_on_this_thread();
         let mut root = root;
         loop {
             scan_and_emit(root.clone(), db_path.clone(), app.clone());
@@ -908,6 +1047,7 @@ pub(crate) struct MetaRow {
     pub gain: Option<f64>,
     pub created: Option<i64>,
     pub modified: Option<i64>,
+    pub not_downloaded: bool,
 }
 
 // Fetches the cached metadata for many paths in one round trip
@@ -942,6 +1082,7 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
                         gain: row.get(13)?,
                         created: row.get(14)?,
                         modified: row.get(15)?,
+                        not_downloaded: row.get(16)?,
                     },
                 ))
             })
@@ -1016,6 +1157,10 @@ async fn list_dir(path: String, db: State<'_, DbHandle>) -> Result<DirListing, S
                 gain: m.gain,
                 created: m.created,
                 modified: m.modified,
+                // Free here — the browse listing's metadata already came from the
+                // cache, so the marker reaches the Files tree without the stat per
+                // entry that this loop deliberately avoids.
+                not_downloaded: m.not_downloaded,
             });
         }
 
@@ -1475,7 +1620,17 @@ fn watch_libraries(
 
 #[tauri::command]
 fn get_art(path: String) -> Option<String> {
-    let tagged = lofty::read_from_path(std::path::Path::new(&path)).ok()?;
+    let path = std::path::Path::new(&path);
+    // Cover art is never worth downloading a track for. Reading tags materializes
+    // the whole file (see dataless.rs), this command is synchronous so it runs on
+    // the UI thread, and on a restored session it is the *first* thing to touch
+    // the track — so a cloud file froze the window on launch, downloading a track
+    // the user had not asked to play. No art until the bytes are here: playing the
+    // track fetches it, and the track-changed callback asks for the art again.
+    if dataless::path_is_dataless(path) {
+        return None;
+    }
+    let tagged = lofty::read_from_path(path).ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     let pic = tag.pictures().first()?;
     let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
@@ -2342,43 +2497,88 @@ async fn search_folders(
 // grouped by album, then disc/track, so an album folder plays in track order
 // and an artist folder plays album by album. Backs the "play a folder from
 // search" action.
-// A track row for a file the library index has never seen: the same shape a DB
-// row produces, read straight off the file. Only the drop path needs this —
-// everything else in the app is looking at indexed files by construction.
-fn track_from_disk(path: PathBuf) -> SearchResult {
-    let tags = read_tags(&path);
-    let (created, modified) = match std::fs::metadata(&path) {
+// Everything a track row is made of, read straight off the file: the two stat
+// facts the scan cache keys on, the two it displays, whether the bytes are here
+// at all, and the tags. One read serving both shapes it can turn into — the row
+// the UI draws (row_from_facts) and the row the cache stores (upsert_track) —
+// because a file that has just been downloaded needs both and reading it twice
+// would be two answers where there is one file.
+struct DiskFacts {
+    tags: Tags,
+    size: i64,
+    created: Option<i64>,
+    modified: Option<i64>,
+    not_downloaded: bool,
+}
+
+fn read_disk_facts(path: &Path) -> DiskFacts {
+    let meta = std::fs::metadata(path);
+    let not_downloaded = meta
+        .as_ref()
+        .map(dataless::is_dataless)
+        .unwrap_or(false);
+    let (size, created, modified) = match &meta {
         Ok(m) => {
             let secs = |t: std::io::Result<std::time::SystemTime>| {
                 t.ok()
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64)
             };
-            (secs(m.created()), secs(m.modified()))
+            (m.len() as i64, secs(m.created()), secs(m.modified()))
         }
-        Err(_) => (None, None),
+        Err(_) => (0, None, None),
     };
-    SearchResult {
-        path: path.to_string_lossy().into_owned(),
-        title: tags.title,
-        artist: tags.artist,
-        album: tags.album,
-        album_artist: tags.album_artist,
-        // Unlike the flat library lists, a dropped folder is one contiguous run of
-        // files, so the metadata track/disc numbers are meaningful and worth keeping
-        // — they are also what the sort below reads.
-        track: tags.track,
-        disc: tags.disc,
-        year: tags.year,
-        genre: tags.genre,
-        duration: tags.duration,
-        bitrate: tags.bitrate,
-        sample_rate: tags.sample_rate,
-        bit_depth: tags.bit_depth,
-        gain: tags.rg_track_gain,
+    // Stat before tags, so a cloud file can be recognized without being read. The
+    // callers that reach here on a *dataless* file run on command threads that have
+    // NOT opted out of materializing (only the scanner and the decoder do), so
+    // reading tags would download the file — minutes of a blocked thread, to fill
+    // in a title. The row goes up untagged and marked, and playing it is what
+    // fetches it (after which the row is read again — see reindex_downloaded).
+    let tags = if not_downloaded {
+        Tags::default()
+    } else {
+        read_tags(path)
+    };
+    DiskFacts {
+        tags,
+        size,
         created,
         modified,
+        not_downloaded,
     }
+}
+
+// The same shape a DB row produces, from facts read off the file instead.
+fn row_from_facts(path: &Path, f: &DiskFacts) -> SearchResult {
+    SearchResult {
+        path: path.to_string_lossy().into_owned(),
+        title: f.tags.title.clone(),
+        artist: f.tags.artist.clone(),
+        album: f.tags.album.clone(),
+        album_artist: f.tags.album_artist.clone(),
+        // Unlike the flat library lists, a dropped folder is one contiguous run of
+        // files, so the metadata track/disc numbers are meaningful and worth keeping
+        // — they are also what the drop sort reads.
+        track: f.tags.track,
+        disc: f.tags.disc,
+        year: f.tags.year,
+        genre: f.tags.genre.clone(),
+        duration: f.tags.duration,
+        bitrate: f.tags.bitrate,
+        sample_rate: f.tags.sample_rate,
+        bit_depth: f.tags.bit_depth,
+        gain: f.tags.rg_track_gain,
+        created: f.created,
+        modified: f.modified,
+        not_downloaded: f.not_downloaded,
+    }
+}
+
+// A track row for a file the library index has never seen, read straight off the
+// file. The drop path needs this — everything else in the app is looking at
+// indexed files by construction.
+fn track_from_disk(path: PathBuf) -> SearchResult {
+    row_from_facts(&path, &read_disk_facts(&path))
 }
 
 // Flatten what the user dropped on the window into a playable list of tracks, in
@@ -2458,6 +2658,7 @@ async fn dropped_tracks(
                             gain: m.gain,
                             created: m.created,
                             modified: m.modified,
+                            not_downloaded: m.not_downloaded,
                         },
                         None => track_from_disk(p),
                     }
@@ -2695,7 +2896,7 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
         let sql = format!(
             "SELECT path, title, artist, album, album_artist, disc,
                     year, genre, duration, bitrate, sample_rate, bit_depth,
-                    rg_track_gain, created, mtime
+                    rg_track_gain, created, mtime, dataless
              FROM tracks
              ORDER BY artist IS NULL, artist COLLATE NOCASE,
                       album COLLATE NOCASE, disc, track,
@@ -2724,6 +2925,7 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
                     row.get(12)?,
                     row.get(13)?,
                     row.get(14)?,
+                    row.get(15)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -3601,6 +3803,36 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_columns_match_the_schema_and_the_row_reader() {
+        // Three things are coupled by position and nothing but a comment holds
+        // them together: the tracks table, the TRACK_COLUMNS select list, and the
+        // indices track_row reads. Adding a column to two of the three is the easy
+        // mistake — and it fails at runtime, in one pane, as a cell that is blank
+        // or (worse) shows the neighbouring column's value.
+        let conn = Connection::open_in_memory().expect("open");
+        init_schema(&conn).expect("schema");
+        conn.execute(
+            "INSERT INTO tracks (path, root, mtime, size, title, duration, dataless)
+             VALUES ('/m/a.flac', '/m', 42, 7, 'A', 1.5, 1)",
+            [],
+        )
+        .expect("insert");
+
+        let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks");
+        let row = conn
+            .query_row(&sql, [], track_row)
+            .expect("every TRACK_COLUMNS name must exist in the tracks table");
+
+        // Spot-check both ends of the list plus the column just added: a shifted
+        // index shows up here as a value landing in its neighbour's field.
+        assert_eq!(row.path, "/m/a.flac");
+        assert_eq!(row.title.as_deref(), Some("A"));
+        assert_eq!(row.duration, Some(1.5));
+        assert_eq!(row.modified, Some(42));
+        assert!(row.not_downloaded);
+    }
 
     #[test]
     fn audio_extensions_exclude_drm() {

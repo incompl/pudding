@@ -9,6 +9,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { SearchTrack } from "./types";
 
 export interface AudioEngineCallbacks {
   // Fires when playback advances to a new track (initial track of a Play, or
@@ -23,6 +24,16 @@ export interface AudioEngineCallbacks {
   // A single track failed to decode or open. The engine auto-advances past it;
   // this callback is for logging / surfacing to the user.
   onError: (path: string, message: string) => void;
+  // Playback is waiting on `path` to be downloaded from a file provider, or on
+  // nothing when null. Not an error and not a stall: the transport stays live
+  // and the track plays by itself once the file lands.
+  onFetching: (path: string | null) => void;
+  // A cloud file's bytes are on this Mac now, and `track` is the file read again
+  // now that it can be read at all — the row every surface is holding for it was
+  // built from a scan that could see its name and nothing else. Distinct from
+  // onFetching(null), which only says the wait ended: a download that failed
+  // clears the same way, and this fires only when the file actually arrived.
+  onDownloaded: (track: SearchTrack) => void;
   // The engine has played through the entire queue. The "current track" stays
   // remembered so a subsequent play() with the same queue can restart from the
   // last track that ran.
@@ -47,6 +58,11 @@ interface StateEvent {
 interface ErrorEvent {
   path: string;
   message: string;
+}
+// Null path = nothing is being fetched. One event carries the whole state (see
+// emit_fetching) so a missed edge can't leave the UI waiting forever.
+interface FetchingEvent {
+  path: string | null;
 }
 interface StreamMetadataEvent {
   station: string | null;
@@ -93,6 +109,16 @@ export class GaplessEngine {
     this.unlistens.push(
       await listen<ErrorEvent>("audio:error", (e) => {
         this.cb.onError(e.payload.path, e.payload.message);
+      }),
+    );
+    this.unlistens.push(
+      await listen<FetchingEvent>("audio:fetching", (e) => {
+        this.cb.onFetching(e.payload.path);
+      }),
+    );
+    this.unlistens.push(
+      await listen<SearchTrack>("audio:downloaded", (e) => {
+        this.cb.onDownloaded(e.payload);
       }),
     );
     this.unlistens.push(

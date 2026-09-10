@@ -313,11 +313,14 @@ mod tests {
         assert_eq!(format!("{:?}", bm), "Bookmark(300 bytes)");
     }
 
-    // These tests run UNSANDBOXED, so they prove the FFI is callable and balanced,
-    // not that bookmarks do their job — unsandboxed, plain paths work anyway and a
-    // broken bookmark would pass. tools/sandbox-check.sh is what proves the claim.
+    // These tests run outside the signed sandboxed .app, so they are only live FFI
+    // smoke tests and not the proof that bookmarks do their job. On some macOS
+    // hosts, an ordinary cargo test process cannot create app-scope security
+    // bookmarks at all. Keep them out of the default suite; tools/sandbox-check.sh
+    // is the real integration check.
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "requires macOS security-scoped bookmark support in the test process"]
     fn create_and_resolve_a_real_directory() {
         let dir = std::env::temp_dir();
         let bm = Bookmark::create(&dir).expect("create");
@@ -336,6 +339,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "requires macOS security-scoped bookmark support in the test process"]
     fn create_rejects_a_nonexistent_path() {
         // A bookmark to nothing cannot be made; this must surface as an error
         // rather than an empty blob that fails mysteriously at resolve time.

@@ -19,6 +19,7 @@ import {
   duration,
   currentNodePath,
   currentStreamUrl,
+  fetchingPath,
   queuePlayingIndex,
   app,
 } from "./state";
@@ -29,6 +30,7 @@ import {
   cleanStreamText,
 } from "./main";
 import { setNowPlaying, handleEnded } from "./playback";
+import { applyDownloaded } from "./track-facts";
 
 export const engine = new GaplessEngine({
   onAdvance: (path) => {
@@ -57,6 +59,15 @@ export const engine = new GaplessEngine({
   onPlayingChange: (p) => { isPlaying.value = p; },
   onError: (path, message) => {
     console.error("audio: track failed", path, message);
+  },
+  onFetching: (path) => {
+    fetchingPath.value = path;
+  },
+  // The file behind a "(Not downloaded)" row just landed, so every copy of that
+  // row is describing a file that no longer exists in that state — marker, blank
+  // title and all. See applyDownloaded.
+  onDownloaded: (track) => {
+    applyDownloaded(track);
   },
   onQueueEnded: () => {
     handleEnded();

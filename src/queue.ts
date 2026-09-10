@@ -21,6 +21,7 @@ import {
   npAlbum,
   npAlbumArtist,
   queuePlayingIndex,
+  fetchingPath,
   activeQueue,
   browsedPlaylist,
   listFaceOpen,
@@ -41,6 +42,7 @@ import {
   queueRenameBtn,
 } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
+import { applyCellStatus, rowStatus } from "./row-status";
 import {
   activeColumns,
   buildCells,
@@ -244,37 +246,13 @@ function buildQueueRow(
     style: { "--cols": template },
   });
   append(text, buildCells(t, cols, QUEUE_CELLS));
-  // A missing playlist row is shown but can't be played: dim it, label it, and
-  // skip the click handler so it reads as unavailable rather than dropped. The
-  // label rides *inside* the title cell rather than taking over a column of its
-  // own: it is a fact about the row, not a value of any field, and the cell it
-  // would otherwise land in is whichever column happens to come second — the
-  // runtime, in an automatic set whose tracks carry no artist, which the folded
-  // row then hides outright, losing the marker entirely. Inside the title it
-  // survives every column set and both layouts, and no column loses its value.
-  //
-  // It trails the title, in parens, rather than reading as one more
-  // middot-separated value. A title is a phrase, and a dim phrase after a middot
-  // is exactly what an artist or an album looks like here, so a track actually
-  // *called* "Missing File" made the row read as two values of the same kind.
-  // Brackets say "aside about the row above" in ordinary type, which no column
-  // value here is ever wearing.
-  //
-  // Trailing costs the marker the ellipsis fight it used to win by leading, so
-  // the cell takes the header's shape instead — the title in its own box, the
-  // marker flex: none beside it (see .queue-primary.has-missing). The title
-  // ellipsizes *around* the marker, and the row keeps its explanation at every
-  // column width.
-  if (t.missing) {
-    const primary = text.querySelector<HTMLElement>(".queue-primary") ?? text;
-    const label = primary.textContent ?? "";
-    primary.textContent = "";
-    primary.classList.add("has-missing");
-    append(primary, [
-      h("span", { class: "queue-title-text", text: label }),
-      h("span", { class: "queue-missing", text: "(Missing file)" }),
-    ]);
-  }
+  // The row's one aside — "(Missing file)" for a playlist row whose file is gone,
+  // or a cloud file's "(Downloading...)" / "(Not downloaded)". Shared with the
+  // left pane's two track lists, which draw the same marker from the same facts;
+  // why it lives inside the title cell rather than in a column of its own is in
+  // row-status.ts. A missing row is also dimmed and left without a click handler
+  // below, so it reads as unavailable rather than dropped.
+  applyCellStatus(text, rowStatus(t, fetchingPath.peek()));
   // Row remove (curation): strips this row from the list (and file, if a
   // playlist). Stops propagation so it never counts as a play/commit click.
   const remove = h("button", {
@@ -357,7 +335,7 @@ function buildQueueRow(
         void showContextMenu(e.clientX, e.clientY, [
           ...queueMenuItems((sink) => sink([t])),
           addToPlaylistItem(() => [t]),
-          editMetadataItem(t.path),
+          editMetadataItem(t),
           showInFinderItem(t.path),
           // Right-clicking a row scopes the picker to that row's pane implicitly,
           // so it needs no "Queue ▸" label and no focused-pane guesswork.
@@ -434,8 +412,14 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
     queueWin &&
     queueListEl.contains(queueWin.el)
   ) {
+    const fetching = fetchingPath.peek();
     queueListEl.querySelectorAll<HTMLElement>("li.queue-row:not(.colhead)").forEach((li) => {
       li.classList.toggle("playing", viewToPool[Number(li.dataset.rowIndex)] === playIdx);
+      // The parked download moves from row to row as the queue plays, and this
+      // is the repaint that already runs on every play-advance.
+      const row = queue.tracks[Number(li.dataset.rowIndex)];
+      const cell = li.querySelector<HTMLElement>(".queue-text");
+      if (row && cell) applyCellStatus(cell, rowStatus(row, fetching));
     });
     if (revealTo != null) queueWin.revealIndex(revealTo, stickyMargin());
     return;
@@ -1012,6 +996,7 @@ export function nodeToTrack(n: TreeNode): SearchTrack {
     gain: n.gain,
     created: n.created,
     modified: n.modified,
+    notDownloaded: n.notDownloaded,
   };
 }
 

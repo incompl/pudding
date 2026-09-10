@@ -55,14 +55,37 @@ function isPlaylistPath(path: string): boolean {
   return ext === "m3u" || ext === "m3u8";
 }
 
-// Whether the drop is worth lighting the overlay for. A folder is the case with
-// no extension to read, so "no extension" counts as droppable — which also means
-// a `README` gets a hopeful highlight and then does nothing. That's the right way
-// round: the alternative refuses folders whose name happens to contain a dot
-// (`Bowie - Low (1977)` is fine, `Vol.2` is not), and silently rejecting a real
-// music folder is a much worse failure than a moment of optimism about a text file.
-function looksDroppable(path: string): boolean {
-  return isAudioPath(path) || isPlaylistPath(path) || extensionOf(path) === "";
+// Extensions that name a *file*, confidently enough to turn the overlay off for
+// them. Only ever consulted to decide what the overlay promises, never to decide
+// what gets dropped — see handleDrop.
+//
+// A blocklist rather than an allowlist because of which way the two mistakes cut.
+// The thing we must never miss is a folder, and a folder's name, when it has a dot
+// in it at all, ends in something like `2` (`Vol.2`), `eno` (`Bowie feat. Eno`) or
+// `1977)` — never in `txt`. So listing what is definitely a file leaves folders
+// alone, while listing what might be a folder cannot be done at all. Anything not
+// named here — every extensionless name, every dotted folder, every audio format
+// the list below has not heard of — still lights the overlay.
+const FILE_EXTS = new Set([
+  // documents
+  "txt", "md", "rtf", "pdf", "doc", "docx", "pages", "odt",
+  "xls", "xlsx", "numbers", "csv", "ppt", "pptx", "key",
+  // images
+  "png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "svg", "tiff", "tif", "bmp", "ico",
+  // video
+  "mp4", "mov", "m4v", "avi", "mkv", "webm", "mpg", "mpeg", "wmv",
+  // archives and disk images
+  "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "dmg", "iso", "pkg",
+  // code and config
+  "json", "xml", "yml", "yaml", "toml", "html", "htm", "css", "js", "ts", "py", "rs", "sh",
+]);
+
+// What the overlay should promise for this drag. Yes to anything that could be a
+// folder, which is anything not named above: a name cannot prove something *is* a
+// folder, and there is nothing but the name to go on — under the App Sandbox the
+// dropped paths only become ours to stat on `drop`, not on hover.
+function looksPlayable(path: string): boolean {
+  return !FILE_EXTS.has(extensionOf(path));
 }
 
 let dropOverlay: HTMLElement;
@@ -74,10 +97,10 @@ export async function initFileDrop(): Promise<void> {
   await getCurrentWebview().onDragDropEvent((event) => {
     const p = event.payload;
     if (p.type === "enter") {
-      // `over` fires continuously and carries no paths, so the accept/reject
-      // decision is made once here, on enter, and simply held until the gesture
-      // ends. Nothing to do on `over` at all.
-      showOverlay(p.paths.some(looksDroppable));
+      // `over` fires continuously and carries no paths, so the decision is made
+      // once here, on enter, and simply held until the gesture ends. Nothing to do
+      // on `over` at all.
+      showOverlay(p.paths.some(looksPlayable));
     } else if (p.type === "drop") {
       showOverlay(false);
       void handleDrop(p.paths);
@@ -91,41 +114,52 @@ function showOverlay(visible: boolean): void {
   dropOverlay.classList.toggle("hidden", !visible);
 }
 
+// Everything dropped goes to the backend as it came — including the paths the
+// overlay just declined to light up for. `dropped_tracks` is the only layer that
+// can tell a folder from a file (it stats each path, walks the directories, and
+// keeps only audio), so a name-based filter here could only throw away paths it
+// would have known exactly what to do with.
+//
+// Which is what keeps `looksPlayable` honest: it decides what the overlay claims,
+// never what happens. A folder actually named `Notes.txt` gets no highlight and
+// then plays anyway.
 async function handleDrop(paths: string[]): Promise<void> {
-  const usable = paths.filter(looksDroppable);
-  if (usable.length === 0) return;
+  if (paths.length === 0) return;
 
   // A lone file is the Open With case exactly — same routing, same recents entry,
   // same lone-playback teardown — so hand it to the same function rather than a
-  // parallel copy that could drift.
-  if (usable.length === 1 && (isAudioPath(usable[0]) || isPlaylistPath(usable[0]))) {
-    openAssociatedFile(usable[0]);
+  // parallel copy that could drift. Name-based on purpose: it saves the round trip
+  // on the commonest drop there is, and guessing wrong costs an open that fails and
+  // self-heals rather than a silent no-op.
+  if (paths.length === 1 && (isAudioPath(paths[0]) || isPlaylistPath(paths[0]))) {
+    openAssociatedFile(paths[0]);
     return;
   }
 
   let tracks: SearchTrack[];
   try {
-    tracks = await invoke<SearchTrack[]>("dropped_tracks", { paths: usable });
+    tracks = await invoke<SearchTrack[]>("dropped_tracks", { paths });
   } catch (e) {
-    console.error("dropped_tracks failed", usable, e);
+    console.error("dropped_tracks failed", paths, e);
     return;
   }
-  // An empty folder, or one with nothing playable in it. playQueue would bail on
-  // its own, but bail here too so the intent is stated rather than inferred: a
-  // fruitless drop must leave whatever is currently playing completely alone.
+  // An empty folder, one with nothing playable in it, or a drop that was never
+  // music at all. playQueue would bail on its own, but bail here too so the intent
+  // is stated rather than inferred: a fruitless drop must leave whatever is
+  // currently playing completely alone.
   if (tracks.length === 0) return;
 
   // One dropped folder keys its pool the same way Play folder does, so dropping a
   // folder you are already playing is recognized as the same pool rather than
   // opening a duplicate of it. A mixed/multi drop is a one-off, keyed by time.
-  const single = usable.length === 1;
+  const single = paths.length === 1;
   playQueue(
     {
       kind: "folder",
-      title: single ? basename(usable[0]) : "Dropped items",
+      title: single ? basename(paths[0]) : "Dropped items",
       subtitle: trackCountSubtitle(tracks),
       tracks,
     },
-    single ? `queue:folder:${usable[0]}` : `queue:drop:${Date.now()}`,
+    single ? `queue:folder:${paths[0]}` : `queue:drop:${Date.now()}`,
   );
 }

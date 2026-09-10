@@ -700,6 +700,9 @@ export function syntheticParent(
       albumArtist: t.albumArtist ?? null,
       disc: null,
       track: null,
+      // Survives the round trip back out through nodeToTrack, so a cloud track
+      // doesn't lose its marker by being the one that's playing.
+      notDownloaded: t.notDownloaded,
       isFolder: false,
       loaded: true,
       expanded: false,

@@ -19,6 +19,7 @@ import {
   activeQueue,
   isPlaylistSource,
   treeSelection,
+  fetchingPath,
   activeTab,
   selectedStreamUrl,
   resetToLonePlayback,
@@ -27,6 +28,7 @@ import { treeContainer } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
 import { startTrackDrag } from "./drag-drop";
 import { applyRowFlash, startRowFlash } from "./row-flash";
+import { applyInlineStatus, rowStatus } from "./row-status";
 import {
   joinPath,
   displayLabel,
@@ -123,6 +125,7 @@ export function nodesFromListing(
       gain: f.gain,
       created: f.created,
       modified: f.modified,
+      notDownloaded: f.notDownloaded,
       isFolder: false,
       loaded: true,
       expanded: false,
@@ -208,7 +211,7 @@ function flattenVisible(): TreeRow[] {
 // that's a blank line when there's no artist) so every row is the uniform height
 // the window positions rows by. Indentation, which the nested <ul> padding used to
 // give, is applied here as a left margin from the row's depth.
-function renderTreeRow(row: TreeRow): HTMLElement {
+function renderTreeRow(row: TreeRow, index: number): HTMLElement {
   const { node, parent, depth, showArtist } = row;
   if (row.empty) {
     const marker = h("span", { class: "node-label tree-empty", text: "(empty)" });
@@ -219,7 +222,13 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   // The tree row skips the accent while a queue/playlist owns the playhead — the
   // now-playing highlight belongs to the context playing the track, not to every
   // copy of the same file (see the highlight effect and queueIsActivePool).
-  const label = h("span", { class: "node-label", data: { path: node.path } });
+  // The path is what the highlight/selection effects find a row by; the view index
+  // is what the status effect maps a mounted row back to its TreeRow with (mirroring
+  // the queue's and the navigator's rows), so it never has to search the tree.
+  const label = h("span", {
+    class: "node-label",
+    data: { path: node.path, rowIndex: String(index) },
+  });
   // Indent by depth — the flat window has no nested <ul> to carry the old padding.
   if (depth > 0) label.style.marginLeft = `${depth * INDENT_EM}em`;
   // A reveal's one-shot wash, applied at build time (like .selected / .playing) so
@@ -329,6 +338,14 @@ function renderTreeRow(row: TreeRow): HTMLElement {
   if (!node.isFolder && !node.isPlaylist && node.title && node.artist && showArtist) {
     text.appendChild(h("span", { class: "artist", text: node.artist }));
   }
+  // A cloud file says so here too — "(Not downloaded)", or "(Downloading...)" while
+  // the engine is parked on it. Same marker, same words, same dim ink as the queue's
+  // rows (see row-status.ts): it is a fact about the file, and the browse tree is
+  // where the user meets the file first. Folders and playlists are not files and
+  // never wear one. Repainted in place as the download moves (repaintTreeStatus).
+  if (!node.isFolder && !node.isPlaylist) {
+    applyInlineStatus(text, rowStatus(node, fetchingPath.peek()));
+  }
   label.appendChild(text);
   if (node.isPlaylist) {
     attachPlaylistClicks(label, node);
@@ -417,7 +434,7 @@ function renderTreeRow(row: TreeRow): HTMLElement {
         }
         items.push(...queueMenuItems((sink) => sink([nodeToTrack(node)])));
         items.push(addToPlaylistItem(() => [nodeToTrack(node)]));
-        items.push(editMetadataItem(node.path));
+        items.push(editMetadataItem(node));
         items.push(showInFinderItem(node.path));
       }
       void showContextMenu(e.clientX, e.clientY, items);
@@ -718,7 +735,7 @@ function buildTree(): void {
   // its own state at build time when it scrolls in, so it's already correct.
   treeWin = windowedList({
     count: () => treeRows.length,
-    renderRow: (i) => renderTreeRow(treeRows[i]),
+    renderRow: (i) => renderTreeRow(treeRows[i], i),
   });
   treeWin.el.classList.add("tree-window");
   treeContainer.appendChild(treeWin.el);
@@ -734,6 +751,27 @@ function refreshTreeRows(): void {
   }
   treeRows = flattenVisible();
   treeWin.update();
+}
+
+// Move the download marker as the engine's parked track moves: repaint the status
+// of every mounted row. Only the row that started fetching and the one that stopped
+// can actually change, but a mounted slice is a screenful, and finding those two
+// costs the same walk as repainting all of them.
+//
+// Rows scrolled in after this paint themselves (renderTreeRow reads fetchingPath),
+// so this covers exactly the rows already on screen. The other end of the story —
+// the download landing — re-renders the tree outright (applyDownloaded), because it
+// rewrites the row's title and artist and not just its marker.
+export function repaintTreeStatus(fetching: string | null): void {
+  if (!treeWin) return;
+  treeWin.el
+    .querySelectorAll<HTMLElement>(".node-label[data-row-index]")
+    .forEach((el) => {
+      const row = treeRows[Number(el.dataset.rowIndex)];
+      const text = el.querySelector<HTMLElement>(".label-text");
+      if (!row || row.empty || row.node.isFolder || row.node.isPlaylist || !text) return;
+      applyInlineStatus(text, rowStatus(row.node, fetching));
+    });
 }
 
 // Pixels to leave above a revealed row so it clears the sticky Browse back-bar

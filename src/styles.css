@@ -1792,12 +1792,12 @@ body.np-zen.np-idle #nav-bar {
   .col-grid > .col-cell.colhead-cell {
     overflow: visible;
   }
-  /* A missing row's title cell splits the same way a header does, and for the same
-     reason: the cell's own ellipsis would eat the trailing "Missing file" badge, so
-     the title gets its own clipping box (.queue-title-text) and the badge sits
-     beside it at flex: none. Column mode only — see .queue-missing for why the
-     folded row leaves this inline. */
-  .col-grid > .queue-primary.has-missing {
+  /* A marked row's title cell splits the same way a header does, and for the same
+     reason: the cell's own ellipsis would eat the trailing status badge, so the
+     title gets its own clipping box (.row-title-text) and the badge sits beside
+     it at flex: none. Column mode only — see .row-status for why the folded row
+     leaves this inline. */
+  .col-grid > .col-cell.has-status {
     display: flex;
     align-items: baseline;
   }
@@ -2114,8 +2114,17 @@ body.playback-paused .queue-row.playing .eq-bars {
   background: none;
 }
 
-/* The "Missing file" marker, after the title inside the primary cell (see
-   buildQueueRow). Nested one level down rather than being a cell of its own —
+/* The row's status marker — "(Missing file)", or for a cloud file "(Not
+   downloaded)" / "(Downloading...)" — after the title (see rowStatus). One slot
+   for all three: they are the same kind of statement, and a row is only ever one
+   of them at a time.
+
+   Not the queue's: the same span, the same ink and the same words are used by the
+   navigator's leaf lists and by the browse tree, because the marker states a fact
+   about the file and the file is in all three. Hence the pane-less class name —
+   it names what the span is, not which list it turned up in.
+
+   Nested one level down rather than being a cell of its own —
    which is what keeps it out of the folded row's two-field cap, out of the
    column-mode `::before { content: none }` reset that drops the inline middots
    between *cells*, and out of the column-mode rule that lifts every cell to
@@ -2132,7 +2141,7 @@ body.playback-paused .queue-row.playing .eq-bars {
    unlike the middots they replace. They are not a separator between two things —
    they belong to this phrase, and they travel with it into the hover tooltip,
    which reads the row back off the DOM (see overflow-title.ts). */
-.queue-missing {
+.row-status {
   flex: none;
   /* The space before it, as a margin rather than the flex box's `gap`: folded, the
      cell is inline text and has no flex box to carry one, so the phrase would sit
@@ -2151,7 +2160,7 @@ body.playback-paused .queue-row.playing .eq-bars {
    (.queue-text) clips as a whole; an inline-flex box there would be atomic, so a
    long title would hard-clip with no ellipsis at all. Inline, the folded row keeps
    the one trailing ellipsis it has always had. */
-.queue-title-text {
+.row-title-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

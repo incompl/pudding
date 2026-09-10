@@ -67,6 +67,9 @@ export function playlistPlayableTracks(data: PlaylistData): SearchTrack[] {
       gain: t.gain,
       created: t.created,
       modified: t.modified,
+      // Not a filter, unlike `missing` above: a cloud track is playable, and the
+      // flag rides along so the queue view marks it once the playlist is playing.
+      notDownloaded: t.notDownloaded,
     }));
 }
 
@@ -86,6 +89,7 @@ export function playlistViewTracks(data: PlaylistData): SearchTrack[] {
     year: t.year,
     genre: t.genre,
     missing: t.missing,
+    notDownloaded: t.notDownloaded,
     duration: t.duration,
     bitrate: t.bitrate,
     sampleRate: t.sampleRate,

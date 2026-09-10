@@ -38,12 +38,12 @@
 //           the 28rem breakpoint. There the cells are inline and clip nothing
 //           themselves; the line around them is what ellipsizes.
 //
-// .queue-title-text is a field too, though it isn't a cell: a missing row's title
+// .row-title-text is a field too, though it isn't a cell: a missing row's title
 // cell holds the title in its own clipping box beside its "(Missing file)" marker (see
 // buildQueueRow), so the cell around them clips nothing and a long title would
 // answer a hover with silence. Listed here, the innermost-first rule below picks
 // the box that is actually doing the clipping, exactly as it does for a cell.
-const FIELD = ".col-cell, .nav-primary, .nav-secondary, .queue-title-text";
+const FIELD = ".col-cell, .nav-primary, .nav-secondary, .row-title-text";
 const LINE = ".nav-cell, .queue-text";
 
 // Both metrics are integers, and sub-pixel text metrics routinely leave scrollWidth

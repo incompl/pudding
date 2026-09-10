@@ -23,4 +23,5 @@ Mac App Store readiness. Sandbox, entitlements, and bookmarked roots are done
 Decided: files and folders opened from outside the library are not restored
 across launches, so nothing outside a library root ever mints a bookmark.
 
+- [ ] Re-eviction never restores "(Not downloaded)": `downloadedPaths` (src/state.ts) is add-only for the session, so a file the OS evicts back to the cloud after we downloaded it keeps its downloaded look until relaunch. Clear the path there on the scan's `was_dataless != dataless` refresh
 - [ ] Drop unreachable Open Recent entries in `hydrateRecentItems` instead of letting them silently delete themselves on click — prune on PermissionDenied only, so an unplugged drive keeps its rows
