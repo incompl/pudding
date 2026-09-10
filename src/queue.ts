@@ -82,6 +82,7 @@ import {
   queueIsActivePool,
   trackCountSubtitle,
   addToPlaylistItem,
+  showInFinderItem,
   toast,
   clearArt,
   UNTITLED_PLAYLIST_TITLE,
@@ -330,8 +331,9 @@ function buildQueueRow(
     });
     li.addEventListener("dblclick", playRow);
   }
-  // Right-click a playable row to queue it, add it to a playlist, or (multi)
-  // remove it (a missing row has no real file to copy, so it's skipped).
+  // Right-click a playable row to queue it, add it to a playlist, reveal it in
+  // Finder, or (multi) remove it (a missing row has no real file to copy — or
+  // to reveal — so it's skipped).
   // "Add to queue" leads, matching the tree track/folder menus.
   if (!t.missing) {
     li.addEventListener("contextmenu", (e) => {
@@ -348,6 +350,7 @@ function buildQueueRow(
             label: `Remove ${sel.length} from list`,
             action: () => removeCuratedTracks(sel),
           },
+          showInFinderItem(sel[0].path),
           columnsMenuItem("queue", autoQueueColumns(queue.tracks)),
         ]);
       } else {
@@ -355,6 +358,7 @@ function buildQueueRow(
           ...queueMenuItems((sink) => sink([t])),
           addToPlaylistItem(() => [t]),
           editMetadataItem(t.path),
+          showInFinderItem(t.path),
           // Right-clicking a row scopes the picker to that row's pane implicitly,
           // so it needs no "Queue ▸" label and no focused-pane guesswork.
           columnsMenuItem("queue", autoQueueColumns(queue.tracks)),
