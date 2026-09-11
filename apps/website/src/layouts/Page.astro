@@ -44,6 +44,7 @@ const currentPath = Astro.url.pathname.replace(/\/?$/, '/');
           {navigation.map(({ label, path }) => (
             <a href={`${base}${path}`} aria-current={currentPath === `${base}${path}` ? 'page' : undefined}>{label}</a>
           ))}
+          <a href="https://github.com/incompl/pudding" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">↗</span></a>
         </nav>
       </header>
       <main id="main" tabindex="-1"><slot /></main>
@@ -51,8 +52,6 @@ const currentPath = Astro.url.pathname.replace(/\/?$/, '/');
         <div><a class="wordmark" href={base}>pudding</a><p>Copyright 2026 Greg Smith</p></div>
         <nav aria-label="Footer navigation">
           <a href={`${base}privacy/`} aria-current={currentPath === `${base}privacy/` ? 'page' : undefined}>Privacy policy</a>
-          <a href={`${base}support/`}>Support</a>
-          <a href="https://github.com/incompl/pudding">GitHub <span aria-hidden="true">↗</span></a>
         </nav>
       </footer>
     </div>

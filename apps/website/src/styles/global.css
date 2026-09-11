@@ -20,16 +20,18 @@ p, li { line-height: 1.7; }
 h1, h2, h3, p, figure { margin: 0; }
 h1, h2, h3 { text-wrap: balance; }
 .shell { max-width: 1184px; margin: auto; padding: 0 32px; }
-.site-header { display: flex; align-items: center; justify-content: space-between; gap: 32px; padding: 28px 0; border-bottom: 1px solid var(--line); }
+.site-header { display: flex; align-items: center; justify-content: space-between; gap: 32px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .wordmark { display: inline-flex; align-items: center; gap: 9px; font-size: 30px; font-weight: 750; letter-spacing: -1.5px; text-decoration: none; }
 .main-nav { display: flex; flex-wrap: wrap; gap: 10px; }
 .main-nav a { padding: 12px 17px; font-size: 16px; font-weight: 600; text-decoration: none; border: 1px solid transparent; border-radius: 4px; }
 .main-nav a:hover { background: #171d12; }
 .main-nav a[aria-current='page'] { color: var(--primary); background: #202b17; border-color: #4b6035; }
-.hero { position: relative; padding: 69px 0 54px; }
-.hero h1 { margin-top: 0; }
-.hero .app-preview { margin-top: 40px; }
-.eyebrow { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; }
+.hero { position: relative; padding: 20px 0 0; }
+.hero h1 { font-size: clamp(40px, 5.2vw, 64px); margin: 0 0 16px; }
+.hero .intro { max-width: 660px; font-size: 16px; line-height: 1.6; }
+/* The hero screenshot carries ~25px of transparent shadow at its top edge, so it needs
+   almost no margin of its own to sit close under the feature strip. */
+.hero-shot { margin: 6px 0 72px; }
 h1 { font-size: clamp(46px, 7.5vw, 88px); font-weight: 650; line-height: 1.04; letter-spacing: -.055em; margin: 27px 0 36px; }
 .primary { color: var(--primary); }
 .accent { color: var(--accent); }
@@ -42,9 +44,15 @@ h1 { font-size: clamp(46px, 7.5vw, 88px); font-weight: 650; line-height: 1.04; l
 .text-link { font-size: 14px; font-weight: 600; }
 .small-note { font-size: 12px; color: var(--muted); }
 h2 { font-size: clamp(28px, 3.2vw, 38px); font-weight: 600; letter-spacing: -.035em; line-height: 1.2; }
-.app-preview { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: #000; }
+/* Screenshots include the macOS window and shadow; leave them unframed and unclipped. */
 .app-preview img { width: 100%; }
 figcaption { color: var(--muted); text-align: center; padding: 16px; font-size: 14px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.features { padding: 22px 0 0; }
+.feature-list { list-style: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 36px; margin: 0; padding: 0; }
+.feature-list li { position: relative; padding: 9px 0 9px 20px; border-top: 1px solid var(--line); font-size: 14px; line-height: 1.5; color: var(--muted); }
+.feature-list li::before { content: ''; position: absolute; left: 0; top: 16px; width: 6px; height: 6px; background: var(--primary); }
+.feature-list strong { color: #f3f5ed; font-weight: 650; }
 h3 { font-size: 19px; font-weight: 600; margin: 15px 0 10px; letter-spacing: -.4px; }
 .page-heading { padding: 68px 0 44px; max-width: 760px; }
 .page-heading h1 { font-size: clamp(44px, 6vw, 70px); margin: 20px 0; }
@@ -52,7 +60,7 @@ h3 { font-size: 19px; font-weight: 600; margin: 15px 0 10px; letter-spacing: -.4
 .gallery { display: grid; gap: 50px; margin-bottom: 80px; }
 .gallery h2 { margin-bottom: 12px; }
 .gallery article > p { color: var(--muted); margin-bottom: 24px; max-width: 650px; }
-.mini-preview { padding: 32px 20px 10px; background: #11160d; }
+.mini-preview { padding: 32px 20px 10px; }
 .mini-preview img { width: auto; margin: auto; }
 .reading-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 70px; margin-bottom: 80px; }
 .contents { display: flex; flex-direction: column; align-items: start; gap: 18px; font-size: 14px; border-top: 1px solid var(--line); padding-top: 24px; }
@@ -71,10 +79,8 @@ h3 { font-size: 19px; font-weight: 600; margin: 15px 0 10px; letter-spacing: -.4
 .shortcut-list > div { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .shortcut-list dd { margin: 0; color: var(--muted); text-align: right; }
 .policy { margin-bottom: 80px; }
-.support-options { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; margin-bottom: 64px; }
-.support-options article { border-top: 1px solid var(--line); padding-top: 28px; }
-.support-options h2 { font-size: 28px; margin-bottom: 16px; }
-.support-options p { color: var(--muted); margin-bottom: 24px; }
+.support-links { margin: 0 0 80px; padding-left: 24px; font-size: 18px; }
+.support-links li + li { margin-top: 12px; }
 .site-footer { display: flex; align-items: center; justify-content: space-between; gap: 30px; padding: 28px 0 38px; border-top: 1px solid var(--line); }
 .site-footer .wordmark { font-size: 25px; }
 .site-footer p { font-size: 12px; color: var(--muted); margin-top: 8px; }
@@ -84,13 +90,17 @@ h3 { font-size: 19px; font-weight: 600; margin: 15px 0 10px; letter-spacing: -.4
 .skip-link:focus { transform: translateY(0); }
 @media (max-width: 760px) {
   .shell { padding: 0 22px; }
-  .site-header { flex-direction: column; align-items: start; gap: 20px; padding: 22px 0 16px; }
+  .site-header { flex-direction: column; align-items: start; gap: 20px; padding: 11px 0 16px; }
   .main-nav { width: 100%; gap: 4px; justify-content: space-between; }
   .main-nav a { padding: 10px 8px; font-size: 14px; }
-  .hero { padding: 44px 0 36px; }
+  .hero { padding: 32px 0 0; }
+  .features { padding: 18px 0 0; }
+  .feature-list { grid-template-columns: 1fr; }
+  .feature-list li { font-size: 15px; padding: 11px 0 11px 20px; }
+  .feature-list li::before { top: 19px; }
+  .hero-shot { margin: 22px 0 56px; }
   .hero-bottom { flex-direction: column; align-items: start; gap: 26px; }
   .intro { font-size: 16px; }
-  .support-options { grid-template-columns: 1fr; gap: 30px; }
   .page-heading { padding: 44px 0 32px; }
   .reading-layout { grid-template-columns: 1fr; gap: 40px; }
   .contents { flex-direction: row; flex-wrap: wrap; gap: 18px 24px; }
