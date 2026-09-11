@@ -11,6 +11,7 @@
     "dev": "pnpm --filter @pudding/desktop dev",
     "build": "pnpm --filter @pudding/desktop build",
     "gen:licenses": "pnpm --filter @pudding/desktop gen:licenses",
+    "gen:screenshot-library": "pnpm --filter @pudding/desktop gen:screenshot-library",
     "typecheck": "pnpm --filter @pudding/desktop typecheck",
     "preview": "pnpm --filter @pudding/desktop preview",
     "tauri": "pnpm --filter @pudding/desktop tauri",

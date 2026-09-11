@@ -138,6 +138,20 @@ A few things that aren't obvious:
 - Native Rust audio engine ([symphonia](https://github.com/pdeljanov/Symphonia) + [cpal](https://github.com/RustAudio/cpal)) for gapless file playback and internet radio with in-band ICY now-playing metadata
 - Help > Licenses lists every bundled dependency and its license text, generated from the real cargo and pnpm dependency graphs by `scripts/gen-licenses.mjs` (run by `pnpm dev` and `pnpm build`). It covers the statically linked Rust standard library and vendored artwork such as the Lucide icons too, and the build fails if any dependency would ship without attribution
 
+## Screenshot library
+
+Generate a deterministic library of fictional artists, albums, tracks, and
+abstract cover art with no third-party tools:
+
+```sh
+pnpm gen:screenshot-library
+```
+
+The default output is `~/Pudding Screenshot Library`. Pass a different location
+after `--`, for example `pnpm gen:screenshot-library -- --out /tmp/pudding-mock`.
+The generated WAV files have realistic durations, a short preview tone, complete
+metadata, and embedded cover art. The full library is about 120 MB.
+
 ## AI Disclaimer
 
 This app was created using AI development tools. If you're not into that, no judgement, namaste.

@@ -8,6 +8,7 @@
     "dev": "pnpm gen:licenses && vite",
     "build": "pnpm gen:licenses && tsc && vite build",
     "gen:licenses": "node scripts/gen-licenses.mjs",
+    "gen:screenshot-library": "node scripts/gen-screenshot-library.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "preview": "vite preview",
     "tauri": "tauri",
