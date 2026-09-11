@@ -2568,13 +2568,14 @@ function setupSettings(restoredEq: EqState | null): void {
   // The visualizer mounts once into its layer inside the now-playing hero (not a
   // pane takeover). Its rAF loop runs only while it's the chosen hero view AND
   // the hero face is actually visible (not covered by the list, an editor, or a
-  // panel), so it costs nothing otherwise.
+  // panel), so it costs nothing otherwise. The idle sample preview keeps its art
+  // face, but once Play loads that sample it behaves like every other track.
   void createVisualizer(nowPlayingVisualizerEl).then((viz) => {
     effect(() => {
       if (
         nowPlayingView.value === "visualizer" &&
         heroVisible.value &&
-        !bundledSampleShown.value
+        !welcomeSamplePreview.value
       ) viz.start();
       else viz.stop();
     });
@@ -3159,8 +3160,12 @@ function setLiveIndicatorPaused(paused: boolean): void {
 
 function setupEffects(): void {
   effect(() => {
+    const samplePreview = welcomeSamplePreview.value;
     const sampleShown = bundledSampleShown.value;
-    nowPlayingPanel.classList.toggle("welcome-sample", sampleShown);
+    // `welcome-sample` is the idle preview override that keeps the cover visible
+    // even when Visualizer is the saved view. Drop it as soon as the sample is
+    // actually loaded so playback gets the normal art/visualizer behavior.
+    nowPlayingPanel.classList.toggle("welcome-sample", samplePreview);
     nowPlayingPanel.classList.toggle("bundled-sample", sampleShown);
     nowPlayingEmptyEl.classList.toggle(
       "hidden",

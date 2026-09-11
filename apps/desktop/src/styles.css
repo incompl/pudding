@@ -1073,9 +1073,9 @@ html[data-mode="light"] #search-results {
   display: none;
 }
 
-/* A stored Visualizer preference must not erase the bundled sample: its preview
-   and playback keep the art face visible without changing that preference, so
-   leaving the sample restores the user's chosen view. */
+/* A stored Visualizer preference must not erase the idle bundled-sample preview.
+   Once Play loads the sample, .welcome-sample is removed and it uses the normal
+   visualizer face like any other playing file. */
 #now-playing-panel.view-visualizer.welcome-sample #now-playing-visualizer {
   display: none;
 }
