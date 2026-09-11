@@ -16,6 +16,7 @@ import {
   npArtist,
   npAlbum,
   npAlbumArtist,
+  npArt,
   npStreamMeta,
   currentNodePath,
   currentStreamUrl,
@@ -31,7 +32,10 @@ import {
   resetToLonePlayback,
   autoadvanceEnabled,
   dismissFullPanels,
+  libraryRootSet,
+  libraryTreeLoaded,
 } from "./state";
+import { BUNDLED_SAMPLE, bundledSampleArt, bundledSamplePath } from "./sample";
 import { fetchChildren } from "./tree-view";
 import {
   debounce,
@@ -134,6 +138,14 @@ export function togglePlayPause(): void {
     return;
   }
   if (!hasTrack.value) {
+    const samplePath = bundledSamplePath.peek();
+    if (libraryTreeLoaded.peek() && !libraryRootSet.peek() && samplePath) {
+      // Carry the preview art through the transition to real playback so clicking
+      // Play never flashes the cover away while loadArt reads the same tag again.
+      npArt.value = bundledSampleArt.peek();
+      playSearchTrack({ path: samplePath, ...BUNDLED_SAMPLE });
+      return;
+    }
     void startLibrary();
     return;
   }

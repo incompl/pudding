@@ -1073,6 +1073,30 @@ html[data-mode="light"] #search-results {
   display: none;
 }
 
+/* A stored Visualizer preference must not erase the bundled sample: its preview
+   and playback keep the art face visible without changing that preference, so
+   leaving the sample restores the user's chosen view. */
+#now-playing-panel.view-visualizer.welcome-sample #now-playing-visualizer {
+  display: none;
+}
+#now-playing-panel.view-visualizer.welcome-sample #now-playing-art {
+  display: block;
+}
+#now-playing-panel.view-visualizer.welcome-sample #now-playing-text {
+  display: flex;
+}
+
+/* Preview metadata describes an action, not a library location, so it should not
+   inherit the normal now-playing links' pointer/hover affordance. */
+#now-playing-panel.bundled-sample .np-link .marquee-inner {
+  cursor: default;
+}
+#now-playing-panel.bundled-sample #now-playing-title .marquee-inner:hover,
+#now-playing-panel.bundled-sample #now-playing-artist .marquee-inner:hover,
+#now-playing-panel.bundled-sample #now-playing-album .marquee-inner:hover {
+  color: inherit;
+}
+
 /* Track banner: the title/artist that flashes over the visualizer on each new
    track (src/visualizer.ts showTrack). Centered horizontally and anchored low,
    a fixed distance up from the bottom. Layout-inert (pointer-events none) and
@@ -3313,8 +3337,8 @@ body.dragging-noselect * {
   padding: 0.5em 1em;
 }
 
-/* Get-started prompt filling a source panel until its folder/stream list is set
-   (Files → library folder, Streams → stream list path). */
+/* Get-started / recovery prompt filling a source panel until its source is set
+   (Files -> library folder, Streams -> stream list path). */
 .panel-empty {
   color: var(--text-muted);
   padding: 1em;

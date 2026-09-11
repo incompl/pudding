@@ -246,7 +246,7 @@ export async function refreshLibrary(): Promise<void> {
         break;
       }
       // A reconcile can be the moment a library stops (or starts) being empty —
-      // first files copied into a fresh ~/Music, or the last ones removed — and the
+      // first files copied into a configured folder, or the last ones removed — and the
       // get-started prompt is gated on this, so recompute it here as refreshTree
       // does rather than leaving it at whatever the last full rebuild decided.
       libraryHasContent.value = app.rootNode.children.length > 0;

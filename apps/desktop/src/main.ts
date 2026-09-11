@@ -298,6 +298,12 @@ import {
   themeMode,
   themesForMode,
 } from "./theme";
+import {
+  BUNDLED_SAMPLE,
+  bundledSampleArt,
+  bundledSamplePath,
+  prepareBundledSample,
+} from "./sample";
 
 const STORE_FILE = "settings.json";
 export const KEY_LIBRARY_ROOTS = "libraryRoots";
@@ -891,6 +897,25 @@ export const heroVisible = computed(
     !licensesOpen.value &&
     !equalizerOpen.value &&
     paneEditor.value === null,
+);
+
+// A fresh install uses the normal hero as a preview of the bundled welcome track,
+// without claiming anything is loaded to the engine or publishing it to system
+// Now Playing. Real playback always wins over the preview.
+const welcomeSamplePreview = computed(
+  () =>
+    libraryTreeLoaded.value &&
+    !libraryRootSet.value &&
+    !hasTrack.value &&
+    bundledSamplePath.value !== null,
+);
+// The preview and the playing bundled track use the normal metadata elements,
+// but neither has a home in the user's library for those elements to link to.
+const bundledSampleShown = computed(
+  () =>
+    welcomeSamplePreview.value ||
+    (bundledSamplePath.value !== null &&
+      currentNodePath.value === bundledSamplePath.value),
 );
 
 // The playlist whose contents currently fill the pane's list face — the browsed one,
@@ -2546,7 +2571,11 @@ function setupSettings(restoredEq: EqState | null): void {
   // panel), so it costs nothing otherwise.
   void createVisualizer(nowPlayingVisualizerEl).then((viz) => {
     effect(() => {
-      if (nowPlayingView.value === "visualizer" && heroVisible.value) viz.start();
+      if (
+        nowPlayingView.value === "visualizer" &&
+        heroVisible.value &&
+        !bundledSampleShown.value
+      ) viz.start();
       else viz.stop();
     });
     // Announce each new track over the visualizer: flash its title/artist that
@@ -2581,7 +2610,7 @@ function setupSettings(restoredEq: EqState | null): void {
   // version from tauri.conf.json, read via the Tauri app API.
   void getVersion().then((v) => { aboutVersionEl.textContent = `pudding ${v}`; });
 
-  // The get-started prompts' inline "settings" links (Files: no library root,
+  // The get-started prompts' inline settings links (Files: no library root,
   // Streams: no stream list path) open the settings panel.
   for (const id of ["files-empty-settings", "streams-empty-settings"]) {
     document
@@ -2904,12 +2933,15 @@ function setupPlayerControls(): void {
   // click in the empty space beside the text is absorbed rather than firing the
   // link (the .np-link hover accent is scoped to the same span).
   nowPlayingTitleInner.addEventListener("click", () => {
+    if (bundledSampleShown.value) return;
     revealNowPlaying();
   });
   nowPlayingArtistInner.addEventListener("click", () => {
+    if (bundledSampleShown.value) return;
     if (npArtist.value) goToArtist(npArtist.value);
   });
   nowPlayingAlbumInner.addEventListener("click", () => {
+    if (bundledSampleShown.value) return;
     if (npAlbum.value) goToAlbum(npAlbum.value, npAlbumArtist.value ?? npArtist.value ?? "");
   });
 
@@ -3127,20 +3159,30 @@ function setLiveIndicatorPaused(paused: boolean): void {
 
 function setupEffects(): void {
   effect(() => {
-    nowPlayingEmptyEl.classList.toggle("hidden", hasTrack.value);
+    const sampleShown = bundledSampleShown.value;
+    nowPlayingPanel.classList.toggle("welcome-sample", sampleShown);
+    nowPlayingPanel.classList.toggle("bundled-sample", sampleShown);
+    nowPlayingEmptyEl.classList.toggle(
+      "hidden",
+      hasTrack.value || sampleShown,
+    );
   });
   effect(() => {
-    nowPlayingTitleInner.textContent = npTitle.value;
+    nowPlayingTitleInner.textContent = bundledSampleShown.value
+      ? BUNDLED_SAMPLE.title
+      : npTitle.value;
     updateMarquee(nowPlayingTitleEl);
   });
   effect(() => {
-    nowPlayingArtistInner.textContent = npArtist.value ?? "";
-    nowPlayingArtistEl.classList.toggle("hidden", !npArtist.value);
+    const artist = bundledSampleShown.value ? BUNDLED_SAMPLE.artist : npArtist.value;
+    nowPlayingArtistInner.textContent = artist ?? "";
+    nowPlayingArtistEl.classList.toggle("hidden", !artist);
     updateMarquee(nowPlayingArtistEl);
   });
   effect(() => {
-    nowPlayingAlbumInner.textContent = npAlbum.value ?? "";
-    nowPlayingAlbumEl.classList.toggle("hidden", !npAlbum.value);
+    const album = bundledSampleShown.value ? BUNDLED_SAMPLE.album : npAlbum.value;
+    nowPlayingAlbumInner.textContent = album ?? "";
+    nowPlayingAlbumEl.classList.toggle("hidden", !album);
     updateMarquee(nowPlayingAlbumEl);
   });
   // The nav bar: the single line above the transport that carries the source
@@ -3187,7 +3229,11 @@ function setupEffects(): void {
     }
   });
   effect(() => {
-    const url = npArt.value;
+    // Keep the sample on the already-decoded preview URL after Play. Switching
+    // to npArt here would hand the <img> between two reactive sources while the
+    // engine starts, which can briefly drop the composited image to black even
+    // though both sources contain the same data URL.
+    const url = bundledSampleShown.value ? bundledSampleArt.value : npArt.value;
     if (url) {
       // Avoid reassigning an identical src (same-album tracks): a no-op set
       // would still trigger a reload/repaint and flicker.
@@ -3212,11 +3258,12 @@ function setupEffects(): void {
     document.body.classList.toggle("playback-paused", !isPlaying.value);
   });
   effect(() => {
-    // Idle, the play button doesn't go dead — it "starts the library" by playing
-    // the first Files entry (see togglePlayPause/startLibrary), preserving the
-    // ready-to-go energy. It's only truly disabled when there's nothing to start:
-    // no track loaded and an empty/absent library.
-    playPauseBtn.disabled = !hasTrack.value && !libraryHasContent.value;
+    // Idle play starts the first library entry, or the bundled welcome track on a
+    // fresh/no-library install. It is disabled only when neither source is ready.
+    playPauseBtn.disabled =
+      !hasTrack.value &&
+      !libraryHasContent.value &&
+      !(welcomeSamplePreview.value && bundledSamplePath.value);
   });
   effect(() => {
     // Streams have no track to step between, so hide prev/next entirely (like
@@ -3363,12 +3410,9 @@ function setupEffects(): void {
     document.getElementById("tab-streams")?.classList.toggle("hidden", tab !== "streams");
   });
 
-  // While the Files panel has nothing to browse, the whole thing is a get-started
-  // prompt instead of the view springboard — both when no library folder is
-  // configured AND when one is but holds no music, which used to fall through to
-  // an empty springboard that read as a broken app. render() owns hiding the
-  // navigator, folder tree and create button (it already gates those), so just
-  // re-render it when either input flips.
+  // While Files has nothing to browse, the whole pane is a get-started prompt:
+  // setup copy when no root is configured, recovery copy for an empty root.
+  // render() owns both branches, so re-render whenever an input flips.
   effect(() => {
     libraryRootSet.value;
     libraryHasContent.value;
@@ -3812,32 +3856,24 @@ async function init(): Promise<void> {
     load(STORE_FILE, { defaults: {}, autoSave: false }),
   );
 
+  // Resolve the built-in welcome track and read its embedded cover before the
+  // first hero render. Failure is non-fatal: the ordinary idle state remains.
+  try {
+    await bootStep("prepare-bundled-sample", prepareBundledSample);
+  } catch (error) {
+    console.error("bundled sample failed", error);
+  }
+
   // Per-pane column sets, header visibility, and the library sort. Loaded before
   // anything renders, so the first paint is already the user's layout — no flash
   // of the automatic columns followed by a rebuild.
   await loadColumnPrefs();
 
-  // First run (key never set): start on ~/Music instead of an empty panel, the
-  // way every other player does — a fresh install should have the user's music in
-  // it, not a sentence about settings. Backend-resolved (default_library_root) so
-  // the sandboxed build persists the real folder rather than its container link,
-  // and returns null when there is no ~/Music, which falls back to the
-  // get-started prompt exactly as before. An explicit [] — the user removed every
-  // folder — is respected, not reseeded, mirroring the stream-list path below.
+  // No implicit library on first run: existing saved folders remain intact, while
+  // a missing key starts in the bundled-sample onboarding state. Choosing a folder
+  // in Settings is the only action that establishes a library root.
   const storedRoots = await app.store.get<string[]>(KEY_LIBRARY_ROOTS);
   app.libraryRoots = storedRoots ?? [];
-  if (storedRoots === undefined) {
-    try {
-      const fallback = await invoke<string | null>("default_library_root");
-      if (fallback) {
-        app.libraryRoots = [fallback];
-        await app.store.set(KEY_LIBRARY_ROOTS, app.libraryRoots);
-        await app.store.save();
-      }
-    } catch (e) {
-      console.error("default_library_root failed", e);
-    }
-  }
   app.rootBookmarks =
     (await app.store.get<Record<string, string>>(KEY_ROOT_BOOKMARKS)) ?? {};
   // Reclaim the sandbox grant on each root before anything reads one. Everything

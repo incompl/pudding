@@ -425,8 +425,8 @@ export const followSampleRate = signal(false);
 export function autoadvanceEnabled(): boolean {
   return autoadvance.value;
 }
-// Whether a library root has been configured at all. When false the whole Files
-// panel is replaced by a get-started prompt (see the files-empty effect) rather
+// Whether a library root has been configured at all. When false the Files panel
+// shows its setup prompt while the bundled sample previews in Now Playing, rather
 // than showing an empty view springboard the user can't do anything with.
 export const libraryRootSet = signal(false);
 export const streamListPathValid = signal(true);
@@ -440,14 +440,14 @@ export const streamListWritable = signal(false);
 // Whether the file tree has at least one top-level entry to start from. Drives
 // the idle play button: with content, an idle play "starts the library" (plays
 // the first entry) instead of sitting disabled, so the button reads ready-to-go.
-// Also half of the Files get-started prompt's condition — but only once
-// libraryTreeLoaded says the answer is real. See that signal.
+// Also part of the Files empty-state condition — but only once libraryTreeLoaded
+// says the answer is real. See that signal.
 export const libraryHasContent = signal(false);
 // Whether the tree has finished its first (or latest) build — false for the
 // window between refreshTree clearing the old answer and the listing coming back.
-// Without this the get-started prompt would flash on every boot and every library
-// change: libraryRootSet and libraryHasContent are both false mid-refresh, which
-// is indistinguishable from "no library" unless something says "not known yet".
+// Without this empty-state UI would flash on every boot and every library change:
+// libraryRootSet and libraryHasContent are both false mid-refresh, which is
+// indistinguishable from "no library" unless something says "not known yet".
 export const libraryTreeLoaded = signal(false);
 
 export const treeSelection = signal<Set<string>>(new Set());

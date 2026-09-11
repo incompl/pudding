@@ -101,11 +101,10 @@ export interface LibraryNavDeps {
   persistLocation: (steps: NavStep[]) => void;
   // Why the Files panel has nothing to browse, or null when it has something.
   // "no-root" is a fresh install with no library folder configured; "empty" is a
-  // configured folder holding no music — a ~/Music that happens to be empty (the
-  // default seeded on first run), or a drive that didn't mount. Both are dead ends
-  // for every view and for the folder tree, so both swap the whole panel for the
-  // get-started prompt (#files-empty); only the prompt's wording differs. main.ts
-  // re-renders (renderNav) whenever this changes.
+  // configured folder holding no music — an empty folder, or a drive that didn't
+  // mount. Both are dead ends for every view and the folder tree, so both swap the
+  // whole panel for the get-started prompt (#files-empty); only the wording differs.
+  // main.ts re-renders whenever this changes.
   libraryEmpty: () => "no-root" | "empty" | null;
   // Tell the Browse folder tree whether it's the active view. The tree defers its
   // (costly) DOM build while hidden, so entering Browse flushes any pending build.
@@ -854,7 +853,7 @@ function render(): void {
   if (empty !== null) {
     filesEmptyLead.textContent =
       empty === "no-root"
-        ? "To see files, add a library folder in"
+        ? "To get started, add a library folder in"
         : "No music in your library folder. Drop files here, or pick another in";
     folderTree.classList.add("hidden");
     createBtn.classList.add("hidden");

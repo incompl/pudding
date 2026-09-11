@@ -1232,30 +1232,6 @@ fn ensure_default_stream_list(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-// The folder a fresh install starts with: the user's ~/Music, when it exists.
-// Canonicalized deliberately — sandboxed, `home_dir` is the app's container and
-// the music folder reaches the real one through the container's `Music` symlink
-// (that link is what com.apple.security.assets.music.read-write grants against).
-// Storing the container path would leak an implementation detail into Settings and
-// break the moment the container is rebuilt, so resolve the link here and persist
-// the real path, which the entitlement covers just the same. Unsandboxed the
-// canonicalize is a no-op beyond tidying the string.
-//
-// `None` means "no obvious default" — the frontend then falls back to the
-// get-started prompt exactly as it did before there was a default at all. It never
-// creates the folder: a missing ~/Music is a user with their music elsewhere, and
-// seeding an empty one would just replace one empty state with another.
-#[tauri::command]
-fn default_library_root(app: AppHandle) -> Option<String> {
-    let home = app.path().home_dir().ok()?;
-    let music = home.join("Music");
-    if !music.is_dir() {
-        return None;
-    }
-    let resolved = std::fs::canonicalize(&music).unwrap_or(music);
-    Some(normalize_root(&resolved.to_string_lossy()))
-}
-
 #[tauri::command]
 fn default_stream_list_path(app: AppHandle) -> Result<String, String> {
     Ok(ensure_default_stream_list(&app)?
@@ -3714,7 +3690,6 @@ pub fn run() {
             list_dir,
             read_stream_list,
             default_stream_list_path,
-            default_library_root,
             add_stream,
             update_stream,
             delete_stream,

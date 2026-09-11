@@ -166,11 +166,9 @@ beforeEach(() => {
   (globalThis as { __noWindowing?: boolean }).__noWindowing = true;
 });
 
-// The get-started prompt covers BOTH dead ends, not just the configured-folder
-// one: a library folder that holds no music used to fall through to a springboard
-// whose every view was empty, which reads as a broken app rather than one waiting
-// for input. Both cases must also suppress the springboard, the folder tree and
-// the create button — every one of them is a dead end here.
+// The get-started prompt covers both dead ends. A configured-but-empty root gets
+// recovery copy; no root gets the library-setup copy. Both suppress the springboard,
+// folder tree, and create button.
 test("an empty library shows the get-started prompt, not an empty springboard", async () => {
   const { container, filesEmpty, filesEmptyLead, folderTree, createBtn } = setup({
     libraryEmpty: () => "empty",
@@ -183,10 +181,10 @@ test("an empty library shows the get-started prompt, not an empty springboard", 
   assert.ok(createBtn.classList.contains("hidden"), "create button is a dead end here");
 });
 
-test("no library folder shows the prompt, worded for the unconfigured case", async () => {
+test("no library folder shows the original setup prompt", async () => {
   const { container, filesEmpty, filesEmptyLead } = setup({ libraryEmpty: () => "no-root" });
   await flush();
-  assert.ok(!filesEmpty.classList.contains("hidden"), "prompt must show with no root set");
+  assert.ok(!filesEmpty.classList.contains("hidden"), "setup prompt must show");
   assert.match(filesEmptyLead.textContent, /add a library folder in$/);
   assert.equal(labels(container).length, 0, "springboard must not be built");
 });
