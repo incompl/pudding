@@ -853,7 +853,7 @@ function render(): void {
   if (empty !== null) {
     filesEmptyLead.textContent =
       empty === "no-root"
-        ? "To get started, add a library folder in"
+        ? "Add a library folder in"
         : "No music in your library folder. Drop files here, or pick another in";
     folderTree.classList.add("hidden");
     createBtn.classList.add("hidden");

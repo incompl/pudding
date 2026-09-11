@@ -181,11 +181,11 @@ test("an empty library shows the get-started prompt, not an empty springboard", 
   assert.ok(createBtn.classList.contains("hidden"), "create button is a dead end here");
 });
 
-test("no library folder shows the original setup prompt", async () => {
+test("no library folder shows the concise setup prompt", async () => {
   const { container, filesEmpty, filesEmptyLead } = setup({ libraryEmpty: () => "no-root" });
   await flush();
   assert.ok(!filesEmpty.classList.contains("hidden"), "setup prompt must show");
-  assert.match(filesEmptyLead.textContent, /add a library folder in$/);
+  assert.equal(filesEmptyLead.textContent, "Add a library folder in");
   assert.equal(labels(container).length, 0, "springboard must not be built");
 });
 

@@ -3345,6 +3345,39 @@ body.dragging-noselect * {
   line-height: 1.5;
 }
 
+/* Files' empty state is a small onboarding moment rather than a list placeholder:
+   center its three quiet beats in the otherwise empty pane. The dim accent keeps
+   the icon connected to the active Files tab without competing with the sample
+   artwork in the right pane. */
+#files-empty {
+  box-sizing: border-box;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.files-empty-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--accent-dim);
+}
+
+.files-empty-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 1.1em;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.files-empty-copy {
+  margin: 0;
+}
+
 /* A button that reads as an inline text link (the "settings" link in the
    get-started prompt). */
 .link-btn {
