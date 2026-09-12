@@ -25,7 +25,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 
 * No import step. You pick your library folders and they are automatically watched. No need for manual rescan.
 * Relational navigation eg "Go to album"
-* Search-based navigation: ⌘F, type album name, hit enter.
+* Search-based navigation: type an album name and hit enter.
 * First class queue. Right click anything to build one.
 * Playlists are autosaved m3u8 files. No lock-in.
 * Full macOS integration. Light / dark mode, media keys, lock screen with album art, control center.
@@ -67,7 +67,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 ### Playlists
 
 - Playlists are plain `.m3u8` files on disk. No lock-in, hand-editable and readable by any other player, and they autosave on every change
-- Start one from the File menu, or turn the current queue into a saved playlist with Save Queue as Playlist (⌘S)
+- Start one from the File menu, or turn the current queue into a saved playlist with Save Queue as Playlist
 - Right-click any track and use "Add to playlist" to file it into an existing list or a new one
 - Single-click a playlist in the tree to browse it, double-click to play; rename, move, or delete it from the tree or the File menu
 - File ▸ Open Recent lists what you have actually opened — playlists and loose tracks alike — and every `.m3u` / `.m3u8` under your library is searchable
@@ -84,15 +84,15 @@ These features are bog standard for streaming service apps, but rare for file-ba
 
 - 10-band graphic equalizer (32 Hz – 16 kHz) running in the audio engine as a cascade of RBJ peaking biquads plus a preamp
 - The equalizer bars glow with the real per-band energy of what's playing, which is just dang nifty
-- Visualizer: an oldschool neon oscilloscope over a starfield, toggled from View ▸ Visualizer or with ⌘T
+- Visualizer: an oldschool neon oscilloscope over a starfield, toggled from View ▸ Visualizer
 
 ### Interface
 
 - Light and dark themes, each with a variety of flavors, and can auto-switch with the macOS light / dark setting
 - Compact mini player mode (double click now playing)
-- Zen Mode (View ▸ Zen Mode / ⌘⇧F) expands the Now Playing view (album art or visualizer) to fill the window and hide all chrome. Try it with fullscreen!
+- Zen Mode (View ▸ Zen Mode) expands the Now Playing view (album art or visualizer) to fill the window and hide all chrome. Try it with fullscreen!
 - Window size and position remembered separately for mini and normal modes
-- Keyboard shortcuts for playback, volume, and seeking (see below)
+- [Keyboard shortcuts](../website/src/content/documentation.md#keyboard-shortcuts) for playback, volume, seeking, and navigation
 - macOS system integration: Now Playing in Control Center and the lock screen (with album art), plus hardware media keys and lock-screen controls for play/pause, next/previous, and scrubbing
 
 ## Install
@@ -105,22 +105,6 @@ pnpm tauri build
 ```
 
 On macOS the dmg auto-opens. Drag Pudding into Applications and you're good to go.
-
-## Keyboard shortcuts
-
-- `Space` - play / pause
-- `↑` / `↓` - move the selection up / down the list
-- `Enter` - play the selected row
-- `Delete` / `Backspace` - remove the selected row(s) from the queue or playlist
-- `Esc` - clear the selection
-- `⌘↑` / `⌘↓` (or `+` / `-`) - volume up / down (10%)
-- `M` - mute / unmute
-- `←` / `→` - seek back / forward 10s (files only)
-- `⌘O` - open a file or playlist
-- `⌘F` / `Ctrl+F` - focus search
-- `⌘S` - save the current queue as a playlist
-- `⌘T` - toggle the visualizer
-- `⌘⇧F` - toggle Zen Mode
 
 ## Tips
 

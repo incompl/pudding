@@ -63,11 +63,12 @@ h3 { font-size: 19px; font-weight: 600; margin: 15px 0 10px; letter-spacing: -.4
 .mini-preview { padding: 32px 20px 10px; }
 .mini-preview img { width: auto; margin: auto; }
 .reading-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 70px; margin-bottom: 80px; }
-.contents { display: flex; flex-direction: column; align-items: start; gap: 18px; font-size: 14px; border-top: 1px solid var(--line); padding-top: 24px; }
-.contents a { text-decoration: none; }
+.contents { display: flex; flex-direction: column; align-items: start; gap: 8px; font-size: 13px; line-height: 1.4; }
+.contents a { color: var(--primary); text-decoration: none; }
+.contents a:hover { color: var(--primary-hover); }
 .prose { max-width: 730px; }
-.prose section { margin-bottom: 40px; scroll-margin-top: 24px; }
-.prose h2 { font-size: 27px; margin-bottom: 16px; }
+.prose h2 { font-size: 27px; margin: 40px 0 16px; scroll-margin-top: 24px; }
+.prose h2:first-child { margin-top: 0; }
 .prose p, .prose ul, .prose ol { margin: 0 0 16px; color: var(--muted); }
 .prose li + li { margin-top: 8px; }
 .prose a { color: var(--primary); }
@@ -75,6 +76,11 @@ h3 { font-size: 19px; font-weight: 600; margin: 15px 0 10px; letter-spacing: -.4
 .prose code, kbd { font-size: .9em; background: #242d1c; padding: 3px 6px; border-radius: 3px; }
 .prose pre { overflow-x: auto; padding: 20px; background: #171e12; border: 1px solid var(--line); line-height: 1.8; }
 .prose pre code { padding: 0; background: none; }
+.prose table { width: 100%; border-collapse: collapse; margin: 0 0 40px; }
+.prose th, .prose td { padding: 9px 0; border-bottom: 1px solid var(--line); text-align: left; }
+.prose th { font-size: 14px; font-weight: 600; color: #f3f5ed; }
+.prose th:last-child, .prose td:last-child { text-align: right; }
+.prose td { color: var(--muted); }
 .shortcut-list { margin: 0; }
 .shortcut-list > div { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .shortcut-list dd { margin: 0; color: var(--muted); text-align: right; }
@@ -103,7 +109,7 @@ h3 { font-size: 19px; font-weight: 600; margin: 15px 0 10px; letter-spacing: -.4
   .intro { font-size: 16px; }
   .page-heading { padding: 44px 0 32px; }
   .reading-layout { grid-template-columns: 1fr; gap: 40px; }
-  .contents { flex-direction: row; flex-wrap: wrap; gap: 18px 24px; }
+  .contents { flex-direction: row; flex-wrap: wrap; gap: 8px 18px; }
   .site-footer { align-items: start; flex-direction: column; gap: 24px; }
   .desktop-break { display: none; }
 }
