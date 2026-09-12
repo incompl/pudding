@@ -1179,24 +1179,43 @@ export async function goToFile(path: string): Promise<void> {
   revealTreeRow(path);
 }
 
-// Clicking the now-playing title reveals the track in its *playing context* — the
-// pool autoadvance is walking (app.currentParent) — and scrolls to it, so the title
-// answers "where does this live / what am I playing from / what plays next" in one
-// tap, the same "go home to what's playing" the artist/album lines offer for their
-// grouping. The pool's synthetic path IS its canonical origin identity (these keys
-// mirror openAlbumQueue / the leaf lists' syntheticPath — see the syntheticParent
-// call sites), so we read the context straight off it rather than recording a
-// parallel breadcrumb that could drift from the actual pool:
+// Clicking the now-playing title reveals what is playing in the matching sidebar.
+// A stream switches to Streams, selects its station, and scrolls that row into view.
+// A track is revealed in its *playing context* — the pool autoadvance is walking
+// (app.currentParent) — so the title answers "where does this live / what am I
+// playing from / what plays next" in one tap, the same "go home to what's playing"
+// the artist/album lines offer for their grouping. The pool's synthetic path IS its
+// canonical origin identity (these keys mirror openAlbumQueue / the leaf lists'
+// syntheticPath — see the syntheticParent call sites), so we read the context
+// straight off it rather than recording a parallel breadcrumb that could drift from
+// the actual pool:
 //   queue:album:<albumArtist>\0<album>  → the Albums view's album detail
 //   queue:artist:<name>                 → the Artists view's artist detail
 //   queue:songs                         → the Songs view
-//   anything else (real folder pool, an explicit/ad-hoc/restored queue, or no pool
-//     at all for a search / OS-opened file) has no view home, so we degenerate to
-//     revealing where the file lives — its folder in Browse. Either way we stash the
-//     path so the list that lands scrolls straight to the playing row.
-// Hidden for streams (no file) and when nothing's playing.
+//   an active playlist / folder queue / ad-hoc queue → that source's list face
+//   anything else (a real folder pool, or no pool at all for a search / OS-opened
+//     file) reveals where the file lives — its folder in Browse. For library views
+//     we stash the path so the list that lands scrolls straight to the playing row.
+// Hidden when nothing's playing.
 export function revealNowPlaying(): void {
-  if (!hasTrack.value || isStream.value) return;
+  if (!hasTrack.value) return;
+  if (isStream.value) {
+    const url = currentStreamUrl.value;
+    if (!url) return;
+    // Match a user-driven tab switch, except keep the destination station selected
+    // so the title acts as a real "show me this" link rather than merely opening
+    // the right tab. The tab effect runs synchronously, making the row measurable
+    // before scrollIntoView is called even when Streams was previously hidden.
+    clearTreeSelection();
+    activeTab.value = "streams";
+    void persistActiveTab();
+    app.lastSelectionPane = "stream";
+    selectedStreamUrl.value = url;
+    streamsContainer
+      .querySelector(`.node-label[data-stream-url="${CSS.escape(url)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+    return;
+  }
   const path = currentNodePath.value;
   const pool = app.currentParent?.path ?? "";
   if (pool.startsWith("queue:album:")) {
@@ -1213,6 +1232,12 @@ export function revealNowPlaying(): void {
     goToFilesTab();
     app.pendingRevealPlayingPath = path;
     navigateTo([{ t: "view", view: "songs" }]);
+  } else if (queueIsActivePool() && activeQueue.value) {
+    // Playlist, played-folder, and explicit/ad-hoc queue sources already retain
+    // their exact ordered list in activeQueue. Reopen that source rather than
+    // degrading to the file's home folder, which is not necessarily what plays
+    // next. This also abandons any unrelated playlist browse that may be on top.
+    showSourceList();
   } else if (path) {
     goToFilesTab();
     navigateTo([{ t: "view", view: "browse" }]);
