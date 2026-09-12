@@ -1,3 +1,5 @@
+If you hate reading AI-generated documentation, don't worry, I wrote this myself.
+
 ## What is Pudding?
 
 Pudding is a macOS music player. It plays local files and can connect to internet radio stations. It is not a streaming service or a store. You bring your own music files and stream URLs.
@@ -10,7 +12,7 @@ Pudding is split into two panels. The left panel has two tabs: Files and Streams
 
 ## Files
 
-To show your music collection in the Files panel, go to Pudding > Settings in the main menu and add one or more library folders. When you do this, your music collection is automatically scanned to power Pudding features such as Search. It may be instant, or depending on your hardware and library size, you may see a "Scanning" progress bar at the bottom of the Files panel. While it's scanning you can still use the app, but you might not be able to find files that aren't scanned yet. Your library folders are automatically watched while Pudding is open so external changes are reflected automatically. Pudding also automatically checks for changes on re-launch.
+To show your music collection in the Files panel, go to Pudding > Settings in the main menu and add one or more library folders. When you do this, your music collection is automatically scanned to power Pudding features such as Search. It may be instant, or depending on your hardware and library size, you may see a "Scanning" progress bar at the bottom of the Files panel. While it's scanning you can still use the app, but you might not be able to find files that aren't scanned yet. Your library folders are automatically watched while Pudding is open so external changes are reflected automatically. Pudding also automatically checks for library changes on re-launch.
 
 The Files tab has multiple ways to browse your files:
 
@@ -23,7 +25,7 @@ Below that, the Files panel shows a list of all playlists found in your library 
 
 ## Search
 
-Search using the search box in the upper right (⌘F is the shortcut to open it). Search can surface files, folders, playlists, artists, albums, and streams.
+Search using the search box in the upper right (⌘F is the shortcut to open it). Search can locate files, folders, playlists, artists, albums, and streams.
 
 ## Streams
 
@@ -33,31 +35,34 @@ Some more cool things about streams:
 
 * You can customize the stream artwork.
 * The player shows ICY now-playing metadata.
-* Pudding automatically reconnects when needed.
-
-## Playlists
-
-Playlists are backed by `.m3u8` files, so if you click "Create playlist" you'll be prompted to create a file. After that, you can edit the playlist any way you want (drag tracks into it, rename, reorder, etc.) and the file is automatically updated.
-
-Renaming a playlist's display name edits the `#PLAYLIST` name in the file. You can also select "Move Playlist File..." from the File menu to move and rename the file itself.
-
-You can select multiple tracks to drag into a playlist. You can also add anything to a playlist (albums, other playlists, etc.) by right clicking on it.
-
-Playlists are shown in the right panel, replacing the Now Playing view. While a playlist is being played, you can switch between the two views using the navigation bar above the player controls.
-
-## Queues
-
-A queue is like a playlist that is not backed by a file. You can create one by right clicking any file and selecting "Create queue". While a queue exists, the context menu allows you to "Play Next" or "Add to Queue" to put more tracks in the queue.
-
-Queues are shown in the right panel like playlists. In the upper right of the queue view there is a "Clear" button that dismisses the queue. If you'd rather save it, select "Save Queue as Playlist..." from the File menu.
+* Pudding automatically reconnects if it loses connection.
 
 ## Now Playing
 
-Shows art and metadata for the currently playing track. You can click the title to navigate to the context the track is playing from. Likewise, the artist and album are clickable.
+The default view for the right panel shows art and metadata for the currently playing track. You can click the title to navigate to the context the track is playing from. Likewise, the artist and album are clickable.
+
+
+## Playlists
+
+Playlists are backed by `.m3u8` files, so if you click "Create playlist" you'll be prompted to create a file. After that, you can edit the playlist any way you want (drag tracks into it, rename, reorder, etc.) and the playlist file is automatically updated.
+
+This feature is important to me because `.m3u8` is a standard format that can be read by other players. If you decide to stop using Pudding in the future you don't even need to do any kind of export to keep your playlists. They are yours from the start.
+
+When you open a playlist it is shown in the right panel, replacing the Now Playing view. While a playlist is being played, you can switch to and from Now Playing using the navigation bar above the player controls.
+
+Renaming a playlist's display name edits the `#PLAYLIST` name in the file. You can also select "Move Playlist File..." from the File menu to move and rename the file itself.
+
+You can select multiple tracks to drag into a playlist at the same time. You can also add anything to a playlist (albums, other playlists, etc.) by right clicking on it and selecting "Add to playlist..."
+
+## Queues
+
+A queue is like a playlist that is not backed by a file. When you clear it, it's gone. You can create one by right clicking any file and selecting "Create queue". While a queue exists, the context menu allows you to "Play Next" or "Add to Queue" to put more tracks in the queue.
+
+Queues are shown in the right panel like playlists. In the upper right of the queue view there is a "Clear" button that dismisses the queue. If you'd rather save it, select "Save Queue as Playlist..." from the File menu.
 
 ## Autoadvance
 
-This option in the Playback menu controls the behavior when a track ends. With autoadvance disabled, playback will stop. With it enabled, the next track in the _current playing context_ will play. For example, if the track was played from the album in the library, the next track in the album will play. If it was played from a playlist, the next track in the playlist will play, and so on.
+This option in the Playback menu controls the behavior when a track ends. With autoadvance disabled, playback will stop. With it enabled, the next track in the _current playing context_ will play. For example, if the track was played from an album in the library, the next track in the album will play. If it was played from a playlist, the next track in the playlist will play, and so on.
 
 Some exceptions:
 
@@ -73,7 +78,7 @@ You can activate the mini player a few different ways:
 * Double click the now playing album art
 * Just resize the player
 
-The most recent window size for the normal player and mini player are both saved. For example, if you resize the mini player, then switch to the normal player, the mini player will be the same size next time you activate it (unless you are manually resizing the app).
+The most recent window size for the normal player and mini player are both saved. For example, if you resize the mini player, then switch to the normal player, the mini player will remember its size the next time you activate it (unless you are manually resizing the app).
 
 ## Visualizer
 
@@ -85,7 +90,7 @@ Hides everything except Now Playing (or the Visualizer if enabled). Useful in co
 
 ## Themes
 
-Select a theme from Pudding > Settings in the menu. If you check "Match system light / dark mode" then you can actually select two themes. This is useful if your system automatically changes between light and dark mode based on the time of day: you get to choose colors for both times of day.
+Select a theme from Pudding > Settings in the menu. If you check "Match system light / dark mode" then you can actually select two themes. This is useful if your system automatically changes between light and dark mode based on the time of day: you get to choose themes for both times of day.
 
 ## Equalizer
 
@@ -109,7 +114,7 @@ Enable this option from the Playback menu to automatically switch your output de
 
 When the output device supports the file’s sample rate, Pudding switches to it and bypasses sample-rate conversion. With volume at 100% and Equalizer and ReplayGain disabled, this provides an unprocessed path to CoreAudio.
 
-Changing the sample rate reconfigures the output device, so this setting can add a little latency between tracks if they have different sample rates. It also changes a system-wide setting used by other apps, which is why the option is off by default. Pudding remembers the rate the device had immediately before it first changes it and restores that rate when matching is turned off or Pudding quits normally. If the device has changed again since Pudding last selected a rate, Pudding leaves it alone.
+Changing the sample rate reconfigures the output device, so this setting can add a little latency between tracks if they have different sample rates. It also changes a system-wide setting used by other apps, which is why it's off by default. Pudding makes an effort to leave the setting how it found it.
 
 ## More cool features
 
@@ -140,7 +145,7 @@ DRM-protected files are not supported.
 * `.m3u8`
 * `.m3u`
 
-### Internet Radio
+### Streams
 
 Pudding supports HTTP and HTTPS Icecast and SHOUTcast streams.
 
