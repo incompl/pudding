@@ -23,7 +23,7 @@ const currentPath = Astro.url.pathname.replace(/\/?$/, '/');
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
-    <meta name="theme-color" content="#000000" />
+    <meta name="theme-color" content="#151515" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
@@ -34,26 +34,32 @@ const currentPath = Astro.url.pathname.replace(/\/?$/, '/');
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
-    <div class="shell">
-      <header class="site-header">
-        <a class="wordmark" href={base} aria-label="Pudding home">
-          <img src={`${base}favicon.svg`} width="38" height="38" alt="" />
-          pudding
-        </a>
-        <nav class="main-nav" aria-label="Main navigation">
-          {navigation.map(({ label, path }) => (
-            <a href={`${base}${path}`} aria-current={currentPath === `${base}${path}` ? 'page' : undefined}>{label}</a>
-          ))}
-          <a href="https://github.com/incompl/pudding" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">↗</span></a>
-        </nav>
-      </header>
-      <main id="main" tabindex="-1"><slot /></main>
-      <footer class="site-footer">
-        <div><a class="wordmark" href={base}>pudding</a><p>Copyright 2026 Greg Smith</p></div>
-        <nav aria-label="Footer navigation">
-          <a href={`${base}privacy/`} aria-current={currentPath === `${base}privacy/` ? 'page' : undefined}>Privacy policy</a>
-        </nav>
-      </footer>
+    <div class="site-chrome site-header-band">
+      <div class="shell">
+        <header class="site-header">
+          <a class="wordmark" href={base} aria-label="Pudding home">
+            <img src={`${base}favicon.svg`} width="38" height="38" alt="" />
+            pudding
+          </a>
+          <nav class="main-nav" aria-label="Main navigation">
+            {navigation.map(({ label, path }) => (
+              <a href={`${base}${path}`} aria-current={currentPath === `${base}${path}` ? 'page' : undefined}>{label}</a>
+            ))}
+            <a href="https://github.com/incompl/pudding" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+          </nav>
+        </header>
+      </div>
+    </div>
+    <main class="shell" id="main" tabindex="-1"><slot /></main>
+    <div class="site-chrome site-footer-band">
+      <div class="shell">
+        <footer class="site-footer">
+          <div><a class="wordmark" href={base}>pudding</a><p>Copyright 2026 Greg Smith</p></div>
+          <nav aria-label="Footer navigation">
+            <a href={`${base}privacy/`} aria-current={currentPath === `${base}privacy/` ? 'page' : undefined}>Privacy policy</a>
+          </nav>
+        </footer>
+      </div>
     </div>
   </body>
 </html>

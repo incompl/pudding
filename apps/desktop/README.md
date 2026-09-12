@@ -122,6 +122,19 @@ A few things that aren't obvious:
 - Native Rust audio engine ([symphonia](https://github.com/pdeljanov/Symphonia) + [cpal](https://github.com/RustAudio/cpal)) for gapless file playback and internet radio with in-band ICY now-playing metadata
 - Help > Licenses lists every bundled dependency and its license text, generated from the real cargo and pnpm dependency graphs by `scripts/gen-licenses.mjs` (run by `pnpm dev` and `pnpm build`). It covers the statically linked Rust standard library and vendored artwork such as the Lucide icons too, and the build fails if any dependency would ship without attribution
 
+## Updating screenshots
+
+Regenerate the website, documentation, and README images from the real macOS app:
+
+```sh
+pnpm screenshots:update
+pnpm screenshots:check
+```
+
+The runner uses the library generator below and a fresh, isolated app profile.
+See [the screenshot workflow](e2e/screenshots/README.md) for requirements,
+selecting one screenshot, reviewing differences, and adding new recipes.
+
 ## Screenshot library
 
 Generate a deterministic library of fictional artists, albums, tracks, and

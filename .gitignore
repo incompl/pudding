@@ -31,3 +31,6 @@ dist-ssr
 
 # Astro generated types and build cache
 .astro/
+
+# Native screenshot run profiles, fixtures, captures, and review reports
+/apps/desktop/.screenshots/

@@ -18,7 +18,9 @@
     "test:e2e": "node --import tsx --test --test-concurrency=1 e2e/tests/*.test.ts",
     "e2e": "pnpm build:e2e && pnpm test:e2e",
     "drive": "node e2e/drive.mjs --dev",
-    "caliper": "node scripts/caliper.mjs"
+    "caliper": "node scripts/caliper.mjs",
+    "screenshots:update": "node --import tsx e2e/screenshots/run.mjs",
+    "screenshots:check": "node --import tsx e2e/screenshots/run.mjs --check"
   },
   "dependencies": {
     "@preact/signals-core": "^1.14.2",

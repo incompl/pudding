@@ -5,6 +5,7 @@
 // `#id`. This is the counterpart to src/e2e-bridge.ts.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -30,9 +31,12 @@ export const FIXTURE_TONE = path.join(dir, "fixtures/tone.m4a");
 type Pending = {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 };
 
 export type Driver = {
+  css(id: string, text: string | null): Promise<void>;
+  settle(): Promise<{ width: number; height: number; dpr: number }>;
   exists(selector: string): Promise<boolean>;
   click(selector: string): Promise<void>;
   text(selector: string): Promise<string>;
@@ -68,22 +72,33 @@ function makeDriver(ws: WebSocket): Driver {
     const p = pending.get(msg.id);
     if (!p) return;
     pending.delete(msg.id);
+    clearTimeout(p.timer);
     if (msg.ok) p.resolve(msg.result);
     else p.reject(new Error(msg.error ?? "bridge error"));
+  });
+
+  ws.on("close", () => {
+    for (const p of pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error("app disconnected"));
+    }
+    pending.clear();
   });
 
   function send(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
     const id = nextId++;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      ws.send(JSON.stringify({ id, cmd, args }));
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (pending.delete(id)) reject(new Error(`bridge timeout: ${cmd}`));
       }, 10_000);
+      pending.set(id, { resolve, reject, timer });
+      ws.send(JSON.stringify({ id, cmd, args }));
     });
   }
 
   return {
+    css: async (id, text) => void (await send("css", { id, text })),
+    settle: () => send("settle") as Promise<{ width: number; height: number; dpr: number }>,
     exists: (selector) => send("exists", { selector }) as Promise<boolean>,
     click: async (selector) => void (await send("click", { selector })),
     text: (selector) => send("text", { selector }) as Promise<string>,
@@ -109,9 +124,17 @@ function makeDriver(ws: WebSocket): Driver {
 }
 
 /** Start the WS server, launch the app, and resolve once the bridge connects. */
-export function startHarness(): Promise<Harness> {
-  const wss = new WebSocketServer({ port: PORT, host: "127.0.0.1" });
+export function startHarness(options: {
+  appBin?: string;
+  port?: number;
+  noSpawn?: boolean;
+  env?: NodeJS.ProcessEnv;
+  log?: number;
+} = {}): Promise<Harness> {
+  const port = options.port ?? PORT;
+  const wss = new WebSocketServer({ port, host: "127.0.0.1" });
   let child: ChildProcess | undefined;
+  let connected = false;
 
   return new Promise<Harness>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -119,7 +142,7 @@ export function startHarness(): Promise<Harness> {
       child?.kill();
       reject(
         new Error(
-          `app did not connect on :${PORT} within 60s (built? library configured?)`,
+          `app did not connect on :${port} within 60s (built? library configured?)`,
         ),
       );
     }, 60_000);
@@ -128,25 +151,42 @@ export function startHarness(): Promise<Harness> {
     // listening lets the app dial in to *another* process holding :PORT (a stale
     // `pnpm drive` reuses this same default port), so it never reaches us.
     wss.once("listening", () => {
-      if (process.env.PUDDING_E2E_NO_SPAWN !== "1") {
-        child = spawn(appBin, [], {
-          env: { ...process.env, PUDDING_E2E_PORT: String(PORT) },
-          stdio: "inherit",
+      if (!(options.noSpawn ?? process.env.PUDDING_E2E_NO_SPAWN === "1")) {
+        child = spawn(options.appBin ?? appBin, [], {
+          env: { ...process.env, ...options.env, PUDDING_E2E_PORT: String((wss.address() as AddressInfo).port) },
+          stdio: options.log === undefined ? "inherit" : ["ignore", options.log, options.log],
+        });
+        child.once("error", (error) => {
+          clearTimeout(timer);
+          wss.close();
+          reject(error);
+        });
+        child.once("exit", (code, signal) => {
+          if (connected) return;
+          clearTimeout(timer);
+          wss.close();
+          reject(new Error(`app exited before connecting (code ${code}, signal ${signal})`));
         });
       }
     });
 
     wss.once("connection", (ws) => {
       clearTimeout(timer);
+      connected = true;
       const driver = makeDriver(ws);
       resolve({
         driver,
         async close() {
-          ws.close();
+          ws.terminate();
           wss.close();
-          child?.kill();
-          // give the app a moment to exit cleanly
-          await new Promise((r) => setTimeout(r, 200));
+          if (child && child.exitCode === null && child.signalCode === null) {
+            const proc = child;
+            await new Promise<void>((done) => {
+              const killTimer = setTimeout(() => proc.kill("SIGKILL"), 3000);
+              proc.once("exit", () => { clearTimeout(killTimer); done(); });
+              proc.kill();
+            });
+          }
         },
       });
     });

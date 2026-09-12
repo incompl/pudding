@@ -120,6 +120,17 @@ async function handle(
     }
     case "probe":
       return probe();
+    case "settle": {
+      // Wait for assets and a paint boundary, then report actual viewport size.
+      // The runner still verifies consecutive native captures for stability.
+      await document.fonts.ready;
+      await Promise.all(Array.from(document.images)
+        .filter((img) => img.getClientRects().length && img.currentSrc)
+        .map((img) => img.decode()));
+      await new Promise<void>((resolve) => requestAnimationFrame(() =>
+        requestAnimationFrame(() => resolve())));
+      return { width: innerWidth, height: innerHeight, dpr: devicePixelRatio };
+    }
     case "invoke":
       // Passthrough to a real Tauri command — same path the UI uses, so tests
       // exercise the true command -> Rust engine -> event -> signal loop.

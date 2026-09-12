@@ -90,3 +90,11 @@ pipeline (a real engine bug, separate from these tests).
 Use `#id` selectors and read state from `probe()`. To drive a UI flow, prefer a
 real entry point via `action(...)` (registered in `maybeStartE2eBridge(...)` in
 `src/main.ts`) over reaching past the UI with a raw `invoke`.
+
+## Website and documentation captures
+
+`pnpm screenshots:update` reuses this harness and the existing screenshot library
+generator to capture repeatable native app images. See
+[the capture workflow](screenshots/README.md). The screenshot runner passes an
+explicit bundle, an ephemeral port, and a fresh profile; ordinary e2e defaults
+remain unchanged.

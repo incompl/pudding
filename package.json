@@ -29,6 +29,8 @@
     "website:check": "pnpm --filter @pudding/website check",
     "website:build": "pnpm --filter @pudding/website build",
     "website:preview": "pnpm --filter @pudding/website preview",
-    "check": "pnpm --filter @pudding/desktop typecheck && pnpm website:check"
+    "check": "pnpm --filter @pudding/desktop typecheck && pnpm website:check",
+    "screenshots:update": "pnpm --filter @pudding/desktop screenshots:update",
+    "screenshots:check": "pnpm --filter @pudding/desktop screenshots:check"
   }
 }

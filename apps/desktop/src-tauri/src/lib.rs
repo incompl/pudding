@@ -1224,7 +1224,7 @@ async fn read_stream_list(path: String) -> Result<Vec<Stream>, String> {
 // when none has ever been configured, so a fresh install has a valid, writable
 // list instead of the "not configured" prompt.
 fn ensure_default_stream_list(app: &AppHandle) -> Result<PathBuf, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_data = app_data_dir(app)?;
     std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
     let path = app_data.join(DEFAULT_STREAM_LIST_FILE);
     if !path.exists() {
@@ -1788,6 +1788,40 @@ fn e2e_port() -> Option<u16> {
     std::env::var("PUDDING_E2E_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
+}
+
+// Screenshot runs use a fresh profile, including the database, store, and stream
+// list. Never honor the override in a shipping build or a normal app launch.
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    if cfg!(debug_assertions) && e2e_port().is_some() {
+        if let Some(dir) = std::env::var_os("PUDDING_E2E_DATA_DIR") {
+            let path = PathBuf::from(dir);
+            if !path.is_absolute() {
+                return Err("PUDDING_E2E_DATA_DIR must be absolute".into());
+            }
+            return Ok(path);
+        }
+    }
+    app.path().app_data_dir().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn settings_path(app: AppHandle) -> Result<String, String> {
+    Ok(app_data_dir(&app)?
+        .join("settings.json")
+        .to_string_lossy()
+        .into_owned())
+}
+
+// Native traffic lights otherwise depend on whichever app the operator last
+// clicked. Keep this opt-in: caliper may still capture without stealing focus.
+#[tauri::command]
+fn focus_e2e_window(window: tauri::Window) -> Result<bool, String> {
+    if e2e_port().is_none() {
+        return Err("window focus control requires an e2e launch".into());
+    }
+    window.set_focus().map_err(|e| e.to_string())?;
+    window.is_focused().map_err(|e| e.to_string())
 }
 
 // Dev/e2e only: this window's CGWindowID, so `screencapture -l <id>` can grab
@@ -3328,7 +3362,7 @@ pub fn run() {
                 std::process::id()
             );
 
-            let app_data = app.path().app_data_dir()?;
+            let app_data = app_data_dir(app.handle())?;
             std::fs::create_dir_all(&app_data)?;
             let db_path = app_data.join(DB_FILE);
             let conn = open_connection(&db_path)?;
@@ -3715,6 +3749,8 @@ pub fn run() {
             get_stream_image,
             frontend_ready,
             e2e_port,
+            settings_path,
+            focus_e2e_window,
             window_number,
             prepare_external_file,
             write_tags,

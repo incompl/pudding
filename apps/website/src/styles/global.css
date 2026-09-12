@@ -1,7 +1,7 @@
 :root {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   color: #f3f5ed;
-  background: #000000;
+  background: #0f1311;
   color-scheme: dark;
   font-synthesis: none;
   --muted: #a8afa0;
@@ -20,7 +20,10 @@ p, li { line-height: 1.7; }
 h1, h2, h3, p, figure { margin: 0; }
 h1, h2, h3 { text-wrap: balance; }
 .shell { max-width: 1184px; margin: auto; padding: 0 32px; }
-.site-header { display: flex; align-items: center; justify-content: space-between; gap: 32px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.site-chrome { background: #000; }
+.site-header-band { border-bottom: 1px solid var(--line); }
+.site-footer-band { border-top: 1px solid var(--line); }
+.site-header { display: flex; align-items: center; justify-content: space-between; gap: 32px; padding: 14px 0; }
 .wordmark { display: inline-flex; align-items: center; gap: 9px; font-size: 30px; font-weight: 750; letter-spacing: -1.5px; text-decoration: none; }
 .main-nav { display: flex; flex-wrap: wrap; gap: 10px; }
 .main-nav a { padding: 12px 17px; font-size: 16px; font-weight: 600; text-decoration: none; border: 1px solid transparent; border-radius: 4px; }
@@ -29,8 +32,6 @@ h1, h2, h3 { text-wrap: balance; }
 .hero { position: relative; padding: 20px 0 0; }
 .hero h1 { font-size: clamp(40px, 5.2vw, 64px); margin: 0 0 16px; }
 .hero .intro { max-width: 660px; font-size: 16px; line-height: 1.6; }
-/* The hero screenshot carries ~25px of transparent shadow at its top edge, so it needs
-   almost no margin of its own to sit close under the feature strip. */
 .hero-shot { margin: 6px 0 72px; }
 h1 { font-size: clamp(46px, 7.5vw, 88px); font-weight: 650; line-height: 1.04; letter-spacing: -.055em; margin: 27px 0 36px; }
 .primary { color: var(--primary); }
@@ -44,7 +45,7 @@ h1 { font-size: clamp(46px, 7.5vw, 88px); font-weight: 650; line-height: 1.04; l
 .text-link { font-size: 14px; font-weight: 600; }
 .small-note { font-size: 12px; color: var(--muted); }
 h2 { font-size: clamp(28px, 3.2vw, 38px); font-weight: 600; letter-spacing: -.035em; line-height: 1.2; }
-/* Screenshots include the macOS window and shadow; leave them unframed and unclipped. */
+/* The charcoal page separates the app screenshots without an added frame. */
 .app-preview img { width: 100%; }
 figcaption { color: var(--muted); text-align: center; padding: 16px; font-size: 14px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -87,7 +88,7 @@ h3 { font-size: 19px; font-weight: 600; margin: 15px 0 10px; letter-spacing: -.4
 .policy { margin-bottom: 80px; }
 .support-links { margin: 0 0 80px; padding-left: 24px; font-size: 18px; }
 .support-links li + li { margin-top: 12px; }
-.site-footer { display: flex; align-items: center; justify-content: space-between; gap: 30px; padding: 28px 0 38px; border-top: 1px solid var(--line); }
+.site-footer { display: flex; align-items: center; justify-content: space-between; gap: 30px; padding: 28px 0 38px; }
 .site-footer .wordmark { font-size: 25px; }
 .site-footer p { font-size: 12px; color: var(--muted); margin-top: 8px; }
 .site-footer nav { display: flex; flex-wrap: wrap; gap: 26px; font-size: 14px; color: var(--muted); }

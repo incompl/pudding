@@ -305,7 +305,6 @@ import {
   prepareBundledSample,
 } from "./sample";
 
-const STORE_FILE = "settings.json";
 export const KEY_LIBRARY_ROOTS = "libraryRoots";
 // Security-scoped bookmarks for those roots, base64 keyed by path. A separate key
 // rather than a field on each root: the path stays the root's identity everywhere
@@ -3883,7 +3882,7 @@ async function init(): Promise<void> {
   // hit-test against the list box, so no container drop listener is needed.
 
   app.store = await bootStep("load-store", () =>
-    load(STORE_FILE, { defaults: {}, autoSave: false }),
+    invoke<string>("settings_path").then((path) => load(path, { defaults: {}, autoSave: false })),
   );
 
   // Resolve the built-in welcome track and read its embedded cover before the
@@ -4446,6 +4445,15 @@ async function init(): Promise<void> {
     }),
     {
       playFile: (p) => openExternalFile(String(p)),
+      browseAlbum: (arg) => {
+        const { album, albumArtist } = arg as { album: string; albumArtist: string };
+        goToAlbum(album, albumArtist);
+      },
+      setWindowSize: async (arg) => {
+        const { width, height } = arg as { width: number; height: number };
+        if (!(width > 0 && height > 0)) throw new Error("invalid window size");
+        await getCurrentWindow().setSize(new LogicalSize(width, height));
+      },
       // Click a tree row through the real handler, optionally with Cmd/Shift so
       // tests can drive multi-select (the bridge's plain `click` carries no
       // modifiers). Dispatches a genuine MouseEvent so onNodeClick runs its true
