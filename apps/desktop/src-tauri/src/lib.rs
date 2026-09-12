@@ -8,6 +8,7 @@ pub mod bookmarks;
 mod dataless;
 mod icy;
 mod now_playing;
+mod output_device;
 mod playlist;
 // Who holds the sandbox grant for each library root, and for how long. The
 // primitive it drives is bookmarks.rs; pub for the same reason bookmarks is —
@@ -2316,9 +2317,9 @@ fn audio_set_replaygain(mode: String, engine: State<audio::AudioEngine>) {
 }
 
 // Turn follow-the-content output rate switching on or off. The frontend owns the
-// setting (persisted in its store, menu checkbox); the engine reads it as it
-// opens each track, so a change lands at the next track boundary rather than
-// interrupting the one playing. See audio::desired_output_rate.
+// setting (persisted in its store, menu checkbox). Enabling is read as each
+// track opens; disabling also initiates guarded restoration of the device rate
+// that source matching displaced. See audio::desired_output_rate.
 #[tauri::command]
 fn audio_set_follow_sample_rate(enabled: bool, engine: State<audio::AudioEngine>) {
     engine.set_rate_follow(enabled);
@@ -3758,6 +3759,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            // The output device's sample rate is global system state. On a
+            // normal exit, give the audio thread one synchronous chance to put
+            // back the rate that source matching displaced. Its ownership
+            // guard leaves a later user/third-party change untouched.
+            if matches!(&event, tauri::RunEvent::Exit) {
+                app.state::<audio::AudioEngine>().restore_rate_on_exit();
+            }
             // macOS: file associations and "open with" deliver paths via Apple
             // Events, surfaced here as file:// URLs. Fires both on cold start
             // (after setup) and while the app is already running.

@@ -25,7 +25,7 @@ Search using the search box in the upper right (⌘F is the shortcut to open it)
 
 ## Streams
 
-The Streams tab shows a list of internet radio stations to play. You can add, edit, reorder, or delete streams right from this list. This list is backed by a special playlist file which you can specify in the app settings. You can also use a stream list URL, which of course is read-only.
+The Streams tab shows a list of internet radio stations to play. You can add, edit, reorder, or delete streams right from this list. This list is backed by a playlist file which you can specify in the app settings. You can also use a stream list URL, which of course is read-only.
 
 Some more cool things about streams:
 
@@ -107,7 +107,7 @@ Enable this option from the Playback menu to automatically switch your output de
 
 When the output device supports the file’s sample rate, Pudding switches to it and bypasses sample-rate conversion. With volume at 100% and Equalizer and ReplayGain disabled, this provides an unprocessed path to CoreAudio.
 
-Changing the sample rate reconfigures the output device, so this setting can add a little latency between tracks if they have different sample rates. It also changes a system-wide setting used by other apps and remains in effect after Pudding closes, which is why the option is off by default.
+Changing the sample rate reconfigures the output device, so this setting can add a little latency between tracks if they have different sample rates. It also changes a system-wide setting used by other apps, which is why the option is off by default. Pudding remembers the rate the device had immediately before it first changes it and restores that rate when matching is turned off or Pudding quits normally. If the device has changed again since Pudding last selected a rate, Pudding leaves it alone.
 
 ## More cool features
 

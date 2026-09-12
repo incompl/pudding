@@ -417,7 +417,8 @@ export const replayGainMode = signal<ReplayGainMode>("off");
 // OFF, unlike the other playback settings: the device's rate is a system-wide
 // setting shared with every other app, and changing it costs a short silence
 // between two tracks that don't share a rate. The engine reads it as it opens
-// each track, so toggling never interrupts what's playing.
+// each track when enabled. Disabling also restores the device's prior rate when
+// it has not subsequently been changed outside Pudding.
 export const followSampleRate = signal(false);
 
 // Whether playback flows to the next track. One global setting now — no context

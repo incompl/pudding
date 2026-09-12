@@ -2155,9 +2155,9 @@ function setReplayGainMode(mode: ReplayGainMode): void {
   void app.store.set(KEY_REPLAYGAIN, mode).then(() => app.store.save());
 }
 
-// Turn "match device to file sample rate" on or off and persist it. Like
-// ReplayGain, the engine picks it up at the next track it opens, so there's no
-// applyModeChange() and nothing to do to the track already playing.
+// Turn "match device to file sample rate" on or off and persist it. Enabling
+// takes effect when the engine next opens a track; disabling also makes the
+// engine restore the pre-matching device rate when its ownership guard allows.
 function setFollowSampleRate(enabled: boolean): void {
   if (followSampleRate.value === enabled) return;
   followSampleRate.value = enabled;

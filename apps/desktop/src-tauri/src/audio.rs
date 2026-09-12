@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use rtrb::{Consumer as RbConsumer, Producer as RbProducer, RingBuffer};
@@ -75,8 +75,8 @@ const RING_BUFFER_SECONDS: f32 = 1.0;
 
 // Follow-the-content output rate switching (Playback > "Match Device to File
 // Sample Rate", off by default). Switching means changing the output device's
-// nominal rate, which cpal can only do by building a stream at the new rate —
-// so the stream is torn down and rebuilt, and the device is silent while that
+// nominal rate, explicitly through CoreAudio on macOS. The stream is torn down
+// and rebuilt at that rate, and the device is silent while that
 // happens. It is therefore done at a track boundary, behind a drain barrier,
 // and only when the rate actually changes: a track that plays at the rate
 // already running never touches any of this and stays sample-adjacent to its
@@ -97,10 +97,10 @@ const MAX_FOLLOW_RATE: u32 = 192_000;
 // Bound on the drain barrier, so a device that has stopped consuming (asleep,
 // wedged, unplugged) can't hold the decode thread there forever.
 const RATE_SWITCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
-// Bound on the rebuild round-trip. cpal's CoreAudio backend blocks up to a
-// second inside AudioObjectSetPropertyData waiting for the device to report its
-// new rate; this is that, plus room for the teardown and build either side.
+// Bound on the rebuild round-trip. The native rate setter waits up to a second
+// for the device to report its new rate, with room for teardown/build either side.
 const RATE_SWITCH_REBUILD_TIMEOUT: Duration = Duration::from_secs(5);
+const RATE_RESTORE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Position events emitted ~20 Hz: smooth enough for a seekbar, cheap enough
 // to be free on the event loop.
@@ -173,6 +173,11 @@ pub enum Command {
     Append {
         tracks: Vec<PathBuf>,
     },
+    // Update follow-the-content switching. Disabling is a command (rather than
+    // just an atomic write) because it also restores the device rate Pudding
+    // found immediately before its first switch, when the ownership guard says
+    // the device is still ours to restore.
+    SetRateFollow(bool),
     // Tear everything down: drop the queue/stream, silence the device, and
     // report no track so the transport disables. Backs "Clear queue".
     Stop,
@@ -261,10 +266,14 @@ pub struct SharedState {
     // rate stamped on each origin, which stays correct for audio that was
     // produced before a switch. See Origin::rate.
     output_rate: AtomicU32,
-    // Follow-the-content rate switching, off by default. Read by the decode
-    // thread as it opens each track, so toggling it takes effect at the next
-    // track boundary rather than mid-track (like rg_mode).
+    // Follow-the-content rate switching, off by default. Enabling is read by
+    // the decode thread as it opens each track; disabling also schedules the
+    // guarded restoration switch described below.
     rate_follow: AtomicBool,
+    // Set during Tauri's final Exit event. The output thread rejects any
+    // already-armed follow switch after this flips, so nothing can race behind
+    // the final restore and change the device again on the way out.
+    shutting_down: AtomicBool,
     // Set while the decode thread is deliberately letting the ring run dry to
     // reach a rate switch's drain barrier. The callback reads it to keep that
     // silence out of the underrun counters — the same role queue_exhausted and
@@ -294,6 +303,7 @@ impl SharedState {
             rg_mode: AtomicU8::new(0),
             output_rate: AtomicU32::new(output_rate),
             rate_follow: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
             rate_switch_pending: AtomicBool::new(false),
         }
     }
@@ -389,6 +399,7 @@ pub struct StreamMetadataEvent {
 pub struct AudioEngine {
     pub cmd_tx: Sender<Command>,
     shared: Arc<SharedState>,
+    output_tx: Sender<OutputRequest>,
 }
 
 impl AudioEngine {
@@ -428,11 +439,42 @@ impl AudioEngine {
         self.shared.rg_mode.store(mode, Ordering::Relaxed);
     }
 
-    // Follow-the-content output rate switching. Like ReplayGain, the engine
-    // reads this as it opens each track, so a change takes effect at the next
-    // track boundary and never interrupts the one playing.
+    // Follow-the-content output rate switching. Enabling takes effect when the
+    // next track is opened. Disabling also asks the decode/output threads to
+    // restore the device rate this feature displaced.
     pub fn set_rate_follow(&self, enabled: bool) {
-        self.shared.rate_follow.store(enabled, Ordering::Relaxed);
+        self.send(Command::SetRateFollow(enabled));
+    }
+
+    // Tauri calls this from its final Exit event, while the engine threads are
+    // still alive. This path is synchronous because the process is about to go
+    // away: merely queueing a restore would let normal teardown win the race.
+    pub fn restore_rate_on_exit(&self) {
+        self.shared.rate_follow.store(false, Ordering::Relaxed);
+        self.shared.shutting_down.store(true, Ordering::Release);
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        if self
+            .output_tx
+            .send(OutputRequest::RestoreOnExit { reply: reply_tx })
+            .is_err()
+        {
+            log::warn!("audio: output thread unavailable during sample-rate restore");
+            return;
+        }
+        match reply_rx.recv_timeout(RATE_RESTORE_EXIT_TIMEOUT) {
+            Ok(Ok(RestoreOutcome::Restored(rate))) => {
+                log::info!("audio: restored output rate to {rate} Hz before exit")
+            }
+            Ok(Ok(RestoreOutcome::AlreadyRestored(rate))) => {
+                log::info!("audio: output rate already restored at {rate} Hz before exit")
+            }
+            Ok(Ok(RestoreOutcome::ExternalChange { expected, actual })) => log::info!(
+                "audio: not restoring output rate before exit: expected Pudding's {expected} Hz, found {actual} Hz"
+            ),
+            Ok(Ok(RestoreOutcome::NothingToRestore)) => {}
+            Ok(Err(e)) => log::warn!("audio: could not restore output rate before exit: {e}"),
+            Err(_) => log::warn!("audio: timed out restoring output rate before exit"),
+        }
     }
 }
 
@@ -613,10 +655,8 @@ fn raise_decode_thread_qos() {
 fn raise_decode_thread_qos() {}
 
 pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| "no default output device".to_string())?;
+    let output_device = crate::output_device::OutputDevice::default()?;
+    let device = output_device.device.clone();
 
     // Prefer the device's default config. We force stereo and f32; if the
     // device's preferred sample format isn't f32 we still try f32 (cpal
@@ -664,12 +704,12 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
 
     let shared = Arc::new(SharedState::new(output_rate));
     let origins = Arc::new(Mutex::new(Origins::default()));
+    let rate_ownership = Arc::new(Mutex::new(RateOwnership::default()));
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<Command>();
-    // Rate-switch plumbing. `rebuild_tx` carries a request to rebuild the output
-    // stream at a new device rate (decode thread -> output thread); `viz_tx`
-    // carries the replacement visualizer ring the rebuilt stream will fill
-    // (output thread -> spectrum thread).
-    let (rebuild_tx, rebuild_rx) = crossbeam_channel::unbounded::<RebuildRequest>();
+    // Rate-switch plumbing. `output_tx` carries both ordinary source-rate
+    // rebuilds and guarded restoration requests to the output thread; `viz_tx`
+    // carries the replacement visualizer ring the rebuilt stream will fill.
+    let (output_tx, output_rx) = crossbeam_channel::unbounded::<OutputRequest>();
     let (viz_tx, viz_rx) = crossbeam_channel::unbounded::<VizHandoff>();
 
     // Audio callback thread (cpal-owned). The closure captures rb_consumer +
@@ -679,12 +719,13 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     // thread holds it for the life of the process; the OS reclaims at exit.
     //
     // It is also where rate switches are executed, for the same !Send reason:
-    // building a stream at a new rate is how the device's nominal rate gets
-    // changed, and only this thread may own a stream. See output_thread_loop.
+    // the old stream must be dropped before changing the nominal hardware rate,
+    // and only this thread may own a stream. See output_thread_loop.
     {
         let device = device.clone();
         let stream_cfg = stream_cfg.clone();
         let shared = Arc::clone(&shared);
+        let rate_ownership = Arc::clone(&rate_ownership);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
         std::thread::Builder::new()
             .name("audio-output".into())
@@ -708,7 +749,15 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
                     return;
                 }
                 let _ = ready_tx.send(Ok(()));
-                output_thread_loop(&device, sample_format, &shared, stream, rebuild_rx, viz_tx);
+                output_thread_loop(
+                    &output_device,
+                    sample_format,
+                    &shared,
+                    &rate_ownership,
+                    stream,
+                    output_rx,
+                    viz_tx,
+                );
             })
             .map_err(|e| format!("spawn output thread: {e}"))?;
         ready_rx
@@ -720,8 +769,10 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     {
         let shared = Arc::clone(&shared);
         let origins = Arc::clone(&origins);
+        let rate_ownership = Arc::clone(&rate_ownership);
         let app = app.clone();
         let device_rates = Arc::clone(&device_rates);
+        let output_tx = output_tx.clone();
         std::thread::Builder::new()
             .name("audio-decode".into())
             .spawn(move || {
@@ -740,7 +791,8 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
                     output_rate,
                     device_rates,
                     default_rate,
-                    rebuild_tx,
+                    output_tx,
+                    rate_ownership,
                 );
             })
             .map_err(|e| format!("spawn decode thread: {e}"))?;
@@ -773,7 +825,11 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
             .map_err(|e| format!("spawn spectrum thread: {e}"))?;
     }
 
-    Ok(AudioEngine { cmd_tx, shared })
+    Ok(AudioEngine {
+        cmd_tx,
+        shared,
+        output_tx,
+    })
 }
 
 // === Audio callback ===
@@ -1042,7 +1098,8 @@ fn decode_loop(
     mut output_rate: u32,
     device_rates: Arc<Vec<u32>>,
     default_rate: u32,
-    rebuild_tx: Sender<RebuildRequest>,
+    output_tx: Sender<OutputRequest>,
+    rate_ownership: Arc<Mutex<RateOwnership>>,
 ) {
     let mut queue: Vec<PathBuf> = Vec::new();
     // The *decode frontier*: the track being decoded into the ring buffer and
@@ -1078,12 +1135,26 @@ fn decode_loop(
     // track's audio has to finish sounding before the device can be rebuilt at
     // the new rate. See PendingSwitch and perform_rate_switch.
     let mut pending_switch: Option<PendingSwitch> = None;
+    // A failed paused rewind leaves the ring intact until resume or another
+    // command changes the source. Do not keep reopening an unavailable file.
+    let mut paused_restore_deferred = false;
 
     loop {
         // Drain commands non-blocking. Most iterations have none; when a
         // command does arrive it's usually TogglePause or Seek.
         loop {
-            match cmd_rx.try_recv() {
+            let command = cmd_rx.try_recv();
+            if command.is_ok() {
+                if paused_restore_deferred {
+                    // Time spent intentionally paused must not exhaust the drain
+                    // budget: resume still needs time to play the preserved ring.
+                    if let Some(ref mut ps) = pending_switch {
+                        ps.deadline = Instant::now() + RATE_SWITCH_DRAIN_TIMEOUT;
+                    }
+                }
+                paused_restore_deferred = false;
+            }
+            match command {
                 Ok(cmd) => match cmd {
                     Command::Play {
                         tracks,
@@ -1111,7 +1182,8 @@ fn decode_loop(
                             default_rate,
                         );
                         let seat = seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
-                        pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                        pending_switch =
+                            update_rate_switch(&shared, pending_switch, seat.switch_to);
                         if seat.exhausted {
                             emit_state(&app, false, false);
                         }
@@ -1124,7 +1196,7 @@ fn decode_loop(
                         // Radio never follows content rate (see decode_loop's
                         // rate-switch notes), and the file the switch was armed
                         // for is gone regardless.
-                        pending_switch = arm_rate_switch(&shared, None);
+                        pending_switch = update_rate_switch(&shared, pending_switch, None);
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         emit_state(&app, true, true);
@@ -1225,7 +1297,8 @@ fn decode_loop(
                                 );
                                 let seat =
                                     seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
-                                pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                                pending_switch =
+                                    update_rate_switch(&shared, pending_switch, seat.switch_to);
                             } else {
                                 // Nothing is audible (never started, or the tail has
                                 // fully drained): a full reset re-bases the frame
@@ -1247,11 +1320,28 @@ fn decode_loop(
                                 );
                                 let seat =
                                     seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
-                                pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                                pending_switch =
+                                    update_rate_switch(&shared, pending_switch, seat.switch_to);
                                 if seat.exhausted {
                                     emit_state(&app, false, false);
                                 }
                             }
+                        }
+                    }
+                    Command::SetRateFollow(enabled) => {
+                        shared.rate_follow.store(enabled, Ordering::Relaxed);
+                        if !enabled {
+                            // Cancel a source switch that has not happened yet,
+                            // then restore any rate a completed switch displaced.
+                            publish_cancelled_follow_origin(
+                                pending_switch,
+                                frontier.as_ref(),
+                                frontier_idx,
+                                producer_frames,
+                                &shared,
+                                &origins,
+                            );
+                            pending_switch = arm_rate_restore(&shared, &rate_ownership);
                         }
                     }
                     Command::Stop => {
@@ -1265,7 +1355,7 @@ fn decode_loop(
                         frontier = None;
                         cancel_fetch(&mut fetching, &shared, &app);
                         stream = None;
-                        pending_switch = arm_rate_switch(&shared, None);
+                        pending_switch = update_rate_switch(&shared, pending_switch, None);
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
                         shared.queue_exhausted.store(true, Ordering::Relaxed);
@@ -1297,7 +1387,7 @@ fn decode_loop(
                         // already playing at the running device rate. Any switch
                         // armed for the *next* track is moot: the frontier has
                         // just been re-seated onto the audible one.
-                        pending_switch = arm_rate_switch(&shared, None);
+                        pending_switch = update_rate_switch(&shared, pending_switch, None);
                         if let Some(ref mut tr) = frontier {
                             let target = secs.max(0.0).min(tr.duration_seconds);
                             // Reset resampler state — internal sinc taps from
@@ -1361,12 +1451,52 @@ fn decode_loop(
             }
         }
 
+        // A pause can arrive after restoration was armed. Rewind before
+        // discarding buffered audio, and defer restoration until resume if the
+        // audible file cannot be reopened and sought without losing that audio.
+        if shared.paused.load(Ordering::Relaxed)
+            && matches!(
+                pending_switch,
+                Some(PendingSwitch {
+                    purpose: SwitchPurpose::Restore { .. },
+                    ..
+                })
+            )
+        {
+            if paused_restore_deferred
+                || !flush_paused_restore(
+                    &shared,
+                    &origins,
+                    &queue,
+                    output_rate,
+                    &mut frontier,
+                    &mut frontier_idx,
+                    &mut producer_frames,
+                )
+            {
+                paused_restore_deferred = true;
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            if frontier.is_some() {
+                cancel_fetch(&mut fetching, &shared, &app);
+            }
+        }
+
         // Idle conditions: paused, or nothing loaded. In both cases sleep
         // briefly and re-check commands. We don't block on the channel because
         // the audio callback continues running and we want fast response on
         // resume. A paused stream holds no connection (dropped at pause time),
         // so idling here costs nothing.
-        if shared.paused.load(Ordering::Relaxed) {
+        if shared.paused.load(Ordering::Relaxed)
+            && !matches!(
+                pending_switch,
+                Some(PendingSwitch {
+                    purpose: SwitchPurpose::Restore { .. },
+                    ..
+                })
+            )
+        {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
@@ -1402,40 +1532,58 @@ fn decode_loop(
                 );
             }
             pending_switch = None;
-            match perform_rate_switch(&mut rb, ps.target_rate, output_rate, &rebuild_tx) {
+            let restoring = matches!(ps.purpose, SwitchPurpose::Restore { .. });
+            let restore_position = if restoring {
+                restore_position_for_frontier(&origins, played, frontier_idx)
+            } else {
+                0.0
+            };
+            match perform_rate_switch(&mut rb, ps.target_rate, output_rate, ps.purpose, &output_tx)
+            {
                 Ok(switched) => {
                     // The pre-roll silence is real produced audio and has to be
                     // counted, or queue-ended would wait forever for frames that
                     // were never accounted for. Counting it here also puts the
                     // new track's origin past it, so position starts at the
                     // track's first real sample rather than inside the silence.
-                    producer_frames += switched.preroll_frames;
-                    shared
-                        .total_produced
-                        .fetch_add(switched.preroll_frames, Ordering::Relaxed);
-                    output_rate = switched.rate;
-                    shared.output_rate.store(output_rate, Ordering::Relaxed);
                     shared.rate_switch_pending.store(false, Ordering::Relaxed);
-                    if let Some(ref mut tr) = frontier {
-                        // Re-point the track at the rate now running. Nothing has
-                        // been decoded yet (the switch is armed the moment the
-                        // track is opened), so there is no in-flight resampler
-                        // state to preserve.
-                        tr.output_rate = output_rate;
-                        tr.resampler =
-                            make_resampler(tr.input_rate, output_rate, tr.input_channels);
-                        tr.pending_in = vec![Vec::new(); tr.input_channels];
-                        tr.flushed = false;
-                        publish_origin(
-                            &origins,
-                            &shared,
-                            producer_frames,
-                            frontier_idx,
-                            &tr.path,
-                            tr.duration_seconds,
-                            0.0,
-                            output_rate,
-                        );
+                    if switched.rebuilt {
+                        producer_frames += switched.preroll_frames;
+                        shared
+                            .total_produced
+                            .fetch_add(switched.preroll_frames, Ordering::Relaxed);
+                        output_rate = switched.rate;
+                        shared.output_rate.store(output_rate, Ordering::Relaxed);
+                        if let Some(ref mut tr) = frontier {
+                            // Re-point the track at the rate now running. A normal
+                            // source-follow switch happens before this track has
+                            // decoded anything. A restore can happen mid-track, so
+                            // retain pending input and rebase its position instead.
+                            tr.output_rate = output_rate;
+                            tr.resampler =
+                                make_resampler(tr.input_rate, output_rate, tr.input_channels);
+                            if !restoring {
+                                tr.pending_in = vec![Vec::new(); tr.input_channels];
+                                tr.flushed = false;
+                            }
+                            publish_origin(
+                                &origins,
+                                &shared,
+                                producer_frames,
+                                frontier_idx,
+                                &tr.path,
+                                tr.duration_seconds,
+                                restore_position,
+                                output_rate,
+                            );
+                        }
+                        if restoring {
+                            if let Some(tr) = stream.as_mut().and_then(|s| s.reader.as_mut()) {
+                                tr.output_rate = output_rate;
+                                tr.resampler =
+                                    make_resampler(tr.input_rate, output_rate, tr.input_channels);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -1503,7 +1651,7 @@ fn decode_loop(
                         default_rate,
                     );
                     let seat = seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
-                    pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                    pending_switch = update_rate_switch(&shared, pending_switch, seat.switch_to);
                     if seat.exhausted {
                         emit_state(&app, false, false);
                     }
@@ -1532,7 +1680,7 @@ fn decode_loop(
                     default_rate,
                 );
                 let seat = seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
-                pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                pending_switch = update_rate_switch(&shared, pending_switch, seat.switch_to);
                 // An exhausted queue leaves frontier=None (seat_advance sets the
                 // flag); the position-emit thread fires queue-ended once playback
                 // drains. A parked download leaves it None too, but not exhausted —
@@ -1555,7 +1703,7 @@ fn decode_loop(
                     default_rate,
                 );
                 let seat = seat_advance(adv, &mut frontier, &mut fetching, &shared, &app);
-                pending_switch = arm_rate_switch(&shared, seat.switch_to);
+                pending_switch = update_rate_switch(&shared, pending_switch, seat.switch_to);
                 // Exhaustion (and the parked-download case that is not it) is
                 // seat_advance's call; see the note above.
             }
@@ -2154,9 +2302,10 @@ fn push_blocking(rb: &mut RbProducer<f32>, samples: &[f32]) {
 // Optional, off by default (Playback > "Match Source Sample Rate").
 // Instead of resampling every file to whatever rate the output device happens to
 // be set to, put the device at the file's own rate and hand it the samples
-// untouched. cpal changes a device's nominal rate as a side effect of building a
-// stream at that rate, so a switch means dropping the output stream and building
-// another — and the device is silent in between.
+// untouched. On macOS we explicitly set the hardware's nominal rate: CPAL's
+// output stream format alone only changes its client-side rate. A switch drops
+// the output stream, sets the device rate, then builds another stream — and the
+// device is silent in between.
 //
 // That silence is the whole reason for the drain barrier in decode_loop: a
 // switch happens only at a track boundary, and only once the previous track has
@@ -2164,17 +2313,25 @@ fn push_blocking(rb: &mut RbProducer<f32>, samples: &[f32]) {
 // so the sample-adjacent join between them is exactly what it always was.
 //
 // This does change a system-wide setting — every other app on the machine is
-// resampled by the HAL to the rate we picked, and the change outlives us —
-// which is why it ships off by default.
+// resampled by the HAL to the rate we picked — which is why it ships off by
+// default. RateOwnership below makes the change session-scoped when it is still
+// safe for us to put the prior rate back.
 
 // A switch armed at the moment the frontier track was opened, waiting for the
 // previous track to finish playing out.
 #[derive(Clone, Copy)]
 struct PendingSwitch {
     target_rate: u32,
+    purpose: SwitchPurpose,
     // Bound on the wait. A device that has stopped consuming (asleep, wedged,
     // unplugged) must not hold the decode thread here forever.
     deadline: Instant,
+}
+
+#[derive(Clone, Copy)]
+enum SwitchPurpose {
+    Follow,
+    Restore { expected_rate: u32 },
 }
 
 // A request to rebuild the output stream at a new device rate, decode thread ->
@@ -2185,8 +2342,69 @@ struct PendingSwitch {
 struct RebuildRequest {
     rate: u32,
     rb: RbConsumer<f32>,
+    purpose: SwitchPurpose,
     // The rate actually running when the dust settles, or why it isn't.
-    reply: Sender<Result<u32, String>>,
+    reply: Sender<Result<RebuildOutcome, String>>,
+}
+
+// The output thread also owns exit restoration because it is the only thread
+// allowed to hold/rebuild cpal::Stream on CoreAudio.
+enum OutputRequest {
+    Rebuild(RebuildRequest),
+    RestoreOnExit {
+        reply: Sender<Result<RestoreOutcome, String>>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RebuildOutcome {
+    Applied(u32),
+    AlreadyRestored(u32),
+    ExternalChange { expected: u32, actual: u32 },
+    ShuttingDown,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RestoreOutcome {
+    Restored(u32),
+    AlreadyRestored(u32),
+    ExternalChange { expected: u32, actual: u32 },
+    NothingToRestore,
+}
+
+// Session-only ownership record. Nothing here is a preference: it exists only
+// from Pudding's first rate-changing source selection until restoration (or
+// until an external change proves the device is no longer ours to restore).
+#[derive(Default, Debug)]
+struct RateOwnership {
+    original_rate: Option<u32>,
+    last_selected_rate: Option<u32>,
+}
+
+impl RateOwnership {
+    fn note_selection(&mut self, rate_before: u32, selected: u32) {
+        // A no-op cannot start ownership, but it can correct the guard after
+        // a failed build recorded a target the device never reached.
+        if rate_before == selected && self.original_rate.is_none() {
+            return;
+        }
+        self.original_rate.get_or_insert(rate_before);
+        self.last_selected_rate = Some(selected);
+    }
+
+    fn restore_request(&self) -> Option<(u32, u32)> {
+        Some((self.original_rate?, self.last_selected_rate?))
+    }
+
+    fn restore_target_if_unchanged(&self, current_rate: u32) -> Option<u32> {
+        let (original, last_selected) = self.restore_request()?;
+        (current_rate == last_selected).then_some(original)
+    }
+
+    fn clear(&mut self) {
+        self.original_rate = None;
+        self.last_selected_rate = None;
+    }
 }
 
 // The replacement visualizer ring a rebuilt stream fills, output thread ->
@@ -2206,6 +2424,9 @@ struct SwitchResult {
     // Frames of pre-roll silence pushed ahead of the track. The caller counts
     // these as produced audio (they are: the device will play them).
     preroll_frames: u64,
+    // False when the guarded restore deliberately left an externally changed
+    // device (and the existing stream/ring) untouched.
+    rebuilt: bool,
 }
 
 // Ring buffer size in samples for a given output rate. Stereo -> 2 samples per
@@ -2227,9 +2448,8 @@ fn preroll_frames(rate: u32) -> u64 {
 // The discrete output rates this device can be switched to.
 //
 // cpal reports one config range per entry in the device's
-// AvailableNominalSampleRates, and its set_sample_rate only accepts a rate that
-// appears as a *discrete* entry (min == max) — so a continuous range is dropped
-// here rather than offered and then rejected at build time. Enumerating
+// AvailableNominalSampleRates. Follow only advertised discrete entries (min ==
+// max), rather than guessing the supported steps inside a continuous range. Enumerating
 // instantiates an audio unit, so this is called once at startup, never per track.
 fn device_output_rates(device: &cpal::Device) -> Vec<u32> {
     let mut rates: Vec<u32> = match device.supported_output_configs() {
@@ -2316,6 +2536,78 @@ fn arm_rate_switch(shared: &SharedState, target: Option<u32>) -> Option<PendingS
         .store(target.is_some(), Ordering::Relaxed);
     target.map(|target_rate| PendingSwitch {
         target_rate,
+        purpose: SwitchPurpose::Follow,
+        deadline: Instant::now() + RATE_SWITCH_DRAIN_TIMEOUT,
+    })
+}
+
+// Transport commands may replace a source-follow switch, but restoration is
+// a device obligation independent of the current source. Preserve it without
+// blocking command reception (including Stop, Seek, Play, and pause).
+fn update_rate_switch(
+    shared: &SharedState,
+    pending: Option<PendingSwitch>,
+    target: Option<u32>,
+) -> Option<PendingSwitch> {
+    if matches!(
+        pending,
+        Some(PendingSwitch {
+            purpose: SwitchPurpose::Restore { .. },
+            ..
+        })
+    ) {
+        pending
+    } else {
+        arm_rate_switch(shared, target)
+    }
+}
+
+// Opening a track that needs a switch defers its origin until the rebuild.
+// Cancelling that switch must publish it at the running rate, even if there is
+// nothing to restore or the ownership guard later skips the restoration.
+fn publish_cancelled_follow_origin(
+    pending_switch: Option<PendingSwitch>,
+    frontier: Option<&TrackReader>,
+    frontier_idx: usize,
+    producer_frames: u64,
+    shared: &Arc<SharedState>,
+    origins: &Arc<Mutex<Origins>>,
+) {
+    if let (
+        Some(PendingSwitch {
+            purpose: SwitchPurpose::Follow,
+            ..
+        }),
+        Some(tr),
+    ) = (pending_switch, frontier)
+    {
+        publish_origin(
+            origins,
+            shared,
+            producer_frames,
+            frontier_idx,
+            &tr.path,
+            tr.duration_seconds,
+            0.0,
+            tr.output_rate,
+        );
+    }
+}
+
+fn arm_rate_restore(
+    shared: &SharedState,
+    ownership: &Mutex<RateOwnership>,
+) -> Option<PendingSwitch> {
+    let request = ownership
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .restore_request();
+    shared
+        .rate_switch_pending
+        .store(request.is_some(), Ordering::Relaxed);
+    request.map(|(target_rate, expected_rate)| PendingSwitch {
+        target_rate,
+        purpose: SwitchPurpose::Restore { expected_rate },
         deadline: Instant::now() + RATE_SWITCH_DRAIN_TIMEOUT,
     })
 }
@@ -2332,7 +2624,8 @@ fn perform_rate_switch(
     rb: &mut RbProducer<f32>,
     target_rate: u32,
     current_rate: u32,
-    rebuild_tx: &Sender<RebuildRequest>,
+    purpose: SwitchPurpose,
+    output_tx: &Sender<OutputRequest>,
 ) -> Result<SwitchResult, String> {
     // An empty ring is not a silent device: the callback hands the device a
     // buffer at a time, so the last frames read are still in flight. Tearing the
@@ -2354,24 +2647,55 @@ fn perform_rate_switch(
         // RING_BUFFER_SECONDS), so this never blocks on a ring nobody reads yet.
         push_blocking(&mut producer, &vec![0.0; preroll as usize * OUT_CHANNELS]);
 
-        let (reply_tx, reply_rx) = crossbeam_channel::bounded::<Result<u32, String>>(1);
-        if rebuild_tx
-            .send(RebuildRequest {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded::<Result<RebuildOutcome, String>>(1);
+        if output_tx
+            .send(OutputRequest::Rebuild(RebuildRequest {
                 rate,
                 rb: consumer,
+                purpose: if attempt == 0 {
+                    purpose
+                } else {
+                    SwitchPurpose::Follow
+                },
                 reply: reply_tx,
-            })
+            }))
             .is_err()
         {
             return Err("output thread is gone".to_string());
         }
         match reply_rx.recv_timeout(RATE_SWITCH_REBUILD_TIMEOUT) {
-            Ok(Ok(actual)) => {
+            Ok(Ok(RebuildOutcome::Applied(actual))) => {
                 *rb = producer;
                 log::info!("audio: output rate {current_rate} -> {actual} Hz");
                 return Ok(SwitchResult {
                     rate: actual,
                     preroll_frames: preroll,
+                    rebuilt: true,
+                });
+            }
+            Ok(Ok(RebuildOutcome::AlreadyRestored(actual))) => {
+                return Ok(SwitchResult {
+                    rate: actual,
+                    preroll_frames: 0,
+                    rebuilt: false,
+                });
+            }
+            Ok(Ok(RebuildOutcome::ExternalChange { expected, actual })) => {
+                log::info!(
+                    "audio: not restoring output rate: expected Pudding's {expected} Hz, found {actual} Hz"
+                );
+                return Ok(SwitchResult {
+                    // The live stream/ring were deliberately left untouched.
+                    rate: current_rate,
+                    preroll_frames: 0,
+                    rebuilt: false,
+                });
+            }
+            Ok(Ok(RebuildOutcome::ShuttingDown)) => {
+                return Ok(SwitchResult {
+                    rate: current_rate,
+                    preroll_frames: 0,
+                    rebuilt: false,
                 });
             }
             Ok(Err(e)) => last_err = e,
@@ -2391,16 +2715,17 @@ fn perform_rate_switch(
 // is whenever nobody asks for a new rate: dropping a stream tears the device
 // down, so the only reason to do it is to build another one.
 fn output_thread_loop(
-    device: &cpal::Device,
+    device: &crate::output_device::OutputDevice,
     sample_format: SampleFormat,
     shared: &Arc<SharedState>,
+    ownership: &Arc<Mutex<RateOwnership>>,
     stream: cpal::Stream,
-    rebuild_rx: Receiver<RebuildRequest>,
+    output_rx: Receiver<OutputRequest>,
     viz_tx: Sender<VizHandoff>,
 ) {
     let mut stream = Some(stream);
     loop {
-        let Ok(req) = rebuild_rx.recv() else {
+        let Ok(request) = output_rx.recv() else {
             // Nobody can ask for a switch any more (the decode thread is gone).
             // Park holding the stream, exactly as this thread did before
             // switching existed — returning would drop it and kill the device.
@@ -2408,50 +2733,163 @@ fn output_thread_loop(
                 std::thread::park();
             }
         };
-        let RebuildRequest { rate, rb, reply } = req;
-        // Release the device before asking for a new nominal rate.
-        drop(stream.take());
-        let cfg = StreamConfig {
-            channels: OUT_CHANNELS as u16,
-            sample_rate: SampleRate(rate),
-            buffer_size: cpal::BufferSize::Default,
-        };
-        // The old viz producer died with the old stream's closure; mint a fresh
-        // pair and give the spectrum thread the consumer side.
-        let (viz_producer, viz_consumer) = RingBuffer::<f32>::new(viz_ring_samples());
-        let built = match build_stream(
-            device,
-            &cfg,
-            sample_format,
-            rb,
-            Arc::clone(shared),
-            viz_producer,
-        ) {
-            Ok(s) => match s.play() {
-                Ok(()) => Ok(s),
-                Err(e) => Err(format!("stream.play: {e}")),
-            },
-            Err(e) => Err(e),
-        };
-        match built {
-            Ok(s) => {
-                stream = Some(s);
-                let _ = viz_tx.send(VizHandoff {
-                    rb: viz_consumer,
+        match request {
+            OutputRequest::Rebuild(req) => {
+                let RebuildRequest {
                     rate,
-                });
-                let _ = reply.send(Ok(rate));
+                    rb,
+                    purpose,
+                    reply,
+                } = req;
+                if matches!(purpose, SwitchPurpose::Follow)
+                    && shared.shutting_down.load(Ordering::Acquire)
+                {
+                    let _ = reply.send(Ok(RebuildOutcome::ShuttingDown));
+                    continue;
+                }
+
+                // This is deliberately queried here, immediately before the
+                // only operation that can alter the device. It is both the
+                // value we promise to restore and the guard against trampling a
+                // later user/third-party change.
+                let rate_before = match device.current_rate() {
+                    Ok(rate) => rate,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        continue;
+                    }
+                };
+                if let SwitchPurpose::Restore { expected_rate } = purpose {
+                    let restore_target = ownership
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .restore_target_if_unchanged(rate_before);
+                    if restore_target != Some(rate) {
+                        ownership.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                        let _ = reply.send(Ok(RebuildOutcome::ExternalChange {
+                            expected: expected_rate,
+                            actual: rate_before,
+                        }));
+                        continue;
+                    }
+                    if rate_before == rate {
+                        ownership.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                        let _ = reply.send(Ok(RebuildOutcome::AlreadyRestored(rate)));
+                        continue;
+                    }
+                } else {
+                    // Record before dropping/building the stream. Even a failed
+                    // build can have changed CoreAudio's nominal device rate.
+                    ownership
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .note_selection(rate_before, rate);
+                }
+
+                // Release the device before asking for a new nominal rate.
+                drop(stream.take());
+                match build_replacement(device, sample_format, shared, rate, rb) {
+                    Ok((s, viz_consumer)) => {
+                        stream = Some(s);
+                        shared.output_rate.store(rate, Ordering::Relaxed);
+                        if matches!(purpose, SwitchPurpose::Restore { .. }) {
+                            ownership.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                        }
+                        let _ = viz_tx.send(VizHandoff {
+                            rb: viz_consumer,
+                            rate,
+                        });
+                        let _ = reply.send(Ok(RebuildOutcome::Applied(rate)));
+                    }
+                    Err(e) => {
+                        // The device is silent now: the old stream is gone and
+                        // the new one never started. The decode thread retries
+                        // at the rate that was working, with a ring of its own.
+                        log::error!("audio: rebuild at {rate} Hz failed: {e}");
+                        let _ = reply.send(Err(e));
+                    }
+                }
             }
-            Err(e) => {
-                // The device is silent now: the old stream is gone and the new
-                // one never started. The decode thread retries at the rate that
-                // was working, with a ring of its own — this one went down with
-                // the failed build.
-                log::error!("audio: rebuild at {rate} Hz failed: {e}");
-                let _ = reply.send(Err(e));
+            OutputRequest::RestoreOnExit { reply } => {
+                let Some((original, expected)) = ownership
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .restore_request()
+                else {
+                    let _ = reply.send(Ok(RestoreOutcome::NothingToRestore));
+                    continue;
+                };
+                let actual = match device.current_rate() {
+                    Ok(rate) => rate,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        continue;
+                    }
+                };
+                let restore_target = ownership
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .restore_target_if_unchanged(actual);
+                if restore_target != Some(original) {
+                    ownership.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                    let _ = reply.send(Ok(RestoreOutcome::ExternalChange { expected, actual }));
+                    continue;
+                }
+                if actual == original {
+                    ownership.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                    let _ = reply.send(Ok(RestoreOutcome::AlreadyRestored(original)));
+                    continue;
+                }
+
+                // Playback is ending with the process, so this ring intentionally
+                // contains no program audio. Holding the restored stream until
+                // teardown makes the nominal-rate change stick reliably.
+                let (_producer, consumer) = RingBuffer::<f32>::new(ring_samples(original));
+                drop(stream.take());
+                match build_replacement(device, sample_format, shared, original, consumer) {
+                    Ok((s, _viz_consumer)) => {
+                        stream = Some(s);
+                        shared.output_rate.store(original, Ordering::Relaxed);
+                        ownership.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                        let _ = reply.send(Ok(RestoreOutcome::Restored(original)));
+                    }
+                    Err(e) => {
+                        log::error!("audio: exit restore at {original} Hz failed: {e}");
+                        let _ = reply.send(Err(e));
+                    }
+                }
             }
         }
     }
+}
+
+fn build_replacement(
+    device: &crate::output_device::OutputDevice,
+    sample_format: SampleFormat,
+    shared: &Arc<SharedState>,
+    rate: u32,
+    rb: RbConsumer<f32>,
+) -> Result<(cpal::Stream, RbConsumer<f32>), String> {
+    // On macOS the output AudioUnit's client format does not set the hardware
+    // rate. Change the nominal rate explicitly before constructing the stream.
+    device.set_rate(rate)?;
+    let cfg = StreamConfig {
+        channels: OUT_CHANNELS as u16,
+        sample_rate: SampleRate(rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let (viz_producer, viz_consumer) = RingBuffer::<f32>::new(viz_ring_samples());
+    let stream = build_stream(
+        &device.device,
+        &cfg,
+        sample_format,
+        rb,
+        Arc::clone(shared),
+        viz_producer,
+    )?;
+    stream.play().map_err(|e| format!("stream.play: {e}"))?;
+    device.verify_rate(rate)?;
+    Ok((stream, viz_consumer))
 }
 
 // === Symphonia helpers ===
@@ -2556,19 +2994,28 @@ fn replaygain_multiplier(path: &std::path::Path, mode: u8) -> f32 {
 
     // A gain tag is a signed dB figure, usually suffixed " dB" (e.g. "-7.89 dB").
     let parse_db = |k: &ItemKey| -> Option<f32> {
-        tag.get_string(k)
-            .and_then(|s| s.trim().trim_end_matches(|c: char| c.is_alphabetic()).trim().parse::<f32>().ok())
+        tag.get_string(k).and_then(|s| {
+            s.trim()
+                .trim_end_matches(|c: char| c.is_alphabetic())
+                .trim()
+                .parse::<f32>()
+                .ok()
+        })
     };
     // A peak tag is a linear sample value (typically 0..~1); ignore non-positive.
     let parse_peak = |k: &ItemKey| -> Option<f32> {
-        tag.get_string(k).and_then(|s| s.trim().parse::<f32>().ok()).filter(|p| *p > 0.0)
+        tag.get_string(k)
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|p| *p > 0.0)
     };
 
     // mode 2 = album: prefer album tags, fall back to track tags.
     let (gain_db, peak) = if mode == 2 {
         (
-            parse_db(&ItemKey::ReplayGainAlbumGain).or_else(|| parse_db(&ItemKey::ReplayGainTrackGain)),
-            parse_peak(&ItemKey::ReplayGainAlbumPeak).or_else(|| parse_peak(&ItemKey::ReplayGainTrackPeak)),
+            parse_db(&ItemKey::ReplayGainAlbumGain)
+                .or_else(|| parse_db(&ItemKey::ReplayGainTrackGain)),
+            parse_peak(&ItemKey::ReplayGainAlbumPeak)
+                .or_else(|| parse_peak(&ItemKey::ReplayGainTrackPeak)),
         )
     } else {
         (
@@ -2613,10 +3060,10 @@ fn compute_duration_seconds(track: &Track) -> f64 {
     t.seconds as f64 + t.frac
 }
 
-fn seek_track(tr: &mut TrackReader, target_seconds: f64) {
+fn seek_track(tr: &mut TrackReader, target_seconds: f64) -> bool {
     let secs = target_seconds.trunc() as u64;
     let frac = target_seconds - secs as f64;
-    let _ = tr.reader.seek(
+    let result = tr.reader.seek(
         SeekMode::Accurate,
         SeekTo::Time {
             time: Time {
@@ -2628,6 +3075,7 @@ fn seek_track(tr: &mut TrackReader, target_seconds: f64) {
     );
     // After seek, the decoder state is suspect; reset it.
     tr.decoder.reset();
+    result.is_ok()
 }
 
 // The resampling stage between decoder and ring.
@@ -2739,13 +3187,15 @@ fn append_planar(decoded: &AudioBufferRef<'_>, into: &mut [Vec<f32>], expected_c
             }
         }
         AudioBufferRef::S16(buf) => {
-            let scale = 1.0 / (i16::MAX as f32);
+            // Signed PCM spans [-2^(bits-1), 2^(bits-1)-1]. Using MAX adds
+            // gain and maps the negative endpoint below -1.0.
+            let scale = 1.0 / 32_768.0;
             for c in 0..channels {
                 into[c].extend(buf.chan(c).iter().map(|&v| v as f32 * scale));
             }
         }
         AudioBufferRef::S8(buf) => {
-            let scale = 1.0 / (i8::MAX as f32);
+            let scale = 1.0 / 128.0;
             for c in 0..channels {
                 into[c].extend(buf.chan(c).iter().map(|&v| v as f32 * scale));
             }
@@ -2771,7 +3221,7 @@ fn append_planar(decoded: &AudioBufferRef<'_>, into: &mut [Vec<f32>], expected_c
             }
         }
         AudioBufferRef::U16(buf) => {
-            let scale = 1.0 / (i16::MAX as f32);
+            let scale = 1.0 / 32_768.0;
             for c in 0..channels {
                 into[c].extend(buf.chan(c).iter().map(|&v| (v as f32 - 32_768.0) * scale));
             }
@@ -2845,6 +3295,53 @@ fn reset_for_new_playback(shared: &Arc<SharedState>, origins: &Arc<Mutex<Origins
     o.current = None;
 }
 
+// Prepare the replacement decoder before committing a paused flush. On any
+// preparation failure, keep the old frontier, ring, origins, and counters so
+// resume can play every buffered frame before restoration proceeds.
+#[allow(clippy::too_many_arguments)]
+fn flush_paused_restore(
+    shared: &Arc<SharedState>,
+    origins: &Arc<Mutex<Origins>>,
+    queue: &[PathBuf],
+    output_rate: u32,
+    frontier: &mut Option<TrackReader>,
+    frontier_idx: &mut usize,
+    producer_frames: &mut u64,
+) -> bool {
+    let played = shared.frames_played.load(Ordering::Relaxed);
+    if played + shared.total_drained.load(Ordering::Relaxed)
+        >= shared.total_produced.load(Ordering::Relaxed)
+    {
+        return true;
+    }
+    let Some((idx, position)) = playback_location(origins, played) else {
+        return false;
+    };
+    let Some(path) = queue.get(idx) else {
+        return false;
+    };
+    let rg = shared.rg_mode.load(Ordering::Relaxed);
+    let Some(mut reader) = open_track(path, output_rate, rg) else {
+        return false;
+    };
+    if !seek_track(&mut reader, position) {
+        return false;
+    }
+
+    flush_and_wait(shared);
+    *frontier = Some(reader);
+    *frontier_idx = idx;
+    shared.queue_exhausted.store(false, Ordering::Relaxed);
+    origins
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pending
+        .clear();
+    *producer_frames =
+        shared.frames_played.load(Ordering::Relaxed) + shared.total_drained.load(Ordering::Relaxed);
+    true
+}
+
 // Bump flush_gen and block until the audio callback has acknowledged the
 // drain. Bounded by a short timeout so a stuck/disconnected output device
 // can't hang command processing forever; the audible glitch on timeout is
@@ -2885,6 +3382,45 @@ fn publish_origin(
         start_offset_seconds,
         rate,
     });
+}
+
+// Resolve the audible queue slot and position at a frame boundary. The regular
+// position thread normally advances pending origins, but a rate restore cannot
+// depend on winning that scheduling race after it has drained the ring.
+fn playback_location(origins: &Arc<Mutex<Origins>>, frames_played: u64) -> Option<(usize, f64)> {
+    let mut origins = origins.lock().unwrap_or_else(|e| e.into_inner());
+    while let Some(front) = origins.pending.front() {
+        if front.at_consumer_frame > frames_played {
+            break;
+        }
+        origins.current = origins.pending.pop_front();
+    }
+    origins.current.as_ref().map(|origin| {
+        let delta_frames = frames_played.saturating_sub(origin.at_consumer_frame);
+        let position =
+            origin.start_offset_seconds + delta_frames as f64 / origin.rate.max(1) as f64;
+        // This position is a seek target, so only clamp against a duration we
+        // actually know: compute_duration_seconds reports 0.0 for files with no
+        // time_base or n_frames, and clamping to that would restart the track.
+        let position = if origin.duration_seconds > 0.0 {
+            position.min(origin.duration_seconds)
+        } else {
+            position
+        };
+        (origin.queue_index, position)
+    })
+}
+
+fn restore_position_for_frontier(
+    origins: &Arc<Mutex<Origins>>,
+    frames_played: u64,
+    frontier_idx: usize,
+) -> f64 {
+    // The frontier can be the next, unstarted track while the audible origin
+    // still describes the previous track's tail. Never carry that time across.
+    playback_location(origins, frames_played)
+        .filter(|(idx, _)| *idx == frontier_idx)
+        .map_or(0.0, |(_, position)| position)
 }
 
 // === Position-emit thread ===
@@ -3136,7 +3672,8 @@ fn waveform_emit_loop(
                     let mut s_prev2 = 0.0f32;
                     for (j, &x) in win.iter().enumerate() {
                         // Hann window w[j] = 0.5 - 0.5*cos(2πj/(N-1)).
-                        let w = 0.5 - 0.5 * (std::f32::consts::TAU * j as f32 / (n - 1) as f32).cos();
+                        let w =
+                            0.5 - 0.5 * (std::f32::consts::TAU * j as f32 / (n - 1) as f32).cos();
                         let s = x * w + coeff * s_prev - s_prev2;
                         s_prev2 = s_prev;
                         s_prev = s;
@@ -3209,6 +3746,116 @@ fn emit_error(app: &AppHandle, path: &std::path::Path, message: &str) {
             message: message.to_string(),
         },
     );
+}
+
+#[cfg(test)]
+mod signal_integrity_tests {
+    use super::*;
+
+    #[test]
+    fn signed_eight_bit_pcm_uses_the_full_negative_range() {
+        use std::borrow::Cow;
+        use symphonia::core::audio::{AudioBuffer, Channels, SignalSpec};
+        let mut buffer = AudioBuffer::<i8>::new(4, SignalSpec::new(44_100, Channels::FRONT_LEFT));
+        buffer.render_silence(None);
+        buffer.chan_mut(0).copy_from_slice(&[-128, -1, 0, 127]);
+        let mut output = vec![Vec::new()];
+        append_planar(&AudioBufferRef::S8(Cow::Borrowed(&buffer)), &mut output, 1);
+        assert_eq!(output[0], [-1.0, -1.0 / 128.0, 0.0, 127.0 / 128.0]);
+    }
+
+    // Independent PCM WAV writer: expected samples come from the signed integer
+    // definition, not from the decoder or conversion helper under test.
+    fn write_pcm_fixture(rate: u32, bits: u16) -> (PathBuf, Vec<f32>) {
+        let frames = 5_003u32; // Deliberately not a resampler or callback block multiple.
+        let bytes_per_sample = bits / 8;
+        let data_size = frames * 2 * bytes_per_sample as u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // Integer PCM.
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // Stereo.
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2 * bytes_per_sample as u32).to_le_bytes());
+        bytes.extend_from_slice(&(2 * bytes_per_sample).to_le_bytes());
+        bytes.extend_from_slice(&bits.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+
+        let full_scale = 1i32 << (bits - 1);
+        let edges = [-full_scale, full_scale - 1, -1, 0, 1, full_scale / 2];
+        let mut expected = Vec::new();
+        for frame in 0..frames {
+            for channel in 0..2u32 {
+                let index = frame as usize * 2 + channel as usize;
+                let sample = if index < edges.len() {
+                    edges[index]
+                } else {
+                    ((frame * 7_919 + channel * 17_011) % (2 * full_scale as u32)) as i32
+                        - full_scale
+                };
+                bytes.extend_from_slice(&sample.to_le_bytes()[..bytes_per_sample as usize]);
+                expected.push(sample as f32 / full_scale as f32);
+            }
+        }
+        let path = std::env::temp_dir().join(format!(
+            "pudding-signal-integrity-{}-{rate}-{bits}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).expect("write PCM fixture");
+        (path, expected)
+    }
+
+    #[test]
+    fn native_rate_pcm_reaches_the_output_callback_unchanged() {
+        for rate in [44_100, 48_000, 96_000] {
+            for bits in [16, 24] {
+                let (path, expected) = write_pcm_fixture(rate, bits);
+                let mut reader = open_track(&path, rate, 0).expect("open PCM fixture");
+                // The open reader retains the file handle; remove the temporary
+                // directory entry now so assertion failures leave no fixtures.
+                std::fs::remove_file(path).expect("remove PCM fixture");
+                let shared = Arc::new(SharedState::new(rate));
+                let (mut producer, consumer) = RingBuffer::<f32>::new(expected.len() + 2);
+                let (viz, _viz_consumer) = RingBuffer::<f32>::new(viz_ring_samples());
+                let mut callback = ConsumerState {
+                    rb: consumer,
+                    shared: Arc::clone(&shared),
+                    last_flush_gen: 0,
+                    viz,
+                    eq: EqChain::new(rate),
+                    post_flush: true,
+                };
+                let mut produced = 0;
+                let mut actual = Vec::new();
+                loop {
+                    let outcome =
+                        decode_and_push(&mut reader, &mut producer, &shared, &mut produced)
+                            .expect("decode PCM fixture");
+                    while callback.rb.slots() > 0 {
+                        let mut block = vec![0.0; callback.rb.slots().min(514)];
+                        fill_output(&mut callback, &mut block);
+                        actual.extend(block);
+                    }
+                    if matches!(outcome, StepOutcome::TrackEnded) {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "{rate} Hz, {bits}-bit: missing/extra samples"
+                );
+                assert_eq!(produced, (expected.len() / 2) as u64);
+                assert_eq!(shared.frames_played.load(Ordering::Relaxed), produced);
+                for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(actual, expected, "{rate} Hz, {bits}-bit, sample {index}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3397,10 +4044,7 @@ mod replaygain_tests {
     fn mode_off_short_circuits() {
         // Even with tags present, mode 0 never touches the volume.
         let path = temp_copy("stereo22_alac.m4a", "off");
-        write_rg_tags(
-            &path,
-            &[(ItemKey::ReplayGainTrackGain, "-6.00 dB")],
-        );
+        write_rg_tags(&path, &[(ItemKey::ReplayGainTrackGain, "-6.00 dB")]);
         assert_eq!(replaygain_multiplier(&path, 0), 1.0);
         let _ = std::fs::remove_file(&path);
     }
@@ -3433,16 +4077,19 @@ mod replaygain_tests {
                 (ItemKey::ReplayGainAlbumGain, "0.00 dB"),
             ],
         );
-        assert!((replaygain_multiplier(&path, 2) - 1.0).abs() < 1e-3, "album gain");
-        assert!((replaygain_multiplier(&path, 1) - 0.5).abs() < 1e-3, "track gain");
+        assert!(
+            (replaygain_multiplier(&path, 2) - 1.0).abs() < 1e-3,
+            "album gain"
+        );
+        assert!(
+            (replaygain_multiplier(&path, 1) - 0.5).abs() < 1e-3,
+            "track gain"
+        );
         let _ = std::fs::remove_file(&path);
 
         // Only track tags present: album mode must fall back to the track gain.
         let path = temp_copy("stereo22_alac.m4a", "fallback");
-        write_rg_tags(
-            &path,
-            &[(ItemKey::ReplayGainTrackGain, "-6.0206 dB")],
-        );
+        write_rg_tags(&path, &[(ItemKey::ReplayGainTrackGain, "-6.0206 dB")]);
         assert!(
             (replaygain_multiplier(&path, 2) - 0.5).abs() < 1e-3,
             "album mode should fall back to track gain",
@@ -3732,6 +4379,251 @@ mod rate_switch_tests {
     }
 
     #[test]
+    fn transport_source_changes_preserve_an_armed_restore_and_its_deadline() {
+        let shared = SharedState::new(44_100);
+        let mut ownership = RateOwnership::default();
+        ownership.note_selection(48_000, 44_100);
+        let mut pending = arm_rate_restore(&shared, &Mutex::new(ownership));
+        let deadline = pending.unwrap().deadline;
+
+        // Stop / Seek / radio cancel source following; Play / Append can
+        // request a different source rate. Neither may cancel restoration.
+        for target in [None, Some(96_000), None, Some(44_100)] {
+            pending = update_rate_switch(&shared, pending, target);
+            let restore = pending.unwrap();
+            assert_eq!(restore.target_rate, 48_000);
+            assert!(matches!(
+                restore.purpose,
+                SwitchPurpose::Restore {
+                    expected_rate: 44_100
+                }
+            ));
+            assert_eq!(restore.deadline, deadline);
+            assert!(shared.rate_switch_pending.load(Ordering::Relaxed));
+        }
+        // Ordinary source switches must still be replaceable and cancellable.
+        let follow = update_rate_switch(&shared, None, Some(96_000));
+        assert!(update_rate_switch(&shared, follow, None).is_none());
+        assert!(!shared.rate_switch_pending.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn failed_paused_restore_preserves_buffered_audio_across_a_track_boundary() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests-fixtures/mono44_alac.m4a");
+        for failure in ["open", "queue slot", "origin", "seek"] {
+            let shared = Arc::new(SharedState::new(44_100));
+            shared.paused.store(true, Ordering::Relaxed);
+            let origins = Arc::new(Mutex::new(Origins::default()));
+            let mut queue = vec![fixture.clone(), fixture.clone()];
+            let mut frontier = open_track(&fixture, 44_100, 0);
+            // Pending decoded input must survive along with the ring itself.
+            frontier.as_mut().unwrap().pending_in[0].push(0.125);
+            let mut frontier_idx = 1;
+            let mut producer_frames = 4;
+            shared
+                .total_produced
+                .store(producer_frames, Ordering::Relaxed);
+            let expected = [0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4];
+            let (mut producer, consumer) = RingBuffer::<f32>::new(expected.len());
+            push_blocking(&mut producer, &expected);
+            let (viz, _tap) = RingBuffer::<f32>::new(32);
+            let mut callback = ConsumerState {
+                rb: consumer,
+                shared: shared.clone(),
+                last_flush_gen: 0,
+                viz,
+                eq: EqChain::new(44_100),
+                post_flush: false,
+            };
+            if failure != "origin" {
+                let offset = if failure == "seek" { 1e9 } else { 0.0 };
+                publish_origin(&origins, &shared, 0, 0, "audible", 0.0, offset, 44_100);
+                playback_location(&origins, 0);
+                publish_origin(&origins, &shared, 2, 1, "next", 1.0, 0.0, 44_100);
+            }
+            if failure == "open" {
+                queue[0] = fixture.with_extension("missing-paused-restore-test");
+                assert!(!queue[0].exists());
+            } else if failure == "queue slot" {
+                queue.clear();
+            }
+            let pending_origins = origins.lock().unwrap().pending.len();
+            assert!(
+                !flush_paused_restore(
+                    &shared,
+                    &origins,
+                    &queue,
+                    44_100,
+                    &mut frontier,
+                    &mut frontier_idx,
+                    &mut producer_frames,
+                ),
+                "{failure}"
+            );
+            assert_eq!(frontier.as_ref().unwrap().pending_in[0], [0.125]);
+            assert_eq!(frontier_idx, 1);
+            assert_eq!(producer_frames, 4);
+            assert_eq!(shared.flush_gen.load(Ordering::Relaxed), 0);
+            assert_eq!(shared.total_drained.load(Ordering::Relaxed), 0);
+            assert_eq!(origins.lock().unwrap().pending.len(), pending_origins);
+            // Exercise the real callback: resume must play all of both tracks'
+            // buffered samples, without an intervening flush or skip.
+            shared.paused.store(false, Ordering::Relaxed);
+            let mut output = [0.0; 8];
+            fill_output(&mut callback, &mut output);
+            assert_eq!(output, expected, "{failure}");
+        }
+    }
+
+    #[test]
+    fn successful_paused_restore_reseats_the_audible_track_before_flushing() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests-fixtures/mono44_alac.m4a");
+        let queue = vec![fixture.clone(), fixture.clone()];
+        let shared = Arc::new(SharedState::new(44_100));
+        shared.paused.store(true, Ordering::Relaxed);
+        shared.queue_exhausted.store(true, Ordering::Relaxed);
+        let origins = Arc::new(Mutex::new(Origins::default()));
+        publish_origin(&origins, &shared, 0, 0, "audible", 1.0, 0.0, 44_100);
+        publish_origin(&origins, &shared, 2, 1, "next", 1.0, 0.0, 44_100);
+        let mut frontier = None; // Decoder already reached EOF; a tail remains.
+        let mut frontier_idx = 2;
+        let mut producer_frames = 4;
+        shared.total_produced.store(4, Ordering::Relaxed);
+        let (mut producer, consumer) = RingBuffer::<f32>::new(8);
+        push_blocking(&mut producer, &[0.25; 8]);
+        let (viz, _tap) = RingBuffer::<f32>::new(32);
+        let mut callback = ConsumerState {
+            rb: consumer,
+            shared: shared.clone(),
+            last_flush_gen: 0,
+            viz,
+            eq: EqChain::new(44_100),
+            post_flush: false,
+        };
+        let callback_shared = shared.clone();
+        let callback_thread = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while callback_shared.flush_gen.load(Ordering::Acquire) == 0 {
+                assert!(Instant::now() < deadline, "flush was never requested");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            fill_output(&mut callback, &mut [0.0; 8]);
+            assert_eq!(callback.rb.slots(), 0);
+        });
+        assert!(flush_paused_restore(
+            &shared,
+            &origins,
+            &queue,
+            44_100,
+            &mut frontier,
+            &mut frontier_idx,
+            &mut producer_frames,
+        ));
+        callback_thread.join().unwrap();
+        assert_eq!(frontier_idx, 0);
+        assert_eq!(frontier.unwrap().path, fixture.to_string_lossy());
+        assert!(!shared.queue_exhausted.load(Ordering::Relaxed));
+        assert_eq!(shared.total_drained.load(Ordering::Relaxed), 4);
+        assert_eq!(producer_frames, 4);
+        assert!(origins.lock().unwrap().pending.is_empty());
+        assert_eq!(playback_location(&origins, 0), Some((0, 0.0)));
+    }
+
+    #[test]
+    fn ownership_remembers_only_the_rate_before_the_first_change() {
+        let mut ownership = RateOwnership::default();
+        // Merely rebuilding at a rate the device already has does not claim it.
+        ownership.note_selection(48_000, 48_000);
+        assert_eq!(ownership.restore_request(), None);
+
+        ownership.note_selection(48_000, 44_100);
+        assert_eq!(ownership.restore_request(), Some((48_000, 44_100)));
+
+        // Later source-rate switches update the guard but never replace the
+        // rate that preceded Pudding's first change.
+        ownership.note_selection(44_100, 96_000);
+        assert_eq!(ownership.restore_request(), Some((48_000, 96_000)));
+        assert_eq!(ownership.restore_target_if_unchanged(96_000), Some(48_000));
+    }
+
+    #[test]
+    fn ownership_guard_rejects_a_later_external_change() {
+        let mut ownership = RateOwnership::default();
+        ownership.note_selection(48_000, 44_100);
+
+        assert_eq!(ownership.restore_target_if_unchanged(44_100), Some(48_000));
+        assert_eq!(ownership.restore_target_if_unchanged(96_000), None);
+
+        ownership.clear();
+        assert_eq!(ownership.restore_request(), None);
+        assert_eq!(ownership.restore_target_if_unchanged(44_100), None);
+    }
+
+    #[test]
+    fn cancelling_follow_preserves_the_next_tracks_origin_without_a_rebuild() {
+        let shared = Arc::new(SharedState::new(48_000));
+        let origins = Arc::new(Mutex::new(Origins::default()));
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests-fixtures/mono44_aac.m4a");
+        let reader = open_track(&path, 48_000, 0).expect("open_track");
+        // Include a previous flush: origins use consumed, not produced, frames.
+        shared.total_drained.store(4_800, Ordering::Relaxed);
+        publish_origin(&origins, &shared, 4_800, 0, "previous", 10.0, 0.0, 48_000);
+        let pending = arm_rate_switch(&shared, Some(44_100));
+        publish_cancelled_follow_origin(pending, Some(&reader), 1, 52_800, &shared, &origins);
+        let restore = arm_rate_restore(&shared, &Mutex::new(RateOwnership::default()));
+        assert!(restore.is_none());
+        assert!(!shared.rate_switch_pending.load(Ordering::Relaxed));
+
+        // The next track stays pending until the preceding audio has sounded.
+        assert_eq!(playback_location(&origins, 24_000), Some((0, 0.5)));
+        assert_eq!(playback_location(&origins, 48_000), Some((1, 0.0)));
+        let active = origins.lock().unwrap().current.clone().unwrap();
+        assert_eq!(active.path, reader.path);
+        assert_eq!(active.rate, 48_000);
+        assert_eq!(playback_location(&origins, 52_800), Some((1, 0.1)));
+
+        // Disabling again mid-track must not publish a new zero-time origin.
+        publish_cancelled_follow_origin(None, Some(&reader), 1, 57_600, &shared, &origins);
+        assert!(origins.lock().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn restore_position_tracks_the_frontier_slot_and_pending_origins() {
+        let shared = Arc::new(SharedState::new(44_100));
+        let origins = Arc::new(Mutex::new(Origins::default()));
+        publish_origin(&origins, &shared, 0, 0, "track", 120.0, 5.0, 44_100);
+        // Mid-track restoration retains a previous seek offset at the old rate.
+        assert_eq!(restore_position_for_frontier(&origins, 441_000, 0), 15.0);
+        // An unstarted next slot must not inherit the preceding track's time.
+        assert_eq!(restore_position_for_frontier(&origins, 441_000, 1), 0.0);
+
+        // Duplicate queue entries share a path; the slot determines identity.
+        // Resolve a pending origin without waiting for the position thread.
+        publish_origin(&origins, &shared, 441_000, 1, "track", 120.0, 0.0, 44_100);
+        assert_eq!(restore_position_for_frontier(&origins, 485_100, 1), 1.0);
+        assert_eq!(restore_position_for_frontier(&origins, 485_100, 0), 0.0);
+    }
+
+    #[test]
+    fn ownership_preserves_restoration_after_a_failed_switch_and_fallback() {
+        // A failed build can leave either the old or the attempted rate on the
+        // device. A fallback must repair the guard in both cases.
+        for rate_after_failure in [44_100, 96_000] {
+            let mut ownership = RateOwnership::default();
+            ownership.note_selection(48_000, 44_100);
+            ownership.note_selection(44_100, 96_000);
+            ownership.note_selection(rate_after_failure, 44_100);
+            assert_eq!(ownership.restore_request(), Some((48_000, 44_100)));
+            assert_eq!(ownership.restore_target_if_unchanged(44_100), Some(48_000));
+            // An actual later external change must still prevent restoration.
+            assert_eq!(ownership.restore_target_if_unchanged(96_000), None);
+        }
+    }
+
+    #[test]
     fn preroll_always_fits_the_ring_it_is_pushed_into() {
         // perform_rate_switch pushes the pre-roll into a ring whose consumer has
         // not been handed to a stream yet, so nothing can make room: if it
@@ -3802,5 +4694,48 @@ mod rate_switch_tests {
         // why the ring is rebuilt on a switch rather than reused.
         assert!(ring_samples(96_000) > ring_samples(48_000));
         assert_eq!(ring_samples(48_000) % OUT_CHANNELS, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "briefly changes the default output device's hardware rate, then restores it"]
+    fn hardware_output_rebuild_changes_nominal_rate_and_restores() {
+        let device = crate::output_device::OutputDevice::default().expect("output device");
+        let original = device.current_rate().expect("original nominal rate");
+        let target = device_output_rates(&device.device)
+            .into_iter()
+            .find(|&rate| rate != original)
+            .expect("device must support another rate");
+        let format = device
+            .device
+            .default_output_config()
+            .unwrap()
+            .sample_format();
+        let shared = Arc::new(SharedState::new(original));
+        // Restore even if a hardware assertion panics. Declared before streams
+        // so those drop first during unwinding.
+        struct RestoreRate(crate::output_device::OutputDevice, u32);
+        impl Drop for RestoreRate {
+            fn drop(&mut self) {
+                if let Err(e) = self.0.set_rate(self.1) {
+                    eprintln!("hardware test could not restore {} Hz: {e}", self.1);
+                }
+            }
+        }
+        let _restore = RestoreRate(device.clone(), original);
+        let build = |rate| {
+            let (_producer, consumer) = RingBuffer::<f32>::new(ring_samples(rate));
+            build_replacement(&device, format, &shared, rate, consumer).expect("build replacement")
+        };
+        let (stream, _) = build(original);
+        drop(stream);
+        let (stream, _) = build(target);
+        assert_eq!(device.current_rate().unwrap(), target);
+        eprintln!("hardware nominal rate: {original} -> {target} Hz");
+        drop(stream);
+        let (stream, _) = build(original);
+        assert_eq!(device.current_rate().unwrap(), original);
+        eprintln!("hardware nominal rate restored: {original} Hz");
+        drop(stream);
     }
 }

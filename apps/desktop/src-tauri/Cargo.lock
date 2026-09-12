@@ -3336,6 +3336,7 @@ version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "block2",
+ "coreaudio-sys",
  "cpal",
  "crossbeam-channel",
  "libc",
