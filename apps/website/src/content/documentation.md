@@ -8,7 +8,7 @@ Pudding is a macOS music player. It plays local files and can connect to interne
 
 Pudding is split into two panels. The left panel has two tabs: Files and Streams. The right panel shows Now Playing by default and will show other content depending on what you're doing.
 
-![Pudding with an album’s tracks in the Files panel on the left and its artwork and playback controls in Now Playing on the right.](../assets/desktop.png)
+![Pudding with the Files panel on the left listing the library views and the Favorites and Synthwave playlists, and album artwork with playback controls in Now Playing on the right.](../assets/desktop.png)
 
 ## Files
 

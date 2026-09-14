@@ -3,17 +3,17 @@ import { Image } from 'astro:assets';
 import Page from '../layouts/Page.astro';
 import screenshot from '../assets/desktop.png';
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
-const desc = "A new music player for local files and internet radio.";
+const desc = "A music player for local files and internet radio.";
 ---
 
 <Page title="Pudding" description={desc}>
   <section class="hero" aria-labelledby="hero-title">
-    <h1 id="hero-title">
-      Own your music.
-      <br />
-      <span class="primary">Play it in Pudding.</span>
-    </h1>
-    <div class="hero-bottom">
+    <div class="hero-copy">
+      <h1 id="hero-title">
+        Own your music.
+        <br />
+        <span class="primary">Play it in Pudding.</span>
+      </h1>
       <p class="intro">
         {desc}
       </p>
@@ -21,6 +21,10 @@ const desc = "A new music player for local files and internet radio.";
         <a class="button" href={`${base}documentation/`}>Get Pudding <span aria-hidden="true">↗</span></a>
       </div>
     </div>
+
+    <figure class="app-preview">
+      <Image src={screenshot} alt="Pudding Desktop in its dark theme, showing the Files panel with library views and playlists, album artwork, and playback controls." widths={[640, 960, 1400, 1920]} sizes="(max-width: 980px) 94vw, 46vw" format="webp" />
+    </figure>
   </section>
 
   <section class="features" aria-labelledby="features-title">
@@ -36,8 +40,4 @@ const desc = "A new music player for local files and internet radio.";
       <li><strong>Retro visualizer</strong>. Gaze at a glowing neon oscilloscope flying through space.</li>
     </ul>
   </section>
-
-  <figure class="app-preview hero-shot">
-    <Image src={screenshot} alt="Pudding Desktop in its dark theme, showing a music library, album artwork, and playback controls." widths={[640, 1200, 1956]} sizes="(max-width: 1184px) 94vw, 1120px" format="webp" />
-  </figure>
 </Page>
