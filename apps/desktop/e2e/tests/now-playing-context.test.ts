@@ -61,7 +61,7 @@ test("Now Playing title reopens the playing playlist", async () => {
   await d.invoke("write_playlist", {
     path: playlistPath,
     name: "Context Playlist",
-    tracks: [A, B],
+    tracks: [{ path: A }, { path: B }],
   });
 
   try {

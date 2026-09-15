@@ -34,6 +34,11 @@ import {
   appendToActivePool,
   teardownPlaybackToEmpty,
   forgetCurationHistory,
+  readPlaylist,
+  writePlaylist,
+  notePlaylistMtime,
+  playlistChangedOnDisk,
+  adoptReloadedPlaylist,
 } from "./queue";
 import { editInline } from "./editors";
 import {
@@ -129,7 +134,7 @@ export async function playPlaylist(node: TreeNode): Promise<void> {
 export async function playPlaylistPath(path: string): Promise<void> {
   let data: PlaylistData;
   try {
-    data = await invoke<PlaylistData>("read_playlist", { path });
+    data = await readPlaylist(path);
   } catch (e) {
     // The file is gone (moved/deleted outside the app). Self-heal: tell the
     // user and drop it from the recents so the dead entry stops reappearing.
@@ -189,7 +194,7 @@ export async function browsePlaylistPath(
 ): Promise<void> {
   let data: PlaylistData;
   try {
-    data = await invoke<PlaylistData>("read_playlist", { path });
+    data = await readPlaylist(path);
   } catch (e) {
     // The file is gone (moved/deleted outside the app). Self-heal: tell the
     // user and drop it from the recents so the dead entry stops reappearing.
@@ -228,7 +233,7 @@ export async function addPlaylistToQueue(
   const queueBefore = activeQueue.value;
   const pathBefore = currentNodePath.value;
   try {
-    const data = await invoke<PlaylistData>("read_playlist", { path: node.path });
+    const data = await readPlaylist(node.path);
     if (activeQueue.value !== queueBefore) return;
     if (!queueBefore && currentNodePath.value !== pathBefore) return;
     sink(playlistPlayableTracks(data));
@@ -245,6 +250,63 @@ export async function addPlaylistToQueue(
 // menu and a Finder double-click are one code path (see deliver_open_file) — and
 // it takes playlists as well as audio, which is why there is no Open Playlist.
 
+
+// --- Outside changes ---------------------------------------------------------
+
+// Re-read any open playlist whose file changed on disk without us. The watcher
+// supplies the prompt but not the answer — a library scan only reports that
+// *something* under a root moved — so each open playlist is stat'd and only a
+// disagreeing mtime costs a read.
+//
+// Both open copies are checked: the browsed playlist and the playing queue can be
+// two different files, or one file seen twice. The playing one matters most,
+// because curation autosaves — leave it stale and the user's next drag writes the
+// pre-edit rows back over whatever the other app just wrote.
+//
+// Only reaches playlists the watcher can see, i.e. those under a library root; one
+// opened from elsewhere via Open... is covered by the window-focus check that also
+// calls this (see main.ts), which is the case where you'd have been editing it in
+// another app anyway.
+export async function reloadChangedPlaylists(): Promise<void> {
+  // An inline rename owns a live text input inside the list we would rebuild, and
+  // a swap here would tear it out mid-type — the same guard the scan's pane
+  // refresh takes. Nothing is lost by waiting: the next scan or focus re-checks.
+  if (app.inlineEditing) return;
+  const paths = new Set(
+    [browsedPlaylist.value, activeQueue.value]
+      .filter((q): q is Queue => isPlaylistSource(q))
+      .map((q) => q.sourcePath!),
+  );
+  for (const path of paths) {
+    let mtime: number | null;
+    try {
+      mtime = await invoke<number | null>("playlist_mtime", { path });
+    } catch (e) {
+      console.error("playlist_mtime failed", path, e);
+      continue;
+    }
+    // Gone is not changed. A deleted playlist is handled where it's noticed (the
+    // tree refresh, the next play), and blanking the open pane here would be a
+    // worse answer than leaving up the rows we last read.
+    if (mtime === null) continue;
+    if (!playlistChangedOnDisk(path, mtime)) continue;
+    let data: PlaylistData;
+    try {
+      data = await readPlaylist(path);
+    } catch (e) {
+      // Unreadable for some other reason: forget the stamp so a later attempt
+      // retries rather than deciding the file is settled.
+      console.error("read_playlist failed", path, e);
+      notePlaylistMtime(path, null);
+      continue;
+    }
+    // Say so. The rows under the user's cursor just changed without them asking,
+    // and a list that silently reorders itself reads as a bug.
+    if (adoptReloadedPlaylist(path, data.name, playlistViewTracks(data))) {
+      toast(`"${data.name}" changed on disk`);
+    }
+  }
+}
 
 // --- Playlist index (phase 4) ---
 // Every `.m3u/.m3u8` under the library root — path + display name — backing the
@@ -304,7 +366,7 @@ export async function menuNewPlaylist(): Promise<void> {
   if (!path) return;
   const name = playlistNameFromPath(path);
   try {
-    await invoke("write_playlist", { path, name, tracks: [] });
+    await writePlaylist(path, name, []);
   } catch (e) {
     console.error("write_playlist failed", path, e);
     return;
@@ -345,7 +407,7 @@ export async function saveQueueAsPlaylist(path: string): Promise<void> {
   if (!q || isPlaylistSource(q) || !queueIsActivePool()) return;
   const name = playlistNameFromPath(path);
   try {
-    await invoke("write_playlist", { path, name, tracks: q.tracks.map((t) => t.path) });
+    await writePlaylist(path, name, q.tracks);
   } catch (e) {
     console.error("write_playlist failed", path, e);
     return;
@@ -411,7 +473,7 @@ export async function renameOpenPlaylist(input: string): Promise<void> {
   browsedPlaylist.value = retitle(browsedPlaylist.value);
   activeQueue.value = retitle(activeQueue.value);
   try {
-    await invoke("write_playlist", { path, name, tracks: list.tracks.map((t) => t.path) });
+    await writePlaylist(path, name, list.tracks);
   } catch (e) {
     console.error("write_playlist (rename) failed", path, e);
     toast("Couldn't rename playlist");
@@ -556,7 +618,7 @@ export async function newPlaylistWithTracks(getTracks: TrackProvider): Promise<v
   if (!path) return;
   const name = playlistNameFromPath(path);
   try {
-    await invoke("write_playlist", { path, name, tracks: tracks.map((t) => t.path) });
+    await writePlaylist(path, name, tracks);
   } catch (e) {
     console.error("write_playlist (new) failed", path, e);
     toast("Couldn't create playlist");
@@ -595,15 +657,17 @@ export async function addTracksToPlaylist(path: string, getTracks: TrackProvider
   // the new paths, and rewrite.
   let data: PlaylistData;
   try {
-    data = await invoke<PlaylistData>("read_playlist", { path });
+    data = await readPlaylist(path);
   } catch (e) {
     console.error("read_playlist failed", path, e);
     toast("Couldn't open playlist");
     return;
   }
-  const combined = [...data.tracks.map((t) => t.path), ...tracks.map((t) => t.path)];
+  // The file's own rows keep the `#EXTINF` values they were read with, so
+  // appending to a hand-made playlist can't strip the rows already in it.
+  const combined = [...data.tracks, ...tracks];
   try {
-    await invoke("write_playlist", { path, name: data.name, tracks: combined });
+    await writePlaylist(path, data.name, combined);
   } catch (e) {
     console.error("write_playlist (append) failed", path, e);
     toast("Couldn't save playlist");

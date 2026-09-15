@@ -53,8 +53,8 @@ test("Add to playlist targets the playing pool while another is browsed", async 
   // that the curated list is Q (not P) at add time — the regression trigger.
   const P = path.join(os.tmpdir(), `pudding-e2e-target-P-${stamp}.m3u`);
   const Q = path.join(os.tmpdir(), `pudding-e2e-target-Q-${stamp}.m3u`);
-  await d.invoke("write_playlist", { path: P, name: "List P", tracks: [A, B] });
-  await d.invoke("write_playlist", { path: Q, name: "List Q", tracks: [C] });
+  await d.invoke("write_playlist", { path: P, name: "List P", tracks: [{ path: A }, { path: B }] });
+  await d.invoke("write_playlist", { path: Q, name: "List Q", tracks: [{ path: C }] });
 
   try {
     // Play P: it becomes the active pool (in memory + engine).

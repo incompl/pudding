@@ -12,10 +12,20 @@
 //   filename — so rename never touches the filesystem.
 // - Metadata: the library DB wins for known paths; `#EXTINF` title / filename is
 //   the fallback for out-of-library rows.
-// - Paths: write relative to the playlist file when the track is under its
-//   directory, absolute otherwise; resolve to absolute on open.
+// - Paths: a row Pudding writes itself goes relative to the playlist file when
+//   both ends sit inside one *container* — the volume, sync root, or home folder
+//   you could copy as a unit (see `Bounds`) — and absolute otherwise; every row
+//   resolves to absolute on open. Relative is what makes a playlist portable.
+// - Rewrites are non-destructive: comments and unknown `#EXT*` directives are
+//   carried over from the file being overwritten (see `Preserved`), a row's
+//   `#EXTINF` survives even when the library has never seen the file, and a row
+//   the file already had keeps the exact spelling its author gave it. Pudding
+//   chooses a path's form only for the rows it is actually authoring.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::{CStr, OsStr};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -88,6 +98,11 @@ pub struct PlaylistData {
     name: String,
     path: String,
     tracks: Vec<PlaylistTrack>,
+    // The file's mtime as of this read. The frontend keeps it and re-stats the
+    // file on library scans and window focus: a value that moved without one of
+    // our own writes means another app (or a text editor) rewrote the playlist,
+    // and the open view is stale. None when the file vanished mid-read.
+    mtime: Option<i64>,
 }
 
 // A library playlist for the index (Add to playlist ▸ / searchable playlists).
@@ -102,6 +117,11 @@ pub struct PlaylistRef {
 struct ParsedEntry {
     path: String,
     extinf_title: Option<String>,
+    // The `#EXTINF` runtime in seconds, or None when absent or unknown (`-1`).
+    // Kept because for an out-of-library row it is the only duration there is —
+    // both for the runtime the pane shows and for the rewrite that has to put the
+    // line back. The DB's value wins whenever the path is in the library.
+    extinf_secs: Option<f64>,
 }
 
 // --- Encoding ---------------------------------------------------------------
@@ -181,39 +201,218 @@ fn resolve_path(base_dir: &Path, raw: &str) -> String {
     normalize(&joined).to_string_lossy().into_owned()
 }
 
-// Parse extended-M3U text into the display name and resolved entries. Blank
-// lines and unknown `#` directives are ignored; `#PLAYLIST:` sets the name and
-// `#EXTINF:<secs>,<title>` supplies a fallback title for the next path line.
+// One classified line of an extended-M3U file. Blanks and directives are kept as
+// variants rather than skipped because the rewrite path has to put the directives
+// back; only `parse` discards them.
+enum Line<'a> {
+    Blank,
+    Directive(&'a str),
+    Track(&'a str),
+}
+
+// Split playlist text into classified lines. This is the single definition of
+// "which lines carry paths" — both the reader and the rewrite's directive
+// preserver consume it, so the two can never disagree about where a track's
+// attached directives end.
+fn scan(content: &str) -> Vec<Line<'_>> {
+    content
+        .lines()
+        .map(str::trim)
+        .map(|l| {
+            if l.is_empty() {
+                Line::Blank
+            } else if l.starts_with('#') {
+                Line::Directive(l)
+            } else {
+                Line::Track(l)
+            }
+        })
+        .collect()
+}
+
+// The seconds field of an `#EXTINF:` value — the number before the comma.
+// Tolerates the IPTV-style `#EXTINF:123 tvg-id="x",Title` by reading only the
+// numeric prefix. `-1` is the format's "unknown", so it comes back None like
+// anything unparseable.
+fn parse_extinf_secs(head: &str) -> Option<f64> {
+    let num: String = head
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '.')
+        .collect();
+    num.parse::<f64>().ok().filter(|s| *s >= 0.0)
+}
+
+// Parse extended-M3U text into the display name and resolved entries.
+// `#PLAYLIST:` sets the name and `#EXTINF:<secs>,<title>` supplies the fallback
+// runtime and title for the next path line. Blank lines and other `#` directives
+// are ignored *here* — they have no bearing on what the pane shows — but they are
+// not lost: `Preserved` captures them for the rewrite.
 fn parse(content: &str, base_dir: &Path) -> (Option<String>, Vec<ParsedEntry>) {
     let mut name: Option<String> = None;
     let mut entries: Vec<ParsedEntry> = Vec::new();
     let mut pending_title: Option<String> = None;
+    let mut pending_secs: Option<f64> = None;
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('#') {
-            if let Some(n) = rest.strip_prefix("PLAYLIST:") {
-                name = Some(n.trim().to_string());
-            } else if let Some(inf) = rest.strip_prefix("EXTINF:") {
-                // `<secs>,<title>` — keep the title, drop the duration.
-                pending_title = inf
-                    .split_once(',')
-                    .map(|(_, t)| t.trim().to_string())
-                    .filter(|t| !t.is_empty());
+    for line in scan(content) {
+        match line {
+            Line::Blank => {}
+            Line::Directive(d) => {
+                let rest = &d[1..];
+                if let Some(n) = rest.strip_prefix("PLAYLIST:") {
+                    name = Some(n.trim().to_string());
+                } else if let Some(inf) = rest.strip_prefix("EXTINF:") {
+                    // `<secs>,<title>` — both halves are kept now: the title names
+                    // an out-of-library row and the seconds are its only runtime.
+                    if let Some((head, title)) = inf.split_once(',') {
+                        pending_secs = parse_extinf_secs(head);
+                        pending_title =
+                            Some(title.trim().to_string()).filter(|t| !t.is_empty());
+                    }
+                }
             }
-            // Other `#` directives (#EXTM3U, unknown extensions) round-trip
-            // harmlessly by being ignored on read.
-            continue;
+            Line::Track(t) => entries.push(ParsedEntry {
+                path: resolve_path(base_dir, t),
+                extinf_title: pending_title.take(),
+                extinf_secs: pending_secs.take(),
+            }),
         }
-        entries.push(ParsedEntry {
-            path: resolve_path(base_dir, line),
-            extinf_title: pending_title.take(),
-        });
     }
     (name, entries)
+}
+
+// --- Preservation -----------------------------------------------------------
+
+// The parts of an existing playlist file that have no place in Pudding's data
+// model — plain comments and non-`#EXTINF` extension directives — captured so a
+// rewrite can put them back. Curation autosaves on every edit, so without this a
+// single drag would silently strip whatever the file's original author wrote.
+//
+// `#EXTM3U`, `#PLAYLIST:` and `#EXTINF:` are deliberately *not* captured: all
+// three are regenerated from live state on every write, so carrying them over
+// would duplicate them.
+#[derive(Default)]
+struct Preserved {
+    // Plain `#` comments standing before the first track — a file banner
+    // ("# Created by ..."), which belongs to the file rather than to any one row.
+    header: Vec<String>,
+    // Directives that introduce a track, keyed by the resolved path they precede:
+    // `#EXTGRP`, `#EXTVLCOPT`, `#EXTALB` and friends. They travel with their row,
+    // so a reorder moves them rather than stranding them. First occurrence wins
+    // when one path appears twice — the two rows are indistinguishable by the only
+    // key we have.
+    attached: HashMap<String, Vec<String>>,
+    // Anything trailing the last track line.
+    trailer: Vec<String>,
+    // The exact text each row was written with, keyed by the resolved path —
+    // `attached`'s key, so the two can never disagree about which row is which.
+    // A spelling is content its author chose: `./a.mp3`, a route that runs
+    // through a symlink, an accented filename in NFC where the DB holds NFD.
+    // Re-deriving one from the resolved path quietly rewrites all three, so a
+    // rewrite plays back the original bytes instead. First occurrence wins for a
+    // repeated path, as with `attached`.
+    raw: HashMap<String, String>,
+    // The directory those spellings are relative to. A write aimed anywhere else
+    // — the destination half of a move — must not reuse them: the same
+    // `../Artist/x.mp3` names a different file read from a different folder.
+    base_dir: PathBuf,
+    style: HouseStyle,
+}
+
+// The prevailing path form of the rows a file already has, which is what a row
+// added to it should look like.
+#[derive(Default, Clone, Copy, PartialEq)]
+enum HouseStyle {
+    // Every row absolute. Such a file has already given up portability, and a
+    // lone relative row among twenty absolute ones just makes it a patchwork.
+    AllAbsolute,
+    // Anything else — all-relative, mixed, or no rows to judge by. `relativize`
+    // decides, which for an all-relative file reproduces its style anyway.
+    #[default]
+    Open,
+}
+
+impl Preserved {
+    // Capture from playlist text. `#EXT*` directives attach to the track they
+    // precede; plain comments do too, except before the first track, where they
+    // read as a banner for the file and stay at the top.
+    fn from_content(content: &str, base_dir: &Path) -> Self {
+        let mut out = Preserved {
+            base_dir: base_dir.to_path_buf(),
+            ..Preserved::default()
+        };
+        let mut run: Vec<String> = Vec::new();
+        let mut seen_track = false;
+        let mut all_absolute = true;
+
+        for line in scan(content) {
+            match line {
+                Line::Blank => {}
+                Line::Directive(d) => {
+                    let rest = &d[1..];
+                    if rest.starts_with("EXTM3U")
+                        || rest.starts_with("PLAYLIST:")
+                        || rest.starts_with("EXTINF:")
+                    {
+                        continue;
+                    }
+                    if !seen_track && !rest.starts_with("EXT") {
+                        out.header.push(d.to_string());
+                    } else {
+                        run.push(d.to_string());
+                    }
+                }
+                Line::Track(t) => {
+                    seen_track = true;
+                    all_absolute &= Path::new(t).is_absolute();
+                    let resolved = resolve_path(base_dir, t);
+                    let block = std::mem::take(&mut run);
+                    if !block.is_empty() {
+                        out.attached.entry(resolved.clone()).or_insert(block);
+                    }
+                    out.raw.entry(resolved).or_insert_with(|| t.to_string());
+                }
+            }
+        }
+        out.trailer = run;
+        out.style = if seen_track && all_absolute {
+            HouseStyle::AllAbsolute
+        } else {
+            HouseStyle::Open
+        };
+        out
+    }
+
+    // The spelling a row already had, when it still means the same file from the
+    // directory being written. None for a row the file didn't have — and for a
+    // *relative* spelling captured against some other directory, which is what
+    // keeps a move from carrying `../Artist/x.mp3` to a folder where it points
+    // somewhere else entirely. An absolute spelling is immune to the move and
+    // travels as it is.
+    fn row_spelling(&self, resolved: &str, base_dir: &Path) -> Option<&str> {
+        let raw = self.raw.get(resolved)?;
+        (Path::new(raw).is_absolute() || self.base_dir == base_dir).then_some(raw.as_str())
+    }
+
+    // Capture from the file a write is about to overwrite. A missing or unreadable
+    // file — a brand-new playlist, the common case — preserves nothing.
+    fn from_file(path: &str) -> Self {
+        match std::fs::read(path) {
+            Ok(bytes) => Self::from_content(&decode_bytes(&bytes), &playlist_base_dir(path)),
+            Err(_) => Preserved::default(),
+        }
+    }
+}
+
+// mtime in milliseconds since the epoch: the token the frontend compares to notice
+// that a playlist changed underneath an open view. Milliseconds because that is
+// what a JS number holds exactly. None when the file is gone.
+fn file_mtime_ms(path: &str) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as i64)
 }
 
 // The filename stem as a display-name fallback (Kodi/VLC convention when no
@@ -243,6 +442,11 @@ fn playlist_base_dir(path: &str) -> PathBuf {
 // the library DB (falling back to `#EXTINF`/filename for out-of-library rows).
 #[tauri::command]
 pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, String> {
+    // Stat *before* reading, never after: a write landing between the two would
+    // then pair new content with an older mtime, which only costs a redundant
+    // reload later. The other order pairs old content with a newer mtime and the
+    // staleness is never noticed at all.
+    let mtime = file_mtime_ms(&path);
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     let content = decode_bytes(&bytes);
     let base_dir = playlist_base_dir(&path);
@@ -306,7 +510,11 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     in_library: false,
                     missing,
                     not_downloaded,
-                    duration: None,
+                    // The playlist's own claim about a file we were never allowed
+                    // to inspect. Unverified, but it is the only runtime this row
+                    // will ever have — and showing it beats an empty cell and a
+                    // total that silently undercounts.
+                    duration: e.extinf_secs,
                     bitrate: None,
                     sample_rate: None,
                     bit_depth: None,
@@ -324,37 +532,89 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
             .unwrap_or_else(|| stem_name(&path)),
         path,
         tracks,
+        mtime,
     })
 }
 
-// Serialize a playlist to extended-M3U text (UTF-8). Paths under the playlist's
-// directory are written relative; others absolute. `#EXTINF` carries the DB
-// display for portability, with the cached runtime in seconds (−1 if unknown).
+// One row a write is asked to lay down: the absolute path, plus the `#EXTINF`
+// facts the caller is holding for it. Title and duration matter only for rows the
+// library DB doesn't know — the DB's live tags win for everything else — but they
+// are what lets an out-of-library row keep its name and runtime when it is copied
+// into a *different* playlist, where re-reading the destination file could not
+// possibly find it.
+#[derive(serde::Deserialize)]
+pub struct TrackRef {
+    path: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+}
+
+// Serialize a playlist to extended-M3U text (UTF-8). A row the file already had
+// is written back with the exact path it already had; a row being added is
+// spelled relative to the playlist's directory when it can be reached without
+// leaving the playlist's container, and absolute when it can't — unless the file
+// spells every other row absolute, in which case it says so and we listen.
+// `#EXTINF` carries the DB display and runtime when the library knows
+// the path and the caller's carried-over values when it doesn't, so a rewrite
+// never strips a row's only metadata. `preserved` puts back the comments and
+// extension directives the data model has no room for.
 fn serialize(
     path: &str,
     name: &str,
-    tracks: &[String],
+    rows: &[TrackRef],
+    preserved: &Preserved,
     conn: &Connection,
 ) -> Result<String, String> {
     let base_dir = playlist_base_dir(path);
-    let meta_map = fetch_meta(conn, tracks)?;
+    let bounds = Bounds::of(&base_dir);
+    let paths: Vec<String> = rows.iter().map(|r| r.path.clone()).collect();
+    let meta_map = fetch_meta(conn, &paths)?;
 
     let mut out = String::from("#EXTM3U\n");
     out.push_str(&format!("#PLAYLIST:{}\n", sanitize_line(name)));
-    for t in tracks {
-        if let Some(m) = meta_map.get(t) {
-            let (title, artist, duration) = (&m.title, &m.artist, &m.duration);
-            let display = match (artist, title) {
-                (Some(a), Some(ti)) => format!("{} - {}", a, ti),
-                (_, Some(ti)) => ti.clone(),
-                _ => String::new(),
-            };
-            if !display.is_empty() {
-                let secs = duration.map(|d| d.round() as i64).unwrap_or(-1);
-                out.push_str(&format!("#EXTINF:{},{}\n", secs, sanitize_line(&display)));
-            }
+    for line in &preserved.header {
+        out.push_str(line);
+        out.push('\n');
+    }
+    for r in rows {
+        for line in preserved.attached.get(&r.path).into_iter().flatten() {
+            out.push_str(line);
+            out.push('\n');
         }
-        out.push_str(&relativize(&base_dir, t));
+        // The DB wins for a known path — its tags are live and may have been
+        // edited since the file was last written. The caller's values are the
+        // fallback that keeps an out-of-library row from going anonymous.
+        let (display, secs) = match meta_map.get(&r.path) {
+            Some(m) => (
+                match (&m.artist, &m.title) {
+                    (Some(a), Some(ti)) => format!("{} - {}", a, ti),
+                    (_, Some(ti)) => ti.clone(),
+                    _ => String::new(),
+                },
+                m.duration,
+            ),
+            None => (r.title.clone().unwrap_or_default(), r.duration),
+        };
+        let display = sanitize_line(&display);
+        // A bare duration with no title is still worth a line: it is what the file
+        // said, and dropping it would make the rewrite lossy for no gain.
+        if !display.is_empty() || secs.is_some() {
+            let secs = secs.map(|d| d.round() as i64).unwrap_or(-1);
+            out.push_str(&format!("#EXTINF:{},{}\n", secs, display));
+        }
+        // A row the file already had keeps its author's spelling; only a row we
+        // are adding gets one chosen for it.
+        match preserved.row_spelling(&r.path, &base_dir) {
+            Some(raw) => out.push_str(raw),
+            None if preserved.style == HouseStyle::AllAbsolute => out.push_str(&r.path),
+            None => out.push_str(&relativize(&base_dir, &r.path, &bounds)),
+        }
+        out.push('\n');
+    }
+    for line in &preserved.trailer {
+        out.push_str(line);
         out.push('\n');
     }
     Ok(out)
@@ -380,13 +640,176 @@ fn sanitize_line(s: &str) -> String {
     out.trim().to_string()
 }
 
-// A track path relative to the playlist's directory when it's a descendant,
-// else the absolute path unchanged.
-fn relativize(base_dir: &Path, track: &str) -> String {
-    Path::new(track)
-        .strip_prefix(base_dir)
-        .ok()
-        .and_then(|rel| rel.to_str())
+// The container a playlist sits in: the deepest enclosing thing you could hand
+// to someone else — copy, sync, unplug and carry — with both the playlist and
+// its music inside it. It is the ceiling a relative row may climb to and no
+// further, because it is the only unit that travels intact.
+//
+// Deepest match wins, and every one of these is a real boundary on macOS:
+//   /Volumes/<name>            a mounted volume, external or network
+//   ~/Library/CloudStorage/<x> one provider's synced tree (iCloud, Proton, ...)
+//   ~/Library/Mobile Documents/<x>  an iCloud app container
+//   ~                          the home folder
+//   /                          nothing else matched; the whole filesystem
+fn container_root(dir: &Path, home: Option<&Path>) -> PathBuf {
+    let comps: Vec<Component> = dir.components().collect();
+    if comps.is_empty() {
+        return PathBuf::from("/");
+    }
+    // Depth in components, counting the root. The filesystem root is the
+    // container of last resort: it always holds both ends, which is exactly why
+    // a row that needs it is no longer portable in any useful sense.
+    let mut depth = 1usize;
+    if comps.len() >= 3 && comps[1].as_os_str() == "Volumes" {
+        depth = depth.max(3);
+    }
+    if let Some(home) = home {
+        let hc: Vec<Component> = home.components().collect();
+        if !hc.is_empty() && comps.len() >= hc.len() && comps[..hc.len()] == hc[..] {
+            depth = depth.max(hc.len());
+            // A sync root's *children* are the containers, not the directory that
+            // collects them: `~/Library/CloudStorage` holds one folder per
+            // provider, and no two of them sync together.
+            let rest = &comps[hc.len()..];
+            let under_sync_dir = rest.len() >= 3
+                && rest[0].as_os_str() == "Library"
+                && matches!(
+                    rest[1].as_os_str().to_str(),
+                    Some("CloudStorage") | Some("Mobile Documents")
+                );
+            if under_sync_dir {
+                depth = depth.max(hc.len() + 3);
+            }
+        }
+    }
+    comps[..depth.min(comps.len())].iter().collect()
+}
+
+// What bounds a relative row, worked out once per write because every row in a
+// file shares it: the container the playlist sits in, and the device that
+// container is on.
+struct Bounds {
+    container: PathBuf,
+    dev: Option<u64>,
+}
+
+// The user's real home directory, looked up once per process.
+//
+// Deliberately *not* `$HOME`: the Mac App Store build runs sandboxed, where the
+// kernel redirects `$HOME` into `~/Library/Containers/<bundle id>/Data`. Trust
+// that and no real path looks like it is under the home folder any more — every
+// container boundary below it goes undetected, and the sandboxed build quietly
+// gets the unbounded behaviour this rule exists to prevent. The password
+// database is not redirected, so it answers the same in both builds.
+fn real_home() -> Option<PathBuf> {
+    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+    HOME.get_or_init(|| {
+        // `getpwuid_r`, not `getpwuid`: the result lands in a buffer we own
+        // rather than shared static storage another thread's lookup could
+        // overwrite underneath us. 2 KiB is far past any real `pw_dir`; a short
+        // buffer reports ERANGE, which falls through to `$HOME` like any other
+        // failure — wrong only in the sandbox, which is where it never happens.
+        let mut buf = vec![0u8; 2048];
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut pwd,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut found,
+            )
+        };
+        let from_passwd = if rc == 0 && !found.is_null() {
+            let dir = unsafe { (*found).pw_dir };
+            (!dir.is_null())
+                .then(|| unsafe { CStr::from_ptr(dir) }.to_bytes())
+                .filter(|b| !b.is_empty())
+                .map(|b| PathBuf::from(OsStr::from_bytes(b)))
+        } else {
+            None
+        };
+        from_passwd.or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    })
+    .clone()
+}
+
+impl Bounds {
+    fn of(base_dir: &Path) -> Self {
+        Self::with_home(base_dir, real_home().as_deref())
+    }
+
+    // Split out from `of` so the rules can be tested against a fabricated home
+    // rather than whoever happens to be running the suite.
+    fn with_home(base_dir: &Path, home: Option<&Path>) -> Self {
+        Bounds {
+            container: container_root(base_dir, home),
+            dev: std::fs::metadata(base_dir).ok().map(|m| m.dev()),
+        }
+    }
+
+    // Do the playlist and the track live on the same filesystem? A mount point
+    // inside a container holds data the container itself doesn't carry, so a
+    // relative row that crosses one survives the copy pointing at nothing.
+    fn same_device(&self, track: &Path) -> bool {
+        match (self.dev, std::fs::metadata(track).ok().map(|m| m.dev())) {
+            (Some(a), Some(b)) => a == b,
+            // A row naming a file that isn't there yet is judged on its path
+            // alone. Refusing to relativize on a failed stat would make a
+            // playlist's spelling depend on whether the drive is plugged in.
+            _ => true,
+        }
+    }
+}
+
+// A track path written relative to the playlist's directory — what actually makes
+// a playlist portable: move or copy the whole tree and every row still resolves.
+// Walks up with `..` when the track sits *beside* the playlist rather than under
+// it, which is the ordinary `Music/Playlists/x.m3u8` → `Music/Artist/...` layout a
+// plain prefix-strip had to give up on and write absolute.
+//
+// Falls back to the absolute path when a relative one would have to leave the
+// playlist's container to reach the track — an external volume, or (the case
+// that named this rule) a playlist inside a sync root pointing at music outside
+// it. Such a row resolves correctly on *this* machine and nowhere else: the
+// thing that gets copied or synced doesn't contain both ends, so `../../../..`
+// lands wherever that other machine happens to keep its home folder.
+fn relativize(base_dir: &Path, track: &str, bounds: &Bounds) -> String {
+    let target = Path::new(track);
+    let base: Vec<Component> = base_dir.components().collect();
+    let tgt: Vec<Component> = target.components().collect();
+    let shared = base
+        .iter()
+        .zip(tgt.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    // `shared` counts the root component itself, so 2 is the smallest count that
+    // means "a real directory in common".
+    if shared < 2 {
+        return track.to_string();
+    }
+    // The shared directory is precisely what a relative row climbs to before it
+    // descends again, so a shared directory above the container means the row
+    // reaches outside the unit that travels. (The container is a prefix of
+    // `base_dir`, so comparing depths compares prefixes.)
+    if shared < bounds.container.components().count() {
+        return track.to_string();
+    }
+    if !bounds.same_device(target) {
+        return track.to_string();
+    }
+    let mut rel = PathBuf::new();
+    for _ in shared..base.len() {
+        rel.push("..");
+    }
+    for comp in &tgt[shared..] {
+        rel.push(comp.as_os_str());
+    }
+    // A non-UTF-8 or empty result (the track *is* the directory) is not a path we
+    // can write as a row; the absolute form always is.
+    rel.to_str()
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .unwrap_or_else(|| track.to_string())
 }
@@ -398,14 +821,31 @@ fn relativize(base_dir: &Path, track: &str) -> String {
 pub fn write_playlist(
     path: String,
     name: String,
-    tracks: Vec<String>,
+    tracks: Vec<TrackRef>,
     db: State<DbHandle>,
-) -> Result<(), String> {
+) -> Result<Option<i64>, String> {
+    // Read what we are about to overwrite, so its comments and extension
+    // directives survive the rewrite. Cheap next to the write itself, and it is
+    // the only place the originals still exist.
+    let preserved = Preserved::from_file(&path);
     let content = {
         let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-        serialize(&path, &name, &tracks, &conn)?
+        serialize(&path, &name, &tracks, &preserved, &conn)?
     };
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    // Hand back the mtime this write produced so the caller can record it as its
+    // own. Otherwise the watcher sees our own file land, calls it an outside
+    // change, and reloads the view out from under the edit that caused it.
+    Ok(file_mtime_ms(&path))
+}
+
+// The playlist file's mtime, or None if it no longer exists. Deliberately cheap —
+// one stat, no decode, no parse, no DB — because it runs for every open playlist
+// on every library scan and every window focus, and re-reading a few thousand rows
+// just to discover that nothing changed would not be.
+#[tauri::command]
+pub fn playlist_mtime(path: String) -> Option<i64> {
+    file_mtime_ms(&path)
 }
 
 // Relocate a playlist file (rename implied, like `mv`): rewrite it at the new
@@ -435,6 +875,21 @@ fn is_same_file(a: &str, b: &str) -> bool {
     }
 }
 
+// Parsed rows as write rows. The round-trip commands (move, rename) rewrite a
+// file they just read, so they carry its own `#EXTINF` values straight back —
+// which is what keeps an out-of-library row's title and runtime alive through a
+// move, where the destination file has nothing to preserve from.
+fn entries_as_rows(entries: Vec<ParsedEntry>) -> Vec<TrackRef> {
+    entries
+        .into_iter()
+        .map(|e| TrackRef {
+            path: e.path,
+            title: e.extinf_title,
+            duration: e.extinf_secs,
+        })
+        .collect()
+}
+
 fn move_playlist_inner(old_path: &str, new_path: &str, conn: &Connection) -> Result<(), String> {
     let bytes = std::fs::read(old_path).map_err(|e| e.to_string())?;
     let content = decode_bytes(&bytes);
@@ -443,14 +898,19 @@ fn move_playlist_inner(old_path: &str, new_path: &str, conn: &Connection) -> Res
     let name = name
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| stem_name(new_path));
-    let paths: Vec<String> = entries.into_iter().map(|e| e.path).collect();
+    // Preserve from the content already in hand, and against the *old* directory:
+    // attached directives are keyed by resolved absolute path, which is the same
+    // key the rows carry, so the destination's own re-relativizing can't disturb
+    // the match.
+    let preserved = Preserved::from_content(&content, &base_dir);
+    let rows = entries_as_rows(entries);
 
     // Decide before writing: once we write the destination, an aliased source and
     // destination are indistinguishable from a genuine one, and removing the
     // source would delete the file we just wrote.
     let same = is_same_file(old_path, new_path);
 
-    let out = serialize(new_path, &name, &paths, conn)?;
+    let out = serialize(new_path, &name, &rows, &preserved, conn)?;
     std::fs::write(new_path, out).map_err(|e| e.to_string())?;
     // Best-effort remove of the original; skip it when source and destination are
     // the same file (writing already rewrote it in place).
@@ -471,11 +931,12 @@ pub fn rename_playlist(path: String, name: String, db: State<DbHandle>) -> Resul
     let content = decode_bytes(&bytes);
     let base_dir = playlist_base_dir(&path);
     let (_old_name, entries) = parse(&content, &base_dir);
-    let paths: Vec<String> = entries.into_iter().map(|e| e.path).collect();
+    let preserved = Preserved::from_content(&content, &base_dir);
+    let rows = entries_as_rows(entries);
 
     let out = {
         let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-        serialize(&path, &name, &paths, &conn)?
+        serialize(&path, &name, &rows, &preserved, &conn)?
     };
     std::fs::write(&path, out).map_err(|e| e.to_string())
 }
@@ -657,8 +1118,23 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, "/music/a/track.mp3");
         assert_eq!(entries[0].extinf_title.as_deref(), Some("Artist - Song"));
+        assert_eq!(entries[0].extinf_secs, Some(212.0));
         assert_eq!(entries[1].path, "/abs/b.flac");
         assert_eq!(entries[1].extinf_title, None);
+        assert_eq!(entries[1].extinf_secs, None);
+    }
+
+    #[test]
+    fn parse_extinf_secs_forms() {
+        assert_eq!(parse_extinf_secs("212"), Some(212.0));
+        assert_eq!(parse_extinf_secs(" 212 "), Some(212.0));
+        assert_eq!(parse_extinf_secs("212.5"), Some(212.5));
+        // The format's "unknown" and outright junk both mean: no runtime.
+        assert_eq!(parse_extinf_secs("-1"), None);
+        assert_eq!(parse_extinf_secs(""), None);
+        assert_eq!(parse_extinf_secs("abc"), None);
+        // IPTV-style trailing attributes: read the numeric prefix, ignore the rest.
+        assert_eq!(parse_extinf_secs("212 tvg-id=\"x\""), Some(212.0));
     }
 
     #[test]
@@ -687,11 +1163,361 @@ mod tests {
         assert_eq!(entries[0].path, "/song.mp3");
     }
 
+    // The home every path test is written against, so the rules are exercised
+    // against a fixed layout rather than whoever is running the suite.
+    const HOME: &str = "/Users/me";
+
+    fn bounds(base: &str) -> Bounds {
+        Bounds::with_home(Path::new(base), Some(Path::new(HOME)))
+    }
+
+    // `relativize` against that home, so a test reads as one line.
+    fn rel(base: &str, track: &str) -> String {
+        relativize(Path::new(base), track, &bounds(base))
+    }
+
     #[test]
     fn relativize_under_and_outside() {
+        assert_eq!(rel("/music/lists", "/music/lists/a/x.mp3"), "a/x.mp3");
+        // Shares only the root: nothing you could copy as a unit holds both ends.
+        assert_eq!(rel("/music/lists", "/other/y.mp3"), "/other/y.mp3");
+    }
+
+    #[test]
+    fn relativize_walks_up_to_a_sibling_tree() {
+        // The ordinary layout — playlists in their own folder beside the music —
+        // which the old prefix-strip had to write absolute, killing portability.
+        assert_eq!(rel("/music/Playlists", "/music/Artist/x.mp3"), "../Artist/x.mp3");
+        assert_eq!(
+            rel("/Users/me/Music/lists", "/Users/me/Downloads/y.flac"),
+            "../../Downloads/y.flac"
+        );
+        // A separate volume still goes absolute: one shared component is the root.
+        assert_eq!(rel("/Users/me/Music", "/Volumes/Ext/z.mp3"), "/Volumes/Ext/z.mp3");
+    }
+
+    #[test]
+    fn real_home_is_the_users_own_directory() {
+        // Unsandboxed — the suite's own case — the password database and `$HOME`
+        // agree. The lookup exists for the sandboxed build, where only the former
+        // still names the directory the user's music actually lives in.
+        let home = real_home().expect("no home directory");
+        assert!(home.is_absolute(), "{home:?}");
+        if let Some(env) = std::env::var_os("HOME") {
+            assert_eq!(home, PathBuf::from(env));
+        }
+    }
+
+    #[test]
+    fn the_reported_layout_goes_absolute_against_the_real_home() {
+        // The bug end to end, on this machine's actual home rather than a
+        // fabricated one: real_home → container_root → relativize.
+        let home = real_home().expect("no home directory");
+        let list = home.join("Library/CloudStorage/ProtonDrive-x-folder/mp3s");
+        let track = home.join("mp3s/ffviibm.mp3");
+        let track = track.to_str().unwrap();
+        assert_eq!(relativize(&list, track, &Bounds::of(&list)), track);
+    }
+
+    #[test]
+    fn container_root_is_the_deepest_unit_that_travels() {
+        let home = Some(Path::new(HOME));
+        let root = |d: &str| container_root(Path::new(d), home);
+        // Nothing enclosing but the filesystem.
+        assert_eq!(root("/music/Playlists"), Path::new("/"));
+        // The volume, not the directory that collects volumes.
+        assert_eq!(root("/Volumes/Ext/Music/lists"), Path::new("/Volumes/Ext"));
+        assert_eq!(root("/Volumes/Ext"), Path::new("/Volumes/Ext"));
+        // The home folder, until something deeper claims it.
+        assert_eq!(root("/Users/me/Music/lists"), Path::new(HOME));
+        // One provider's synced tree — each is its own unit, so the boundary is
+        // the provider folder rather than the directory holding all of them.
+        assert_eq!(
+            root("/Users/me/Library/CloudStorage/ProtonDrive-x-folder/mp3s"),
+            Path::new("/Users/me/Library/CloudStorage/ProtonDrive-x-folder")
+        );
+        assert_eq!(
+            root("/Users/me/Library/Mobile Documents/com~apple~CloudDocs/Music"),
+            Path::new("/Users/me/Library/Mobile Documents/com~apple~CloudDocs")
+        );
+        // `CloudStorage` itself syncs nothing: its children do.
+        assert_eq!(root("/Users/me/Library/CloudStorage"), Path::new(HOME));
+        // Someone else's home is not this user's container.
+        assert_eq!(root("/Users/you/Music"), Path::new("/"));
+    }
+
+    #[test]
+    fn a_relative_row_never_climbs_out_of_a_sync_root() {
+        // The reported bug. A playlist inside a synced folder, pointing at music
+        // outside it, used to get `../../../../mp3s/x.mp3`: correct on this Mac
+        // and meaningless on the other machine the folder syncs to, where that
+        // many `..` lands somewhere else entirely.
+        let list = "/Users/me/Library/CloudStorage/ProtonDrive-x-folder/mp3s";
+        assert_eq!(rel(list, "/Users/me/mp3s/x.mp3"), "/Users/me/mp3s/x.mp3");
+        // Inside the same synced tree it stays relative — that is the whole point
+        // of the container: those two ends do travel together.
+        assert_eq!(
+            rel(list, "/Users/me/Library/CloudStorage/ProtonDrive-x-folder/Artist/x.mp3"),
+            "../Artist/x.mp3"
+        );
+        // Same rule one boundary out: a playlist on a volume reaches across that
+        // volume freely and off it never.
+        assert_eq!(rel("/Volumes/Ext/lists", "/Volumes/Ext/Artist/x.mp3"), "../Artist/x.mp3");
+        assert_eq!(rel("/Volumes/Ext/lists", "/Users/me/mp3s/x.mp3"), "/Users/me/mp3s/x.mp3");
+    }
+
+    #[test]
+    fn relativized_rows_resolve_back_to_the_same_paths() {
+        // The round-trip that portability actually rests on: whatever relativize
+        // writes, resolve_path must read back as the path we started with.
+        let base = Path::new("/music/Playlists");
+        for abs in [
+            "/music/Playlists/a/x.mp3",
+            "/music/Artist/Album/y.flac",
+            "/Volumes/Ext/z.mp3",
+            "/Users/me/mp3s/w.mp3",
+        ] {
+            assert_eq!(resolve_path(base, &rel("/music/Playlists", abs)), abs);
+        }
+    }
+
+    #[test]
+    fn preserved_carries_comments_and_unknown_directives() {
         let base = Path::new("/music/lists");
-        assert_eq!(relativize(base, "/music/lists/a/x.mp3"), "a/x.mp3");
-        assert_eq!(relativize(base, "/other/y.mp3"), "/other/y.mp3");
+        let content = "#EXTM3U\n                       # Created by SomeOtherPlayer\n                       #EXTGRP:Side A\n                       #EXTINF:212,Artist - Song\n                       a.mp3\n                       #EXTVLCOPT:start-time=30\n                       b.mp3\n                       # trailing note\n";
+        let pres = Preserved::from_content(content, base);
+        // A plain comment before any track is the file's banner, not row 1's.
+        assert_eq!(pres.header, vec!["# Created by SomeOtherPlayer".to_string()]);
+        // `#EXT*` directives belong to the row they introduce and travel with it.
+        assert_eq!(
+            pres.attached.get("/music/lists/a.mp3"),
+            Some(&vec!["#EXTGRP:Side A".to_string()])
+        );
+        assert_eq!(
+            pres.attached.get("/music/lists/b.mp3"),
+            Some(&vec!["#EXTVLCOPT:start-time=30".to_string()])
+        );
+        assert_eq!(pres.trailer, vec!["# trailing note".to_string()]);
+        // The three we regenerate are never captured, or a rewrite would double them.
+        assert!(!pres.header.iter().any(|l| l.starts_with("#EXTM3U")));
+        assert!(pres
+            .attached
+            .values()
+            .flatten()
+            .all(|l| !l.starts_with("#EXTINF")));
+    }
+
+    #[test]
+    fn rewrite_preserves_extinf_and_comments_for_out_of_library_rows() {
+        // The regression this whole path exists for: a reorder autosave used to
+        // rewrite from the DB alone, so a playlist written by another app — whose
+        // files sit outside every library root — came back stripped of every title
+        // and every comment it had.
+        let root = scratch("rewrite");
+        let list = root.join("mix.m3u8");
+        let original = "#EXTM3U\n                        #PLAYLIST:Mix\n                        # hand-written, do not lose me\n                        #EXTGRP:Side A\n                        #EXTINF:212,Artist One - Song One\n                        /outside/one.mp3\n                        #EXTINF:180,Artist Two - Song Two\n                        /outside/two.mp3\n";
+        std::fs::write(&list, original).unwrap();
+
+        let path = list.to_str().unwrap();
+        let preserved = Preserved::from_file(path);
+        let (_n, entries) = parse(original, &playlist_base_dir(path));
+        // Reorder, exactly as a drag in the pane would.
+        let mut rows = entries_as_rows(entries);
+        rows.reverse();
+
+        let out = serialize(path, "Mix", &rows, &preserved, &empty_db()).unwrap();
+
+        assert!(out.contains("#EXTINF:180,Artist Two - Song Two"), "{out}");
+        assert!(out.contains("#EXTINF:212,Artist One - Song One"), "{out}");
+        assert!(out.contains("# hand-written, do not lose me"), "{out}");
+        // The group directive followed its row to the file's second half.
+        let group = out.find("#EXTGRP:Side A").expect("group directive dropped");
+        let one = out.find("/outside/one.mp3").unwrap();
+        assert!(group < one && group > out.find("/outside/two.mp3").unwrap(), "{out}");
+        // And the whole thing re-reads as what we wrote.
+        let (name, back) = parse(&out, &playlist_base_dir(path));
+        assert_eq!(name.as_deref(), Some("Mix"));
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].path, "/outside/two.mp3");
+        assert_eq!(back[0].extinf_secs, Some(180.0));
+        assert_eq!(back[0].extinf_title.as_deref(), Some("Artist Two - Song Two"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_sibling_playlist_folder_writes_portable_rows() {
+        // The layout most people actually have — `Music/Playlists/x.m3u8` pointing
+        // at `Music/Artist/...` — used to serialize every row absolute, so copying
+        // the Music folder anywhere else broke the whole playlist.
+        let root = scratch("portable");
+        let lists = root.join("Playlists");
+        std::fs::create_dir_all(&lists).unwrap();
+        let list = lists.join("mix.m3u8");
+        let track = root.join("Artist").join("Album").join("01.flac");
+
+        let rows = vec![TrackRef {
+            path: track.to_str().unwrap().to_string(),
+            title: Some("Artist - Song".to_string()),
+            duration: Some(212.0),
+        }];
+        let out = serialize(
+            list.to_str().unwrap(),
+            "Mix",
+            &rows,
+            &Preserved::default(),
+            &empty_db(),
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("../Artist/Album/01.flac"),
+            "row did not go relative: {out}"
+        );
+        assert!(!out.contains(root.to_str().unwrap()), "absolute row leaked: {out}");
+        // And the relative row still resolves to the file it names.
+        let (_n, back) = parse(&out, &playlist_base_dir(list.to_str().unwrap()));
+        assert_eq!(back[0].path, track.to_str().unwrap());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_existing_rows_spelling_is_never_restyled() {
+        // A path's spelling is content its author chose, like the comments and
+        // directives around it. A rewrite may not quietly restyle it — even into
+        // the form Pudding would have picked, and even though that form is the
+        // more portable one. Only rows Pudding is adding get a form chosen.
+        let root = scratch("spelling");
+        let lists = root.join("Playlists");
+        std::fs::create_dir_all(&lists).unwrap();
+        let list = lists.join("mix.m3u8");
+        let abs_track = root.join("Artist").join("01.flac");
+        let abs_s = abs_track.to_str().unwrap().to_string();
+
+        // Written absolute by hand (or by another player), plus a row spelled
+        // with a redundant `./` that would not survive a round trip through the
+        // resolved path either.
+        let original = format!("#EXTM3U\n#PLAYLIST:Mix\n{}\n./b.mp3\n", abs_s);
+        std::fs::write(&list, &original).unwrap();
+
+        let path = list.to_str().unwrap();
+        let preserved = Preserved::from_file(path);
+        let (_n, entries) = parse(&original, &playlist_base_dir(path));
+        let rows = entries_as_rows(entries);
+        let out = serialize(path, "Mix", &rows, &preserved, &empty_db()).unwrap();
+
+        assert!(out.contains(&format!("\n{}\n", abs_s)), "absolute row restyled: {out}");
+        assert!(!out.contains("../Artist/01.flac"), "absolute row restyled: {out}");
+        assert!(out.contains("\n./b.mp3\n"), "`./` spelling lost: {out}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_row_follows_an_all_absolute_file() {
+        // A file whose every row is absolute has already given up portability.
+        // Adding the one relative row among them buys nothing and leaves a
+        // patchwork, so the file's own convention wins.
+        let root = scratch("housestyle");
+        let lists = root.join("Playlists");
+        std::fs::create_dir_all(&lists).unwrap();
+        let list = lists.join("mix.m3u8");
+        let track = |n: &str| root.join("Artist").join(n).to_str().unwrap().to_string();
+
+        std::fs::write(
+            &list,
+            format!("#EXTM3U\n#PLAYLIST:Mix\n{}\n{}\n", track("01.flac"), track("02.flac")),
+        )
+        .unwrap();
+
+        let path = list.to_str().unwrap();
+        let preserved = Preserved::from_file(path);
+        let rows: Vec<TrackRef> = ["01.flac", "02.flac", "03.flac"]
+            .iter()
+            .map(|n| TrackRef { path: track(n), title: None, duration: None })
+            .collect();
+        let out = serialize(path, "Mix", &rows, &preserved, &empty_db()).unwrap();
+
+        assert!(out.contains(&format!("\n{}\n", track("03.flac"))), "new row went relative: {out}");
+        assert!(!out.contains("../Artist"), "new row went relative: {out}");
+
+        // The same addition to an all-relative file goes relative, which is the
+        // same convention read the other way.
+        let rel_list = lists.join("rel.m3u8");
+        std::fs::write(&rel_list, "#EXTM3U\n#PLAYLIST:Rel\n../Artist/01.flac\n").unwrap();
+        let rel_path = rel_list.to_str().unwrap();
+        let out = serialize(
+            rel_path,
+            "Rel",
+            &rows[..2],
+            &Preserved::from_file(rel_path),
+            &empty_db(),
+        )
+        .unwrap();
+        assert!(out.contains("../Artist/02.flac"), "new row went absolute: {out}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_move_rebases_relative_rows_and_leaves_absolute_ones() {
+        // Preservation is scoped to the directory a spelling was captured
+        // against: the destination of a move is a different directory, so a
+        // relative row has to be recomputed there or it points somewhere else.
+        // An absolute row means the same thing from anywhere and travels as-is.
+        let root = scratch("moverebase");
+        let from = root.join("A");
+        let to = root.join("A").join("deep");
+        std::fs::create_dir_all(&to).unwrap();
+        let abs_track = root.join("Music").join("z.mp3");
+        let abs_s = abs_track.to_str().unwrap().to_string();
+
+        let old = from.join("mix.m3u8");
+        std::fs::write(
+            &old,
+            format!("#EXTM3U\n#PLAYLIST:Mix\n../Music/x.mp3\n{}\n", abs_s),
+        )
+        .unwrap();
+        let new = to.join("mix.m3u8");
+
+        move_playlist_inner(old.to_str().unwrap(), new.to_str().unwrap(), &empty_db()).unwrap();
+
+        let out = std::fs::read_to_string(&new).unwrap();
+        assert!(out.contains("../../Music/x.mp3"), "relative row not rebased: {out}");
+        assert!(out.contains(&format!("\n{}\n", abs_s)), "absolute row restyled: {out}");
+        // The rebased row still names the file it named before the move.
+        let (_n, back) = parse(&out, &playlist_base_dir(new.to_str().unwrap()));
+        assert_eq!(back[0].path, root.join("Music").join("x.mp3").to_str().unwrap());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rewrite_is_idempotent() {
+        // Read → write → read → write must reach a fixed point; anything else means
+        // autosave churns the file (and its mtime) on every edit that changes nothing.
+        let root = scratch("idem");
+        let list = root.join("mix.m3u8");
+        let original = "#EXTM3U\n#PLAYLIST:Mix\n# banner\n#EXTGRP:A\n#EXTINF:212,One\n/outside/one.mp3\n# tail\n";
+        std::fs::write(&list, original).unwrap();
+        let path = list.to_str().unwrap();
+        let db = empty_db();
+
+        let once = {
+            let pres = Preserved::from_file(path);
+            let (_n, e) = parse(original, &playlist_base_dir(path));
+            serialize(path, "Mix", &entries_as_rows(e), &pres, &db).unwrap()
+        };
+        std::fs::write(&list, &once).unwrap();
+        let twice = {
+            let pres = Preserved::from_file(path);
+            let (_n, e) = parse(&once, &playlist_base_dir(path));
+            serialize(path, "Mix", &entries_as_rows(e), &pres, &db).unwrap()
+        };
+        assert_eq!(once, twice, "rewrite is not a fixed point");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

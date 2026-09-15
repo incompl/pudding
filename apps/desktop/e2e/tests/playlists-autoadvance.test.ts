@@ -170,7 +170,11 @@ test("a saved playlist plays from disk and auto-advances", async () => {
   const d = h.driver;
   const plPath = path.join(os.tmpdir(), `pudding-e2e-${Date.now()}.m3u`);
   // Rust writes the real M3U (same command the app's autosave/Save-as-Playlist use).
-  await d.invoke("write_playlist", { path: plPath, name: "E2E List", tracks: POOL });
+  await d.invoke("write_playlist", {
+    path: plPath,
+    name: "E2E List",
+    tracks: POOL.map((path) => ({ path })),
+  });
   try {
     await d.action("playPlaylist", { path: plPath }); // read_playlist -> queue pool
     await d.waitFor(

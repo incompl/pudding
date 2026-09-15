@@ -7,7 +7,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { signal } from "@preact/signals-core";
 import { h, eqBars, append } from "./dom";
-import type { Queue, SearchTrack, SearchFolder, TreeNode, ContextMenuItem } from "./types";
+import type {
+  Queue,
+  SearchTrack,
+  SearchFolder,
+  TreeNode,
+  ContextMenuItem,
+  PlaylistData,
+  PlaylistWriteRow,
+} from "./types";
 import {
   app,
   hasTrack,
@@ -653,15 +661,132 @@ export function playingTrackObj(list: Queue): SearchTrack | null {
   return v >= 0 ? list.tracks[v] : null;
 }
 
+// --- Playlist file access ----------------------------------------------------
+// Every read and write of a .m3u8 goes through this pair, for one reason: each has
+// to record the file's resulting mtime. That registry is what lets an open
+// playlist tell "another app rewrote this" from "we just saved it" — the whole
+// basis of reloadChangedPlaylists.
+
+// The mtime each playlist file carried the last time we read or wrote it. Keyed by
+// path and never pruned: it holds a handful of numbers, and a stale entry is
+// corrected by the next read of that file.
+const seenMtime = new Map<string, number>();
+
+// Record a file's mtime as one we've accounted for. A null/undefined stamp (the
+// file is gone, or the stat failed) forgets it instead, so a playlist that comes
+// back is re-read rather than compared against a stamp from its previous life.
+export function notePlaylistMtime(path: string, mtime: number | null | undefined): void {
+  if (typeof mtime === "number") seenMtime.set(path, mtime);
+  else seenMtime.delete(path);
+}
+
+// Has this file moved since we last saw it? A path we've never recorded counts as
+// changed — we have no basis to claim otherwise.
+export function playlistChangedOnDisk(path: string, mtime: number): boolean {
+  return seenMtime.get(path) !== mtime;
+}
+
+// Read a playlist file, noting its mtime. Throws like the raw invoke; every caller
+// already has a story for a playlist that won't open.
+export async function readPlaylist(path: string): Promise<PlaylistData> {
+  const data = await invoke<PlaylistData>("read_playlist", { path });
+  notePlaylistMtime(path, data.mtime);
+  return data;
+}
+
+// The one way a playlist file gets written. Each row carries its `#EXTINF` facts
+// alongside its path: the library DB wins for tracks it knows, but a row from
+// outside every library root has no other source of a title or runtime, and
+// dropping them here is what used to strip a hand-made playlist of its metadata on
+// its first reorder. Throws on failure; callers report.
+export async function writePlaylist(
+  path: string,
+  name: string,
+  tracks: PlaylistWriteRow[],
+): Promise<void> {
+  const mtime = await invoke<number | null>("write_playlist", {
+    path,
+    name,
+    tracks: tracks.map((t) => ({ path: t.path, title: t.title, duration: t.duration })),
+  });
+  // Claim the stamp we just produced, or the watcher sees our own file land a beat
+  // later, calls it an outside change, and reloads the pane out from under the
+  // edit that caused it.
+  notePlaylistMtime(path, mtime);
+}
+
 // Persist the open playlist after an edit. Every row is written (missing included)
-// so the file round-trips; paths only — metadata is re-resolved from the DB on read.
+// so the file round-trips.
 export async function saveOpenPlaylist(path: string, name: string, tracks: SearchTrack[]): Promise<void> {
   try {
-    await invoke("write_playlist", { path, name, tracks: tracks.map((t) => t.path) });
+    await writePlaylist(path, name, tracks);
   } catch (e) {
     console.error("write_playlist (autosave) failed", path, e);
     toast("Couldn't save playlist");
   }
+}
+
+// Adopt rows re-read from disk into whichever open copies point at that file, and
+// say whether anything open actually took them.
+//
+// Deliberately not applyCuration: that records an undo snapshot and autosaves, and
+// neither belongs to a change we didn't make — ⌘Z would write the pre-reload rows
+// straight back over the other app's edit. The stored curation history is dropped
+// instead, since every snapshot in it describes a file that no longer exists.
+export function adoptReloadedPlaylist(
+  path: string,
+  title: string,
+  tracks: SearchTrack[],
+): boolean {
+  const browsed = browsedPlaylist.value;
+  const active = activeQueue.value;
+  const hitsBrowsed = browsed != null && browsed.sourcePath === path;
+  const hitsActive = active != null && active.sourcePath === path;
+  if (!hitsBrowsed && !hitsActive) return false;
+
+  // The reload built fresh row objects, so the identity reconcilePoolEdit tracks
+  // is gone and has to be re-established by path before the swap.
+  const isPool = hitsActive && queueIsActivePool();
+  const playingOld = isPool ? playingTrackObj(active!) : null;
+  const playingNew = playingOld
+    ? rematchPlaying(playingOld, queuePlayingIndex.value ?? 0, tracks)
+    : null;
+
+  const subtitle = trackCountSubtitle(tracks);
+  if (hitsBrowsed) browsedPlaylist.value = { ...browsed!, title, tracks, subtitle };
+  if (hitsActive) activeQueue.value = { ...active!, title, tracks, subtitle };
+
+  if (isPool) {
+    reconcilePoolEdit(tracks, playingNew);
+    // The outside edit deleted the row we're sounding. Let it play out — an edit in
+    // another app is no reason to cut the audio — but stop claiming a row, or the
+    // highlight lands on whatever slid into that index.
+    if (playingOld && !playingNew) queuePlayingIndex.value = null;
+  }
+  forgetCurationHistory(path);
+  return true;
+}
+
+// The playing row, found again in a freshly read list. Matched by path, nearest to
+// where it was: a playlist may hold the same file more than once, and snapping the
+// highlight to the file's first copy would misreport what's sounding.
+function rematchPlaying(
+  playing: SearchTrack,
+  oldIdx: number,
+  tracks: SearchTrack[],
+): SearchTrack | null {
+  let best: SearchTrack | null = null;
+  let bestDist = Infinity;
+  let i = 0;
+  for (const t of tracks) {
+    if (t.missing) continue;
+    if (t.path === playing.path && Math.abs(i - oldIdx) < bestDist) {
+      bestDist = Math.abs(i - oldIdx);
+      best = t;
+    }
+    i++;
+  }
+  return best;
 }
 
 // Apply a new view-array to the open list: swap the signal, reconcile playback when

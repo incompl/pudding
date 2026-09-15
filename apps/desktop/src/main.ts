@@ -67,7 +67,6 @@ import type {
   ContextMenuItem,
   NavState,
   PaneView,
-  PlaylistData,
   RecentItem,
   TrackProvider,
   LeafListContext,
@@ -261,6 +260,7 @@ import {
   canUndoCuration,
   canRedoCuration,
   curationHistoryVersion,
+  readPlaylist,
 } from "./queue";
 import {
   KEY_RECENT_ITEMS,
@@ -286,6 +286,7 @@ import {
   addTracksToPlaylist,
   deletePlaylistPath,
   startNavPlaylistRename,
+  reloadChangedPlaylists,
 } from "./playlists";
 import { app } from "./state";
 import {
@@ -1333,7 +1334,7 @@ function showPlaylistContextMenu(
   startRename: () => void,
 ): void {
   const getTracks: TrackProvider = async () =>
-    playlistPlayableTracks(await invoke<PlaylistData>("read_playlist", { path }));
+    playlistPlayableTracks(await readPlaylist(path));
   void showContextMenu(x, y, [
     { label: "Play", action: () => void playPlaylistPath(path) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
@@ -2048,7 +2049,7 @@ function setupSessionPersistence(): void {
 async function refreshPlaylistSnapshot(queue: Queue): Promise<Queue> {
   if (!queue.sourcePath) return queue;
   try {
-    const data = await invoke<PlaylistData>("read_playlist", { path: queue.sourcePath });
+    const data = await readPlaylist(queue.sourcePath);
     // Missing rows included, marked — same view the browse path builds.
     const tracks = playlistViewTracks(data);
     return {
@@ -4353,6 +4354,19 @@ async function init(): Promise<void> {
     // without leaving and re-entering. Skip while an inline edit is open — like
     // refreshLibrary, a rebuild would tear out the edit input.
     if (!app.inlineEditing) refreshNavPaneAfterScan();
+    // The scan's other half: the tree learns a playlist's file changed, but the
+    // open *pane* holds a snapshot taken when it was browsed. Without this, an
+    // edit made in another app stays invisible until you navigate away and back —
+    // and the next curation here autosaves the stale rows back over it.
+    void reloadChangedPlaylists();
+  });
+
+  // The watcher only reaches playlists under a library root, and only fires while
+  // we're frontmost enough to act on it. Re-activation covers the rest: a playlist
+  // opened from anywhere, and every edit made in another app while Pudding sat in
+  // the background — which is exactly when you'd have been making them.
+  await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+    if (focused) void reloadChangedPlaylists();
   });
 
   await listen<string>("open-file", (event) => {

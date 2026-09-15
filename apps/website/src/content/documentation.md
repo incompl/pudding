@@ -2,7 +2,7 @@ If you hate reading AI-generated documentation, don't worry, I wrote this myself
 
 ## What is Pudding?
 
-Pudding is a macOS music player. It plays local files and can connect to internet radio stations. It is not a streaming service or a store. You bring your own music files and stream URLs.
+Pudding is a macOS music player. It plays local files and can connect to internet radio stations. It is not a streaming service or a store. You bring your own music collection and stream URLs.
 
 ## Layout
 
@@ -92,7 +92,7 @@ You can activate the mini player a few different ways:
 
 ![Mini player](../assets/mini.png)
 
-The most recent window size for the normal player and mini player are both saved. For example, if you resize the mini player, then switch to the normal player, the mini player will remember its size the next time you activate it (unless you are manually resizing the app).
+The most recent window size for the normal player and mini player are both saved. For example, if you resize the mini player, then switch to the normal player, the mini player will remember its size the next time you activate it.
 
 ## Visualizer
 

@@ -3800,6 +3800,7 @@ pub fn run() {
             now_playing_clear,
             playlist::read_playlist,
             playlist::write_playlist,
+            playlist::playlist_mtime,
             playlist::move_playlist,
             playlist::rename_playlist,
             playlist::delete_playlist,

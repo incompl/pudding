@@ -44,7 +44,11 @@ async function filePaths(d: Driver, plPath: string): Promise<string[]> {
 test("dragging a multi-selection reorders the whole block, not just the grabbed row", async () => {
   const d = h.driver;
   const P = path.join(os.tmpdir(), `pudding-e2e-msreorder-${Date.now()}.m3u`);
-  await d.invoke("write_playlist", { path: P, name: "List P", tracks: [A, B, C, D] });
+  await d.invoke("write_playlist", {
+    path: P,
+    name: "List P",
+    tracks: [A, B, C, D].map((path) => ({ path })),
+  });
 
   try {
     // Play P: it becomes the active, curated (autosaving) pool.

@@ -45,7 +45,7 @@ async function filePaths(d: Driver, plPath: string): Promise<string[]> {
 test("Add to queue while a playlist plays collapses to a fresh Queue — the file never changes", async () => {
   const d = h.driver;
   const P = path.join(os.tmpdir(), `pudding-e2e-detach-${Date.now()}.m3u`);
-  await d.invoke("write_playlist", { path: P, name: "List P", tracks: [A, B] });
+  await d.invoke("write_playlist", { path: P, name: "List P", tracks: [{ path: A }, { path: B }] });
 
   try {
     // Play P: it becomes the active pool, a real playlist source.

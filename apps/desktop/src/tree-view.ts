@@ -10,7 +10,6 @@ import type {
   DirListing,
   SearchTrack,
   ContextMenuItem,
-  PlaylistData,
 } from "./types";
 import {
   app,
@@ -57,7 +56,7 @@ import {
 } from "./playlists";
 import { editMetadataItem } from "./editors";
 import { playFile, playFolder, playStream, rowPlayButton } from "./playback";
-import { addFolderToQueue, nodeToTrack, queueMenuItems } from "./queue";
+import { addFolderToQueue, nodeToTrack, queueMenuItems, readPlaylist } from "./queue";
 import { windowedList, type WindowedList } from "./windowed-list";
 
 // One flattened, currently-visible row of the tree: a node plus the context the
@@ -361,9 +360,7 @@ function renderTreeRow(row: TreeRow, index: number): HTMLElement {
         { label: "Play", action: () => void playPlaylist(node) },
         ...queueMenuItems((sink) => void addPlaylistToQueue(node, sink)),
         addToPlaylistItem(async () =>
-          playlistPlayableTracks(
-            await invoke<PlaylistData>("read_playlist", { path: node.path }),
-          ),
+          playlistPlayableTracks(await readPlaylist(node.path)),
         ),
         { label: "Rename", action: () => startTreePlaylistRename(node, label) },
         { label: "Delete", action: () => void deletePlaylistNode(node) },

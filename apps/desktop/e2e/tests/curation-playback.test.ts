@@ -128,7 +128,11 @@ async function withBrowsedPlayingPlaylist(
   body: (plPath: string) => Promise<void>,
 ): Promise<void> {
   const plPath = path.join(os.tmpdir(), `pudding-e2e-curate-${Date.now()}.m3u`);
-  await d.invoke("write_playlist", { path: plPath, name: "E2E List", tracks: POOL });
+  await d.invoke("write_playlist", {
+    path: plPath,
+    name: "E2E List",
+    tracks: POOL.map((path) => ({ path })),
+  });
   try {
     await d.action("playPlaylist", { path: plPath }); // read_playlist -> queue pool
     await d.waitFor(

@@ -415,6 +415,9 @@ export interface PlaylistTrack {
   inLibrary: boolean;
   missing: boolean;
   notDownloaded: boolean;
+  // Seconds. The library's cached value for a known path; for an out-of-library
+  // row, the playlist file's own `#EXTINF` claim — unverified, but the only
+  // runtime that row will ever have.
   duration: number | null;
   // The remaining column fields. All null for an out-of-library row: they come from
   // the scan cache, and a path outside every library root was never scanned. See
@@ -431,6 +434,20 @@ export interface PlaylistData {
   name: string;
   path: string;
   tracks: PlaylistTrack[];
+  // The file's mtime at the moment of this read, or null if it vanished. Kept by
+  // the mtime registry in queue.ts so an open playlist can tell an outside edit
+  // from one of our own saves. See notePlaylistMtime.
+  mtime: number | null;
+}
+
+// What writePlaylist needs from a row: where the file is, plus the `#EXTINF`
+// facts to fall back on when the library has never scanned it. Both SearchTrack
+// and PlaylistTrack satisfy it, so the queue, the open pane, and a file we just
+// read can all be written back without a conversion step.
+export interface PlaylistWriteRow {
+  path: string;
+  title?: string | null;
+  duration?: number | null;
 }
 
 // A row of the Open Recent submenu. The list is mixed: `kind` says whether the
