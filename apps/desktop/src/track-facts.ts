@@ -115,6 +115,11 @@ export function applyTagUpdate(path: string, tags: FileEntry): void {
     albumArtist: tags.albumArtist,
     disc: tags.disc,
     track: tags.track,
+    // The other two tag columns. Absent from the editor's set for years, so a
+    // Genre or Year cell would sit at its pre-edit value while every cell beside
+    // it updated — the one row in the list that disagreed with the file.
+    year: tags.year,
+    genre: tags.genre,
     // Absent rather than null when the re-stat failed: a patch says what it
     // learned, and "we don't know the new mtime" is not "there isn't one".
     ...(tags.modified != null ? { modified: tags.modified } : {}),

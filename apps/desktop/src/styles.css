@@ -3156,6 +3156,24 @@ body.dragging-noselect * {
   margin: 0.15em 0.2em;
   border-radius: 6px;
   background: var(--surface-raised);
+  /* The label column's width and the gap after it, as variables because a field's
+     error line has to start where its input starts — one number, two rules, and
+     the pane widens the column below. The label and the error line are both set
+     in smaller type, and `em` in a width or a margin resolves against the
+     element's *own* font-size — so those two scales are variables too, and each
+     rule converts the shared figure through the scale it is drawn in. */
+  --editor-label-width: 3.2em;
+  --editor-label-gap: 0.6em;
+  --editor-label-scale: 0.85;
+  --editor-error-scale: 0.8;
+}
+
+/* A field and the line that explains what's wrong with it, stacked. Only rows
+   that can be wrong are wrapped in one; the rest sit in the form directly. */
+.inline-editor-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2em;
 }
 
 /* "Editing <filename>" line above the fields — cues that this rewrites the file
@@ -3172,22 +3190,40 @@ body.dragging-noselect * {
 .inline-editor-field {
   display: flex;
   align-items: center;
-  gap: 0.6em;
+  gap: var(--editor-label-gap);
+}
+
+/* Why this field's value can't be written, under the field it belongs to and
+   indented past the label so it starts at the input's left edge — the eye reads
+   down from the box it is about. Coloured like a refused submit, and for the same
+   reason: the field is holding something the file cannot keep. */
+.inline-editor-field-error {
+  /* The column as this line's own em sees it: the label box is drawn at the
+     label's scale, the gap at the form's, and the whole indent then divided by
+     this line's scale. Left unconverted the message hangs left of the input. */
+  margin-left: calc(
+    (var(--editor-label-width) * var(--editor-label-scale) + var(--editor-label-gap)) /
+      var(--editor-error-scale)
+  );
+  color: var(--danger);
+  font-size: calc(var(--editor-error-scale) * 1em);
+  line-height: 1.25;
 }
 
 .inline-editor-label {
   flex: none;
-  width: 3.2em;
+  width: var(--editor-label-width);
   /* Tight line-height so a two-line label ("Album Artist") still fits within the
      input's height — the row height then tracks the input, keeping every field
      row the same height and the spacing even. */
   line-height: 1.05;
   color: var(--text-muted);
-  font-size: 0.85em;
+  font-size: calc(var(--editor-label-scale) * 1em);
   text-align: right;
 }
 
-.inline-editor-field input {
+.inline-editor-field input,
+.inline-editor-field textarea {
   flex: 1;
   min-width: 0;
   padding: 0.25em 0.4em;
@@ -3200,7 +3236,15 @@ body.dragging-noselect * {
   font: inherit;
 }
 
-.inline-editor-field input:focus {
+/* A comment can run to a paragraph. Two lines by default, growable by drag but
+   only downward: a sideways resize would drag the field out of the label grid. */
+.inline-editor-field textarea {
+  resize: vertical;
+  line-height: 1.3;
+}
+
+.inline-editor-field input:focus,
+.inline-editor-field textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -3223,6 +3267,89 @@ body.dragging-noselect * {
   color: inherit;
 }
 
+/* A count, not a phrase: disc/track/year inputs shrink to a few digits' worth so
+   the row reads as a number with a label, and an empty one doesn't look like a
+   title someone forgot to type. Overrides the flex:1 every other input gets. */
+.inline-editor-number {
+  flex: none;
+  width: 3.4em;
+}
+
+/* The word joining a number to its total ("Track 3 of 12"). Muted and unclickable
+   so it reads as part of the sentence the row is making, not as a second label. */
+.inline-editor-of {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+/* A row whose control is taller than one line (the comment's textarea) aligns to
+   the top, so its label sits on the first line instead of floating at the middle
+   of a two-line box. */
+.inline-editor-field:has(textarea) {
+  align-items: flex-start;
+}
+
+.inline-editor-field:has(textarea) .inline-editor-label {
+  padding-top: 0.3em;
+}
+
+/* The artwork row: a square well with its two buttons stacked beside it. Taller
+   than a field row, so it aligns to the top — the label and the first button line
+   up with the top edge of the well rather than floating at its middle. */
+.inline-editor-artwork {
+  align-items: flex-start;
+}
+
+.inline-editor-artwork .inline-editor-label {
+  /* Nudge onto the well's first line, matching how a label sits on an input. */
+  padding-top: 0.3em;
+}
+
+/* The well itself. Fixed square: every cover is square or near enough, and a well
+   that resized to the image would move the whole form on each pick. */
+.artwork-well {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 5.2em;
+  height: 5.2em;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+/* Contained, not cropped: a non-square picture is shown whole. What the well
+   shows is what the file carries, which is the point of having it. */
+.artwork-well-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.artwork-well-empty {
+  color: var(--text-muted);
+  font-size: 0.8em;
+}
+
+.artwork-well-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3em;
+  min-width: 0;
+}
+
+/* Why a pick was refused (not an image, too large to embed), in the place the
+   pick was made. Wraps rather than ellipsizes: it is a sentence, and a truncated
+   reason is no reason. */
+.artwork-well-error {
+  color: var(--text-muted);
+  font-size: 0.8em;
+  line-height: 1.25;
+}
+
 /* Reason Save is disabled (e.g. the edited track is playing). Sits below the
    actions row, right-aligned under Save, so it reads as the answer to "why
    didn't that work?". Muted, with a padlock glyph marking it as an expected
@@ -3232,9 +3359,24 @@ body.dragging-noselect * {
   align-items: center;
   gap: 0.35em;
   align-self: flex-end;
+  /* A backend failure can be a whole sentence; let it wrap inside the form
+     rather than push the form wider than the pane. */
+  max-width: 100%;
   color: var(--text-muted);
   font-size: 0.85em;
   margin-top: 0.35em;
+  text-align: right;
+}
+
+/* A submit that was refused, as opposed to a Save that is standing disabled:
+   something went wrong rather than something being not-yet-allowed, so it takes
+   the danger colour and drops the padlock, which means the opposite. */
+.inline-editor-note.is-refusal {
+  color: var(--danger);
+}
+
+.inline-editor-note.is-refusal .inline-editor-note-icon {
+  display: none;
 }
 
 .inline-editor-note-icon {
@@ -3298,23 +3440,32 @@ body.dragging-noselect * {
    Drop the raised "card" fill (the panel frame already sets it apart) so it sits
    on the panel's black, and relax the tree-fit margins/gaps now that there's
    room to breathe. */
+/* The wider label column is set here rather than on the label itself so the
+   field error lines, which indent past it, re-indent with it. */
 #pane-editor-view .inline-editor {
   background: none;
   margin: 0;
   padding: 0 0.25em;
   gap: 0.7em;
+  --editor-label-width: 5em;
 }
 
-/* Wider label column so "Album Artist" fits on one line instead of wrapping —
-   the pane has the horizontal room the tree didn't. */
+/* Wider column means "Album Artist" fits on one line instead of wrapping — the
+   pane has the horizontal room the tree didn't. */
 #pane-editor-view .inline-editor-label {
-  width: 5em;
   line-height: 1.2;
 }
 
 /* Roomier inputs to match the more open layout. */
-#pane-editor-view .inline-editor-field input {
+#pane-editor-view .inline-editor-field input,
+#pane-editor-view .inline-editor-field textarea {
   padding: 0.4em 0.55em;
+}
+
+/* The pane has room for a well you can actually judge a cover in. */
+#pane-editor-view .artwork-well {
+  width: 6.4em;
+  height: 6.4em;
 }
 
 /* In the tree this heading is a tiny muted caption; in the pane it's the title

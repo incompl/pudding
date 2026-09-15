@@ -6,12 +6,12 @@
 
 import type { Signal } from "@preact/signals-core";
 
-// Does double duty (matching the Rust struct): a row of a browse listing, and the
-// tag set the metadata editor is seeded from and hands back. The column fields are
-// populated only on the listing path — the editor deals in the six above them — so
-// they are optional here, and an editor response leaves them undefined rather than
-// null. write_tags is the one exception: it returns `modified`, because writing tags
-// rewrites the file and every open row's Date Modified goes stale.
+// Does double duty (matching the Rust struct): a row of a browse listing, and what
+// write_tags hands back after a save. The column fields are populated only on the
+// listing path, so they are optional here and a write_tags response leaves most of
+// them undefined rather than null — it fills the tags it wrote, plus `modified`,
+// because writing tags rewrites the file and every open row's Date Modified goes
+// stale. The editor is *seeded* from EditorTags below, not from this.
 export interface FileEntry {
   name: string;
   title: string | null;
@@ -35,6 +35,29 @@ export interface FileEntry {
   // cloud file reads the same in the Files tree as it does in a playlist. See
   // SearchTrack.notDownloaded.
   notDownloaded?: boolean;
+}
+
+// What the metadata editor is seeded with and edits: every writable field, and
+// nothing else. Separate from FileEntry because the two sets only overlap — the
+// disc/track totals, the comment and the artwork are editable but are not columns
+// and are not cached, while a row's duration, bit rate and dates are facts about
+// the file that no tag edit can change. Mirrors the Rust EditorTags.
+export interface EditorTags {
+  name: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  albumArtist: string | null;
+  disc: number | null;
+  discTotal: number | null;
+  track: number | null;
+  trackTotal: number | null;
+  year: number | null;
+  genre: string | null;
+  comment: string | null;
+  // The embedded cover as a data URL — the same picture the hero draws — or null
+  // when the file carries none.
+  artwork: string | null;
 }
 
 export interface TrackMeta {
@@ -311,6 +334,8 @@ export type ContextMenuItem =
 // behaviors (Enter submits, Esc cancels, Save disabled until the required fields
 // are filled). Returns the <form> element for
 // the caller to insert; `onCancel` fires on Esc or the Cancel button.
+export type FieldValidator = (value: string) => string | null;
+
 export interface InlineEditorField {
   key: string;
   label: string;
@@ -322,6 +347,43 @@ export interface InlineEditorField {
   // When set, the field gets a trailing "Choose..." button; it resolves to a value
   // to drop into the input (or null to leave it), e.g. picking an image file.
   browse?: () => Promise<string | null>;
+  // A count, not a phrase: the input shrinks to the width of a few digits instead
+  // of stretching across the row, so a disc number doesn't read as an empty title.
+  numeric?: boolean;
+  // A textarea rather than a single-line input. Not decoration: an <input> strips
+  // newlines out of its own value, so a tag that legitimately holds more than one
+  // line (a comment) would come back flattened by the act of being edited.
+  multiline?: boolean;
+  // A second numeric input on the same row, joined by "of": "Track [3] of [12]".
+  // Its value comes back under its own key alongside the first. The pair is one
+  // fact — 3 of 12 — and splitting it across two labelled rows would read as two.
+  total?: { key: string; value?: string; validate?: FieldValidator };
+  // Why this value can't be written, or null when it can. Save stays disabled
+  // while any field has a reason, and the first one shows as the form's note.
+  // This is for values the *file format* can't hold — not for house rules about
+  // what a tag ought to say.
+  validate?: FieldValidator;
+}
+
+// What the artwork well does on Save. "keep" is the answer for every edit that
+// didn't touch it, and it means the file's picture is not rewritten at all.
+export type ArtworkEdit =
+  | { kind: "keep" }
+  | { kind: "remove" }
+  | { kind: "set"; path: string };
+
+// The outcome of picking an image: the file and its preview, or the reason it
+// can't be used — which the well shows in place of an alert, since the backend
+// validates the picked file the same way the save will. null = dialog dismissed.
+export type ArtworkPick =
+  | { ok: true; path: string; dataUrl: string }
+  | { ok: false; message: string };
+
+export interface InlineEditorArtwork {
+  label: string;
+  // The file's current picture as a data URL, or null when it carries none.
+  current: string | null;
+  choose: () => Promise<ArtworkPick | null>;
 }
 
 export interface InlineEditorOptions {
@@ -331,7 +393,18 @@ export interface InlineEditorOptions {
   // station" — the editor face fills the pane, so it names what's being edited
   // now that there's no adjacent row to imply it.
   heading?: string;
-  onSubmit: (values: Record<string, string>) => void | Promise<void>;
+  // An image well above the fields, for the one editable thing that isn't text.
+  // Its state is not in `values` (a data URL has no business in a text field), so
+  // it arrives as the second argument to onSubmit.
+  artwork?: InlineEditorArtwork;
+  // Returning a string means the submit did not take, and that string is the
+  // reason: it is shown as the form's note, under the buttons, and the form stays
+  // open. A save that fails has to say so where it was asked for — the console is
+  // not a place the user is looking.
+  onSubmit: (
+    values: Record<string, string>,
+    artwork: ArtworkEdit,
+  ) => void | string | Promise<void | string>;
   onCancel: () => void;
   // When set, Save is disabled whenever this returns true (on top of the
   // required-field check), and `blockedNote` shows above the buttons to say why.

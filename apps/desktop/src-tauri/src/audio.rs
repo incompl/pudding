@@ -3018,7 +3018,10 @@ fn replaygain_multiplier(path: &std::path::Path, mode: u8) -> f32 {
     if mode == 0 {
         return 1.0;
     }
-    let Ok(tagged) = lofty::read_from_path(path) else {
+    // Tags only, and the container identified from the bytes: this runs on the
+    // decode thread, and a file that can't be parsed for properties still has a
+    // gain tag worth honouring. See open_tagged.
+    let Ok(tagged) = crate::open_tagged(path, crate::TAGS_ONLY) else {
         return 1.0;
     };
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {

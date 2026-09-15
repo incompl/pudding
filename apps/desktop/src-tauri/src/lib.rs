@@ -158,10 +158,10 @@ struct RecentItem {
 }
 
 // Does double duty: a row of a browse listing (where the column fields below are
-// populated) and the tag set the metadata editor is seeded from and hands back
-// (where they are not — the editor deals only in the six fields it can write).
-// Default exists for that second use, so an editor path says what it isn't filling
-// in rather than listing seven Nones.
+// populated) and what write_tags hands back after a save (where only the tags it
+// wrote, plus `modified`, are). Default exists for that second use, so the write
+// path says what it isn't filling in rather than listing the Nones. The editor is
+// *seeded* from EditorTags, not from this — the two sets only overlap.
 #[derive(Serialize, Default)]
 struct FileEntry {
     name: String,
@@ -429,9 +429,15 @@ struct Tags {
     rg_track_gain: Option<f64>,
 }
 
-// The tracks table is a cache rebuilt by run_scan; bump this whenever its shape changes
-// and the next startup will drop and recreate it.
-const SCHEMA_VERSION: i64 = 7;
+// The tracks table is a cache rebuilt by run_scan; bump this whenever its shape
+// changes — or whenever what the scanner *reads* changes — and the next startup
+// will drop and recreate it. The second case is why this is at 8: open_tagged
+// identifies a container by its bytes rather than its extension, so files whose
+// name lied about their format (an MP4 called .mp3) were cached as untagged and
+// duration-less. The incremental scan skips any row whose mtime and size are
+// unchanged, so without a rebuild those rows would stay wrong until the files
+// themselves were touched.
+const SCHEMA_VERSION: i64 = 8;
 
 // WAL lets the scan's write transaction run without blocking concurrent reads
 // (list_dir, get_metadata) on the main connection.
@@ -602,9 +608,40 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+// Whether the audio properties are parsed alongside the tags. The library scan
+// needs them (duration, bit rate, sample rate, bit depth are four of its columns);
+// the tag editor and ReplayGain want only the tags, and skipping the parse means a
+// file whose audio stream has a damaged frame can still be read and re-tagged
+// instead of failing at the door.
+const WITH_PROPERTIES: bool = true;
+const TAGS_ONLY: bool = false;
+
+// Open a file for tag work. Two things this does that lofty::read_from_path does
+// not, and every tag read and write in the app goes through it:
+//
+//   - Identifies the container from the file's own bytes, falling back to the
+//     extension only when the bytes say nothing (guess_file_type's `or`). Real
+//     libraries are full of files whose name lies about what they are — an MP4
+//     called .mp3 is the common one, from a download that renamed by format
+//     rather than by container. lofty otherwise trusts the extension, hands the
+//     MPEG parser an MP4, and fails the whole file: no tags in any list, no
+//     artwork, and an editor that could neither read nor save it.
+//   - Skips the audio-property parse for callers that only want tags, so a
+//     damaged frame somewhere in the stream doesn't stop a tag edit either.
+fn open_tagged(
+    path: &std::path::Path,
+    read_properties: bool,
+) -> Result<lofty::file::TaggedFile, lofty::error::LoftyError> {
+    lofty::probe::Probe::open(path)?
+        .options(lofty::config::ParseOptions::new().read_properties(read_properties))
+        // Options first: the sniff reads as far as they allow it to.
+        .guess_file_type()?
+        .read()
+}
+
 fn read_tags(path: &std::path::Path) -> Tags {
     let empty = Tags::default();
-    let Ok(tagged) = lofty::read_from_path(path) else {
+    let Ok(tagged) = open_tagged(path, WITH_PROPERTIES) else {
         return empty;
     };
     // These come from the decoded audio properties, not from tags, so they are
@@ -1607,8 +1644,18 @@ fn get_art(path: String) -> Option<String> {
     if dataless::path_is_dataless(path) {
         return None;
     }
-    let tagged = lofty::read_from_path(path).ok()?;
+    let tagged = open_tagged(path, TAGS_ONLY).ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    picture_data_url(tag)
+}
+
+// A tag's embedded cover as a data URL, or None when it carries no picture. The
+// webview's CSP allows only 'self' and data: image sources, so this is the only
+// shape art can reach an <img> in. Shared by the hero (get_art) and the metadata
+// editor's seed (read_file_tags), so the well in the editor shows exactly the
+// picture the hero would draw — the first of the primary tag's pictures, which is
+// also the one write_tags replaces.
+fn picture_data_url(tag: &lofty::tag::Tag) -> Option<String> {
     let pic = tag.pictures().first()?;
     let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
     let encoded = base64::engine::general_purpose::STANDARD.encode(pic.data());
@@ -1883,37 +1930,289 @@ fn prepare_external_file(path: String) -> Result<TrackMeta, String> {
     })
 }
 
-// Write the editable tags back into a file and sync the library cache row, so
-// the Songs/Artists/Albums views reflect the change without waiting for the
-// debounced watcher rescan. Mirrors read_tags: it mutates the *primary* tag (the
-// one read_tags reads), creating one of the file's native type when the file is
-// untagged. Empty/omitted fields clear the corresponding item. `duration` comes
+// The metadata editor's own shape: every field it can write, plus the file's name
+// to title the form with. Deliberately not a FileEntry — the editable set is
+// neither a subset nor a superset of a browse row's. The totals, the comment and
+// the artwork are editable but are not columns and so are not cached (the tracks
+// table holds what the lists draw), while a row's duration, bit rate and dates are
+// facts about the file that no tag edit can change.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct EditorTags {
+    name: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    disc: Option<u32>,
+    disc_total: Option<u32>,
+    track: Option<u32>,
+    track_total: Option<u32>,
+    year: Option<u32>,
+    genre: Option<String>,
+    comment: Option<String>,
+    // The embedded cover as a data URL — the same picture the hero draws (see
+    // picture_data_url), so the editor's well shows what the rest of the app shows.
+    artwork: Option<String>,
+}
+
 // Read a file's current tags straight from disk to seed the metadata editor.
 // Views carry only partial rows for a track — a SearchResult (Songs/album/artist
 // leaf lists) has no album-artist or disc — so seeding from the row would let a
 // save write those fields back as empty and wipe them. Reading fresh gives the
-// editor the whole tag set. Shape matches what write_tags returns.
+// editor the whole tag set.
+//
+// Reads the file itself rather than going through read_tags: that one fills the
+// scan cache, so it stops at what the tracks table stores, and three of the fields
+// here (the two totals and the comment) are editor-only. One lofty parse either way.
 #[tauri::command]
-fn read_file_tags(path: String) -> Result<FileEntry, String> {
+fn read_file_tags(path: String) -> Result<EditorTags, String> {
     let p = PathBuf::from(&path);
-    let tags = read_tags(&p);
-    Ok(FileEntry {
-        name: p
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        title: tags.title,
-        artist: tags.artist,
-        album: tags.album,
-        album_artist: tags.album_artist,
-        disc: tags.disc,
-        track: tags.track,
-        // Editor seed: the six fields above are the whole of what it can write.
-        ..Default::default()
+    let name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // An unreadable or untagged file still opens the editor, on an empty form:
+    // saving from it writes a fresh tag of the container's native type, which is
+    // exactly how an untagged file gets its first tag (see write_tags).
+    let Ok(tagged) = open_tagged(&p, TAGS_ONLY) else {
+        return Ok(EditorTags {
+            name,
+            ..Default::default()
+        });
+    };
+    let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
+        return Ok(EditorTags {
+            name,
+            ..Default::default()
+        });
+    };
+    let norm = |v: Option<std::borrow::Cow<'_, str>>| {
+        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    Ok(EditorTags {
+        name,
+        title: norm(tag.title()),
+        artist: norm(tag.artist()),
+        album: norm(tag.album()),
+        // No Accessor shortcut for album artist; pull it by key, as read_tags does.
+        album_artist: norm(
+            tag.get_string(&lofty::tag::ItemKey::AlbumArtist)
+                .map(std::borrow::Cow::Borrowed),
+        ),
+        disc: tag.disk(),
+        disc_total: tag.disk_total(),
+        track: tag.track(),
+        track_total: tag.track_total(),
+        year: tag.year(),
+        genre: norm(tag.genre()),
+        comment: norm(tag.comment()),
+        artwork: picture_data_url(tag),
     })
 }
 
-// from the decoded audio, not a tag, so it is neither shown nor written here.
+// Ceiling on a picture the editor will embed. Separate from the stream-image cap
+// despite matching it today: a station image is fetched into the DOM and can be
+// dropped, while this is copied into the audio file itself and into every backup
+// of it, so the two limits answer to different things and shouldn't drift by
+// accident.
+const MAX_EMBEDDED_ART_BYTES: u64 = 10 * 1024 * 1024;
+
+// Read a picked image file for the editor's artwork well: validates it the same
+// way the save will (lofty sniffs the format from the bytes, so the extension is
+// never trusted) and hands back a data URL to preview. Doing both here is the
+// point — a file that previews is a file that will save, so a bad pick is caught
+// at the picker instead of blowing up the write. The messages are user-facing.
+#[tauri::command]
+fn read_artwork_file(path: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    let meta = std::fs::metadata(&p).map_err(|e| format!("Couldn't read that file: {}", e))?;
+    if meta.len() > MAX_EMBEDDED_ART_BYTES {
+        return Err(format!(
+            "That image is too large to embed (limit {} MB).",
+            MAX_EMBEDDED_ART_BYTES / (1024 * 1024)
+        ));
+    }
+    let pic = read_picture(&p)?;
+    let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(pic.data());
+    Ok(format!("data:{};base64,{}", mime, encoded))
+}
+
+// A picked file as a lofty Picture, typed as the front cover. from_reader is what
+// decides whether this is an image at all: it sniffs the signature and rejects
+// anything that isn't one of the formats a tag can carry.
+fn read_picture(path: &std::path::Path) -> Result<lofty::picture::Picture, String> {
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Couldn't read that file: {}", e))?;
+    let mut pic = lofty::picture::Picture::from_reader(&mut file)
+        .map_err(|_| "That file isn't a PNG, JPEG, GIF, BMP or TIFF image.".to_string())?;
+    pic.set_pic_type(lofty::picture::PictureType::CoverFront);
+    Ok(pic)
+}
+
+// What the metadata editor sends back: every writable field, with None meaning
+// "the file should not carry this" — the editor's empty box and a missing field
+// are the same instruction, which is what makes Save able to clear a tag.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TagEdits {
+    title: Option<String>,
+    artist: Option<String>,
+    album_artist: Option<String>,
+    album: Option<String>,
+    disc: Option<u32>,
+    disc_total: Option<u32>,
+    track: Option<u32>,
+    track_total: Option<u32>,
+    year: Option<u32>,
+    genre: Option<String>,
+    comment: Option<String>,
+    // Absent for a save that doesn't touch the picture, which is most of them —
+    // hence the default. A chosen image rides as the path the picker returned
+    // rather than as its bytes: the preview already crossed the IPC boundary once
+    // as a data URL, and sending a 10 MB cover back to be written would be the
+    // same megabytes a second time.
+    #[serde(default)]
+    artwork: ArtworkEdit,
+}
+
+// The three things a save can do to a file's picture.
+#[derive(Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum ArtworkEdit {
+    // Leave whatever the file has. The editor sends this unless the user used
+    // the well, so a tag edit never rewrites (or re-compresses) the cover.
+    #[default]
+    Keep,
+    Remove,
+    Set {
+        path: String,
+    },
+}
+
+// The same three, once the picked file has been read and validated — so the
+// fallible part happens before the audio file is opened.
+enum ArtworkChange {
+    Keep,
+    Remove,
+    Set(lofty::picture::Picture),
+}
+
+impl ArtworkEdit {
+    fn resolve(&self) -> Result<ArtworkChange, String> {
+        match self {
+            ArtworkEdit::Keep => Ok(ArtworkChange::Keep),
+            ArtworkEdit::Remove => Ok(ArtworkChange::Remove),
+            ArtworkEdit::Set { path } => Ok(ArtworkChange::Set(read_picture(
+                std::path::Path::new(path),
+            )?)),
+        }
+    }
+}
+
+impl TagEdits {
+    // Trim every text field and treat what's left of an empty one as absent, so
+    // "   " clears a tag rather than writing whitespace into it. Symmetric with
+    // the norm() read_file_tags seeds the form through, which means a form the
+    // user opened and saved untouched writes back exactly what it showed.
+    fn normalized(self) -> TagEdits {
+        let norm = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        TagEdits {
+            title: norm(self.title),
+            artist: norm(self.artist),
+            album_artist: norm(self.album_artist),
+            album: norm(self.album),
+            genre: norm(self.genre),
+            comment: norm(self.comment),
+            ..self
+        }
+    }
+}
+
+// Set or clear each edited item on `tag`. Split out of write_tags so the mapping
+// from "the form said this" to "the file says that" can be tested without a file
+// on disk — it is the half of the command with all the per-field decisions in it.
+//
+// Every field is written unconditionally: the editor is seeded from this same tag,
+// so a field the user didn't touch writes back the value it was showing, and one
+// they emptied clears. That is also why a field the editor does NOT offer (a
+// composer, a grouping, any tag another editor wrote) survives untouched — nothing
+// here rebuilds the tag, it only sets the items it names.
+fn apply_tag_edits(tag: &mut lofty::tag::Tag, edits: &TagEdits, artwork: ArtworkChange) {
+    match &edits.title {
+        Some(v) => tag.set_title(v.clone()),
+        None => tag.remove_title(),
+    }
+    match &edits.artist {
+        Some(v) => tag.set_artist(v.clone()),
+        None => tag.remove_artist(),
+    }
+    match &edits.album {
+        Some(v) => tag.set_album(v.clone()),
+        None => tag.remove_album(),
+    }
+    // No Accessor shortcut for album artist (see read_file_tags): set/clear by key.
+    match &edits.album_artist {
+        Some(v) => {
+            tag.insert_text(lofty::tag::ItemKey::AlbumArtist, v.clone());
+        }
+        None => tag.remove_key(&lofty::tag::ItemKey::AlbumArtist),
+    }
+    match &edits.genre {
+        Some(v) => tag.set_genre(v.clone()),
+        None => tag.remove_genre(),
+    }
+    match &edits.comment {
+        Some(v) => tag.set_comment(v.clone()),
+        None => tag.remove_comment(),
+    }
+    match edits.disc {
+        Some(d) => tag.set_disk(d),
+        None => tag.remove_disk(),
+    }
+    match edits.disc_total {
+        Some(d) => tag.set_disk_total(d),
+        None => tag.remove_disk_total(),
+    }
+    match edits.track {
+        Some(t) => tag.set_track(t),
+        None => tag.remove_track(),
+    }
+    match edits.track_total {
+        Some(t) => tag.set_track_total(t),
+        None => tag.remove_track_total(),
+    }
+    // ID3v2 keeps the year inside the recording-time frame, so a file carrying a
+    // full date (1979-10-05) comes back from the editor as the year alone. That is
+    // the field the form offers and the column shows; writing back what was shown
+    // is the honest trade for making it editable at all.
+    match edits.year {
+        Some(y) => tag.set_year(y),
+        None => tag.remove_year(),
+    }
+    // Picture 0 and only picture 0 — the one the well showed, and the one
+    // picture_data_url hands the hero. A file with a back cover or a band photo
+    // behind it keeps them: the editor never displayed those, so a save has no
+    // business dropping them.
+    match artwork {
+        ArtworkChange::Keep => {}
+        ArtworkChange::Remove => {
+            if tag.picture_count() > 0 {
+                tag.remove_picture(0);
+            }
+        }
+        ArtworkChange::Set(pic) => tag.set_picture(0, pic),
+    }
+}
+
+// Write the editable tags back into a file and sync the library cache row, so
+// the Songs/Artists/Albums views reflect the change without waiting for the
+// debounced watcher rescan. Mirrors read_file_tags: it mutates the *primary* tag
+// (the one that seeded the editor), creating one of the file's native type when
+// the file is untagged. Empty/omitted fields clear the corresponding item.
+// `duration` comes from the decoded audio, not a tag, so it is neither shown nor
+// written here.
 //
 // The frontend refuses this for the file the audio engine currently holds open
 // (lofty rewrites the file in place, which would corrupt an in-progress decode),
@@ -1921,12 +2220,7 @@ fn read_file_tags(path: String) -> Result<FileEntry, String> {
 #[tauri::command]
 async fn write_tags(
     path: String,
-    title: Option<String>,
-    artist: Option<String>,
-    album_artist: Option<String>,
-    album: Option<String>,
-    disc: Option<u32>,
-    track: Option<u32>,
+    tags: TagEdits,
     db: State<'_, DbHandle>,
 ) -> Result<FileEntry, String> {
     // lofty read/save is blocking file I/O and the cache UPDATE takes the writer
@@ -1934,7 +2228,16 @@ async fn write_tags(
     let write_conn = db.conn.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let p = PathBuf::from(&path);
-        let mut tagged = lofty::read_from_path(&p).map_err(|e| format!("read failed: {}", e))?;
+        // Resolve the picked image before touching the audio file: a file that
+        // isn't an image must fail with the picker's own message and leave the
+        // track untouched, not half-written.
+        let artwork = tags.artwork.resolve()?;
+        let edits = tags.normalized();
+
+        let mut tagged = open_tagged(&p, TAGS_ONLY).map_err(|e| {
+            log::error!("write_tags: reading {} failed: {e}", p.display());
+            format!("Couldn't read that file: {}", e)
+        })?;
 
         // Untagged files have no tag to mutate; give them one of the container's
         // native type (ID3v2 for MP3, MP4 atoms for m4a, Vorbis comments for FLAC...).
@@ -1946,44 +2249,16 @@ async fn write_tags(
             .primary_tag_mut()
             .expect("primary tag present (inserted above when absent)");
 
-        // Trim, and treat empty as "clear" — symmetric with read_tags' norm().
-        let norm = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        let title = norm(title);
-        let artist = norm(artist);
-        let album = norm(album);
-        let album_artist = norm(album_artist);
-
-        match &title {
-            Some(v) => tag.set_title(v.clone()),
-            None => tag.remove_title(),
-        }
-        match &artist {
-            Some(v) => tag.set_artist(v.clone()),
-            None => tag.remove_artist(),
-        }
-        match &album {
-            Some(v) => tag.set_album(v.clone()),
-            None => tag.remove_album(),
-        }
-        // No Accessor shortcut for album artist (see read_tags): set/clear by key.
-        match &album_artist {
-            Some(v) => {
-                tag.insert_text(lofty::tag::ItemKey::AlbumArtist, v.clone());
-            }
-            None => tag.remove_key(&lofty::tag::ItemKey::AlbumArtist),
-        }
-        match disc {
-            Some(d) => tag.set_disk(d),
-            None => tag.remove_disk(),
-        }
-        match track {
-            Some(t) => tag.set_track(t),
-            None => tag.remove_track(),
-        }
+        apply_tag_edits(tag, &edits, artwork);
 
         tagged
             .save_to_path(&p, lofty::config::WriteOptions::default())
-            .map_err(|e| format!("save failed: {}", e))?;
+            .map_err(|e| {
+                // The frontend shows this string in the form; the log keeps the
+                // path, which the form has no room for.
+                log::error!("write_tags: saving {} failed: {e}", p.display());
+                format!("Couldn't save the tags: {}", e)
+            })?;
 
         // Re-stat after the write so the cached mtime/size match the file lofty just
         // rewrote. The incremental scan skips rows whose mtime+size are unchanged, so
@@ -2001,21 +2276,27 @@ async fn write_tags(
             })
             .unwrap_or((0, 0));
 
+        // Only the fields the tracks table actually holds: the totals, the comment
+        // and the artwork are editable but uncached (see EditorTags), so there is
+        // nothing here to keep in step for them.
         {
             let conn = write_conn.lock().unwrap_or_else(|e| e.into_inner());
             let _ = conn.execute(
                 "UPDATE tracks SET mtime = ?2, size = ?3, title = ?4, artist = ?5,
-                     album = ?6, album_artist = ?7, disc = ?8, track = ?9 WHERE path = ?1",
+                     album = ?6, album_artist = ?7, disc = ?8, track = ?9, year = ?10,
+                     genre = ?11 WHERE path = ?1",
                 params![
                     path,
                     mtime,
                     size,
-                    title,
-                    artist,
-                    album,
-                    album_artist,
-                    disc,
-                    track
+                    edits.title,
+                    edits.artist,
+                    edits.album,
+                    edits.album_artist,
+                    edits.disc,
+                    edits.track,
+                    edits.year,
+                    edits.genre
                 ],
             );
         }
@@ -2025,17 +2306,20 @@ async fn write_tags(
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default(),
-            title,
-            artist,
-            album,
-            album_artist,
-            disc,
-            track,
-            // The one column field an edit changes. Writing tags rewrites the file,
-            // so every open row's Date Modified cell is stale the moment this
-            // returns; handing back the post-write mtime lets the caller patch it
-            // (see applyTagUpdate) instead of waiting for a rescan that the
-            // mtime/size pre-sync above has deliberately made a no-op.
+            title: edits.title,
+            artist: edits.artist,
+            album: edits.album,
+            album_artist: edits.album_artist,
+            disc: edits.disc,
+            track: edits.track,
+            year: edits.year,
+            genre: edits.genre,
+            // The one column field an edit changes that the user didn't type.
+            // Writing tags rewrites the file, so every open row's Date Modified
+            // cell is stale the moment this returns; handing back the post-write
+            // mtime lets the caller patch it (see applyTagUpdate) instead of
+            // waiting for a rescan that the mtime/size pre-sync above has
+            // deliberately made a no-op.
             modified: Some(mtime),
             ..Default::default()
         })
@@ -3776,6 +4060,7 @@ pub fn run() {
             prepare_external_file,
             write_tags,
             read_file_tags,
+            read_artwork_file,
             audio_play,
             audio_play_stream,
             audio_toggle_pause,
@@ -3941,6 +4226,230 @@ mod tests {
         // No tvg-logo, and art doesn't leak onto the next stream.
         assert_eq!(streams[1].name, "Plain");
         assert_eq!(streams[1].image, None);
+    }
+
+    // A form the user opened and saved untouched must write back exactly what it
+    // showed, and an emptied box must clear the item rather than write "" into it.
+    // The whole write path against a real file: the sample MP3 the app ships,
+    // copied aside. apply_tag_edits is unit-tested above on a bare Tag, but only a
+    // save proves the edited tag survives lofty's round trip into an actual
+    // container — including the picture, which is the one item that is not text.
+    //
+    // Run twice: once under the file's own extension, and once under a *lying*
+    // one. A real library has files whose name disagrees with their container (an
+    // MP4 downloaded as .mp3 is the usual one), and lofty trusts the extension
+    // unless asked not to — so the lying copy is the case that fails at the first
+    // read, before any of this, if open_tagged ever stops sniffing the bytes.
+    #[test]
+    fn write_and_read_back_a_real_file() {
+        for ext in ["mp3", "m4a"] {
+            let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("pudding sample.mp3");
+            let dst =
+                std::env::temp_dir().join(format!("pudding-tags-{}.{}", std::process::id(), ext));
+            std::fs::copy(&src, &dst).expect("copy sample");
+
+            let mut tagged = open_tagged(&dst, TAGS_ONLY).expect("read");
+            if tagged.primary_tag_mut().is_none() {
+                let tag_type = tagged.primary_tag_type();
+                tagged.insert_tag(lofty::tag::Tag::new(tag_type));
+            }
+            let tag = tagged.primary_tag_mut().unwrap();
+            let edits = TagEdits {
+                title: Some("Corneria".into()),
+                artist: Some("yeyeyeye".into()),
+                genre: Some("Chiptune".into()),
+                year: Some(1993),
+                disc: Some(2),
+                disc_total: Some(3),
+                track: Some(4),
+                track_total: Some(5),
+                comment: Some("line one\nline two".into()),
+                ..Default::default()
+            }
+            .normalized();
+            // A one-pixel PNG, sniffed by the same from_reader the picker uses.
+            let png = std::env::temp_dir().join(format!("pudding-art-{}.png", std::process::id()));
+            std::fs::write(&png, PNG_1PX).expect("write png");
+            let art = ArtworkEdit::Set {
+                path: png.to_string_lossy().into_owned(),
+            }
+            .resolve()
+            .expect("read picture");
+            apply_tag_edits(tag, &edits, art);
+            tagged
+                .save_to_path(&dst, lofty::config::WriteOptions::default())
+                .expect("save");
+
+            let back = read_file_tags(dst.to_string_lossy().into_owned()).expect("read back");
+            assert_eq!(back.title.as_deref(), Some("Corneria"), "ext {ext}");
+            assert_eq!(back.artist.as_deref(), Some("yeyeyeye"), "ext {ext}");
+            assert_eq!(back.genre.as_deref(), Some("Chiptune"), "ext {ext}");
+            assert_eq!(back.year, Some(1993), "ext {ext}");
+            assert_eq!(back.disc, Some(2), "ext {ext}");
+            assert_eq!(back.disc_total, Some(3), "ext {ext}");
+            assert_eq!(back.track, Some(4), "ext {ext}");
+            assert_eq!(back.track_total, Some(5), "ext {ext}");
+            assert_eq!(
+                back.comment.as_deref(),
+                Some("line one\nline two"),
+                "ext {ext}"
+            );
+            assert!(
+                back.artwork
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("data:image/png;base64,"),
+                "ext {ext}"
+            );
+
+            let _ = std::fs::remove_file(&dst);
+            let _ = std::fs::remove_file(&png);
+        }
+    }
+
+    // The smallest valid PNG: 1x1, transparent.
+    const PNG_1PX: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn tag_edits_deserialize_from_the_editor_payload() {
+        let json = r#"{"title":null,"artist":"yeyeyeye","albumArtist":null,"album":null,
+            "genre":null,"comment":"ueueueue","disc":2,"discTotal":3,"track":4,
+            "trackTotal":5,"year":null,"artwork":{"kind":"set","path":"/tmp/x.png"}}"#;
+        let edits: TagEdits = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(edits.artist.as_deref(), Some("yeyeyeye"));
+        assert_eq!(edits.disc_total, Some(3));
+        assert!(matches!(edits.artwork, ArtworkEdit::Set { .. }));
+        let keep = r#"{"artwork":{"kind":"keep"}}"#;
+        let edits: TagEdits = serde_json::from_str(keep).expect("deserialize keep");
+        assert!(matches!(edits.artwork, ArtworkEdit::Keep));
+    }
+
+    #[test]
+    fn tag_edits_round_trip_and_clear() {
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        let filled = TagEdits {
+            title: Some("  Borrowed Light  ".into()),
+            artist: Some("Wren".into()),
+            album_artist: Some("Various Artists".into()),
+            album: Some("Night Bus".into()),
+            disc: Some(1),
+            disc_total: Some(2),
+            track: Some(3),
+            track_total: Some(12),
+            year: Some(1979),
+            genre: Some("Ambient".into()),
+            comment: Some("ripped from vinyl".into()),
+            artwork: ArtworkEdit::Keep,
+        }
+        .normalized();
+        apply_tag_edits(&mut tag, &filled, ArtworkChange::Keep);
+
+        // Trimmed on the way in, like every other text field.
+        assert_eq!(tag.title().as_deref(), Some("Borrowed Light"));
+        assert_eq!(tag.artist().as_deref(), Some("Wren"));
+        assert_eq!(
+            tag.get_string(&lofty::tag::ItemKey::AlbumArtist),
+            Some("Various Artists")
+        );
+        assert_eq!(tag.album().as_deref(), Some("Night Bus"));
+        assert_eq!(tag.disk(), Some(1));
+        assert_eq!(tag.disk_total(), Some(2));
+        assert_eq!(tag.track(), Some(3));
+        assert_eq!(tag.track_total(), Some(12));
+        assert_eq!(tag.year(), Some(1979));
+        assert_eq!(tag.genre().as_deref(), Some("Ambient"));
+        assert_eq!(tag.comment().as_deref(), Some("ripped from vinyl"));
+
+        // Whitespace is not a value: an all-spaces box clears, same as an empty one.
+        let cleared = TagEdits {
+            title: Some("   ".into()),
+            ..Default::default()
+        }
+        .normalized();
+        apply_tag_edits(&mut tag, &cleared, ArtworkChange::Keep);
+        assert_eq!(tag.title(), None);
+        assert_eq!(tag.artist(), None);
+        assert_eq!(tag.get_string(&lofty::tag::ItemKey::AlbumArtist), None);
+        assert_eq!(tag.album(), None);
+        assert_eq!(tag.disk(), None);
+        assert_eq!(tag.disk_total(), None);
+        assert_eq!(tag.track(), None);
+        assert_eq!(tag.track_total(), None);
+        assert_eq!(tag.year(), None);
+        assert_eq!(tag.genre(), None);
+        assert_eq!(tag.comment(), None);
+    }
+
+    // The assumption the editor's Year field is built on: a year is four digits or
+    // it is nothing. Both tag families keep it inside a date item (ID3v2.4's TDRC,
+    // MP4's ©day), and lofty reads a year back out only when it finds four digits
+    // — so a shorter one would be written to the file and then be invisible to
+    // Pudding and to every other player. The editor refuses it in the field rather
+    // than let a save swallow it; if this ever stops holding, that rule should go.
+    #[test]
+    fn a_year_is_four_digits_or_it_is_not_read_back() {
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Mp4Ilst);
+        tag.insert_text(lofty::tag::ItemKey::RecordingDate, "1993".into());
+        assert_eq!(tag.year(), Some(1993));
+        tag.insert_text(lofty::tag::ItemKey::RecordingDate, "123".into());
+        assert_eq!(
+            tag.year(),
+            None,
+            "a three-digit year does not survive the read"
+        );
+        // And a full date still answers with its year, which is why the editor
+        // writes back only the year it showed (see apply_tag_edits).
+        tag.insert_text(lofty::tag::ItemKey::RecordingDate, "1979-10-05".into());
+        assert_eq!(tag.year(), Some(1979));
+    }
+
+    // The well shows picture 0, so a save may replace or drop picture 0 — and must
+    // leave anything queued behind it (a back cover, a band photo) alone.
+    #[test]
+    fn artwork_edit_touches_only_the_first_picture() {
+        let png = |byte: u8| {
+            lofty::picture::Picture::new_unchecked(
+                lofty::picture::PictureType::CoverFront,
+                Some(lofty::picture::MimeType::Png),
+                None,
+                vec![byte],
+            )
+        };
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        tag.push_picture(png(1));
+        tag.push_picture(lofty::picture::Picture::new_unchecked(
+            lofty::picture::PictureType::CoverBack,
+            Some(lofty::picture::MimeType::Png),
+            None,
+            vec![2],
+        ));
+        let keep = TagEdits::default().normalized();
+
+        apply_tag_edits(&mut tag, &keep, ArtworkChange::Set(png(9)));
+        assert_eq!(tag.pictures().len(), 2);
+        assert_eq!(tag.pictures()[0].data(), [9]);
+        assert_eq!(tag.pictures()[1].data(), [2]);
+
+        apply_tag_edits(&mut tag, &keep, ArtworkChange::Remove);
+        assert_eq!(tag.pictures().len(), 1);
+        assert_eq!(
+            tag.pictures()[0].pic_type(),
+            lofty::picture::PictureType::CoverBack
+        );
+
+        // Removing from a file with no picture at all is a no-op, not a panic.
+        apply_tag_edits(&mut tag, &keep, ArtworkChange::Remove);
+        apply_tag_edits(&mut tag, &keep, ArtworkChange::Remove);
+        assert!(tag.pictures().is_empty());
     }
 
     #[test]
