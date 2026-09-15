@@ -112,7 +112,12 @@ h3 {
 .hero {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  /* The screenshot column is slightly the narrower of the two. The app window is
+     close to square (a square cover beside a fixed-width Files panel), so at equal
+     widths the image stands a good deal taller than the copy and the row centers
+     it against two bands of empty page. Under 1fr it renders short enough to sit
+     with the copy rather than tower over it. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr);
   align-items: center;
   gap: 3rem;
   padding: 2rem 0 0;
@@ -425,6 +430,21 @@ kbd {
   transform: translateY(0);
 }
 @media (max-width: 980px) {
+  .features {
+    padding: 2rem 0;
+  }
+  .feature-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+/* The hero stacks later than the feature list does, and the width is derived
+   rather than picked: the screenshot column may shrink to about 48% of the window
+   the scene captures (HERO_WINDOW in scenes.mjs) before the image reads as a
+   thumbnail and the copy is better off with the full width. At 800pt captured into
+   a 0.95fr column, that threshold falls at 900px, where the image still renders
+   384px wide. Two things move this number — a different capture width, or a
+   different hero column ratio — and index.astro's `sizes` states it too. */
+@media (max-width: 900px) {
   .hero {
     grid-template-columns: 1fr;
     gap: 2.5rem;
@@ -438,12 +458,6 @@ kbd {
   }
   .hero .intro {
     max-width: 560px;
-  }
-  .features {
-    padding: 2rem 0;
-  }
-  .feature-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 @media (max-width: 760px) {

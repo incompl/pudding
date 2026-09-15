@@ -70,13 +70,13 @@ const albums = [
     ],
   },
   {
-    artist: "Nothingness But Shining",
+    artist: "Fictional People",
     album: "A Little Nugget of Universe",
     year: 2023,
     genre: "Indie Pop",
     cover: HERO_COVER,
     tracks: [
-      ["The Deep Sweetness", 203],
+      ["Nothingness But Shining", 203],
       ["Peach Season", 189],
       ["Almost Symmetrical", 226],
       ["Sunday Diagram", 248],

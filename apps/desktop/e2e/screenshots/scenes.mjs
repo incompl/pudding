@@ -44,9 +44,20 @@ export function restoredAlbum(library, manifest, album) {
 }
 
 // Every documentation scene is the same 960 × 640 window, so the images sit
-// together on a page without one of them reading as a different app. The mini
-// player is the sole exception — its window genuinely is that small.
+// together on a page without one of them reading as a different app. Two scenes
+// stand outside that set and size themselves: the mini player, whose window
+// genuinely is that small, and the homepage hero (see HERO_WINDOW).
 const WINDOW = { width: 960, height: 640 };
+
+// The homepage hero is narrower because it is the one image that never sits
+// beside the documentation set — index.astro is the only page that shows it, and
+// the README shows it alone — and because it stands in a column next to the hero
+// copy, where a 3:2 window reads as mostly empty. Now Playing's art is pinned to
+// the window's HEIGHT (`max-width: min(100%, 60vh)` in styles.css), so it stays
+// the same 384px square here and only the black gutter beside it goes. Keep this
+// between 720 and 960: below ~720 the art itself starts shrinking, and below
+// 601 the app switches to its compact layout.
+const HERO_WINDOW = { width: 800, height: 640 };
 const asset = (name) => [`apps/website/src/assets/${name}.png`];
 
 // --- Fictional stream list ---------------------------------------------------
@@ -405,7 +416,7 @@ export const scenes = [
     // The homepage and README image. It is the one scene that arrives on
     // HERO_ALBUM, so the cover in its hero is that album's own photograph rather
     // than the one every documentation image carries.
-    id: 'desktop', size: WINDOW,
+    id: 'desktop', size: HERO_WINDOW,
     destinations: ['apps/desktop/images/screenshot.png', 'apps/website/src/assets/desktop.png'],
     settings: (library, manifest) => ({ playbackSession: restoredAlbum(library, manifest, HERO_ALBUM) }),
     prepare: basicLayout(HERO_ALBUM),
