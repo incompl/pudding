@@ -161,7 +161,7 @@ Some more questions and answers on the topic:
 
 **Is it safe to run?** Same answer as any small open source app: the source is all here, every bundled dependency and its license is listed under Help > Licenses, and you can build it yourself.
 
-**Who's responsible when it breaks?** Me. It's my app and the bugs are mine. You can report issues on [GitHub](https://github.com/incompl/pudding/issues).
+**Who's responsible when it breaks?** Me. It's my app and the bugs are mine. You can report issues on [GitHub](https://github.com/incompl/pudding/issues), or email <pudding@incompl.com> if you'd rather not do it in public.
 
 **Does this change the license?** No. It's Apache-2.0, same as it would be otherwise. Dependencies keep their own licenses and are attributed in Help > Licenses.
 

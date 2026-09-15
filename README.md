@@ -3,7 +3,7 @@
 Independent music apps. Oldschool taste, newschool features.
 
 - **[Pudding Desktop](apps/desktop/README.md)** — the macOS music player for local files and internet radio, built with Tauri, Rust, and TypeScript.
-- **[Website](apps/website/README.md)** — the static Astro site introducing Pudding.
+- **[Website](apps/website/README.md)** — the static Astro site introducing Pudding, live at [puddingisgood.com](https://puddingisgood.com).
 - **Pudding Mobile** — planned as a separate radio-focused app with its own mobile UI. Its stack is undecided; there is no mobile implementation yet.
 
 ## Repository layout

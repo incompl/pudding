@@ -12,8 +12,9 @@ Mac App Store readiness. Sandbox, entitlements, and bookmarked roots are done
 
 ## Store metadata and signing
 
-- [ ] Privacy policy URL (required even though we collect nothing)
-- [ ] Support URL
+- [x] Privacy policy URL (required even though we collect nothing) — https://puddingisgood.com/privacy/
+- [x] Support URL — https://puddingisgood.com/support/ (support email: pudding@incompl.com)
+- [ ] Enter both URLs, the marketing URL (https://puddingisgood.com), and the support email in App Store Connect
 - [ ] MAS signing: 3rd Party Mac Developer identity + embedded provisioning profile, which Tauri's bundler will not do for us
 - [ ] Confirm App Store Connect accepts the hardened runtime flag (`flags=0x10002`) at the first upload
 - [ ] Make sure the differentiation lands in the screenshots and description, not just the README (4.3)

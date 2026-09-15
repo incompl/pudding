@@ -2,7 +2,6 @@
 import { Image } from 'astro:assets';
 import Page from '../layouts/Page.astro';
 import screenshot from '../assets/desktop.png';
-const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 const desc = "A music player for local files and internet radio.";
 ---
 
@@ -18,7 +17,7 @@ const desc = "A music player for local files and internet radio.";
         {desc}
       </p>
       <div class="hero-cta">
-        <a class="button" href={`${base}documentation/`}>Get Pudding <span aria-hidden="true">↗</span></a>
+        <p class="pending">Coming soon</p>
       </div>
     </div>
 

@@ -4,6 +4,8 @@ version = "1.0.0"
 description = "A music player for local files and internet radio"
 authors = ["incompl"]
 license = "Apache-2.0"
+homepage = "https://puddingisgood.com"
+repository = "https://github.com/incompl/pudding"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

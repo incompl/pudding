@@ -172,6 +172,18 @@ h1 {
   background: var(--primary-hover);
   color: #17200f;
 }
+/* Stands in for the download button before release, keeping the hero's shape
+   without offering a link that cannot work yet. */
+.pending {
+  display: inline-flex;
+  align-items: center;
+  padding: 1rem 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--primary);
+  font-size: 16px;
+  font-weight: 650;
+}
 .hero-cta .small-note {
   margin-top: 0.75rem;
 }

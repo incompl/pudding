@@ -3208,12 +3208,18 @@ pub fn run() {
                 "open-equalizer" => {
                     let _ = app.emit("open-equalizer", ());
                 }
-                // Help ▸ Pudding on GitHub opens the repo in the default browser.
-                "open-readme" => {
-                    let _ = app.opener().open_url(
-                        "https://github.com/incompl/pudding",
-                        None::<&str>,
-                    );
+                // Help ▸ Website and Help ▸ Support open the site in the default
+                // browser. Support is the in-app path App Review expects, and it
+                // is the same URL given in App Store Connect.
+                "open-website" => {
+                    let _ = app
+                        .opener()
+                        .open_url("https://puddingisgood.com", None::<&str>);
+                }
+                "open-support" => {
+                    let _ = app
+                        .opener()
+                        .open_url("https://puddingisgood.com/support/", None::<&str>);
                 }
                 // View ▸ Visualizer is a single on/off toggle (⌘T); it relays a
                 // flip. The frontend owns the preference (swaps art <-> visualizer,
@@ -3686,15 +3692,18 @@ pub fn run() {
             // app's Help menu and injects its built-in search field (the one that
             // indexes every menu item — type "equalizer" and it points you at the
             // item; see wire_macos_help_menu).
-            let readme_item =
-                MenuItemBuilder::with_id("open-readme", "Pudding on GitHub").build(app)?;
+            let website_item = MenuItemBuilder::with_id("open-website", "Website").build(app)?;
+            // Support is a store requirement as much as a courtesy: the app has to
+            // offer a way to reach the developer without leaving it to find one.
+            let support_item = MenuItemBuilder::with_id("open-support", "Support").build(app)?;
             // Licenses opens another right-pane panel in the Settings/About family
             // (same Back button): the open source software Pudding is built from,
             // generated from the real dependency graph at build time.
             let licenses_item =
                 MenuItemBuilder::with_id("open-licenses", "Licenses").build(app)?;
             let help_menu = SubmenuBuilder::new(app, "Help")
-                .item(&readme_item)
+                .item(&website_item)
+                .item(&support_item)
                 .item(&licenses_item)
                 .build()?;
 

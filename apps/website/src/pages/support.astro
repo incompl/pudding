@@ -1,15 +1,14 @@
 ---
 import Page from '../layouts/Page.astro';
-const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 const issues = 'https://github.com/incompl/pudding/issues';
+const email = 'pudding@incompl.com';
 ---
-<Page title="Support — Pudding" description="Links to Pudding’s documentation, questions and feedback, and privacy policy.">
+<Page title="Support — Pudding" description="Get help with Pudding: questions and feedback on GitHub, or email support.">
   <header class="page-heading">
     <h1>Support</h1>
   </header>
   <ul class="support-links">
-    <li><a href={`${base}documentation/`}>Documentation</a></li>
     <li><a href={issues} target="_blank" rel="noopener noreferrer">Questions, bug reports &amp; feedback on GitHub <span aria-hidden="true">↗</span></a></li>
-    <li><a href={`${base}privacy/`}>Privacy policy</a></li>
+    <li><a href={`mailto:${email}`}>Email {email}</a></li>
   </ul>
 </Page>
