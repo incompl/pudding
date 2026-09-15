@@ -5,18 +5,29 @@
  *
  * The WAVs contain a short, quiet tone followed by low-rate PCM silence, so
  * their displayed durations look realistic without needing an audio encoder.
- * Each file carries ID3v2 metadata and embedded, generated album art.
+ * Each file carries ID3v2 metadata and, as its embedded album art, one of the
+ * photographs tracked in apps/desktop/images: real artwork rather than
+ * generated pixels, because these covers are what the published screenshots
+ * show at hero size.
  */
 
 import { constants } from "node:fs";
-import { mkdir, open, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { deflateSync } from "node:zlib";
+import { fileURLToPath } from "node:url";
 
 const SAMPLE_RATE = 8_000;
 const BYTES_PER_SAMPLE = 2;
 const PREVIEW_SECONDS = 4;
+
+// Five albums share one photograph. "A Little Nugget of Universe" carries its own because the
+// website's homepage screenshot is the one scene that restores that album
+// (HERO_ALBUM in e2e/screenshots/scenes.mjs), precisely so the hero's cover is
+// not the cover every documentation image already shows.
+const ART_DIR = fileURLToPath(new URL("../images/", import.meta.url));
+const DEFAULT_COVER = "sample album art 1.jpg";
+const HERO_COVER = "sample album art 2.jpg";
 
 const albums = [
   {
@@ -24,7 +35,6 @@ const albums = [
     album: "Static Gardens",
     year: 2026,
     genre: "Electronic",
-    palette: ["15243a", "38d6b4", "f2c14e"],
     tracks: [
       ["Glass Elevator", 198],
       ["Moss Circuit", 244],
@@ -38,7 +48,6 @@ const albums = [
     album: "Weather for Satellites",
     year: 2025,
     genre: "Ambient",
-    palette: ["101a36", "536dfe", "9ee7ff"],
     tracks: [
       ["Low Orbit", 286],
       ["Cloud Index", 259],
@@ -52,7 +61,6 @@ const albums = [
     album: "Borrowed Light",
     year: 2024,
     genre: "Jazz",
-    palette: ["241714", "c45d3a", "f4d6a0"],
     tracks: [
       ["Half Past Blue", 235],
       ["Corner Table", 272],
@@ -62,13 +70,13 @@ const albums = [
     ],
   },
   {
-    artist: "Orchard Automatic",
-    album: "Soft Geometry",
+    artist: "Nothingness But Shining",
+    album: "A Little Nugget of Universe",
     year: 2023,
     genre: "Indie Pop",
-    palette: ["27311f", "ff7aa2", "ffd36e"],
+    cover: HERO_COVER,
     tracks: [
-      ["Parallel Lines", 203],
+      ["The Deep Sweetness", 203],
       ["Peach Season", 189],
       ["Almost Symmetrical", 226],
       ["Sunday Diagram", 248],
@@ -80,7 +88,6 @@ const albums = [
     album: "Maps of Quiet Places",
     year: 2022,
     genre: "Folk",
-    palette: ["26352b", "73956f", "e3c78f"],
     tracks: [
       ["Paper Compass", 231],
       ["Old River Road", 257],
@@ -94,7 +101,6 @@ const albums = [
     album: "Night Bus Radio",
     year: 2026,
     genre: "Alternative",
-    palette: ["17152b", "9f6cff", "ff8c61"],
     tracks: [
       ["Last Stop Lanterns", 211, "Candle Index"],
       ["Crosswalk Constellation", 238, "Vera Halcyon"],
@@ -122,7 +128,8 @@ Options:
                  (default: ~/Pudding Screenshot Library)
   -h, --help     Show this help
 
-The names and artwork are fictional and generated solely as mock content.`);
+The artists, albums and tracks are fictional mock content. The cover art is the
+project's own photography, copied from apps/desktop/images.`);
 }
 
 function parseArgs(argv) {
@@ -193,9 +200,9 @@ function makeId3(track, cover) {
       "APIC",
       Buffer.concat([
         Buffer.from([3]),
-        Buffer.from("image/png\0", "ascii"),
+        Buffer.from(`${cover.mime}\0`, "ascii"),
         Buffer.from([3, 0]),
-        cover,
+        cover.bytes,
       ]),
     ),
   ];
@@ -203,63 +210,6 @@ function makeId3(track, cover) {
   // metadata editors room to make small changes without rewriting the audio.
   const body = Buffer.concat([...frames, Buffer.alloc(1_024)]);
   return Buffer.concat([Buffer.from("ID3\x04\x00\x00", "binary"), synchsafe(body.length), body]);
-}
-
-function crc32(buffer) {
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type, data) {
-  const name = Buffer.from(type, "ascii");
-  const out = Buffer.alloc(data.length + 12);
-  out.writeUInt32BE(data.length, 0);
-  name.copy(out, 4);
-  data.copy(out, 8);
-  out.writeUInt32BE(crc32(Buffer.concat([name, data])), data.length + 8);
-  return out;
-}
-
-function hexColor(hex) {
-  return [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16));
-}
-
-function makeCover(albumIndex, palette) {
-  const size = 512;
-  const colors = palette.map(hexColor);
-  const raw = Buffer.alloc((size * 3 + 1) * size);
-  for (let y = 0; y < size; y += 1) {
-    const row = y * (size * 3 + 1);
-    for (let x = 0; x < size; x += 1) {
-      const wave = Math.sin((x + albumIndex * 37) / (31 + albumIndex * 3));
-      const rings = Math.sin(Math.hypot(x - 256, y - 256) / (17 + albumIndex));
-      const band = ((x + y + albumIndex * 83) % (96 + albumIndex * 7)) < 42 ? 1 : 0;
-      const mix = Math.max(0, Math.min(1, 0.5 + wave * 0.22 + rings * 0.18));
-      const accent = band && ((x * 3 + y * 2) % 211 < 72) ? colors[2] : colors[1];
-      const offset = row + 1 + x * 3;
-      for (let channel = 0; channel < 3; channel += 1) {
-        raw[offset + channel] = Math.round(colors[0][channel] * (1 - mix) + accent[channel] * mix);
-      }
-    }
-  }
-
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(size, 0);
-  ihdr.writeUInt32BE(size, 4);
-  ihdr[8] = 8;
-  ihdr[9] = 2;
-  return Buffer.concat([
-    Buffer.from("89504e470d0a1a0a", "hex"),
-    pngChunk("IHDR", ihdr),
-    pngChunk("IDAT", deflateSync(raw, { level: 9 })),
-    pngChunk("IEND", Buffer.alloc(0)),
-  ]);
 }
 
 function wavHeader(dataSize, id3Size) {
@@ -324,13 +274,26 @@ async function main() {
   const manifest = [];
   const lists = playlists.map((list) => ({ ...list, lines: ["#EXTM3U"] }));
   let trackIndex = 0;
+  // Read once and shared by every track on the album, since the same bytes go
+  // into each file's APIC frame as well as the album folder's cover file.
+  const covers = new Map();
+  const loadCover = async (name) => {
+    if (!covers.has(name)) {
+      covers.set(name, {
+        bytes: await readFile(path.join(ART_DIR, name)),
+        mime: name.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg",
+        file: `cover${path.extname(name)}`,
+      });
+    }
+    return covers.get(name);
+  };
 
   for (let albumIndex = 0; albumIndex < albums.length; albumIndex += 1) {
     const album = albums[albumIndex];
     const albumDir = path.join(outDir, safeName(album.artist), safeName(album.album));
     await mkdir(albumDir, { recursive: true });
-    const cover = makeCover(albumIndex, album.palette);
-    await writeFile(path.join(albumDir, "cover.png"), cover);
+    const cover = await loadCover(album.cover ?? DEFAULT_COVER);
+    await writeFile(path.join(albumDir, cover.file), cover.bytes);
 
     for (let index = 0; index < album.tracks.length; index += 1) {
       const [title, duration, artist = album.artist] = album.tracks[index];

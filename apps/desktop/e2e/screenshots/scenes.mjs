@@ -1,16 +1,14 @@
 // One capture can serve multiple consumers. Add new documentation scenes here.
 // Each recipe runs in a fresh app/profile and must prepare its own complete state.
+import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { encodePNG } from './png.mjs';
+import { fileURLToPath } from 'node:url';
 
 // Exercise the app's normal session restoration: it restores paused at an exact
 // playhead without racing audio callbacks (seeking a live track resumes playback).
 // A scene layers its own `settings` over this rather than restating it.
 export function initialSettings(library, manifest) {
-  const first = manifest.tracks[0];
-  const tracks = manifest.tracks.filter((track) => track.album === first.album)
-    .map((track) => ({ ...track, path: path.join(library, track.file) }));
   return {
     libraryRoots: [library],
     themeMode: 'dark', darkAccent: 'pistachio', volume: 0,
@@ -20,10 +18,28 @@ export function initialSettings(library, manifest) {
     equalizer: { enabled: false, preamp: 0, gains: Array(10).fill(0) },
     windowSizeNormal: { width: 960, height: 640 },
     windowSizeMini: { width: 367, height: 168 }, windowPosition: { x: 120, y: 120 },
-    playbackSession: {
-      queue: { kind: 'album', title: first.album, subtitle: `${tracks.length} tracks`, tracks },
-      index: 0, path: tracks[0].path, time: 42, duration: first.duration,
-    },
+    playbackSession: restoredAlbum(library, manifest, defaultAlbum(manifest)),
+  };
+}
+
+// The album every scene but the homepage hero arrives on.
+const defaultAlbum = (manifest) => manifest.tracks[0].album;
+
+// The album the homepage screenshot arrives on instead. It exists so that image
+// can carry its own cover: the fixture library gives this one album a different
+// photograph (gen-screenshot-library.mjs), and nothing else in the suite shows
+// it — the artist, search, queue and editor scenes each feature another album.
+const HERO_ALBUM = 'A Little Nugget of Universe';
+
+// One album's tracks as the paused session a scene arrives on. A scene that
+// needs a different album layers this over `initialSettings` through `settings`.
+export function restoredAlbum(library, manifest, album) {
+  const tracks = manifest.tracks.filter((track) => track.album === album)
+    .map((track) => ({ ...track, path: path.join(library, track.file) }));
+  if (!tracks.length) throw new Error(`The fixture library holds no album named ${album}`);
+  return {
+    queue: { kind: 'album', title: album, subtitle: `${tracks.length} tracks`, tracks },
+    index: 0, path: tracks[0].path, time: 42, duration: tracks[0].duration,
   };
 }
 
@@ -38,10 +54,10 @@ const asset = (name) => [`apps/website/src/assets/${name}.png`];
 // "Night Light Radio" exists to give the search scene a stream hit for its query.
 const STATIONS = [
   'Night Light Radio',
+  'Endless Amelodic Noise',
   'Deep Field FM',
-  'Paper Lantern Radio',
-  'Coastal Static',
-  'Orbit One',
+  'The Vibe Zone',
+  'Real Birds 24/7',
 ];
 
 // One of them is a station the suite actually broadcasts (station.mjs), so the
@@ -54,38 +70,20 @@ const STATIONS = [
 // "Artist - Song" form the hero splits across its two lines. The artist is one
 // the fixture library does not contain, so the image can't be misread as a local
 // track playing.
-// Its artwork is also what the scene asserts the hero is showing: the restored
-// session's album cover is 512 square, so a 600 there is proof the art swapped
-// to the station's own rather than a cover left over from the paused track.
-const LOGO_SIZE = 600;
+// Its artwork is also what the scene asserts the hero is showing: naturalWidth
+// is the only thing that tells the station's own art apart from the album cover
+// left over from the paused track, so this photograph is tracked at a size the
+// fixture library's 1024-square covers do not share. Keep the two sizes
+// different if either image is ever replaced.
+const LOGO_SIZE = 900;
+const LOGO_FILE = 'sample album art 3.jpg';
 export const LIVE_STATION = {
-  name: 'Deep Field FM',
-  title: 'Hollow Coast - Tidal Hour',
-  song: 'Tidal Hour',
-  logo: stationLogo(),
+  name: 'Endless Amelodic Noise',
+  title: 'No One Lives Here - Five Pitched Down Laundry Machines',
+  song: 'No One Lives Here',
+  logo: readFileSync(fileURLToPath(new URL(`../../images/${LOGO_FILE}`, import.meta.url))),
+  logoFile: LOGO_FILE,
 };
-
-// Generated rather than tracked, like the fixture library's covers: concentric
-// signal rings over a deep field, in colors no album in that library uses.
-function stationLogo() {
-  const field = [0x0a, 0x12, 0x2b], wave = [0x4f, 0xd8, 0xc4], core = [0xff, 0xc2, 0x6b];
-  const rgba = Buffer.alloc(LOGO_SIZE * LOGO_SIZE * 4);
-  for (let y = 0; y < LOGO_SIZE; y += 1) {
-    for (let x = 0; x < LOGO_SIZE; x += 1) {
-      const dx = x / LOGO_SIZE - 0.5, dy = y / LOGO_SIZE - 0.5;
-      const r = Math.hypot(dx, dy);
-      const rings = (0.5 + 0.5 * Math.cos(r * 64 - 0.8)) ** 4 * Math.max(0, 1 - r * 2.1);
-      const glow = Math.max(0, 1 - r * 16) ** 2.4;
-      const i = (y * LOGO_SIZE + x) * 4;
-      for (let c = 0; c < 3; c += 1) {
-        const lit = field[c] + (wave[c] - field[c]) * rings;
-        rgba[i + c] = Math.round(Math.min(255, lit + (core[c] - lit) * glow));
-      }
-      rgba[i + 3] = 255;
-    }
-  }
-  return encodePNG(LOGO_SIZE, LOGO_SIZE, rgba);
-}
 
 // Written beside the library folder, never inside it: a .m3u8 under a library
 // root would show up as another playlist in the Files panel. That directory is
@@ -111,8 +109,8 @@ const withStreams = { fixture: writeStreamList, settings: (library) => ({ manife
 
 // --- Shared arrival ----------------------------------------------------------
 
-async function nowPlaying(d, library, manifest, { clearQueue = false } = {}) {
-  const track = manifest.tracks[0];
+async function nowPlaying(d, library, manifest, { clearQueue = false, album } = {}) {
+  const track = manifest.tracks.find((item) => item.album === (album ?? defaultAlbum(manifest)));
   await d.waitFor(async () => {
     const songs = await d.invoke('list_all_songs');
     return songs.length === manifest.tracks.length;
@@ -157,8 +155,12 @@ const albumPaths = (library, manifest, album) => manifest.tracks
 
 // --- Recipes -----------------------------------------------------------------
 
-async function basicLayout(d, library, manifest) {
-  await nowPlaying(d, library, manifest, { clearQueue: true });
+// Parameterised by the album it arrives on, because its two scenes differ in
+// nothing else: the homepage hero takes HERO_ALBUM so its Now Playing art is not
+// the cover every documentation image already shows, and the light-theme image
+// takes the album the rest of the suite uses.
+const basicLayout = (album) => async function basicLayout(d, library, manifest) {
+  await nowPlaying(d, library, manifest, { clearQueue: true, album });
   // The Files panel stays on its index — the library views, then the Playlists
   // section listing the two playlists the fixture library ships with. No drill is
   // needed: an unset navLocation restores the navigator to its root menu.
@@ -175,7 +177,7 @@ async function basicLayout(d, library, manifest) {
       !state.autoadvance && !(await d.exists('#now-playing-panel.has-nav')) &&
       !(await d.prop('#eq-enabled', 'checked'));
   }, { message: 'Basic layout must sit at the Files index with no queue or optional playback features' });
-}
+};
 
 // Artists drilled one level: the artist's Albums section over their Tracks
 // section, with the back row to Artists. Documents the drill model, which the
@@ -400,9 +402,13 @@ function liveStream(state) {
 
 export const scenes = [
   {
+    // The homepage and README image. It is the one scene that arrives on
+    // HERO_ALBUM, so the cover in its hero is that album's own photograph rather
+    // than the one every documentation image carries.
     id: 'desktop', size: WINDOW,
     destinations: ['apps/desktop/images/screenshot.png', 'apps/website/src/assets/desktop.png'],
-    prepare: basicLayout,
+    settings: (library, manifest) => ({ playbackSession: restoredAlbum(library, manifest, HERO_ALBUM) }),
+    prepare: basicLayout(HERO_ALBUM),
   },
   {
     id: 'mini', size: { width: 367, height: 168 },
@@ -433,11 +439,12 @@ export const scenes = [
   },
   { id: 'themes', size: WINDOW, destinations: asset('settings-theme'), ...withStreams, prepare: themePicker },
   {
-    // The same layout as `desktop`, in the light mode the docs tell people they
-    // can pin or let the OS swap into.
+    // The same layout as `desktop` — on the album every other documentation
+    // image shows — in the light mode the docs tell people they can pin or let
+    // the OS swap into.
     id: 'light', size: WINDOW, destinations: asset('theme-light'),
-    settings: () => ({ themeMode: 'light', lightAccent: 'apple' }),
-    prepare: basicLayout,
+    settings: () => ({ themeMode: 'light', lightAccent: 'raspberry' }),
+    prepare: basicLayout(),
   },
   {
     id: 'equalizer', size: WINDOW, destinations: asset('equalizer'),

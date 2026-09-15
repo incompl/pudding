@@ -36,6 +36,11 @@ with a fresh profile under `.screenshots/`. Settings, metadata DB, and the defau
 stream list all use that directory. The profile override is honored only in a
 debug build launched with `PUDDING_E2E_PORT`.
 
+The artists, albums and tracks in that library are invented; the cover art is
+not. Every album carries one of the photographs tracked in `apps/desktop/images`,
+because a synthesised pattern reads as filler at the size Now Playing gives it on
+a website.
+
 `scenes.mjs` is the manifest and recipe collection. Each recipe declares its
 logical window size, setup function, and repository-relative destination paths.
 It drives the same app actions as e2e tests, asserts the expected library and
@@ -68,7 +73,11 @@ that no queue navigation remains. The Files panel sits on its index — the libr
 views plus the Playlists section, where the fixture library's Favorites and
 Synthwave playlists appear. Shuffle, repeat, autoadvance, ReplayGain,
 sample-rate matching, the equalizer, and the visualizer are disabled explicitly.
-The `light` scene reuses that recipe under a light theme.
+It is also the one scene that arrives on a different album (`HERO_ALBUM`), so the
+homepage's artwork is not the cover every documentation image already carries:
+the fixture library gives that one album its own photograph, and no other scene
+features it. The `light` scene reuses the recipe under a light theme, on the
+album the rest of the documentation shows.
 Documentation references the website asset directly; it needs no extra copy.
 
 The `columns` scene is the one that ships a layout rather than a view: a stored
@@ -119,6 +128,12 @@ audio every 8192 bytes. The engine reaches it through `icy.rs` exactly the way i
 reaches a real station, and the fixture stream list points one station at it (and
 carries its art on the usual `tvg-logo` attribute). The other four stay example
 URLs nothing dials.
+
+The station's art is another tracked photograph, served under its own extension
+and content type. It is deliberately not the album covers' pixel size:
+`naturalWidth` is the only thing the scene can use to tell the station's own art
+apart from a cover left over from the paused track, so if either image is
+replaced the two sizes have to stay different.
 
 The audio is the app's own bundled `pudding sample.mp3`, tags stripped off both
 ends so its frame region loops end to end. None of it reaches a pixel — every

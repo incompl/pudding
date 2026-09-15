@@ -14,6 +14,7 @@
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 // Icecast's own default. Small enough that the first title reaches the decoder
 // within a fraction of a second of the connection opening.
@@ -82,13 +83,18 @@ function pump(res, frames, title) {
 // Starts the station on an ephemeral loopback port and hands back the URLs the
 // fixture stream list points at. `close` ends it and drops the open connection,
 // which an endless response body would otherwise hold forever.
-export async function startStation({ name, title, logo, audioFile }) {
+export async function startStation({ name, title, logo, logoFile, audioFile }) {
   const frames = mpegFrames(await readFile(audioFile), audioFile);
+  // Served under the artwork's own extension and content type, the way a real
+  // stream list's tvg-logo points at an ordinary image URL.
+  const extension = path.extname(logoFile).toLowerCase();
+  const logoRoute = `/logo${extension}`;
+  const logoType = extension === '.png' ? 'image/png' : 'image/jpeg';
   const sockets = new Set();
   const server = createServer((req, res) => {
     const route = (req.url ?? '').split('?')[0];
-    if (route === '/logo.png') {
-      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': logo.length });
+    if (route === logoRoute) {
+      res.writeHead(200, { 'Content-Type': logoType, 'Content-Length': logo.length });
       res.end(logo);
       return;
     }
@@ -120,7 +126,7 @@ export async function startStation({ name, title, logo, audioFile }) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   return {
     streamUrl: `${origin}/stream`,
-    logoUrl: `${origin}/logo.png`,
+    logoUrl: `${origin}${logoRoute}`,
     async close() {
       for (const socket of sockets) socket.destroy();
       server.close();

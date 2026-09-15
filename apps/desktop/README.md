@@ -138,8 +138,8 @@ selecting one screenshot, reviewing differences, and adding new recipes.
 
 ## Screenshot library
 
-Generate a deterministic library of fictional artists, albums, tracks, and
-abstract cover art with no third-party tools:
+Generate a deterministic library of fictional artists, albums, and tracks,
+covered by the project's own photography, with no third-party tools:
 
 ```sh
 pnpm gen:screenshot-library
@@ -148,7 +148,8 @@ pnpm gen:screenshot-library
 The default output is `~/Pudding Screenshot Library`. Pass a different location
 after `--`, for example `pnpm gen:screenshot-library -- --out /tmp/pudding-mock`.
 The generated WAV files have realistic durations, a short preview tone, complete
-metadata, and embedded cover art. The full library is about 120 MB.
+metadata, and, as embedded cover art, the photographs tracked in
+`apps/desktop/images`. The full library is about 120 MB.
 
 ## AI Disclaimer
 
