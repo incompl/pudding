@@ -3465,21 +3465,23 @@ pub fn run() {
                 redo: edit_redo,
             });
 
-            // Playback menu, in four groups of three, ordered by subject: what's
-            // playing now (Play/Pause, Previous, Next); what plays next (Shuffle,
-            // a Repeat submenu, and the global "Autoadvance" checkbox — does
-            // playback flow track-to-track, or stop after each?); how loud
-            // (Volume Up/Down, Mute); and how it sounds (Equalizer, a ReplayGain
+            // Playback menu, in three groups ordered by subject: the track in
+            // progress (Play/Pause, Previous, Next, then Volume Up/Down and
+            // Mute — the hands-on controls for what's playing right now); what
+            // plays next (Shuffle, a Repeat submenu, and the global
+            // "Autoadvance" checkbox — does playback flow track-to-track, or
+            // stop after each?); and how it sounds (Equalizer, a ReplayGain
             // submenu, Match Source Sample Rate). Autoadvance sits with Shuffle
             // and Repeat because all three answer the same question — what
-            // happens when this track ends — and the set-once audio-path settings
-            // stay in their own group rather than trailing the volume keys.
-            // Queue teardown ("Clear") lives on the queue pane itself, not here —
-            // a queue verb has no home in a global menu. Transport items relay to the
-            // frontend (menu:transport); Previous/Next carry ⌘←/⌘→ accelerators
-            // that both drive the shortcut and reveal it here. (Play/Pause, seek,
-            // and volume have bare-key shortcuts that can't be menu accelerators
-            // without hijacking typing, so those appear without accelerators.)
+            // happens when this track ends — and the set-once audio-path
+            // settings stay in their own group rather than trailing the volume
+            // keys. Queue teardown ("Clear") lives on the queue pane itself, not
+            // here — a queue verb has no home in a global menu. Transport items
+            // relay to the frontend (menu:transport); Previous/Next carry ⌘←/⌘→
+            // accelerators that both drive the shortcut and reveal it here.
+            // (Play/Pause, seek, and volume have bare-key shortcuts that can't
+            // be menu accelerators without hijacking typing, so those appear
+            // without accelerators.)
             // Shuffle/Repeat/Mute mirror the toolbar controls and Autoadvance
             // defaults on; the frontend corrects every checkmark to its persisted
             // value at startup and after each change (set_*_checked). Autoadvance
@@ -3525,8 +3527,8 @@ pub fn run() {
             // Equalizer opens our in-app EQ panel in the right pane (like Settings
             // / About) — an audio effect on playback, so it heads the audio-path
             // group rather than living in Window (it's a pane, not a separate
-            // window as in Apple Music). ⌥⌘E is the familiar Equalizer accelerator. Selecting
-            // it emits "open-equalizer" for the frontend.
+            // window as in Apple Music). ⌥⌘E is the familiar Equalizer
+            // accelerator. Selecting it emits "open-equalizer" for the frontend.
             let equalizer = MenuItemBuilder::with_id("open-equalizer", "Equalizer")
                 .accelerator("Alt+Cmd+E")
                 .build(app)?;
