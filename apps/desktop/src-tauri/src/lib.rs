@@ -3465,12 +3465,17 @@ pub fn run() {
                 redo: edit_redo,
             });
 
-            // Playback menu, top to bottom: transport (Play/Pause, Previous,
-            // Next); Shuffle + a Repeat submenu; Volume Up/Down + Mute; and a
-            // single global "Autoadvance" checkbox (does playback flow
-            // track-to-track, or stop after each?). Queue teardown ("Clear") lives
-            // on the queue pane itself, not here — a queue verb has no home in a
-            // global menu. Transport items relay to the
+            // Playback menu, in four groups of three, ordered by subject: what's
+            // playing now (Play/Pause, Previous, Next); what plays next (Shuffle,
+            // a Repeat submenu, and the global "Autoadvance" checkbox — does
+            // playback flow track-to-track, or stop after each?); how loud
+            // (Volume Up/Down, Mute); and how it sounds (Equalizer, a ReplayGain
+            // submenu, Match Source Sample Rate). Autoadvance sits with Shuffle
+            // and Repeat because all three answer the same question — what
+            // happens when this track ends — and the set-once audio-path settings
+            // stay in their own group rather than trailing the volume keys.
+            // Queue teardown ("Clear") lives on the queue pane itself, not here —
+            // a queue verb has no home in a global menu. Transport items relay to the
             // frontend (menu:transport); Previous/Next carry ⌘←/⌘→ accelerators
             // that both drive the shortcut and reveal it here. (Play/Pause, seek,
             // and volume have bare-key shortcuts that can't be menu accelerators
@@ -3504,9 +3509,9 @@ pub fn run() {
                 .checked(true)
                 .build(app)?;
             let repeat_all =
-                CheckMenuItemBuilder::with_id("repeat-all", "Repeat All").build(app)?;
+                CheckMenuItemBuilder::with_id("repeat-all", "All").build(app)?;
             let repeat_one =
-                CheckMenuItemBuilder::with_id("repeat-one", "Repeat One").build(app)?;
+                CheckMenuItemBuilder::with_id("repeat-one", "One").build(app)?;
             let repeat_menu = SubmenuBuilder::new(app, "Repeat")
                 .item(&repeat_off)
                 .item(&repeat_all)
@@ -3518,15 +3523,15 @@ pub fn run() {
                 MenuItemBuilder::with_id("playback-volume-down", "Volume Down").build(app)?;
             let mute = CheckMenuItemBuilder::with_id("playback-mute", "Mute").build(app)?;
             // Equalizer opens our in-app EQ panel in the right pane (like Settings
-            // / About) — an audio effect on playback, so it sits by Volume/Mute
-            // rather than in Window (it's a pane, not a separate window as in
-            // Apple Music). ⌥⌘E is the familiar Equalizer accelerator. Selecting
+            // / About) — an audio effect on playback, so it heads the audio-path
+            // group rather than living in Window (it's a pane, not a separate
+            // window as in Apple Music). ⌥⌘E is the familiar Equalizer accelerator. Selecting
             // it emits "open-equalizer" for the frontend.
             let equalizer = MenuItemBuilder::with_id("open-equalizer", "Equalizer")
                 .accelerator("Alt+Cmd+E")
                 .build(app)?;
             // ReplayGain (volume normalization): three radio-style items in a
-            // submenu next to the Equalizer, another playback audio setting. Off
+            // submenu below the Equalizer, another playback audio setting. Off
             // by default; the frontend corrects the checkmark to its persisted
             // value at startup and after each change (set_replaygain_checked),
             // like the Repeat trio. Applied per track from the file's
@@ -3557,18 +3562,17 @@ pub fn run() {
                 .item(&play_pause)
                 .item(&previous)
                 .item(&next)
-                .separator()
-                .item(&shuffle)
-                .item(&repeat_menu)
-                .separator()
                 .item(&volume_up)
                 .item(&volume_down)
                 .item(&mute)
+                .separator()
+                .item(&shuffle)
+                .item(&repeat_menu)
+                .item(&autoadvance)
+                .separator()
                 .item(&equalizer)
                 .item(&replaygain_menu)
                 .item(&follow_sample_rate)
-                .separator()
-                .item(&autoadvance)
                 .build()?;
             app.manage(PlaybackMenu {
                 autoadvance,
