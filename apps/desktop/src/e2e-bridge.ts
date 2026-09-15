@@ -118,6 +118,44 @@ async function handle(
       }
       return true;
     }
+    case "freeze": {
+      // The CSS freeze can only reach what the cascade reaches. This reaches
+      // what the engine is actually running: every CSS animation, every
+      // transition already in flight, and anything script started — whatever
+      // the declaration looked like, and whichever property it targets.
+      // Cancelling drops each effect, so the element falls back to its
+      // cascaded value rather than holding some arbitrary frame.
+      //
+      // Returns what it found. A capture that will not settle can then name
+      // the thing still moving instead of leaving it to be guessed at from
+      // pixels, which is a poor way to tell a fading opacity from a
+      // interpolating color.
+      const found: Record<string, unknown>[] = [];
+      for (const anim of document.getAnimations()) {
+        const css = anim as Animation & {
+          animationName?: string;
+          transitionProperty?: string;
+        };
+        const target = anim.effect instanceof KeyframeEffect
+          ? anim.effect.target
+          : null;
+        found.push({
+          kind: css.animationName
+            ? `animation ${css.animationName}`
+            : css.transitionProperty
+              ? `transition ${css.transitionProperty}`
+              : "script animation",
+          target: target
+            ? `${target.tagName.toLowerCase()}${target.id ? `#${target.id}` : ""}` +
+              `${typeof target.className === "string" && target.className
+                ? `.${target.className.trim().split(/\s+/).join(".")}` : ""}`
+            : null,
+          playState: anim.playState,
+        });
+        anim.cancel();
+      }
+      return found;
+    }
     case "probe":
       return probe();
     case "settle": {

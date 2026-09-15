@@ -105,10 +105,17 @@ const albums = [
   },
 ];
 
+// The example playlists shown in the Files panel's index. `pick` decides
+// membership as each track is generated, so both files stay deterministic.
+const playlists = [
+  { name: "Favorites", pick: (albumIndex, index) => (index + albumIndex) % 2 === 0 },
+  { name: "Synthwave", pick: (albumIndex) => ["Electronic", "Ambient"].includes(albums[albumIndex].genre) },
+];
+
 function usage() {
   console.log(`Usage: node scripts/gen-screenshot-library.mjs [--out DIR]
 
-Creates 30 tagged WAV files, six album covers, a playlist, and a manifest.
+Creates 30 tagged WAV files, six album covers, two playlists, and a manifest.
 
 Options:
   -o, --out DIR  Output directory
@@ -315,7 +322,7 @@ async function main() {
   const outDir = parseArgs(process.argv.slice(2));
   await mkdir(outDir, { recursive: true });
   const manifest = [];
-  const playlist = ["#EXTM3U"];
+  const lists = playlists.map((list) => ({ ...list, lines: ["#EXTM3U"] }));
   let trackIndex = 0;
 
   for (let albumIndex = 0; albumIndex < albums.length; albumIndex += 1) {
@@ -347,13 +354,17 @@ async function main() {
       );
       await writeMockWav(path.join(outDir, relativeFile), track, cover, trackIndex++);
       manifest.push({ file: relativeFile, ...track });
-      if ((index + albumIndex) % 2 === 0) {
-        playlist.push(`#EXTINF:${duration},${artist} - ${title}`, relativeFile);
+      for (const list of lists) {
+        if (list.pick(albumIndex, index)) {
+          list.lines.push(`#EXTINF:${duration},${artist} - ${title}`, relativeFile);
+        }
       }
     }
   }
 
-  await writeFile(path.join(outDir, "Favorites.m3u8"), `${playlist.join("\n")}\n`);
+  for (const list of lists) {
+    await writeFile(path.join(outDir, `${list.name}.m3u8`), `${list.lines.join("\n")}\n`);
+  }
   await writeFile(
     path.join(outDir, "manifest.json"),
     `${JSON.stringify({ generatedBy: "Pudding", fictional: true, tracks: manifest }, null, 2)}\n`,

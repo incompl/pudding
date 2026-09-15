@@ -97,8 +97,34 @@ const PALETTE_HSL = PALETTE.map(rgb2hsl);
 
 // Pick a palette index different from `cur`, so the drift never crossfades a
 // color into itself and the order stays unpredictable.
+// Random source for the look's stochastic parts (the star field and the color
+// drift's next target). captureStill swaps in a seeded generator so a screenshot
+// of the visualizer is identical from run to run, then puts this back.
+let rand: () => number = Math.random;
+
+// Small deterministic PRNG (mulberry32). Only ever drives the look, so speed and
+// a short period matter more than statistical quality.
+const seeded = (seed: number): (() => number) => () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+
+// A synthetic oscilloscope frame for captureStill. The audio tap is silent while
+// a screenshot session sits paused, so the still needs a waveform of its own: a
+// few harmonics under a gentle envelope, which reads as a music trace rather
+// than a textbook sine.
+const STILL_WAVEFORM = Array.from({ length: 256 }, (_, i) => {
+  const p = (i / 255) * Math.PI * 2;
+  return (
+    (Math.sin(p * 3) * 0.55 + Math.sin(p * 7 + 1.1) * 0.22 + Math.sin(p * 13 + 2.3) * 0.11) *
+    (0.55 + 0.45 * Math.sin(p))
+  );
+});
+
 const pickColor = (cur: number): number => {
-  let n = Math.floor(Math.random() * (PALETTE.length - 1));
+  let n = Math.floor(rand() * (PALETTE.length - 1));
   if (n >= cur) n++;
   return n;
 };
@@ -135,6 +161,23 @@ export interface Visualizer {
   // Flash the track's title/artist over the scene: fade in, hold, fade out.
   // Called on each new track while the visualizer is the visible hero view.
   showTrack(title: string, artist: string | null): void;
+  // Stop the live loop and leave one reproducible frame on the canvas, for the
+  // screenshot suite (e2e/screenshots). Everything the look draws from is pinned:
+  // a seeded star field and color drift, a synthetic waveform, and a fixed number
+  // of fixed-length steps. Two captures of the result are identical, which is what
+  // the runner requires. Nothing restarts the loop afterwards, so this is
+  // terminal for the session that calls it.
+  captureStill(opts?: StillOptions): void;
+}
+
+export interface StillOptions {
+  // Seeds the star field and the color drift's targets.
+  seed?: number;
+  // How many frames to compose. The bloom trails accumulate over frames, so too
+  // few leaves a bare line; the default settles the look.
+  frames?: number;
+  // Seconds of motion per frame.
+  dt?: number;
 }
 
 // Track banner timing (ms). Fast fade in, a comfortable hold, slow fade out —
@@ -189,6 +232,22 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
   // resize so density and placement track the new dimensions.
   let stars: Star[] = [];
 
+  // Seed double the base density; the first half is always visible, the second
+  // half fades in with energy (see `threshold`), so full energy ~doubles it.
+  // Split out of resize so captureStill can reseed the field at an unchanged
+  // size, which resize alone short-circuits.
+  const seedStars = () => {
+    const baseCount = Math.round((W * H) / (2600 * dpr));
+    stars = Array.from({ length: baseCount * 2 }, (_, i) => ({
+      x: (rand() * 2 - 1) * W,
+      y: (rand() * 2 - 1) * H,
+      z: rand() * W, // spread through the whole depth range up front
+      base: 0.4 + rand() * 0.6,
+      speed: 0.5 + rand() * 0.9,
+      threshold: i < baseCount ? 0 : 0.1 + rand() * 0.8,
+    }));
+  };
+
   const resize = () => {
     const cssW = Math.max(1, container.clientWidth);
     const cssH = Math.max(1, container.clientHeight);
@@ -203,17 +262,7 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
     canvas.height = H;
     read = makeBuf();
     write = makeBuf();
-    // Seed double the base density; the first half is always visible, the second
-    // half fades in with energy (see `threshold`), so full energy ~doubles it.
-    const baseCount = Math.round((W * H) / (2600 * dpr));
-    stars = Array.from({ length: baseCount * 2 }, (_, i) => ({
-      x: (Math.random() * 2 - 1) * W,
-      y: (Math.random() * 2 - 1) * H,
-      z: Math.random() * W, // spread through the whole depth range up front
-      base: 0.4 + Math.random() * 0.6,
-      speed: 0.5 + Math.random() * 0.9,
-      threshold: i < baseCount ? 0 : 0.1 + Math.random() * 0.8,
-    }));
+    seedStars();
   };
   resize();
   new ResizeObserver(() => resize()).observe(container);
@@ -266,19 +315,10 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
   let colorTo = pickColor(colorFrom);
   let colorT = 0; // seconds elapsed into the current crossfade
 
-  const frame = (tMs: number) => {
-    if (!running) return;
-    // A resize can leave zero-size buffers for a beat (e.g. the pane was hidden
-    // when start() ran); skip until the ResizeObserver gives real dimensions.
-    if (W === 0 || H === 0) {
-      rafId = requestAnimationFrame(frame);
-      return;
-    }
-
-    const t = tMs / 1000;
-    // Clamp dt so a hidden/backgrounded pane (huge gap) doesn't warp the field.
-    const dt = lastT ? Math.min(0.05, t - lastT) : 0;
-    lastT = t;
+  // Compose exactly one frame, advancing every time-based effect by `dt` seconds.
+  // Holds no notion of when it is called, so the rAF loop below and captureStill
+  // produce their frames through the same code.
+  const step = (dt: number) => {
     const w = write.x;
 
     // Advance the color crossfade; on completion, pick a new random target.
@@ -348,8 +388,8 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
       // Fly toward the camera; respawn far away (invisible) once we pass it.
       s.z -= vel * dt;
       if (s.z <= 1) {
-        s.x = (Math.random() * 2 - 1) * W;
-        s.y = (Math.random() * 2 - 1) * H;
+        s.x = (rand() * 2 - 1) * W;
+        s.y = (rand() * 2 - 1) * H;
         s.z = W;
       }
 
@@ -395,8 +435,30 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
     const tmp = read;
     read = write;
     write = tmp;
+  };
 
+  const frame = (tMs: number) => {
+    if (!running) return;
+    // A resize can leave zero-size buffers for a beat (e.g. the pane was hidden
+    // when start() ran); skip until the ResizeObserver gives real dimensions.
+    if (W === 0 || H === 0) {
+      rafId = requestAnimationFrame(frame);
+      return;
+    }
+
+    const t = tMs / 1000;
+    // Clamp dt so a hidden/backgrounded pane (huge gap) doesn't warp the field.
+    const dt = lastT ? Math.min(0.05, t - lastT) : 0;
+    lastT = t;
+    step(dt);
     rafId = requestAnimationFrame(frame);
+  };
+
+  // Halt the loop without touching what is already on the canvas.
+  const halt = () => {
+    running = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
   };
 
   return {
@@ -409,9 +471,38 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
       rafId = requestAnimationFrame(frame);
     },
     stop() {
-      running = false;
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = 0;
+      halt();
+    },
+    captureStill({ seed = 1, frames = 150, dt = 1 / 60 } = {}) {
+      // Stop first: a queued rAF would otherwise paint real-time motion over the
+      // frame composed here, between this call and the screenshot.
+      halt();
+      // Pick up the pane's real size while the normal source is still in place,
+      // so whether resize reseeds can't shift the seeded sequence below.
+      resize();
+      // The live loop skips zero-size frames and tries again next tick; a capture
+      // has no next tick, and a blank canvas would sail through as a valid image.
+      if (W === 0 || H === 0) throw new Error("visualizer has no size to capture");
+      const live = rand;
+      rand = seeded(seed);
+      try {
+        seedStars();
+        // A fixed point in the color drift rather than a random one. The span to
+        // the next crossfade is longer than the frames below cover, so no target
+        // is picked mid-capture.
+        colorFrom = 0;
+        colorTo = 4;
+        colorT = COLOR_SECS * 0.5;
+        // The trails are pure accumulation, so start from an empty bloom and let
+        // the frames below build it — otherwise the still inherits whatever the
+        // live loop had drawn.
+        energy = 0;
+        latest = STILL_WAVEFORM;
+        for (const buf of [read, write]) buf.x.clearRect(0, 0, W, H);
+        for (let i = 0; i < frames; i++) step(dt);
+      } finally {
+        rand = live;
+      }
     },
     showTrack(title, artist) {
       bannerTitle.textContent = title;

@@ -244,21 +244,25 @@ function openMetadataEditor(path: string, seed: FileEntry): void {
 // to cancel. Playing such a track is the one action that downloads it (audio.rs
 // parks a worker thread on the fetch); once it lands, the row's "(Not
 // downloaded)" clears and this comes back with it.
+// The verb's actual work, callable on its own: read the tags fresh, then open
+// the editor on them. Separate from the menu item so the e2e/screenshot bridge
+// can reach the editor face, which no native context menu can open for it.
+export async function editTags(path: string): Promise<void> {
+  let seed: FileEntry;
+  try {
+    seed = await invoke<FileEntry>("read_file_tags", { path });
+  } catch (e) {
+    console.error("read_file_tags failed", e);
+    return;
+  }
+  openMetadataEditor(path, seed);
+}
+
 export function editMetadataItem(track: { path: string; notDownloaded?: boolean }): ContextMenuItem {
-  const path = track.path;
   return {
     label: "Edit metadata...",
     disabled: isNotDownloaded(track),
-    action: async () => {
-      let seed: FileEntry;
-      try {
-        seed = await invoke<FileEntry>("read_file_tags", { path });
-      } catch (e) {
-        console.error("read_file_tags failed", e);
-        return;
-      }
-      openMetadataEditor(path, seed);
-    },
+    action: () => editTags(track.path),
   };
 }
 

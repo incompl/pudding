@@ -34,7 +34,7 @@ import {
 } from "./columns";
 import { windowedList } from "./windowed-list";
 import { maybeStartE2eBridge } from "./e2e-bridge";
-import { createVisualizer } from "./visualizer";
+import { createVisualizer, type Visualizer } from "./visualizer";
 import { bootProfileStart, bootStep, bootProfileReport } from "./perf";
 import {
   initLibraryNav,
@@ -183,6 +183,7 @@ import {
   queueListEl,
   queueCloseBtn,
 
+  searchInput,
   toastEl,
 } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
@@ -217,6 +218,7 @@ import { applyCellStatus, rowStatus } from "./row-status";
 import {
   closePaneEditor,
   editMetadataItem,
+  editTags,
   startTitleEdit,
 } from "./editors";
 import {
@@ -2568,6 +2570,24 @@ function setupEqSpectrum(): void {
   });
 }
 
+// The full-pane panels are mutually exclusive and each one takes the pane the
+// hero was covering, so opening any of them also leaves Zen Mode. Expressing that
+// once keeps the four menu handlers from drifting apart.
+type Panel = "settings" | "about" | "licenses" | "equalizer";
+function openPanel(panel: Panel): void {
+  settingsOpen.value = panel === "settings";
+  aboutOpen.value = panel === "about";
+  licensesOpen.value = panel === "licenses";
+  equalizerOpen.value = panel === "equalizer";
+  zenMode.value = false;
+  if (panel === "licenses") void loadLicenses();
+}
+
+// The live visualizer, once it has mounted. Held at module scope only so the
+// screenshot bridge can reach captureStill; nothing else should drive it from
+// here — its start/stop belongs to the effect in setupSettings.
+let visualizer: Visualizer | null = null;
+
 function setupSettings(restoredEq: EqState | null): void {
   // Settings opens from the native application menu (Pudding → Settings..., ⌘,),
   // which emits "open-settings"; the topbar's old gear is now the mini-player
@@ -2577,10 +2597,10 @@ function setupSettings(restoredEq: EqState | null): void {
   // screen (a hero mode), since the panel takes the pane the hero was covering.
   // Equalizer (Playback → Equalizer, ⌥⌘E) is a third member of this family: same
   // pane, same Back button, mutually exclusive with Settings/About.
-  void listen("open-settings", () => { aboutOpen.value = false; licensesOpen.value = false; equalizerOpen.value = false; zenMode.value = false; settingsOpen.value = true; });
-  void listen("open-about", () => { settingsOpen.value = false; licensesOpen.value = false; equalizerOpen.value = false; zenMode.value = false; aboutOpen.value = true; });
-  void listen("open-licenses", () => { settingsOpen.value = false; aboutOpen.value = false; equalizerOpen.value = false; zenMode.value = false; licensesOpen.value = true; void loadLicenses(); });
-  void listen("open-equalizer", () => { settingsOpen.value = false; aboutOpen.value = false; licensesOpen.value = false; zenMode.value = false; equalizerOpen.value = true; });
+  void listen("open-settings", () => openPanel("settings"));
+  void listen("open-about", () => openPanel("about"));
+  void listen("open-licenses", () => openPanel("licenses"));
+  void listen("open-equalizer", () => openPanel("equalizer"));
   settingsBackBtn.addEventListener("click", () => {
     settingsOpen.value = false;
     aboutOpen.value = false;
@@ -2595,6 +2615,7 @@ function setupSettings(restoredEq: EqState | null): void {
   // panel), so it costs nothing otherwise. The idle sample preview keeps its art
   // face, but once Play loads that sample it behaves like every other track.
   void createVisualizer(nowPlayingVisualizerEl).then((viz) => {
+    visualizer = viz;
     effect(() => {
       if (
         nowPlayingView.value === "visualizer" &&
@@ -4445,10 +4466,6 @@ async function init(): Promise<void> {
     }),
     {
       playFile: (p) => openExternalFile(String(p)),
-      browseAlbum: (arg) => {
-        const { album, albumArtist } = arg as { album: string; albumArtist: string };
-        goToAlbum(album, albumArtist);
-      },
       setWindowSize: async (arg) => {
         const { width, height } = arg as { width: number; height: number };
         if (!(width > 0 && height > 0)) throw new Error("invalid window size");
@@ -4475,6 +4492,42 @@ async function init(): Promise<void> {
       // multi-select context-menu verb makes, so tests assert the selection
       // resolves to the right tracks.
       addSelectionToQueue: () => addToQueue(selectedTracks()),
+      // Open one of the full-pane panels the way its menu item does. The
+      // screenshot suite needs Settings and the Equalizer, which are otherwise
+      // reachable only through the native menu bar (undrivable from here).
+      openPanel: (arg) => openPanel((arg as { panel: Panel }).panel),
+      // Run a search through the real input path — assigning the value and
+      // firing the event the listener is bound to, rather than calling runSearch
+      // behind its back, so the results pane opens exactly as it does for a user.
+      search: (arg) => {
+        searchInput.focus();
+        searchInput.value = String((arg as { query: string }).query);
+        searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+      },
+      // Open the tag editor for a path through the shared "Edit metadata..."
+      // verb, so the pane editor is built and seeded the same way every context
+      // menu builds it.
+      editMetadata: (arg) => editTags(String((arg as { path: string }).path)),
+      // Every path a panel puts on screen. Settings shows the library folders and
+      // the stream list as absolute paths from whichever machine ran a capture,
+      // and it carries them as input *values* — invisible to a text or pixel
+      // assertion. The screenshot suite ships that panel in a public image, so it
+      // reads these back and proves each one is a fixture path before the
+      // shutter — an assertion, not a hope.
+      panelPaths: (arg) => {
+        const selector = String((arg as { selector: string }).selector);
+        const panel = document.querySelector(selector);
+        if (!panel) throw new Error(`panelPaths: no element for ${selector}`);
+        return [...panel.querySelectorAll<HTMLInputElement>("input[type='text']")]
+          .map((input) => input.value);
+      },
+      // Freeze the visualizer on one reproducible frame. Terminal for the
+      // session: the rAF loop does not resume, which is what lets two native
+      // captures of an animated canvas match.
+      visualizerStill: () => {
+        if (!visualizer) throw new Error("visualizer has not mounted");
+        visualizer.captureStill();
+      },
       // Click a list row (queue / browsed playlist) through the real handler,
       // optionally with Cmd/Shift, so tests drive the list's multi-select the same
       // way treeClick drives the tree's. Targets the Nth `li.queue-row` in view
@@ -4511,10 +4564,26 @@ async function init(): Promise<void> {
       },
       // Add paths to the queue via the real "Add to queue" entry point: appends
       // to an open queue, or starts a fresh one when nothing is queued.
-      addToQueue: (arg) => {
+      //
+      // Bare paths are the one thing no UI entry point hands this verb — every
+      // real one (tree selection, nav row, search hit) carries the row's
+      // metadata already. Resolve it the way a Finder drop does, so a scripted
+      // add renders like a real one (title / artist / duration) instead of a
+      // bare filename. Order stays the caller's: dropped_tracks sorts into
+      // listening order for the drop case, so map its rows back onto the paths
+      // as given.
+      addToQueue: async (arg) => {
         const a = arg as { paths: string[] };
+        let resolved: SearchTrack[] = [];
+        try {
+          resolved = await invoke<SearchTrack[]>("dropped_tracks", { paths: a.paths });
+        } catch (e) {
+          console.error("dropped_tracks failed", a.paths, e);
+        }
+        const byPath = new Map(resolved.map((track) => [track.path, track]));
         addToQueue(
-          a.paths.map((path) => ({ path, title: null, artist: null, album: null, albumArtist: null })),
+          a.paths.map((path) => byPath.get(path) ??
+            { path, title: null, artist: null, album: null, albumArtist: null }),
         );
       },
       // Play a saved playlist file from disk through the real read+play path, so

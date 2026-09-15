@@ -36,6 +36,12 @@ type Pending = {
 
 export type Driver = {
   css(id: string, text: string | null): Promise<void>;
+  /**
+   * Cancel every running animation and transition, and report what was found.
+   * Stronger than the CSS freeze: it acts on the engine's live animation list
+   * rather than on the cascade.
+   */
+  freeze(): Promise<{ kind: string; target: string | null; playState: string }[]>;
   settle(): Promise<{ width: number; height: number; dpr: number }>;
   exists(selector: string): Promise<boolean>;
   click(selector: string): Promise<void>;
@@ -98,6 +104,9 @@ function makeDriver(ws: WebSocket): Driver {
 
   return {
     css: async (id, text) => void (await send("css", { id, text })),
+    freeze: () => send("freeze") as Promise<
+      { kind: string; target: string | null; playState: string }[]
+    >,
     settle: () => send("settle") as Promise<{ width: number; height: number; dpr: number }>,
     exists: (selector) => send("exists", { selector }) as Promise<boolean>,
     click: async (selector) => void (await send("click", { selector })),

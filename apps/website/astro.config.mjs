@@ -1,4 +1,6 @@
 import { defineConfig } from 'astro/config';
+import { satteri } from '@astrojs/markdown-satteri';
+import { naturalImageSize } from './plugins/natural-image-size.mjs';
 
 export default defineConfig({
   output: 'static',
@@ -6,4 +8,7 @@ export default defineConfig({
   // Pages, use ASTRO_SITE=https://incompl.github.io and ASTRO_BASE=/pudding.
   site: process.env.ASTRO_SITE || undefined,
   base: process.env.ASTRO_BASE || '/',
+  markdown: {
+    processor: satteri({ hastPlugins: [naturalImageSize] }),
+  },
 });

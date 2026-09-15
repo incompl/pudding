@@ -6,6 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { decodePNG, encodePNG } from './png.mjs';
 
+// Reaches ordinary properties only. An animation whose keyframes target a
+// registered custom property (@property) runs on through this in WKWebView, and
+// through an !important override of the property's value as well — so a rule
+// animating one is unfreezable from here, and belongs in the stylesheet as an
+// animation of the real property instead (see #live-indicator).
 export const FREEZE_CSS = `
 *, *::before, *::after { transition: none !important; animation: none !important; }
 * { caret-color: transparent !important; }
@@ -34,7 +39,34 @@ export function samePixels(a, b) {
     a.channels === b.channels && a.data.equals(b.data);
 }
 
-export async function captureStable(windowId, file, beforeCapture) {
+// Where two same-sized captures disagree, in device pixels: how many, and the
+// box enclosing them. A caller that can't settle gets this rather than a bare
+// "something moved" — the box is usually enough to name the element on its own.
+export function diffRegion(a, b) {
+  if (a.width !== b.width || a.height !== b.height || a.channels !== b.channels) return null;
+  const { width, height, channels } = a;
+  let count = 0, left = width, top = height, right = -1, bottom = -1;
+  for (let y = 0; y < height; y++) {
+    const row = y * width * channels;
+    for (let x = 0; x < width; x++) {
+      const i = row + x * channels;
+      if (a.data.compare(b.data, i, i + channels, i, i + channels) === 0) continue;
+      count++;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
+  }
+  return count ? { count, left, top, right, bottom,
+    width: right - left + 1, height: bottom - top + 1 } : null;
+}
+
+// A settled window is one that captures identically twice in a row. When it
+// never does, the pair that disagreed and their difference go next to the run's
+// other artifacts: an animation this suite forgot to freeze is far easier to
+// recognize in the pink mask than to deduce from the recipe.
+export async function captureStable(windowId, file, beforeCapture, opts = {}) {
   let previous;
   for (let attempt = 0; attempt < 12; attempt++) {
     await beforeCapture();
@@ -44,10 +76,31 @@ export async function captureStable(windowId, file, beforeCapture) {
       await writeFile(file, bytes);
       return pixels;
     }
-    previous = pixels;
+    previous = { ...pixels, bytes };
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error('Window did not settle: consecutive native captures differ. Check playback or animations.');
+  const last = captureWindowPng(windowId);
+  const lastPixels = decodePNG(last);
+  const region = diffRegion(previous, lastPixels);
+  let where = '';
+  if (opts.diagnostics) {
+    await writeFile(`${opts.diagnostics}-a.png`, previous.bytes);
+    await writeFile(`${opts.diagnostics}-b.png`, last);
+    await writeFile(`${opts.diagnostics}-diff.png`, differencePNG(previous, lastPixels));
+    where = `\nUnsettled frames: ${opts.diagnostics}-{a,b,diff}.png`;
+  }
+  // Reported in CSS pixels, the units the recipe and the stylesheet are written
+  // in; the capture itself is 2x.
+  const box = region
+    ? `${region.count} device px differ, within ${region.width}\u00d7${region.height} at ` +
+      `(${region.left / 2}, ${region.top / 2})\u2013(${(region.right + 1) / 2}, ${(region.bottom + 1) / 2}) CSS px`
+    : 'the captures disagree on size';
+  const live = opts.stillRunning?.() ?? [];
+  const blame = live.length
+    ? `Still animating at the shutter: ${live.join('; ')}.`
+    : 'Nothing was animating at the shutter, so this is not a CSS animation or transition.';
+  throw new Error(`Window did not settle: consecutive native captures differ. ${box}. ` +
+    `${blame}${where}`);
 }
 
 // A diagnostic image only; captures themselves retain their native color profile.

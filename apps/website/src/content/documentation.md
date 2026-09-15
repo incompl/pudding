@@ -23,9 +23,15 @@ The Files tab has multiple ways to browse your files:
 
 Below that, the Files panel shows a list of all playlists found in your library folders (you can also find them where they sit in the Browse view).
 
+You can also right click to show sortable column heaaders or additional columns. You can resize the panels to make more space. The defaults are pretty minimal but you have a lot of options.
+
+![The Files panel widened to show the Songs view with column headers, sorted by artist, and a Year column added](../assets/columns.png)
+
 ## Search
 
 Search using the search box in the upper right (⌘F is the shortcut to open it). Search can locate files, folders, playlists, artists, albums, and streams.
+
+![Search results showing below the search inputs](../assets/search.png)
 
 ## Streams
 
@@ -36,6 +42,8 @@ Some more cool things about streams:
 * You can customize the stream artwork.
 * The player shows ICY now-playing metadata.
 * Pudding automatically reconnects if it loses connection.
+
+![The Streams tab with a station playing live: its artwork and ICY now-playing title in the player, and a Live Broadcast indicator in place of the seek bar](../assets/streams.png)
 
 ## Now Playing
 
@@ -50,6 +58,8 @@ This feature is important to me because `.m3u8` is a standard format that can be
 
 When you open a playlist it is shown in the right panel, replacing the Now Playing view. While a playlist is being played, you can switch to and from Now Playing using the navigation bar above the player controls.
 
+![An open playlist](../assets/playlist.png)
+
 Renaming a playlist's display name edits the `#PLAYLIST` name in the file. You can also select "Move Playlist File..." from the File menu to move and rename the file itself.
 
 You can select multiple tracks to drag into a playlist at the same time. You can also add anything to a playlist (albums, other playlists, etc.) by right clicking on it and selecting "Add to playlist..."
@@ -59,6 +69,8 @@ You can select multiple tracks to drag into a playlist at the same time. You can
 A queue is like a playlist that is not backed by a file. When you clear it, it's gone. You can create one by right clicking any file and selecting "Create queue". While a queue exists, the context menu allows you to "Play Next" or "Add to Queue" to put more tracks in the queue.
 
 Queues are shown in the right panel like playlists. In the upper right of the queue view there is a "Clear" button that dismisses the queue. If you'd rather save it, select "Save Queue as Playlist..." from the File menu.
+
+![A queue](../assets/queue.png)
 
 ## Autoadvance
 
@@ -78,11 +90,15 @@ You can activate the mini player a few different ways:
 * Double click the now playing album art
 * Just resize the player
 
+![Mini player](../assets/mini.png)
+
 The most recent window size for the normal player and mini player are both saved. For example, if you resize the mini player, then switch to the normal player, the mini player will remember its size the next time you activate it (unless you are manually resizing the app).
 
 ## Visualizer
 
 Enable the visualizer from View > Visualizer in the main menu, or hit ⌘T. The visualizer changes Now Playing into an abstract animation fed by the currently playing track's audio signal.
+
+![Visualizer screenshot](../assets/visualizer.png)
 
 ## Zen Mode
 
@@ -92,9 +108,15 @@ Hides everything except Now Playing (or the Visualizer if enabled). Useful in co
 
 Select a theme from Pudding > Settings in the menu. If you check "Match system light / dark mode" then you can actually select two themes. This is useful if your system automatically changes between light and dark mode based on the time of day: you get to choose themes for both times of day.
 
+![Settings panel](../assets/settings-theme.png)
+
+![Light theme](../assets/theme-light.png)
+
 ## Equalizer
 
 Reach the equalizer from Playback > Equalizer in the main menu. The appropriate EQ bars light up while a track is playing based on the frequencies of the signal, which may or may not be useful but it is pretty cool in my opinion.
+
+![Equalizer panel](../assets/equalizer.png)
 
 ## ReplayGain
 
@@ -118,13 +140,13 @@ Changing the sample rate reconfigures the output device, so this setting can add
 
 ## More cool features
 
-* Right click an audio file to edit its metadata
+* Right click an audio file to edit its metadata (shown below)
 * Drag and drop files or folders from Finder to play them
-* Right click a table view to show more columns
-* Right click a table view to show column headers which you can sort by
 * Recent file list in File menu
 * macOS integration including Control Center and hardware media keys
 * Cloud files are shown in the UI but not fetched unless you play them
+
+![The metadata editor](../assets/metadata-editor.png)
 
 ## Supported Formats
 

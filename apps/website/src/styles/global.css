@@ -29,7 +29,9 @@ a:focus-visible {
 }
 img {
   display: block;
-  max-width: 100%;
+  /* Screenshots carry a --natural-width (their captured CSS size, half the
+     retina pixels); they shrink to fit but never upscale past it. */
+  max-width: min(100%, var(--natural-width, 100%));
   height: auto;
 }
 p,
@@ -49,7 +51,9 @@ h3 {
   text-wrap: balance;
 }
 .shell {
-  max-width: 1184px;
+  /* 960px of content (a screenshot at its captured size) + the 210px table of
+     contents + the 4rem gap between them + the 2rem gutters. */
+  max-width: 1298px;
   margin: auto;
   padding: 0 2rem;
 }
@@ -295,7 +299,9 @@ h3 {
   color: var(--primary-hover);
 }
 .prose {
-  max-width: 730px;
+  /* Screenshots are captured in a 960 x 640 window, so a column this wide shows
+     them at actual size. */
+  max-width: 960px;
 }
 .prose h2 {
   font-size: 27px;
