@@ -10,7 +10,6 @@ const { title, description } = Astro.props;
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site) : undefined;
 const navigation = [
-  { label: 'Screenshots', path: 'screenshots/' },
   { label: 'Documentation', path: 'documentation/' },
   { label: 'Support', path: 'support/' },
 ];

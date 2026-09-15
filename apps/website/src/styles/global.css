@@ -257,26 +257,6 @@ h3 {
 .page-heading .intro {
   max-width: 650px;
 }
-.gallery {
-  display: grid;
-  gap: 3rem;
-  margin-bottom: 5rem;
-}
-.gallery h2 {
-  margin-bottom: 0.75rem;
-}
-.gallery article > p {
-  color: var(--muted);
-  margin-bottom: 1.5rem;
-  max-width: 650px;
-}
-.mini-preview {
-  padding: 2rem 1.25rem 0.5rem;
-}
-.mini-preview img {
-  width: auto;
-  margin: auto;
-}
 .reading-layout {
   display: grid;
   grid-template-columns: 210px minmax(0, 1fr);

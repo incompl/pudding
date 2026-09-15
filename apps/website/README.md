@@ -20,7 +20,7 @@ The development server defaults to `http://localhost:4321`. The build output is
 ## Editing
 
 - `src/pages/index.astro` contains the home page.
-- `src/pages/screenshots.astro`, `documentation.astro`, and `support.astro` are standalone pages.
+- `src/pages/documentation.astro` and `support.astro` are standalone pages.
 - `src/pages/privacy.astro` contains the app privacy policy, linked from every footer.
 - `src/layouts/Page.astro` contains document metadata and the shared page shell.
 - `src/styles/global.css` contains responsive styles.
