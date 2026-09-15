@@ -34,6 +34,7 @@ import {
   dismissFullPanels,
   libraryRootSet,
   libraryTreeLoaded,
+  isPlayableRow,
 } from "./state";
 import { BUNDLED_SAMPLE, bundledSampleArt, bundledSamplePath } from "./sample";
 import { fetchChildren } from "./tree-view";
@@ -253,7 +254,7 @@ export function poolPaths(): string[] {
   // rebuilds *after* the signal fires, so trusting it here lags one edit behind.
   if (queueIsActivePool()) {
     const q = activeQueue.value;
-    if (q) return q.tracks.filter((t) => !t.missing).map((t) => t.path);
+    if (q) return q.tracks.filter(isPlayableRow).map((t) => t.path);
     // Library-view playback (Songs/Albums/Artists rows) borrows a `queue:` synthetic
     // parent for pool identity but sets no activeQueue signal. Its children are
     // the whole (static, no-missing) view list, so fall through to currentParent

@@ -49,8 +49,27 @@ pub fn is_playlist_path(s: &str) -> bool {
         .unwrap_or(false)
 }
 
-// One resolved playlist row handed to the frontend. `path` is always absolute;
-// `name` is the basename (shown for out-of-library rows). Metadata is the DB's
+// A playlist row naming a stream rather than a file. Any scheme counts, which is
+// the same test the stream-list reader uses (`parse_m3u_stream_list` in lib.rs) —
+// the two readers must never disagree about which rows are stations, since a
+// station list and a playlist are the same file format.
+pub(crate) fn is_url_row(s: &str) -> bool {
+    s.contains("://")
+}
+
+// What still counts as a playlist file. Neither ceiling is a format rule — the
+// parser stays lenient by design — they only bound the damage a file that is not
+// a playlist at all can do: `read_playlist` is a synchronous command, so it runs
+// on the UI thread, and a mis-renamed binary would otherwise decode byte-for-byte
+// into hundreds of thousands of "rows", each paying a stat, with the window
+// frozen for all of it. A 50,000-row playlist is already far past any real one
+// (an iTunes library export runs to a few thousand).
+const MAX_PLAYLIST_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_PLAYLIST_ROWS: usize = 50_000;
+
+// One resolved playlist row handed to the frontend. `path` is always absolute —
+// except a stream row, which is its URL; `name` is the basename (a station's host)
+// shown for out-of-library rows. Metadata is the DB's
 // when `in_library`, else the `#EXTINF` title / None. `missing` flags a row
 // whose file is absent on disk (kept so the file round-trips, filtered out of
 // what's handed to the engine).
@@ -70,6 +89,12 @@ pub struct PlaylistTrack {
     #[serde(rename = "inLibrary")]
     in_library: bool,
     missing: bool,
+    // A row naming a stream (an `http(s)://` station) rather than a local file.
+    // It is a real row of the file and round-trips like any other, but it is not
+    // something the engine's track queue can hold — see `playlistPlayableTracks`
+    // in the frontend, which keeps it out of the pool the way `missing` does.
+    // Never stat'd, so it is never wrongly called missing.
+    stream: bool,
     // A cloud file the provider hasn't put on this Mac yet. Distinct from
     // `missing` in the one way that matters: the file exists and playing it will
     // fetch it (see audio.rs), so the row stays playable — it just says so first,
@@ -114,6 +139,7 @@ pub struct PlaylistRef {
 
 // One parsed entry before DB resolution: an absolute path plus the optional
 // `#EXTINF` title that preceded it.
+#[derive(Debug)]
 struct ParsedEntry {
     path: String,
     extinf_title: Option<String>,
@@ -191,7 +217,15 @@ fn normalize(p: &Path) -> PathBuf {
 
 // Resolve a raw playlist line to an absolute path against the playlist's
 // directory. Absolute lines are normalized as-is; relative ones join `base_dir`.
+//
+// A row naming a stream is left exactly as it was written. It is not a path, and
+// treating it as one is worse than useless: `http://host/s.mp3` is *relative* as
+// far as `Path` is concerned, so it used to be joined onto the playlist's own
+// folder — which turned every internet-radio `.m3u` into one dangling row.
 fn resolve_path(base_dir: &Path, raw: &str) -> String {
+    if is_url_row(raw) {
+        return raw.to_string();
+    }
     let p = Path::new(raw);
     let joined = if p.is_absolute() {
         p.to_path_buf()
@@ -364,7 +398,13 @@ impl Preserved {
                 }
                 Line::Track(t) => {
                     seen_track = true;
-                    all_absolute &= Path::new(t).is_absolute();
+                    // A stream row is neither absolute nor relative, so it gets no
+                    // vote on how *file* rows should be spelled — without this, one
+                    // station among twenty absolute paths would flip the whole file
+                    // to `Open` and start relativizing rows it shouldn't.
+                    if !is_url_row(t) {
+                        all_absolute &= Path::new(t).is_absolute();
+                    }
                     let resolved = resolve_path(base_dir, t);
                     let block = std::mem::take(&mut run);
                     if !block.is_empty() {
@@ -395,8 +435,15 @@ impl Preserved {
     }
 
     // Capture from the file a write is about to overwrite. A missing or unreadable
-    // file — a brand-new playlist, the common case — preserves nothing.
+    // file — a brand-new playlist, the common case — preserves nothing. Nor does
+    // one past the ceiling `read_rows` enforces: nothing that large opened as a
+    // playlist, so there is nothing of a playlist author's in it to keep, and
+    // building a row map over a few million junk lines is the cost this avoids.
     fn from_file(path: &str) -> Self {
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.len() <= MAX_PLAYLIST_BYTES => {}
+            _ => return Preserved::default(),
+        }
         match std::fs::read(path) {
             Ok(bytes) => Self::from_content(&decode_bytes(&bytes), &playlist_base_dir(path)),
             Err(_) => Preserved::default(),
@@ -408,8 +455,14 @@ impl Preserved {
 // that a playlist changed underneath an open view. Milliseconds because that is
 // what a JS number holds exactly. None when the file is gone.
 fn file_mtime_ms(path: &str) -> Option<i64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    modified
+    mtime_ms(&std::fs::metadata(path).ok()?)
+}
+
+// The same value from a stat the caller already has, so a read that must look at
+// the file's size anyway doesn't stat it twice.
+fn mtime_ms(meta: &std::fs::Metadata) -> Option<i64> {
+    meta.modified()
+        .ok()?
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()
         .map(|d| d.as_millis() as i64)
@@ -438,19 +491,41 @@ fn playlist_base_dir(path: &str) -> PathBuf {
 
 // --- Commands ---------------------------------------------------------------
 
+// The file half of a read: stat, decode, parse — and the two ceilings that decide
+// whether this is a playlist at all. Split from the command so both can be tested
+// without a database, and so the ceilings sit next to the work they bound.
+//
+// Stats *before* reading, never after: a write landing between the two would then
+// pair new content with an older mtime, which only costs a redundant reload later.
+// The other order pairs old content with a newer mtime and the staleness is never
+// noticed at all.
+fn read_rows(path: &str) -> Result<(Option<String>, Vec<ParsedEntry>, Option<i64>), String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let mtime = mtime_ms(&meta);
+    // Size first, before a byte is read: past this the file is not a playlist that
+    // lost a row somewhere, it is something else wearing the extension.
+    if meta.len() > MAX_PLAYLIST_BYTES {
+        return Err(format!(
+            "not a playlist: {path} is {} MB",
+            meta.len() / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let content = decode_bytes(&bytes);
+    let (name, entries) = parse(&content, &playlist_base_dir(path));
+    // The other half of the same guard: a file can sit under the byte ceiling and
+    // still parse to more rows than any playlist has, each a stat below.
+    if entries.len() > MAX_PLAYLIST_ROWS {
+        return Err(format!("not a playlist: {path} has {} rows", entries.len()));
+    }
+    Ok((name, entries, mtime))
+}
+
 // Open a playlist file: decode, parse, and resolve each row's metadata against
 // the library DB (falling back to `#EXTINF`/filename for out-of-library rows).
 #[tauri::command]
 pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, String> {
-    // Stat *before* reading, never after: a write landing between the two would
-    // then pair new content with an older mtime, which only costs a redundant
-    // reload later. The other order pairs old content with a newer mtime and the
-    // staleness is never noticed at all.
-    let mtime = file_mtime_ms(&path);
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let content = decode_bytes(&bytes);
-    let base_dir = playlist_base_dir(&path);
-    let (name, entries) = parse(&content, &base_dir);
+    let (name, entries, mtime) = read_rows(&path)?;
 
     let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
     let meta_map = {
@@ -461,16 +536,29 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
     let tracks = entries
         .into_iter()
         .map(|e| {
-            let basename = Path::new(&e.path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&e.path)
-                .to_string();
+            let stream = is_url_row(&e.path);
+            // The name a row falls back to when nothing else names it: a file's
+            // basename, a station's host — which is what the streams pane shows for
+            // a station whose `#EXTINF` gave no title.
+            let basename = if stream {
+                crate::m3u_fallback_name(&e.path).to_string()
+            } else {
+                Path::new(&e.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&e.path)
+                    .to_string()
+            };
             // One stat for both facts (`exists()` was already paying for it):
-            // absent, or present-but-not-downloaded.
-            let meta = std::fs::metadata(&e.path);
-            let missing = meta.is_err();
-            let not_downloaded = meta.map(|m| crate::dataless::is_dataless(&m)).unwrap_or(false);
+            // absent, or present-but-not-downloaded. A stream has no file to stat,
+            // and reporting it missing on a failed stat is precisely the lie this
+            // skips — nothing is wrong with the row, it just isn't a file.
+            let meta = (!stream).then(|| std::fs::metadata(&e.path));
+            let missing = matches!(meta, Some(Err(_)));
+            let not_downloaded = meta
+                .and_then(Result::ok)
+                .map(|m| crate::dataless::is_dataless(&m))
+                .unwrap_or(false);
             match meta_map.get(&e.path).cloned() {
                 Some(m) => PlaylistTrack {
                     path: e.path,
@@ -486,6 +574,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     in_library: true,
                     missing,
                     not_downloaded,
+                    stream,
                     duration: m.duration,
                     bitrate: m.bitrate,
                     sample_rate: m.sample_rate,
@@ -510,6 +599,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
                     in_library: false,
                     missing,
                     not_downloaded,
+                    stream,
                     // The playlist's own claim about a file we were never allowed
                     // to inspect. Unverified, but it is the only runtime this row
                     // will ever have — and showing it beats an empty cell and a
@@ -603,6 +693,15 @@ fn serialize(
         if !display.is_empty() || secs.is_some() {
             let secs = secs.map(|d| d.round() as i64).unwrap_or(-1);
             out.push_str(&format!("#EXTINF:{},{}\n", secs, display));
+        }
+        // A stream row is written back exactly as it came in. `relativize` would
+        // decline it anyway (a URL shares no directory with the playlist), but only
+        // by accident — and a row this file's author wrote as a URL must not depend
+        // on that.
+        if is_url_row(&r.path) {
+            out.push_str(&r.path);
+            out.push('\n');
+            continue;
         }
         // A row the file already had keeps its author's spelling; only a row we
         // are adding gets one chosen for it.
@@ -1082,6 +1181,13 @@ fn read_playlist_name(path: &Path) -> Option<String> {
 // The uncached core: decode the file and return its `#PLAYLIST:` directive if
 // present (playlists are small, so reading the whole file is fine).
 fn parse_playlist_name(path: &Path) -> Option<String> {
+    // Same ceiling as `read_playlist`, for the same reason: this runs for every
+    // playlist the tree lists, and a mis-renamed 2 GB file must not be decoded in
+    // full to discover it has no `#PLAYLIST:` line. Such a file keeps its filename
+    // stem in the tree, which is what a directive-less playlist shows anyway.
+    if std::fs::metadata(path).ok()?.len() > MAX_PLAYLIST_BYTES {
+        return None;
+    }
     let bytes = std::fs::read(path).ok()?;
     let content = decode_bytes(&bytes);
     for line in content.lines() {
@@ -1653,6 +1759,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn stream_rows_resolve_verbatim() {
+        // The bug this fixes: a URL is *relative* as far as `Path` is concerned, so
+        // every station row used to be joined onto the playlist's own folder.
+        let base = Path::new("/music/lists");
+        let content = "#EXTM3U\n#EXTINF:-1,BBC 6 Music\nhttps://stream.example/6music\n../a/track.mp3\n";
+        let (_name, entries) = parse(content, base);
+        assert_eq!(entries[0].path, "https://stream.example/6music");
+        assert_eq!(entries[0].extinf_title.as_deref(), Some("BBC 6 Music"));
+        // The file row beside it still resolves the way it always did.
+        assert_eq!(entries[1].path, "/music/a/track.mp3");
+    }
+
+    #[test]
+    fn stream_rows_round_trip_through_a_rewrite() {
+        // A station row must come back byte-identical from a curation autosave, and
+        // must not drag the file's *file* rows into a different spelling.
+        let root = scratch("streamrows");
+        let list = root.join("mixed.m3u8");
+        let original = "#EXTM3U\n#PLAYLIST:Mixed\n#EXTINF:-1,BBC 6 Music\nhttps://stream.example/6music\n#EXTINF:212,Artist - Song\n/outside/one.mp3\n";
+        std::fs::write(&list, original).unwrap();
+
+        let path = list.to_str().unwrap();
+        let preserved = Preserved::from_file(path);
+        let (_n, entries) = parse(original, &playlist_base_dir(path));
+        let out = serialize(path, "Mixed", &entries_as_rows(entries), &preserved, &empty_db())
+            .unwrap();
+
+        assert!(out.contains("\nhttps://stream.example/6music\n"), "{out}");
+        assert!(out.contains("#EXTINF:-1,BBC 6 Music"), "{out}");
+        // The absolute file row keeps its spelling: one station among the rows must
+        // not flip the file off `AllAbsolute` and start relativizing.
+        assert!(out.contains("\n/outside/one.mp3\n"), "{out}");
+
+        let (_name, back) = parse(&out, &playlist_base_dir(path));
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].path, "https://stream.example/6music");
+        assert_eq!(back[1].path, "/outside/one.mp3");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ceilings_reject_a_file_that_is_not_a_playlist() {
+        let root = scratch("ceilings");
+
+        // Too big: something else wearing the extension. Refused without decoding
+        // it — the point of the ceiling — and the error says which file.
+        let huge = root.join("video.m3u8");
+        std::fs::write(&huge, vec![0u8; (MAX_PLAYLIST_BYTES + 1) as usize]).unwrap();
+        let err = read_rows(huge.to_str().unwrap()).unwrap_err();
+        assert!(err.starts_with("not a playlist:"), "{err}");
+        // And the tree asks for no name from it rather than decoding it in full.
+        assert_eq!(read_playlist_name(&huge), None);
+
+        // Too many rows: under the byte ceiling, still not a playlist.
+        let many = root.join("many.m3u8");
+        std::fs::write(&many, "a\n".repeat(MAX_PLAYLIST_ROWS + 1)).unwrap();
+        let err = read_rows(many.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("rows"), "{err}");
+
+        // A real playlist of ordinary size is untouched by either.
+        let fine = root.join("fine.m3u8");
+        std::fs::write(&fine, "#EXTM3U\n#PLAYLIST:Fine\n/a.mp3\n").unwrap();
+        let (name, entries, _mtime) = read_rows(fine.to_str().unwrap()).unwrap();
+        assert_eq!(name.as_deref(), Some("Fine"));
+        assert_eq!(entries.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

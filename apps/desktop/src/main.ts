@@ -124,6 +124,7 @@ import {
   showSourceList,
   resetToLonePlayback,
   autoadvanceEnabled,
+  isPlayableRow,
 } from "./state";
 import {
   bindDom,
@@ -627,7 +628,7 @@ function makeTrackSelection(onSelect: () => void = () => {}): TrackSelection {
     resolveIn(tracks) {
       const s = sel.value;
       if (s.size === 0) return [];
-      return tracks.filter((t) => s.has(t) && !t.missing);
+      return tracks.filter((t) => s.has(t) && isPlayableRow(t));
     },
     clear() {
       anchor = null;
@@ -664,7 +665,7 @@ function makeTrackSelection(onSelect: () => void = () => {}): TrackSelection {
       const from = tracks.indexOf(a);
       const [lo, hi] = from <= to ? [from, to] : [to, from];
       const next = new Set<SearchTrack>();
-      for (let i = lo; i <= hi; i++) if (!tracks[i].missing) next.add(tracks[i]);
+      for (let i = lo; i <= hi; i++) if (isPlayableRow(tracks[i])) next.add(tracks[i]);
       sel.value = next;
     },
   };
@@ -973,11 +974,11 @@ function persistNavLocation(steps: NavStep[]): void {
 // path is unique per queue and never a real tree path, so the rescan re-bind
 // (suppressed while activeQueue is set) can't repoint currentParent at a folder.
 export function playQueue(queue: Queue, syntheticPath: string, startIndex?: number): void {
-  // The engine pool is the playable rows only; any missing rows stay in the view
-  // (openActiveQueue keeps queue.tracks intact) but never reach the engine, so
-  // gapless never stalls on a dangling file. renderQueue bridges the two index
-  // spaces. For non-playlist queues nothing is missing, so pool === view.
-  const playable = queue.tracks.filter((t) => !t.missing);
+  // The engine pool is the playable rows only; a missing file or a stream row stays
+  // in the view (openActiveQueue keeps queue.tracks intact) but never reaches the
+  // engine, so gapless never stalls on a dangling path. renderQueue bridges the two
+  // index spaces. Only a playlist can hold either, so elsewhere pool === view.
+  const playable = queue.tracks.filter(isPlayableRow);
   if (playable.length === 0) return;
   const parent = syntheticParent(syntheticPath, queue.title, playable);
   // A given start row (a browsed playlist committed from a row) wins; otherwise
@@ -1732,7 +1733,7 @@ export function playQueueTrack(poolIndex: number): void {
     : syntheticParent(
         `queue:active:${Date.now()}`,
         q.title,
-        q.tracks.filter((t) => !t.missing),
+        q.tracks.filter(isPlayableRow),
       );
   const node = parent.children[poolIndex];
   if (!node) return;
@@ -2080,9 +2081,9 @@ async function restorePlaybackSession(): Promise<void> {
     return;
   }
   const queue = await refreshPlaylistSnapshot(s.queue);
-  // The engine pool is playable rows only (missing files stay in the view but
-  // never reach the engine), mirroring playQueue/playQueueTrack.
-  const playable = queue.tracks.filter((t) => !t.missing);
+  // The engine pool is playable rows only (missing files and stream rows stay in
+  // the view but never reach the engine), mirroring playQueue/playQueueTrack.
+  const playable = queue.tracks.filter(isPlayableRow);
   if (playable.length === 0) return;
   // Re-anchor the playhead on the saved *path*, not just its index: a re-read
   // playlist may have gained or lost rows above it. The saved index wins when it
@@ -2888,7 +2889,7 @@ function moveListSelection(delta: 1 | -1): void {
   let i = current ? list.indexOf(current) : delta > 0 ? -1 : list.length;
   do {
     i += delta;
-  } while (i >= 0 && i < list.length && list[i].missing);
+  } while (i >= 0 && i < list.length && !isPlayableRow(list[i]));
   if (i < 0 || i >= list.length) return; // already at the playable end
   queueSel.single(list[i]);
   app.lastSelectionPane = "list";

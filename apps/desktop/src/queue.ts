@@ -41,6 +41,7 @@ import {
   clearActiveQueue,
   showSourceList,
   dismissRightPanel,
+  isPlayableRow,
 } from "./state";
 import {
   queueListEl,
@@ -82,6 +83,7 @@ import {
   poolPaths,
   shuffled,
   rowPlayButton,
+  playStream,
 } from "./playback";
 import {
   queueSel,
@@ -196,15 +198,16 @@ function buildQueueHeader(cols: ColumnId[], template: string, tracks: SearchTrac
   );
 }
 
-// view index → playable-pool index (queuePlayingIndex space, which excludes missing
-// rows), or -1 for a missing row. Lets a row map its playing highlight and click
-// back to its pool position without re-walking the list per row.
+// view index → playable-pool index (queuePlayingIndex space, which excludes the
+// rows the engine never sees), or -1 for a row that isn't in the pool at all — a
+// missing file or a stream. Lets a row map its playing highlight and click back to
+// its pool position without re-walking the list per row.
 function buildViewToPool(tracks: SearchTrack[]): number[] {
   const map: number[] = [];
   let pool = 0;
   for (const t of tracks) {
-    map.push(t.missing ? -1 : pool);
-    if (!t.missing) pool++;
+    map.push(isPlayableRow(t) ? pool : -1);
+    if (isPlayableRow(t)) pool++;
   }
   return map;
 }
@@ -281,8 +284,17 @@ function buildQueueRow(
   if (isPlaying) li.classList.add("playing");
   // Multi-select background, reapplied on remount like .playing (the list selection
   // effect keeps it live between remounts as the window scrolls).
-  if (!t.missing && queueSel.signal.peek().has(t)) li.classList.add("selected");
-  if (t.missing) {
+  if (isPlayableRow(t) && queueSel.signal.peek().has(t)) li.classList.add("selected");
+  if (t.stream) {
+    // A station row. It can't join the pool (the engine's queue holds files), but
+    // it is perfectly playable on its own terms, so it keeps a play button and a
+    // double-click — they just hand it to the stream path, which is lone playback
+    // and takes the pane with it, exactly as playing a station from Streams does.
+    li.classList.add("stream");
+    const playRow = () => playStream({ name: t.title ?? t.path, url: t.path });
+    num.appendChild(rowPlayButton(playRow));
+    li.addEventListener("dblclick", playRow);
+  } else if (t.missing) {
     li.classList.add("missing");
   } else {
     // Select-and-play, shared by the hover play button and a double-click. The
@@ -321,7 +333,7 @@ function buildQueueRow(
   // Finder, or (multi) remove it (a missing row has no real file to copy — or
   // to reveal — so it's skipped).
   // "Add to queue" leads, matching the tree track/folder menus.
-  if (!t.missing) {
+  if (isPlayableRow(t)) {
     li.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       // Finder-style: right-clicking a row outside the selection makes it the
@@ -446,6 +458,17 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
   // without every row being mounted (updateDropTarget reads it).
   queueListEl.dataset.rowCount = String(queue.tracks.length);
   queueListEl.replaceChildren();
+  // A playlist with no rows at all. Say so in the pane: a blank list reads as a
+  // load that failed, and this is the one case where the pane has nothing else to
+  // show for itself — the file opened fine, it just holds no tracks. Only a
+  // playlist can be looked at empty; clearing a queue tears the face down instead.
+  if (isPlaylist && queue.tracks.length === 0) {
+    queueWin = null;
+    queueListEl.appendChild(
+      h("li", { class: "empty-state", text: "This playlist is empty" }),
+    );
+    return;
+  }
   // Sticky, inside #queue-list — which is the query container, so the header can
   // be gated by the same @container rule the columns are.
   const header = showHeader ? buildQueueHeader(cols, template, queue.tracks) : null;
@@ -639,12 +662,13 @@ export function forgetCurationHistory(sourcePath: string): void {
   if (curationHistories.delete(`pl:${sourcePath}`)) bumpCurationHistory();
 }
 
-// Map a playable-pool index (queuePlayingIndex, which excludes missing rows) back
-// to its index in the full view array. Inverse of renderQueue's poolIdx walk.
+// Map a playable-pool index (queuePlayingIndex, which excludes the rows the engine
+// never sees — missing files and streams) back to its index in the full view
+// array. Inverse of renderQueue's poolIdx walk.
 export function viewIndexOfPlayable(tracks: SearchTrack[], playableIdx: number): number {
   let p = 0;
   for (let i = 0; i < tracks.length; i++) {
-    if (tracks[i].missing) continue;
+    if (!isPlayableRow(tracks[i])) continue;
     if (p === playableIdx) return i;
     p++;
   }
@@ -779,7 +803,7 @@ function rematchPlaying(
   let bestDist = Infinity;
   let i = 0;
   for (const t of tracks) {
-    if (t.missing) continue;
+    if (!isPlayableRow(t)) continue;
     if (t.path === playing.path && Math.abs(i - oldIdx) < bestDist) {
       bestDist = Math.abs(i - oldIdx);
       best = t;
@@ -846,7 +870,7 @@ function applyCurationCore(newTracks: SearchTrack[]): void {
 // rebuilt to match the new order) or, if it was the removed row, skipped past.
 export function reconcilePoolEdit(newTracks: SearchTrack[], playingObj: SearchTrack | null): void {
   if (!app.currentParent) return;
-  const playable = newTracks.filter((t) => !t.missing);
+  const playable = newTracks.filter(isPlayableRow);
   // Rebuild the synthetic parent's children in place (same path, so
   // queueIsActivePool stays true and the pane keeps rendering this pool).
   app.currentParent.children = syntheticParent(
@@ -1246,9 +1270,9 @@ export function playNext(tracks: SearchTrack[]): void {
 export function createQueue(tracks: SearchTrack[]): void {
   if (tracks.length === 0) return;
   dismissRightPanel();
-  // The engine pool is playable rows only (missing files stay in the view but never
-  // reach the engine), mirroring playQueue.
-  const playable = tracks.filter((t) => !t.missing);
+  // The engine pool is playable rows only (missing files and stream rows stay in
+  // the view but never reach the engine), mirroring playQueue.
+  const playable = tracks.filter(isPlayableRow);
   if (playable.length === 0) return;
   const queue: Queue = {
     kind: "playlist",

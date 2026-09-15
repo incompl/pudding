@@ -33,6 +33,7 @@ export interface StatusRow {
   path: string;
   missing?: boolean;
   notDownloaded?: boolean;
+  stream?: boolean;
 }
 
 // The marker for one row, or null for the ordinary case.
@@ -48,6 +49,10 @@ export interface StatusRow {
 // and telling the user "not downloaded" in a louder voice than "missing" would
 // have the emphasis exactly backwards.
 export function rowStatus(t: StatusRow, fetching: string | null): string | null {
+  // A station in a playlist. Not a fault like the other three — the row plays,
+  // just not as part of the list it sits in — but it is the same kind of
+  // statement, and the same slot is where the user is already looking for it.
+  if (t.stream) return "(Stream)";
   if (t.missing) return "(Missing file)";
   if (fetching === t.path) return "(Downloading...)";
   // `notDownloaded` is a copy of a scan-cache flag taken when the row was built,

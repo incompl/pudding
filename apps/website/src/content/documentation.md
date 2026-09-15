@@ -64,6 +64,8 @@ Renaming a playlist's display name edits the `#PLAYLIST` name in the file. You c
 
 You can select multiple tracks to drag into a playlist at the same time. You can also add anything to a playlist (albums, other playlists, etc.) by right clicking on it and selecting "Add to playlist..."
 
+A playlist file can also hold stream URLs, since internet radio stations are handed out as `.m3u` files too. Opening a file that holds a single station just tunes in to it. A station sitting among ordinary tracks is shown in the playlist marked "(Stream)" and has its own play button: it plays on its own rather than as part of the list, because a stream never ends and so has nothing to advance from.
+
 ## Queues
 
 A queue is like a playlist that is not backed by a file. When you clear it, it's gone. You can create one by right clicking any file and selecting "Create queue". While a queue exists, the context menu allows you to "Play Next" or "Add to Queue" to put more tracks in the queue.

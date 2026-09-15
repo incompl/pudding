@@ -52,7 +52,11 @@ test("Now Playing title reopens the active queue", async () => {
   await d.waitFor(async () => (await d.probe()).isPlaying === true, {
     message: "queue never started playing",
   });
-  await revealSourceFromNowPlaying(d, "E2E Pool");
+  // "Queue", not the pool's own name ("E2E Pool"): an unsaved queue is always
+  // titled "Queue" in the list header — the source it was built from is named on
+  // the hero, not here (renderQueue). Only a playlist header carries a name, which
+  // is what the next test covers.
+  await revealSourceFromNowPlaying(d, "Queue");
 });
 
 test("Now Playing title reopens the playing playlist", async () => {

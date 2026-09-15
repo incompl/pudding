@@ -222,6 +222,20 @@ export function isNotDownloaded(t: { path: string; notDownloaded?: boolean }): b
   return !!t.notDownloaded && !downloadedPaths.has(t.path);
 }
 
+// Whether a row can go in the engine's pool. Two things keep it out, and every
+// list that builds a pool — or steps through one with the arrow keys, or selects
+// rows to act on — means this rather than `missing` alone:
+//   missing  a playlist row whose file is gone. Kept in the view (marked) so the
+//            file round-trips, never handed to the engine, so gapless can't stall
+//            on a dangling path.
+//   stream   a playlist row naming a station. A real row of the file, but the
+//            engine's queue holds decodable file paths and a station is its own
+//            command (playStream) with no end and no duration — see playlists.ts.
+// `notDownloaded` deliberately isn't here: that file plays, after a wait.
+export function isPlayableRow(t: { missing?: boolean; stream?: boolean }): boolean {
+  return !t.missing && !t.stream;
+}
+
 export const currentNodePath = signal<string | null>(null);
 export const currentStreamUrl = signal<string | null>(null);
 // The stream row highlighted by a single click — a select, not a commit. Mirrors

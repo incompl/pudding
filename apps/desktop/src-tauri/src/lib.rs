@@ -1294,7 +1294,7 @@ fn stream_spans(lines: &[&str]) -> Vec<(Option<usize>, usize)> {
             pending_extinf = Some(i);
         } else if line.starts_with('#') {
             // Other comments/options don't claim the pending title.
-        } else if line.contains("://") {
+        } else if crate::playlist::is_url_row(line) {
             spans.push((pending_extinf.take(), i));
         }
     }
@@ -1468,7 +1468,7 @@ fn parse_m3u_stream_list(body: &str) -> Option<Vec<Stream>> {
             pending_image = extinf_attr(attrs, "tvg-logo").map(str::to_string);
         } else if line.starts_with('#') {
             saw_header |= line.starts_with("#EXTM3U");
-        } else if line.contains("://") {
+        } else if crate::playlist::is_url_row(line) {
             let name = pending_title
                 .take()
                 .unwrap_or_else(|| m3u_fallback_name(line).to_string());
@@ -1492,7 +1492,7 @@ fn extinf_attr<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
 }
 
 // Hostname portion of a URL, or the URL itself if it has no obvious host.
-fn m3u_fallback_name(url: &str) -> &str {
+pub(crate) fn m3u_fallback_name(url: &str) -> &str {
     let Some((_, rest)) = url.split_once("://") else {
         return url;
     };

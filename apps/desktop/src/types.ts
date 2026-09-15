@@ -114,6 +114,10 @@ export interface SearchTrack {
   // Set only for playlist browse rows whose file is absent on disk: shown in the
   // view (marked, per the plan's "keep the row") but never handed to the engine.
   missing?: boolean;
+  // Set only for playlist browse rows that name a stream rather than a file: shown
+  // in the view (marked "(Stream)", playable on its own as a station) but never
+  // handed to the engine's track queue. See isPlayableRow.
+  stream?: boolean;
   // A cloud file the provider hasn't downloaded yet. Marked like `missing` but
   // NOT filtered out of what the engine gets: the file is real and playing it
   // fetches it (see audio.rs). The marker is a warning about what the click
@@ -415,6 +419,10 @@ export interface PlaylistTrack {
   inLibrary: boolean;
   missing: boolean;
   notDownloaded: boolean;
+  // The row names a stream (`http(s)://...`), not a file. Never stat'd, so never
+  // wrongly `missing`; kept in the view and round-tripped on every rewrite, but
+  // out of the engine's pool. See isPlayableRow.
+  stream: boolean;
   // Seconds. The library's cached value for a known path; for an out-of-library
   // row, the playlist file's own `#EXTINF` claim — unverified, but the only
   // runtime that row will ever have.

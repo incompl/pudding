@@ -70,6 +70,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 - Start one from the File menu, or turn the current queue into a saved playlist with Save Queue as Playlist
 - Right-click any track and use "Add to playlist" to file it into an existing list or a new one
 - Single-click a playlist in the tree to browse it, double-click to play; rename, move, or delete it from the tree or the File menu
+- A station URL in a playlist file stays a station: a lone one plays as internet radio when opened, and one among tracks is marked "(Stream)" and played on its own
 - File ▸ Open Recent lists what you have actually opened — playlists and loose tracks alike — and every `.m3u` / `.m3u8` under your library is searchable
 
 ### Internet radio

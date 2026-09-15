@@ -23,6 +23,7 @@ import {
   isPlaylistSource,
   openPlaylistPath,
   dismissRightPanel,
+  isPlayableRow,
   app,
 } from "./state";
 import { refreshLibrary } from "./library";
@@ -41,6 +42,7 @@ import {
   adoptReloadedPlaylist,
 } from "./queue";
 import { editInline } from "./editors";
+import { playStream } from "./playback";
 import {
   playQueue,
   toast,
@@ -51,14 +53,22 @@ import {
   UNTITLED_PLAYLIST_TITLE,
 } from "./main";
 
+// A station's display name: the `#EXTINF` title its file gave it, else the host
+// (the backend's `name` for a stream row). Not the column's usual fallback — the
+// last path segment of a URL is a stream endpoint, so it is as often empty
+// ("https://host/") as it is meaningful.
+function rowTitle(t: { title: string | null; name: string; stream: boolean }): string | null {
+  return t.stream ? (t.title ?? t.name) : t.title;
+}
+
 // The playable rows of a playlist as SearchTracks (dropping missing files),
 // ready for the queue/engine machinery.
 export function playlistPlayableTracks(data: PlaylistData): SearchTrack[] {
   return data.tracks
-    .filter((t) => !t.missing)
+    .filter(isPlayableRow)
     .map((t) => ({
       path: t.path,
-      title: t.title,
+      title: rowTitle(t),
       artist: t.artist,
       album: t.album,
       albumArtist: t.albumArtist,
@@ -78,15 +88,16 @@ export function playlistPlayableTracks(data: PlaylistData): SearchTrack[] {
     }));
 }
 
-// Every row of a playlist as SearchTracks — including missing files, carried
-// through with their `missing` flag so the browse view can show them (marked,
-// unplayable) rather than silently dropping them. Playback paths use
-// playlistPlayableTracks instead, keeping the engine's pool free of dangling
-// files. See playlist-plan.md "Missing / dangling tracks".
+// Every row of a playlist as SearchTracks — including the rows the engine will
+// never see, carried through with the flag that says why (`missing` for a file
+// that's gone, `stream` for a station) so the browse view can show them, marked,
+// rather than silently dropping them. Playback paths use playlistPlayableTracks
+// instead, keeping the engine's pool free of dangling files.
+// See playlist-plan.md "Missing / dangling tracks".
 export function playlistViewTracks(data: PlaylistData): SearchTrack[] {
   return data.tracks.map((t) => ({
     path: t.path,
-    title: t.title,
+    title: rowTitle(t),
     artist: t.artist,
     album: t.album,
     albumArtist: t.albumArtist,
@@ -94,6 +105,7 @@ export function playlistViewTracks(data: PlaylistData): SearchTrack[] {
     year: t.year,
     genre: t.genre,
     missing: t.missing,
+    stream: t.stream,
     notDownloaded: t.notDownloaded,
     duration: t.duration,
     bitrate: t.bitrate,
@@ -103,6 +115,23 @@ export function playlistViewTracks(data: PlaylistData): SearchTrack[] {
     created: t.created,
     modified: t.modified,
   }));
+}
+
+// What to say, and what to clean up, when a playlist won't open. The two cases
+// need different answers: a file that is *gone* should stop haunting Open Recent,
+// while one that is merely unreadable — something else wearing the extension, or
+// past the ceilings read_playlist enforces — keeps its place, because it is still
+// there and the user may well fix it. Asks the filesystem rather than reading the
+// error text: playlist_mtime is a single stat and answers exactly that question.
+async function reportPlaylistOpenFailure(path: string, e: unknown): Promise<void> {
+  console.error("read_playlist failed", path, e);
+  const mtime = await invoke<number | null>("playlist_mtime", { path }).catch(() => null);
+  if (mtime === null) {
+    removeRecentItem(path);
+    toast("Playlist no longer available");
+    return;
+  }
+  toast("Couldn't open playlist");
 }
 
 // Playlist rows use single-click = browse, double-click = play. A short timer
@@ -136,18 +165,37 @@ export async function playPlaylistPath(path: string): Promise<void> {
   try {
     data = await readPlaylist(path);
   } catch (e) {
-    // The file is gone (moved/deleted outside the app). Self-heal: tell the
-    // user and drop it from the recents so the dead entry stops reappearing.
-    console.error("read_playlist failed", path, e);
-    removeRecentItem(path);
-    toast("Playlist no longer available");
+    await reportPlaylistOpenFailure(path, e);
     return;
   }
-  // Show every row (missing included, marked/unplayable) while playing the
-  // playable ones — playQueue filters missing out of the engine pool. Bail only
-  // when nothing is playable, so an all-dangling playlist doesn't open a dead queue.
+  // Show every row (missing and stream rows included, marked) while playing the
+  // playable ones — playQueue filters the rest out of the engine pool.
   const tracks = playlistViewTracks(data);
-  if (tracks.every((t) => t.missing)) return;
+  const streams = tracks.filter((t) => t.stream);
+  // A one-row station file *is* a station: it is the same format (see
+  // parse_m3u_stream_list in lib.rs) and it is what every internet-radio link
+  // hands you. Play it as what it is rather than opening a one-row playlist whose
+  // only row can't join a queue.
+  if (streams.length === 1 && streams.length === tracks.length) {
+    playStream({ name: streams[0].title ?? data.name, url: streams[0].path });
+    return;
+  }
+  // Nothing to play. Land in the playlist anyway — a double-click that produces
+  // no visible event at all reads as a broken app, and the pane is where the user
+  // can see which rows are the problem and fix them — but say which kind of
+  // nothing it is, because an empty file, a list of dead paths and a list of
+  // stations are three different problems with three different fixes.
+  if (!tracks.some(isPlayableRow)) {
+    showPlaylistBrowse(data);
+    toast(
+      tracks.length === 0
+        ? `"${data.name}" is empty`
+        : streams.length === tracks.length
+          ? `"${data.name}" holds only streams`
+          : `No playable tracks in "${data.name}"`,
+    );
+    return;
+  }
   playQueue(
     {
       kind: "playlist",
@@ -196,19 +244,26 @@ export async function browsePlaylistPath(
   try {
     data = await readPlaylist(path);
   } catch (e) {
-    // The file is gone (moved/deleted outside the app). Self-heal: tell the
-    // user and drop it from the recents so the dead entry stops reappearing.
-    console.error("read_playlist failed", path, e);
-    removeRecentItem(path);
-    toast("Playlist no longer available");
+    await reportPlaylistOpenFailure(path, e);
     return;
   }
-  // Browse shows every row, missing files included (marked, unplayable) — so a
-  // playlist whose files can't be resolved doesn't collapse to near-nothing.
-  // Playback (playPlaylist / Add to queue) still filters missing.
+  showPlaylistBrowse(data, opts);
+}
+
+// Put an already-read playlist in the pane. Split from the read so a *play* that
+// finds nothing playable can fall through to the browse without paying for a
+// second read of the same file.
+function showPlaylistBrowse(
+  data: PlaylistData,
+  opts?: { flash?: boolean; recent?: boolean },
+): void {
+  // Browse shows every row, missing files and stations included (marked,
+  // unplayable-in-place) — so a playlist whose files can't be resolved doesn't
+  // collapse to near-nothing. Playback (playPlaylist / Add to queue) still
+  // filters them out of the pool.
   const tracks = playlistViewTracks(data);
-  // The read succeeded and we're committing to show the browse in the pane; a
-  // failed read above bails without a pane change, so it leaves any panel up.
+  // We're committing to show the browse in the pane. A failed read never reaches
+  // here, so it leaves any open panel up rather than clearing the pane first.
   dismissRightPanel();
   browsedPlaylist.value = {
     kind: "playlist",
@@ -236,10 +291,16 @@ export async function addPlaylistToQueue(
     const data = await readPlaylist(node.path);
     if (activeQueue.value !== queueBefore) return;
     if (!queueBefore && currentNodePath.value !== pathBefore) return;
-    sink(playlistPlayableTracks(data));
+    const tracks = playlistPlayableTracks(data);
+    // Both sinks return silently on an empty list, which for a playlist means a
+    // queue verb that looked like it worked and did nothing. Say so instead.
+    if (tracks.length === 0) {
+      toast(`Nothing to add from "${data.name}"`);
+      return;
+    }
+    sink(tracks);
   } catch (e) {
-    console.error("read_playlist failed", node.path, e);
-    toast("Playlist no longer available");
+    await reportPlaylistOpenFailure(node.path, e);
   }
 }
 
