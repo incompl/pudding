@@ -44,6 +44,10 @@ export const engine = new GaplessEngine({
     // Track which queue row is live. A play/jump sets pendingQueueIndex to its
     // target; a gapless auto-advance leaves it null, so we step to the next row
     // down (positional, so duplicate rows resolve to the right instance).
+    // Reading null as "auto-advance" is only safe because the engine wrapper has
+    // already dropped advances belonging to a superseded play (see playToken in
+    // audio-engine.ts) — one of those would otherwise consume the pending index
+    // and leave the real advance stepping past the row it was meant to light.
     if (queueIsActivePool()) {
       queuePlayingIndex.value =
         app.pendingQueueIndex ?? (queuePlayingIndex.value ?? -1) + 1;

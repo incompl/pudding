@@ -47,6 +47,8 @@ export interface AudioEngineCallbacks {
 interface TrackChangedEvent {
   path: string;
   duration: number;
+  // The play session this advance belongs to (see `playToken`).
+  token: number;
 }
 interface PositionEvent {
   seconds: number;
@@ -75,6 +77,20 @@ export class GaplessEngine {
   private currentPath: string | null = null;
   private currentDuration = 0;
   private currentPosition = 0;
+  // Identifies the play session every engine command opens. Bumped
+  // synchronously before the command is sent and echoed back on track-changed,
+  // so an advance belonging to a play we have already superseded can be told
+  // apart from the real one and dropped.
+  //
+  // It has to travel with the event, because by the time a stale one lands
+  // nothing else can identify it: the engine emits track-changed from its
+  // position thread, and one emitted for the outgoing play can still be in
+  // flight over IPC when the next play() is issued. Replay the same files as a
+  // new pool and its path, its queue slot, and every piece of frontend state it
+  // would be checked against are identical to the real advance's. Acting on it
+  // consumed the pending highlight index and left the true first track
+  // highlighted one row too far down (see engine-glue's onAdvance).
+  private playToken = 0;
   private unlistens: UnlistenFn[] = [];
 
   constructor(private cb: AudioEngineCallbacks) {
@@ -84,6 +100,10 @@ export class GaplessEngine {
   private async attach(): Promise<void> {
     this.unlistens.push(
       await listen<TrackChangedEvent>("audio:track-changed", (e) => {
+        // A superseded play's advance describes audio that is no longer
+        // sounding: ignore it outright rather than letting it move the track,
+        // the highlight, or the duration.
+        if (e.payload.token !== this.playToken) return;
         this.currentPath = e.payload.path;
         this.currentDuration = e.payload.duration;
         this.cb.onAdvance(e.payload.path);
@@ -147,7 +167,10 @@ export class GaplessEngine {
     // by the currentPath guard.
     const start = Math.max(0, Math.min(tracks.length - 1, startIndex));
     this.currentPath = tracks[start];
-    await invoke("audio_play", { tracks, startIndex: start });
+    // Bumped before the command is sent, so every track-changed still in flight
+    // from the previous play is already recognizable as stale.
+    const token = ++this.playToken;
+    await invoke("audio_play", { tracks, startIndex: start, token });
   }
 
   // Start (or replace) playback with an internet radio stream. The engine
@@ -160,7 +183,10 @@ export class GaplessEngine {
     this.currentPath = url;
     this.currentDuration = 0;
     this.currentPosition = 0;
-    await invoke("audio_play_stream", { url });
+    // A stream emits no track-changed of its own, so this is what keeps the
+    // outgoing file's last advance from landing on top of it.
+    const token = ++this.playToken;
+    await invoke("audio_play_stream", { url, token });
   }
 
   async togglePause(): Promise<void> {
@@ -191,7 +217,10 @@ export class GaplessEngine {
     this.currentPath = null;
     this.currentDuration = 0;
     this.currentPosition = 0;
-    await invoke("audio_stop");
+    // Teardown supersedes the play it tears down: nothing it emitted on its way
+    // out may re-light a row behind the stop.
+    const token = ++this.playToken;
+    await invoke("audio_stop", { token });
   }
 
   async seekBy(seconds: number): Promise<void> {

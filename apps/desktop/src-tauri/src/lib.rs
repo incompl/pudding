@@ -2051,19 +2051,25 @@ async fn write_tags(
 // return immediately and do not block the IPC worker.
 
 #[tauri::command]
-fn audio_play(tracks: Vec<String>, start_index: usize, engine: State<audio::AudioEngine>) {
+fn audio_play(
+    tracks: Vec<String>,
+    start_index: usize,
+    token: u64,
+    engine: State<audio::AudioEngine>,
+) {
     let paths: Vec<PathBuf> = tracks.into_iter().map(PathBuf::from).collect();
     engine.send(audio::Command::Play {
         tracks: paths,
         start_index,
+        token,
     });
 }
 
 // Internet radio: the engine owns the HTTP connection, ICY metadata, and
 // reconnect policy. Pause disconnects; resume rejoins the live edge.
 #[tauri::command]
-fn audio_play_stream(url: String, engine: State<audio::AudioEngine>) {
-    engine.send(audio::Command::PlayStream { url });
+fn audio_play_stream(url: String, token: u64, engine: State<audio::AudioEngine>) {
+    engine.send(audio::Command::PlayStream { url, token });
 }
 
 #[tauri::command]
@@ -2320,8 +2326,8 @@ fn audio_append(tracks: Vec<String>, engine: State<audio::AudioEngine>) {
 // Tear down playback entirely (see Command::Stop). Backs the "Clear queue"
 // action, which drops the queue and stops the music.
 #[tauri::command]
-fn audio_stop(engine: State<audio::AudioEngine>) {
-    engine.send(audio::Command::Stop);
+fn audio_stop(token: u64, engine: State<audio::AudioEngine>) {
+    engine.send(audio::Command::Stop { token });
 }
 
 #[tauri::command]

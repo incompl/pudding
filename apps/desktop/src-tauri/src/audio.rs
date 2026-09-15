@@ -155,9 +155,12 @@ pub enum Command {
     Play {
         tracks: Vec<PathBuf>,
         start_index: usize,
+        // The frontend's id for this play session; see SharedState::play_token.
+        token: u64,
     },
     PlayStream {
         url: String,
+        token: u64,
     },
     TogglePause,
     Seek(f64),
@@ -180,7 +183,9 @@ pub enum Command {
     SetRateFollow(bool),
     // Tear everything down: drop the queue/stream, silence the device, and
     // report no track so the transport disables. Backs "Clear queue".
-    Stop,
+    Stop {
+        token: u64,
+    },
 }
 
 // === Shared atomics ===
@@ -227,6 +232,18 @@ pub struct SharedState {
     // track's duration (seek bar stuck at max=0). A seek keeps the epoch, so it
     // still doesn't spuriously re-fire track-changed.
     play_epoch: AtomicU64,
+    // The frontend's own id for the current play session, supplied with every
+    // Play/PlayStream/Stop and stamped onto each origin so track-changed can
+    // name the session it belongs to.
+    //
+    // play_epoch above can't serve this: it is bumped here, asynchronously, on
+    // the decode thread — and by restores and Stop as well as by Play — so the
+    // frontend can neither predict nor count its value. It has to be able to
+    // recognize its own play synchronously, at the moment it issues it: a
+    // track-changed the position thread emitted for the previous play can still
+    // be in flight over IPC when the next Play is sent, and with the same files
+    // replayed as a new pool, nothing else in that event distinguishes it.
+    play_token: AtomicU64,
     // Equalizer parameters, written by the UI thread and read by the audio
     // callback. `eq_enabled` bypasses the whole chain when false. `eq_preamp_db`
     // is a wideband gain; `eq_gains_db` holds the per-band peaking gains, all in
@@ -293,6 +310,7 @@ impl SharedState {
             queue_exhausted: AtomicBool::new(true),
             total_produced: AtomicU64::new(0),
             play_epoch: AtomicU64::new(0),
+            play_token: AtomicU64::new(0),
             eq_enabled: AtomicBool::new(false),
             eq_preamp_db: AtomicU32::new(0.0_f32.to_bits()),
             eq_gains_db: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
@@ -321,6 +339,9 @@ struct Origin {
     // The playback session that produced this origin (SharedState::play_epoch).
     // Distinguishes a genuine (re)Play from a seek's same-track re-publish.
     epoch: u64,
+    // The frontend play session this origin belongs to (SharedState::play_token),
+    // reported on track-changed so a superseded play's events can be ignored.
+    token: u64,
     at_consumer_frame: u64,
     // The queue slot this origin describes. Lets the consumer side name the
     // *audible* track unambiguously (path alone is ambiguous with duplicate
@@ -351,6 +372,9 @@ struct Origins {
 pub struct TrackChangedEvent {
     pub path: String,
     pub duration: f64,
+    // The play session (SharedState::play_token) this advance belongs to. The
+    // frontend drops the event when it names a play it has already superseded.
+    pub token: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -1159,10 +1183,14 @@ fn decode_loop(
                     Command::Play {
                         tracks,
                         start_index,
+                        token,
                     } => {
                         if tracks.is_empty() {
                             continue;
                         }
+                        // Claim the session before anything publishes an origin,
+                        // so every origin this Play produces is stamped with it.
+                        shared.play_token.store(token, Ordering::Relaxed);
                         let start = start_index.min(tracks.len().saturating_sub(1));
                         queue = tracks;
                         frontier_idx = start;
@@ -1188,7 +1216,8 @@ fn decode_loop(
                             emit_state(&app, false, false);
                         }
                     }
-                    Command::PlayStream { url } => {
+                    Command::PlayStream { url, token } => {
+                        shared.play_token.store(token, Ordering::Relaxed);
                         queue.clear();
                         frontier_idx = 0;
                         frontier = None;
@@ -1344,7 +1373,11 @@ fn decode_loop(
                             pending_switch = arm_rate_restore(&shared, &rate_ownership);
                         }
                     }
-                    Command::Stop => {
+                    Command::Stop { token } => {
+                        // Claimed like a Play: a track-changed the position thread
+                        // emitted just before this teardown can still be in flight,
+                        // and must not re-light a row after playback is gone.
+                        shared.play_token.store(token, Ordering::Relaxed);
                         // Full teardown. Mirrors a Play reset but into an empty,
                         // exhausted state: flush the device to silence, drop the
                         // queue, and report no track. With `frontier` cleared the
@@ -3372,9 +3405,11 @@ fn publish_origin(
     let drained = shared.total_drained.load(Ordering::Relaxed);
     let at_consumer_frame = producer_frames.saturating_sub(drained);
     let epoch = shared.play_epoch.load(Ordering::Relaxed);
+    let token = shared.play_token.load(Ordering::Relaxed);
     let mut o = origins.lock().unwrap_or_else(|e| e.into_inner());
     o.pending.push_back(Origin {
         epoch,
+        token,
         at_consumer_frame,
         queue_index,
         path: path.to_string(),
@@ -3511,6 +3546,7 @@ fn position_emit_loop(shared: Arc<SharedState>, origins: Arc<Mutex<Origins>>, ap
                         TrackChangedEvent {
                             path: origin.path.clone(),
                             duration: origin.duration_seconds,
+                            token: origin.token,
                         },
                     );
                     last_emitted_path = Some(origin.path.clone());
