@@ -50,9 +50,16 @@ const DEFAULT_STREAM_LIST_FILE: &str = "streams.m3u8";
 pub const USER_AGENT: &str = concat!("pudding/", env!("CARGO_PKG_VERSION"));
 
 struct DbHandle {
-    // The single writer connection. SQLite allows one writer at a time, so scan
-    // inserts and write_tags updates serialize through this mutex — correct, and
-    // WAL keeps that write from blocking readers.
+    // The single writer connection everything outside a scan writes through —
+    // write_tags and reindex_downloaded today. SQLite allows one writer at a
+    // time, so those serialize through this mutex, and WAL keeps the write from
+    // blocking readers.
+    //
+    // A scan is not among them: run_scan opens its own connection (see there) and
+    // never touches this mutex. It holds one transaction across the entire
+    // library walk instead, so a command write that lands mid-scan serializes
+    // down at the SQLite level, where it waits out busy_timeout (5 s) and then
+    // fails rather than queueing behind the walk.
     conn: Arc<Mutex<Connection>>,
     // Pool of read-only connections for the query commands. Reads run off the UI
     // thread (spawn_blocking) each on their own connection instead of contending on
@@ -158,10 +165,10 @@ struct RecentItem {
 }
 
 // Does double duty: a row of a browse listing (where the column fields below are
-// populated) and what write_tags hands back after a save (where only the tags it
-// wrote, plus `modified`, are). Default exists for that second use, so the write
-// path says what it isn't filling in rather than listing the Nones. The editor is
-// *seeded* from EditorTags, not from this — the two sets only overlap.
+// populated) and what write_tags hands back after a save (where the eight cached
+// tag fields, plus `modified`, are). Default exists for that second use, so the
+// write path says what it isn't filling in rather than listing the Nones. The
+// editor is *seeded* from EditorTags, not from this — the two sets only overlap.
 #[derive(Serialize, Default)]
 struct FileEntry {
     name: String,
@@ -881,8 +888,10 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
 // never indexed, so there is no stale row to fix and no `root` to invent for a new
 // one; the SELECT that finds neither is the whole decision.
 //
-// Blocks on the DB writer mutex, which a running scan holds for the length of a
-// whole walk, so only call this from a thread with nothing waiting on it.
+// Blocks for the length of a whole scan when one is running — not on the writer
+// mutex (a scan has its own connection; see DbHandle), but on SQLite's own write
+// lock, which the scan's single transaction holds across the walk. So only call
+// this from a thread with nothing waiting on it.
 fn reindex_downloaded(app: &AppHandle, path: &Path, facts: &DiskFacts) {
     let db = app.state::<DbHandle>();
     // Poisoned only if another writer panicked mid-statement; this row's work is
@@ -1644,6 +1653,14 @@ fn get_art(path: String) -> Option<String> {
     if dataless::path_is_dataless(path) {
         return None;
     }
+    art_data_url(path)
+}
+
+// One file's embedded cover as a data URL, opened for the picture alone. The hero
+// wants it for the track it is drawing; the editor's bulk seed wants it once, at
+// the end of a fold that compared digests rather than encoding every selected
+// file's cover (see fold_common_tags).
+fn art_data_url(path: &Path) -> Option<String> {
     let tagged = open_tagged(path, TAGS_ONLY).ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     picture_data_url(tag)
@@ -1660,6 +1677,21 @@ fn picture_data_url(tag: &lofty::tag::Tag) -> Option<String> {
     let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
     let encoded = base64::engine::general_purpose::STANDARD.encode(pic.data());
     Some(format!("data:{};base64,{}", mime, encoded))
+}
+
+// A stand-in for the picture, for the bulk seed's fold: equal digests mean equal
+// bytes, so a selection can be asked whether it shares a cover without base64
+// encoding every file's. That cost is unbounded otherwise —
+// MAX_EMBEDDED_ART_BYTES caps what the *picker* will embed, not what a file
+// already holds. Never shown and never persisted: std's hasher is not stable
+// across Rust releases, and nothing here outlives the fold that produced it.
+fn picture_digest(tag: &lofty::tag::Tag) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let pic = tag.pictures().first()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    pic.mime_type().map(|m| m.as_str()).hash(&mut hasher);
+    pic.data().hash(&mut hasher);
+    Some(format!("{:016x}", hasher.finish()))
 }
 
 // Ceiling on a stream list station image. Anything larger than this is not
@@ -1967,7 +1999,27 @@ struct EditorTags {
 // here (the two totals and the comment) are editor-only. One lofty parse either way.
 #[tauri::command]
 fn read_file_tags(path: String) -> Result<EditorTags, String> {
-    let p = PathBuf::from(&path);
+    Ok(file_tags(&path, ArtworkRead::DataUrl))
+}
+
+// How much work a read owes the artwork well. The single-file seed wants the
+// picture itself; the fold below wants only to know whether two files carry the
+// same one, and drops to Skip for the rest of a selection that has already been
+// found to disagree — a field in `mixed` is settled, so its value is never
+// compared again.
+#[derive(Clone, Copy)]
+enum ArtworkRead {
+    DataUrl,
+    Digest,
+    Skip,
+}
+
+// The editor's whole read side, shared by the single-file seed above and the bulk
+// fold below. One 13-field mapping in one place: a second reader for the bulk case
+// would drift from this one within a release or two, and the drift would show up
+// as a field the bulk form quietly refuses to seed.
+fn file_tags(path: &str, artwork: ArtworkRead) -> EditorTags {
+    let p = PathBuf::from(path);
     let name = p
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -1976,21 +2028,21 @@ fn read_file_tags(path: String) -> Result<EditorTags, String> {
     // saving from it writes a fresh tag of the container's native type, which is
     // exactly how an untagged file gets its first tag (see write_tags).
     let Ok(tagged) = open_tagged(&p, TAGS_ONLY) else {
-        return Ok(EditorTags {
+        return EditorTags {
             name,
             ..Default::default()
-        });
+        };
     };
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
-        return Ok(EditorTags {
+        return EditorTags {
             name,
             ..Default::default()
-        });
+        };
     };
     let norm = |v: Option<std::borrow::Cow<'_, str>>| {
         v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     };
-    Ok(EditorTags {
+    EditorTags {
         name,
         title: norm(tag.title()),
         artist: norm(tag.artist()),
@@ -2007,8 +2059,175 @@ fn read_file_tags(path: String) -> Result<EditorTags, String> {
         year: tag.year(),
         genre: norm(tag.genre()),
         comment: norm(tag.comment()),
-        artwork: picture_data_url(tag),
+        artwork: match artwork {
+            ArtworkRead::DataUrl => picture_data_url(tag),
+            ArtworkRead::Digest => picture_digest(tag),
+            ArtworkRead::Skip => None,
+        },
+    }
+}
+
+// What a selection agrees on, and which fields it doesn't. `common` carries the
+// value where every file matches; `mixed` *names* the fields where they differ
+// rather than leaving a sentinel in `common`, so "they all agree there is no
+// album" stays distinct from "the albums differ".
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CommonTags {
+    common: EditorTags,
+    mixed: Vec<String>,
+}
+
+// One field of the fold. A field already in `mixed` is settled — nothing later can
+// bring it back — so it is never read or compared again, which is what lets the
+// artwork read drop to Skip once the covers are known to disagree.
+fn merge_field<T: PartialEq>(
+    key: &str,
+    common: &mut Option<T>,
+    next: Option<T>,
+    mixed: &mut Vec<String>,
+    still_common: &mut bool,
+) {
+    if mixed.iter().any(|k| k == key) {
+        return;
+    }
+    if *common == next {
+        *still_common = true;
+    } else {
+        mixed.push(key.to_string());
+        *common = None;
+    }
+}
+
+// Seed the editor from N files: fold their tags down to what they share. A fold
+// over file_tags rather than a second reader, for the reason given there.
+//
+// Agreement is judged on the strings the editor would show — file_tags' own norm()
+// does the trimming — so two files whose artist differs only in trailing space
+// agree, as the form would have it.
+fn fold_common_tags(
+    paths: &[String],
+    progress: &dyn Fn(usize, usize),
+) -> Result<CommonTags, String> {
+    let Some((first, rest)) = paths.split_first() else {
+        return Err("No tracks to edit.".to_string());
+    };
+    let total = paths.len();
+    // One file is no fold and needs no digest: read its picture straight and skip
+    // the re-encode at the end. The single-track editor takes this path.
+    let mut common = file_tags(
+        first,
+        if rest.is_empty() {
+            ArtworkRead::DataUrl
+        } else {
+            ArtworkRead::Digest
+        },
+    );
+    let mut mixed: Vec<String> = Vec::new();
+    progress(1, total);
+
+    for (i, path) in rest.iter().enumerate() {
+        let art_settled = mixed.iter().any(|k| k == "artwork");
+        let next = file_tags(
+            path,
+            if art_settled {
+                ArtworkRead::Skip
+            } else {
+                ArtworkRead::Digest
+            },
+        );
+
+        let mut still_common = false;
+        // `name` is the one field that isn't an Option, and it needs no special
+        // case beyond that: any real selection disagrees on it and reports itself
+        // mixed, which is exactly what the form's heading wants to hear.
+        if !mixed.iter().any(|k| k == "name") {
+            if common.name == next.name {
+                still_common = true;
+            } else {
+                mixed.push("name".to_string());
+                common.name = String::new();
+            }
+        }
+        // Short handles, only so the twelve fields below stay one line each.
+        let m = &mut mixed;
+        let sc = &mut still_common;
+        merge_field("title", &mut common.title, next.title, m, sc);
+        merge_field("artist", &mut common.artist, next.artist, m, sc);
+        merge_field("album", &mut common.album, next.album, m, sc);
+        merge_field(
+            "albumArtist",
+            &mut common.album_artist,
+            next.album_artist,
+            m,
+            sc,
+        );
+        merge_field("disc", &mut common.disc, next.disc, m, sc);
+        merge_field("discTotal", &mut common.disc_total, next.disc_total, m, sc);
+        merge_field("track", &mut common.track, next.track, m, sc);
+        merge_field(
+            "trackTotal",
+            &mut common.track_total,
+            next.track_total,
+            m,
+            sc,
+        );
+        merge_field("year", &mut common.year, next.year, m, sc);
+        merge_field("genre", &mut common.genre, next.genre, m, sc);
+        merge_field("comment", &mut common.comment, next.comment, m, sc);
+        merge_field("artwork", &mut common.artwork, next.artwork, m, sc);
+
+        // Nothing left to learn once every field disagrees, so the rest of the
+        // selection need not be opened at all — worth the three lines on a large,
+        // heterogeneous one. The label is told the whole list is done, because for
+        // its purposes it is.
+        if !still_common {
+            progress(total, total);
+            break;
+        }
+        progress(i + 2, total);
+    }
+
+    // The fold compared digests to keep N covers off the CPU; the form needs the
+    // picture. Encode the one that survived — the files agree on it, so the first
+    // one's is theirs.
+    if !rest.is_empty() && common.artwork.is_some() {
+        common.artwork = art_data_url(Path::new(first));
+    }
+    Ok(CommonTags { common, mixed })
+}
+
+// Seed the metadata editor over a selection. Off the UI thread for two reasons:
+// N lofty parses is a multi-second read at a few hundred files, and reading a
+// dataless file would *download* it (see dataless.rs) — the caller keeps cloud
+// files out, but not on this thread's good behaviour.
+//
+// `generation` is the same frontend-minted batch id the write takes, stamped onto
+// every progress event so a label can ignore a fold that isn't its own: start on
+// 300 files, escape, open on 3, and without it the new form counts to 300. There
+// is no cancel to go with it — escaping the form leaves the fold running to the
+// end of its list, which is bounded, touches nothing, and is then never heard
+// from again.
+#[tauri::command]
+async fn read_common_tags(
+    paths: Vec<String>,
+    generation: u64,
+    app: AppHandle,
+) -> Result<CommonTags, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fold_common_tags(&paths, &|done, total| {
+            let _ = app.emit(
+                "tag-read-progress",
+                TagProgress {
+                    generation,
+                    done,
+                    total,
+                },
+            );
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // Ceiling on a picture the editor will embed. Separate from the stream-image cap
@@ -2051,23 +2270,47 @@ fn read_picture(path: &std::path::Path) -> Result<lofty::picture::Picture, Strin
     Ok(pic)
 }
 
-// What the metadata editor sends back: every writable field, with None meaning
-// "the file should not carry this" — the editor's empty box and a missing field
-// are the same instruction, which is what makes Save able to clear a tag.
+// What the metadata editor sends back: a **patch**, not a description of the
+// file. Three states per field, which is what lets one form edit any number of
+// files at once:
+//
+//   key absent   leave this tag alone
+//   null         clear this tag
+//   a value      set this tag
+//
+// The double Option carries that: `None` is the absent key, `Some(None)` the
+// explicit null. Absent-means-untouched is why a save can no longer flatten a
+// field the user never looked at — an ID3 full date (1979-10-05) now survives an
+// unrelated edit instead of being rewritten as its year (see apply_tag_edits).
+//
+// Nothing downstream may read this to learn what a track now holds: with most
+// keys absent it describes the edit and not the file. The tag itself, after
+// apply_tag_edits, is what answers that (see cached_fields).
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct TagEdits {
-    title: Option<String>,
-    artist: Option<String>,
-    album_artist: Option<String>,
-    album: Option<String>,
-    disc: Option<u32>,
-    disc_total: Option<u32>,
-    track: Option<u32>,
-    track_total: Option<u32>,
-    year: Option<u32>,
-    genre: Option<String>,
-    comment: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    title: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    artist: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    album_artist: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    album: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    disc: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "double_option")]
+    disc_total: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "double_option")]
+    track: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "double_option")]
+    track_total: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "double_option")]
+    year: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "double_option")]
+    genre: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    comment: Option<Option<String>>,
     // Absent for a save that doesn't touch the picture, which is most of them —
     // hence the default. A chosen image rides as the path the picker returned
     // rather than as its bytes: the preview already crossed the IPC boundary once
@@ -2075,6 +2318,19 @@ struct TagEdits {
     // same megabytes a second time.
     #[serde(default)]
     artwork: ArtworkEdit,
+}
+
+// Serde reads a present `null` and an absent key as the same `None` on an
+// Option, which is exactly the distinction a patch is made of. Deserializing
+// into the inner Option and wrapping the result in Some makes the two differ:
+// the field's own `#[serde(default)]` supplies `None` when the key is absent,
+// and this is only ever called when it is present.
+fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(de).map(Some)
 }
 
 // The three things a save can do to a file's picture.
@@ -2112,12 +2368,19 @@ impl ArtworkEdit {
 }
 
 impl TagEdits {
-    // Trim every text field and treat what's left of an empty one as absent, so
-    // "   " clears a tag rather than writing whitespace into it. Symmetric with
-    // the norm() read_file_tags seeds the form through, which means a form the
-    // user opened and saved untouched writes back exactly what it showed.
+    // Trim every text field and turn what's left of an empty one into a clear, so
+    // "   " strips a tag rather than writing whitespace into it. Trims through
+    // both layers: an absent key stays absent (`None`), while `Some(Some("  "))`
+    // becomes `Some(None)`. Symmetric with the norm() read_file_tags seeds the
+    // form through, so agreement is judged on the same strings the editor shows.
     fn normalized(self) -> TagEdits {
-        let norm = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let norm = |v: Option<Option<String>>| {
+            v.map(|inner| {
+                inner
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+        };
         TagEdits {
             title: norm(self.title),
             artist: norm(self.artist),
@@ -2130,66 +2393,78 @@ impl TagEdits {
     }
 }
 
-// Set or clear each edited item on `tag`. Split out of write_tags so the mapping
-// from "the form said this" to "the file says that" can be tested without a file
-// on disk — it is the half of the command with all the per-field decisions in it.
+// Apply the patch to `tag`. Split out of write_tags so the mapping from "the form
+// said this" to "the file says that" can be tested without a file on disk — it is
+// the half of the command with all the per-field decisions in it.
 //
-// Every field is written unconditionally: the editor is seeded from this same tag,
-// so a field the user didn't touch writes back the value it was showing, and one
-// they emptied clears. That is also why a field the editor does NOT offer (a
-// composer, a grouping, any tag another editor wrote) survives untouched — nothing
-// here rebuilds the tag, it only sets the items it names.
-fn apply_tag_edits(tag: &mut lofty::tag::Tag, edits: &TagEdits, artwork: ArtworkChange) {
+// Three arms per field, straight off TagEdits: an absent key is left alone, a null
+// removes the item, a value sets it. A field the editor does NOT offer (a composer,
+// a grouping, any tag another editor wrote) survives for the same reason an
+// untouched one does — nothing here rebuilds the tag, it only touches the items the
+// patch names.
+fn apply_tag_edits(tag: &mut lofty::tag::Tag, edits: &TagEdits, artwork: &ArtworkChange) {
     match &edits.title {
-        Some(v) => tag.set_title(v.clone()),
-        None => tag.remove_title(),
+        None => {}
+        Some(None) => tag.remove_title(),
+        Some(Some(v)) => tag.set_title(v.clone()),
     }
     match &edits.artist {
-        Some(v) => tag.set_artist(v.clone()),
-        None => tag.remove_artist(),
+        None => {}
+        Some(None) => tag.remove_artist(),
+        Some(Some(v)) => tag.set_artist(v.clone()),
     }
     match &edits.album {
-        Some(v) => tag.set_album(v.clone()),
-        None => tag.remove_album(),
+        None => {}
+        Some(None) => tag.remove_album(),
+        Some(Some(v)) => tag.set_album(v.clone()),
     }
     // No Accessor shortcut for album artist (see read_file_tags): set/clear by key.
     match &edits.album_artist {
-        Some(v) => {
+        None => {}
+        Some(None) => tag.remove_key(&lofty::tag::ItemKey::AlbumArtist),
+        Some(Some(v)) => {
             tag.insert_text(lofty::tag::ItemKey::AlbumArtist, v.clone());
         }
-        None => tag.remove_key(&lofty::tag::ItemKey::AlbumArtist),
     }
     match &edits.genre {
-        Some(v) => tag.set_genre(v.clone()),
-        None => tag.remove_genre(),
+        None => {}
+        Some(None) => tag.remove_genre(),
+        Some(Some(v)) => tag.set_genre(v.clone()),
     }
     match &edits.comment {
-        Some(v) => tag.set_comment(v.clone()),
-        None => tag.remove_comment(),
+        None => {}
+        Some(None) => tag.remove_comment(),
+        Some(Some(v)) => tag.set_comment(v.clone()),
     }
     match edits.disc {
-        Some(d) => tag.set_disk(d),
-        None => tag.remove_disk(),
+        None => {}
+        Some(None) => tag.remove_disk(),
+        Some(Some(d)) => tag.set_disk(d),
     }
     match edits.disc_total {
-        Some(d) => tag.set_disk_total(d),
-        None => tag.remove_disk_total(),
+        None => {}
+        Some(None) => tag.remove_disk_total(),
+        Some(Some(d)) => tag.set_disk_total(d),
     }
     match edits.track {
-        Some(t) => tag.set_track(t),
-        None => tag.remove_track(),
+        None => {}
+        Some(None) => tag.remove_track(),
+        Some(Some(t)) => tag.set_track(t),
     }
     match edits.track_total {
-        Some(t) => tag.set_track_total(t),
-        None => tag.remove_track_total(),
+        None => {}
+        Some(None) => tag.remove_track_total(),
+        Some(Some(t)) => tag.set_track_total(t),
     }
     // ID3v2 keeps the year inside the recording-time frame, so a file carrying a
-    // full date (1979-10-05) comes back from the editor as the year alone. That is
-    // the field the form offers and the column shows; writing back what was shown
-    // is the honest trade for making it editable at all.
+    // full date (1979-10-05) shows in the editor as the year alone — and writing
+    // that back destroys the month and day. Under a patch that only happens when
+    // the user actually typed in the Year box: an untouched Year is an absent key,
+    // and the date survives the save untouched.
     match edits.year {
-        Some(y) => tag.set_year(y),
-        None => tag.remove_year(),
+        None => {}
+        Some(None) => tag.remove_year(),
+        Some(Some(y)) => tag.set_year(y),
     }
     // Picture 0 and only picture 0 — the one the well showed, and the one
     // picture_data_url hands the hero. A file with a back cover or a band photo
@@ -2202,127 +2477,561 @@ fn apply_tag_edits(tag: &mut lofty::tag::Tag, edits: &TagEdits, artwork: Artwork
                 tag.remove_picture(0);
             }
         }
-        ArtworkChange::Set(pic) => tag.set_picture(0, pic),
+        // By reference, and cloned here: one resolved image is stamped into every
+        // file of a batch, so the Picture can't be moved out of the change.
+        ArtworkChange::Set(pic) => tag.set_picture(0, pic.clone()),
     }
 }
 
-// Write the editable tags back into a file and sync the library cache row, so
-// the Songs/Artists/Albums views reflect the change without waiting for the
-// debounced watcher rescan. Mirrors read_file_tags: it mutates the *primary* tag
-// (the one that seeded the editor), creating one of the file's native type when
-// the file is untagged. Empty/omitted fields clear the corresponding item.
-// `duration` comes from the decoded audio, not a tag, so it is neither shown nor
-// written here.
+// The eight tag fields the tracks table caches, read back off the tag write_tags
+// has just mutated. The patch describes the edit; the tag describes the file — a
+// patch that carries only `album` says nothing about the title, so building the
+// cache row or the returned FileEntry from `edits` would null out seven columns
+// per file and hand the frontend rows that had lost their titles. Read the file
+// instead, which is also more honest than the old version for a single track: it
+// reports what the file says rather than what the form said.
 //
-// The frontend refuses this for the file the audio engine currently holds open
-// (lofty rewrites the file in place, which would corrupt an in-progress decode),
-// so this command assumes the file is not being played.
+// `modified` is deliberately not here. It comes from the post-write re-stat, not
+// from a tag, and it is the whole reason applyTagUpdate can patch the Date
+// Modified cell instead of waiting for a rescan the mtime/size pre-sync has made
+// a no-op. Nine fields leave write_tags; these eight come off the tag.
+fn cached_fields(tag: &lofty::tag::Tag) -> FileEntry {
+    let norm = |v: Option<std::borrow::Cow<'_, str>>| {
+        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    FileEntry {
+        title: norm(tag.title()),
+        artist: norm(tag.artist()),
+        album: norm(tag.album()),
+        album_artist: norm(
+            tag.get_string(&lofty::tag::ItemKey::AlbumArtist)
+                .map(std::borrow::Cow::Borrowed),
+        ),
+        disc: tag.disk(),
+        track: tag.track(),
+        year: tag.year(),
+        genre: norm(tag.genre()),
+        ..Default::default()
+    }
+}
+
+// One file's worth of a successful save: the path it was written to, and what the
+// file says afterwards. `path` is explicit because a FileEntry carries a `name`
+// and not a path, and the caller must not have to re-derive which entry is which
+// from the input order minus the failures. Also applyTagUpdates' own entry shape.
+#[derive(Serialize)]
+struct WrittenTrack {
+    path: String,
+    tags: FileEntry,
+}
+
+// One file the batch could not finish. `stale` separates the two kinds: a file
+// that was not written at all (locked, unreadable, held by the decoder) from one
+// that was written correctly but whose library row could not be updated. The
+// second is not a save failure — telling the user a save failed when it didn't is
+// the one report worse than no report — so the form counts it with the saved and
+// says the list will catch up.
+//
+// A file in here with `stale: false` is a file still holding exactly what it held
+// before Save was pressed. write_one_file stages every write on a copy and renames
+// it into place, so "couldn't be written" means untouched rather than damaged, and
+// the form is free to say so.
+#[derive(Serialize)]
+struct FailedWrite {
+    path: String,
+    message: String,
+    stale: bool,
+}
+
+// Four outcomes, not two. A path the loop never reached because the user pressed
+// Stop is neither ok nor failed, and "Saved 12 of 300" reads as 288 errors unless
+// the caller can tell which happened. `aborted` is the same distinction for the
+// batch that gave up on its own.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TagWriteReport {
+    ok: Vec<WrittenTrack>,
+    failed: Vec<FailedWrite>,
+    stopped: bool,
+    // Set when the storage failed under the batch — a full disk, a read-only
+    // mount, a drive pulled out — and the loop stopped rather than attempting the
+    // rest. Every remaining path is untouched and unreported, which is only
+    // legible if the caller is told why the counts don't add up. Carries the
+    // failure that ended it, because "23 of 300" with no reason reads as a bug.
+    aborted: Option<String>,
+}
+
+// Per-file progress for the editor's "Saving... 37 of 300" label, and for the
+// "Reading 300 tracks..." one the bulk seed fills in behind. One payload, two
+// events (`tag-write-progress`, `tag-read-progress`): the same three numbers said
+// twice would drift. One event per file, unthrottled — 300 events over a run
+// measured in seconds is nothing next to 300 file rewrites. `generation` is the
+// frontend-minted batch id, so a label can ignore events that aren't its own.
+#[derive(Serialize, Clone)]
+struct TagProgress {
+    generation: u64,
+    done: usize,
+    total: usize,
+}
+
+// The Stop button's reach into a running batch. Holds the generation the user
+// asked to cancel; the loop compares it against its own and stops only on a
+// match, so a cancel arriving late cannot kill the batch after the one it was
+// aimed at. Zero means nothing has been cancelled — the frontend's counter starts
+// at 1.
+#[derive(Default)]
+struct TagWriteCancel {
+    generation: std::sync::atomic::AtomicU64,
+}
+
+// Stop a running tag write between files. Cancellation is never inside a file: a
+// save already under way runs to completion. It is safe to stop one now — the
+// write is staged on a copy and the track is only replaced by an atomic rename —
+// but a half-tagged staged file is still wasted work, so the loop finishes the
+// file it is on and checks between them.
+#[tauri::command]
+fn cancel_tag_write(generation: u64, cancel: State<'_, Arc<TagWriteCancel>>) {
+    cancel
+        .generation
+        .store(generation, std::sync::atomic::Ordering::Relaxed);
+}
+
+// Is this the error that means another connection holds the write lock? A scan
+// holds one transaction across its entire library walk, so this is what a save
+// started during a scan hits — after waiting out the full 5 s busy_timeout.
+fn is_sqlite_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked,
+                ..
+            },
+            _
+        )
+    )
+}
+
+// Keep one library row in step with the file just written. Only the fields the
+// tracks table actually holds: the totals, the comment and the artwork are
+// editable but uncached (see EditorTags), so there is nothing here for them.
+//
+// One UPDATE per file, from inside the loop — deferring them into a single
+// transaction after the loop would make a failure all-or-nothing (three hundred
+// files correctly rewritten and zero rows updated), and would leave the mtime/size
+// pre-sync comparing every mid-loop rescan against a pre-edit row.
+fn update_cached_row(
+    conn: &Connection,
+    path: &str,
+    tags: &FileEntry,
+    mtime: i64,
+    size: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE tracks SET mtime = ?2, size = ?3, title = ?4, artist = ?5,
+             album = ?6, album_artist = ?7, disc = ?8, track = ?9, year = ?10,
+             genre = ?11 WHERE path = ?1",
+        params![
+            path,
+            mtime,
+            size,
+            tags.title,
+            tags.artist,
+            tags.album,
+            tags.album_artist,
+            tags.disc,
+            tags.track,
+            tags.year,
+            tags.genre
+        ],
+    )
+}
+
+// The batch itself: apply one patch to every path, keeping the cache in step.
+//
+// Everything the engine and the frontend own arrives as a closure so the loop can
+// be tested with literals — the held set especially, which is read *per iteration*
+// because nothing decided at submit can protect the back half of a batch:
+// autoadvance can walk into file #37 while the loop is on #12.
+//
+// Two things end a batch early, and they are not the same: `cancelled` is the user
+// pressing Stop, and a storage failure is the disk refusing everything that comes
+// next (see WriteFailure). Both leave the untouched files unreported rather than
+// counting them as errors.
+fn write_tags_to_files(
+    paths: &[String],
+    edits: &TagEdits,
+    artwork: &ArtworkChange,
+    cache: &dyn Fn(&str, &FileEntry, i64, i64) -> rusqlite::Result<usize>,
+    held: &dyn Fn() -> Vec<String>,
+    cancelled: &dyn Fn() -> bool,
+    progress: &dyn Fn(usize, usize),
+) -> TagWriteReport {
+    let mut report = TagWriteReport::default();
+    // Latched on the first SQLITE_BUSY. One timeout means a scan holds the write
+    // lock and will hold it for the rest of its walk, so every remaining file would
+    // pay the full 5 s busy_timeout before failing the same way — 300 files is up
+    // to 25 minutes of a loop sitting in the kernel with the label apparently
+    // frozen. Stop attempting and mark the rest stale instead; the recovery is
+    // identical either way, since a row that never got its UPDATE keeps its
+    // pre-edit mtime and the next incremental scan re-reads it. Per batch, not
+    // global: the next save tries again from scratch.
+    let mut cache_locked = false;
+    let total = paths.len();
+    for (done, path) in paths.iter().enumerate() {
+        if cancelled() {
+            report.stopped = true;
+            break;
+        }
+        let p = PathBuf::from(path);
+
+        // Asked of the engine, now, for this file. The decode frontier runs ahead
+        // of the audible track (gapless opens the next one early), so "the track
+        // that is playing" is not the whole answer.
+        if held().iter().any(|h| h == path) {
+            report.failed.push(FailedWrite {
+                path: path.clone(),
+                message: "Can't write a track while it's playing".to_string(),
+                stale: false,
+            });
+            progress(done + 1, total);
+            continue;
+        }
+
+        let written = write_one_file(&p, edits, artwork);
+        let (tags, mtime, size) = match written {
+            Ok(v) => v,
+            Err(failure) => {
+                let fatal = failure.fatal;
+                report.failed.push(FailedWrite {
+                    path: path.clone(),
+                    message: failure.message.clone(),
+                    stale: false,
+                });
+                progress(done + 1, total);
+                // The mount said no, so it will say no to all 287 files left.
+                // Attempting them anyway is not harmless: each one first copies the
+                // track to stage the write, so a full disk would be answered by
+                // trying to fill it another 287 times, slowly, while the label
+                // counts up as though something were being saved.
+                if fatal {
+                    report.aborted = Some(failure.message);
+                    break;
+                }
+                continue;
+            }
+        };
+
+        // The file is correct on disk from here on; what is left is the library
+        // row (see update_cached_row). A row that could not be updated is its own
+        // outcome, not a write failure.
+        let synced = if cache_locked {
+            Err("Saved the file, but the library list may be stale".to_string())
+        } else {
+            // Zero rows updated is not a failure: a file outside every library
+            // root has no cached row to keep in step.
+            cache(path, &tags, mtime, size).map(|_| ()).map_err(|e| {
+                if is_sqlite_busy(&e) {
+                    cache_locked = true;
+                }
+                log::error!("write_tags: cache update for {} failed: {e}", p.display());
+                "Saved the file, but the library list may be stale".to_string()
+            })
+        };
+
+        match synced {
+            Ok(()) => report.ok.push(WrittenTrack {
+                path: path.clone(),
+                tags: FileEntry {
+                    // The one column field an edit changes that the user didn't
+                    // type. Writing tags rewrites the file, so every open row's Date
+                    // Modified cell is stale the moment this returns; handing back
+                    // the post-write mtime lets the caller patch it (see
+                    // applyTagUpdate) instead of waiting for a rescan that the
+                    // mtime/size pre-sync has deliberately made a no-op.
+                    modified: Some(mtime),
+                    ..tags
+                },
+            }),
+            Err(message) => report.failed.push(FailedWrite {
+                path: path.clone(),
+                message,
+                stale: true,
+            }),
+        }
+        progress(done + 1, total);
+    }
+    report
+}
+
+// Why one file was not written, and whether the batch has any business trying the
+// next one. A file that is unreadable, or a container lofty can't tag, is its own
+// problem and the loop steps over it. A storage failure is the *mount* talking,
+// and it will say the same thing to every file left in the batch — so it stops.
+#[derive(Debug)]
+struct WriteFailure {
+    message: String,
+    fatal: bool,
+}
+
+impl WriteFailure {
+    fn io(context: &str, e: &std::io::Error) -> Self {
+        WriteFailure {
+            message: format!("{}: {}", context, e),
+            fatal: is_storage_fatal(e),
+        }
+    }
+
+    // A lofty error is only ever fatal to the batch when it is an io error
+    // underneath — a malformed tag or an unsupported container says nothing about
+    // the next file.
+    fn lofty(context: &str, e: &lofty::error::LoftyError) -> Self {
+        WriteFailure {
+            message: format!("{}: {}", context, e),
+            fatal: match e.kind() {
+                lofty::error::ErrorKind::Io(io) => is_storage_fatal(io),
+                _ => false,
+            },
+        }
+    }
+}
+
+// Did the storage itself fail, rather than this one file? A full disk, a volume
+// remounted read-only, a quota, or a drive pulled out mid-batch. std names the
+// first three; the unplugged-drive errnos have no named ErrorKind and arrive as
+// Uncategorized, so they are read off the raw number — EIO, ENXIO and ENODEV
+// carry the same values on every unix this builds for.
+fn is_storage_fatal(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        e.kind(),
+        ErrorKind::StorageFull | ErrorKind::ReadOnlyFilesystem | ErrorKind::QuotaExceeded
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        matches!(e.raw_os_error(), Some(5 | 6 | 19))
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+// Where a save is staged before it becomes the track. Next to the file, because
+// rename is only atomic within one filesystem — a temp in /tmp would make the last
+// step a cross-device copy, which is the thing this is all here to avoid.
+//
+// The name deliberately carries no audio extension: is_audio_path goes by
+// extension alone and list_dir does not skip dotfiles, so a temp called
+// `.track.mp3` would show up as a song in any scan that overlapped the save. lofty
+// identifies a container by sniffing the bytes it is handed and never by the name
+// (write_id3v2 builds its own Probe over the open file), so dropping the extension
+// costs nothing.
+fn temp_sibling(target: &Path) -> Result<PathBuf, std::io::Error> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = target.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
+    })?;
+    Ok(dir.join(format!(
+        ".pudding-save-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )))
+}
+
+// Deletes the staged copy on every way out of write_one_file except the one that
+// renames it away. Without this a failed save leaves litter beside the track, and
+// the next scan would be indexing half-written files.
+struct StagedFile(PathBuf);
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        // After a successful rename there is nothing at this path and the remove
+        // fails with ENOENT, which is exactly the no-op wanted.
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+// One file: open, patch, save, re-stat, read back. Returns what the file says
+// afterwards (read off the mutated tag, never off the patch — see cached_fields)
+// along with the post-write mtime and size. Mirrors read_file_tags in mutating the
+// *primary* tag, creating one of the container's native type when the file is
+// untagged.
+fn write_one_file(
+    p: &Path,
+    edits: &TagEdits,
+    artwork: &ArtworkChange,
+) -> Result<(FileEntry, i64, i64), WriteFailure> {
+    // Resolve the link first. This save ends in a rename, and rename replaces a
+    // *directory entry*: renaming onto a symlink would leave a regular file where
+    // the link was and strand the track it pointed at. Canonicalizing puts the
+    // copy, the tagging and the rename all on the real file. A path that won't
+    // resolve is handed on unchanged, for open_tagged to reject with its own
+    // message.
+    let target = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+
+    let mut tagged = open_tagged(&target, TAGS_ONLY).map_err(|e| {
+        log::error!("write_tags: reading {} failed: {e}", target.display());
+        WriteFailure::lofty("Couldn't read that file", &e)
+    })?;
+
+    // Untagged files have no tag to mutate; give them one of the container's
+    // native type (ID3v2 for MP3, MP4 atoms for m4a, Vorbis comments for FLAC...).
+    //
+    // Seeded from whatever tag the file does carry, because that is the tag the
+    // user was just looking at: file_tags reads `primary_tag().or_else(first_tag)`,
+    // so an MP3 carrying nothing but ID3v1 — an ordinary thing in a library ripped
+    // before about 2005 — seeds the form from ID3v1 while the save lands on a
+    // brand-new ID3v2. Starting that new tag empty made a title-only edit write a
+    // tag holding nothing but the title, and being primary it then shadowed the
+    // artist and album the form had shown a second earlier. re_map keeps what the
+    // new type can carry, drops what it can't, and leaves the pictures alone.
+    //
+    // The old tag stays where it is. It is redundant once the primary carries the
+    // same values, but stripping tags is not what Save was asked to do, and every
+    // reader — this app included — prefers the primary one.
+    if tagged.primary_tag_mut().is_none() {
+        let tag_type = tagged.primary_tag_type();
+        let mut seed = tagged
+            .first_tag()
+            .cloned()
+            .unwrap_or_else(|| lofty::tag::Tag::new(tag_type));
+        seed.re_map(tag_type);
+        tagged.insert_tag(seed);
+    }
+    let tag = tagged
+        .primary_tag_mut()
+        .expect("primary tag present (inserted above when absent)");
+
+    apply_tag_edits(tag, edits, artwork);
+    let mut tags = cached_fields(tag);
+    // From the path the caller gave, not the canonicalized one: a symlinked track
+    // is its own row under its own name, and the library shows the name the user
+    // has for it.
+    tags.name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Stage the write on a copy, then rename it over the original. lofty rewrites
+    // a file where it stands: for ID3v2 it reads the audio into memory, truncates
+    // the file to zero bytes and writes the whole thing back. A save interrupted
+    // anywhere between that truncate and the last byte leaves an empty or
+    // half-written file where a song used to be — a full disk does it, so does a
+    // drive pulled mid-batch, a force-quit, or a power cut. Rename is atomic, so
+    // the only two things this can leave on disk are the old file and the new one.
+    //
+    // On APFS the copy is a clone: no second copy of the bytes, and the xattrs,
+    // ACLs and Finder tags come along with it. Elsewhere it is a real copy, which
+    // costs the track's own size in temporary space for the length of one save.
+    // That is the price of never destroying a file, and it is worth it.
+    //
+    // It does mean a save now needs a writable *directory* and not just a writable
+    // file, so a track sitting in a read-only folder can no longer be tagged where
+    // it once could. That case is close to imaginary in a music library, and it
+    // fails cleanly with the file intact — which is the trade being made.
+    let staged = StagedFile(
+        temp_sibling(&target).map_err(|e| WriteFailure::io("Couldn't save the tags", &e))?,
+    );
+    std::fs::copy(&target, &staged.0).map_err(|e| {
+        log::error!("write_tags: staging {} failed: {e}", target.display());
+        WriteFailure::io("Couldn't save the tags", &e)
+    })?;
+
+    tagged
+        .save_to_path(&staged.0, lofty::config::WriteOptions::default())
+        .map_err(|e| {
+            // The frontend shows this string in the form; the log keeps the path,
+            // which the form has no room for.
+            log::error!("write_tags: saving {} failed: {e}", target.display());
+            WriteFailure::lofty("Couldn't save the tags", &e)
+        })?;
+
+    // The staged copy is a correct, complete track carrying the new tags. This is
+    // the instant it becomes the file.
+    std::fs::rename(&staged.0, &target).map_err(|e| {
+        log::error!("write_tags: replacing {} failed: {e}", target.display());
+        WriteFailure::io("Couldn't save the tags", &e)
+    })?;
+
+    // Re-stat after the write so the cached mtime/size match the file lofty just
+    // rewrote. The incremental scan skips rows whose mtime+size are unchanged, so
+    // recording the post-write values makes the watcher's self-write event a
+    // no-op instead of a redundant re-read.
+    let (mtime, size) = std::fs::metadata(&target)
+        .map(|m| {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            (mtime, m.len() as i64)
+        })
+        .unwrap_or((0, 0));
+    Ok((tags, mtime, size))
+}
+
+// Apply one patch from the metadata editor to any number of files, and sync each
+// library cache row so the Songs/Artists/Albums views reflect the change without
+// waiting for the debounced watcher rescan. `duration` comes from the decoded
+// audio, not a tag, so it is neither shown nor written here.
+//
+// `tags` is a patch: absent keys are left alone on every file (see TagEdits). One
+// bad file does not sink the rest — every path gets its own outcome in the report.
+//
+// The file the audio engine holds open is refused here rather than trusted to the
+// frontend's gate: the decoder reads ahead across track boundaries, and a batch
+// takes long enough for playback to walk into a file the loop has not reached yet.
+// The check is per file and live, which narrows that window without closing it.
+// The save itself renames a staged copy over the track, so the worst a lost race
+// costs is a decoder reading from the replaced file — not a damaged one.
 #[tauri::command]
 async fn write_tags(
-    path: String,
+    paths: Vec<String>,
     tags: TagEdits,
+    generation: u64,
     db: State<'_, DbHandle>,
-) -> Result<FileEntry, String> {
+    engine: State<'_, audio::AudioEngine>,
+    cancel: State<'_, Arc<TagWriteCancel>>,
+    app: AppHandle,
+) -> Result<TagWriteReport, String> {
     // lofty read/save is blocking file I/O and the cache UPDATE takes the writer
     // mutex, so run the whole thing off the UI thread.
     let write_conn = db.conn.clone();
+    let held = engine.held_probe();
+    let cancel = Arc::clone(&cancel);
     tauri::async_runtime::spawn_blocking(move || {
-        let p = PathBuf::from(&path);
-        // Resolve the picked image before touching the audio file: a file that
-        // isn't an image must fail with the picker's own message and leave the
-        // track untouched, not half-written.
+        // Resolve the picked image once, before touching any audio file: a file
+        // that isn't an image must fail with the picker's own message and leave
+        // every track untouched, not half-written. One read and one validation for
+        // the whole batch, however many files it stamps the cover into.
         let artwork = tags.artwork.resolve()?;
         let edits = tags.normalized();
 
-        let mut tagged = open_tagged(&p, TAGS_ONLY).map_err(|e| {
-            log::error!("write_tags: reading {} failed: {e}", p.display());
-            format!("Couldn't read that file: {}", e)
-        })?;
-
-        // Untagged files have no tag to mutate; give them one of the container's
-        // native type (ID3v2 for MP3, MP4 atoms for m4a, Vorbis comments for FLAC...).
-        if tagged.primary_tag_mut().is_none() {
-            let tag_type = tagged.primary_tag_type();
-            tagged.insert_tag(lofty::tag::Tag::new(tag_type));
-        }
-        let tag = tagged
-            .primary_tag_mut()
-            .expect("primary tag present (inserted above when absent)");
-
-        apply_tag_edits(tag, &edits, artwork);
-
-        tagged
-            .save_to_path(&p, lofty::config::WriteOptions::default())
-            .map_err(|e| {
-                // The frontend shows this string in the form; the log keeps the
-                // path, which the form has no room for.
-                log::error!("write_tags: saving {} failed: {e}", p.display());
-                format!("Couldn't save the tags: {}", e)
-            })?;
-
-        // Re-stat after the write so the cached mtime/size match the file lofty just
-        // rewrote. The incremental scan skips rows whose mtime+size are unchanged, so
-        // recording the post-write values makes the watcher's self-write event a
-        // no-op instead of a redundant re-read.
-        let (mtime, size) = std::fs::metadata(&p)
-            .map(|m| {
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                (mtime, m.len() as i64)
-            })
-            .unwrap_or((0, 0));
-
-        // Only the fields the tracks table actually holds: the totals, the comment
-        // and the artwork are editable but uncached (see EditorTags), so there is
-        // nothing here to keep in step for them.
-        {
-            let conn = write_conn.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = conn.execute(
-                "UPDATE tracks SET mtime = ?2, size = ?3, title = ?4, artist = ?5,
-                     album = ?6, album_artist = ?7, disc = ?8, track = ?9, year = ?10,
-                     genre = ?11 WHERE path = ?1",
-                params![
-                    path,
-                    mtime,
-                    size,
-                    edits.title,
-                    edits.artist,
-                    edits.album,
-                    edits.album_artist,
-                    edits.disc,
-                    edits.track,
-                    edits.year,
-                    edits.genre
-                ],
-            );
-        }
-
-        Ok(FileEntry {
-            name: p
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            title: edits.title,
-            artist: edits.artist,
-            album: edits.album,
-            album_artist: edits.album_artist,
-            disc: edits.disc,
-            track: edits.track,
-            year: edits.year,
-            genre: edits.genre,
-            // The one column field an edit changes that the user didn't type.
-            // Writing tags rewrites the file, so every open row's Date Modified
-            // cell is stale the moment this returns; handing back the post-write
-            // mtime lets the caller patch it (see applyTagUpdate) instead of
-            // waiting for a rescan that the mtime/size pre-sync above has
-            // deliberately made a no-op.
-            modified: Some(mtime),
-            ..Default::default()
-        })
+        Ok(write_tags_to_files(
+            &paths,
+            &edits,
+            &artwork,
+            &|path, tags, mtime, size| {
+                let conn = write_conn.lock().unwrap_or_else(|e| e.into_inner());
+                update_cached_row(&conn, path, tags, mtime, size)
+            },
+            &|| held.held_paths(),
+            &|| cancel.generation.load(std::sync::atomic::Ordering::Relaxed) == generation,
+            &|done, total| {
+                let _ = app.emit(
+                    "tag-write-progress",
+                    TagProgress {
+                        generation,
+                        done,
+                        total,
+                    },
+                );
+            },
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3424,6 +4133,10 @@ pub fn run() {
             inner: Mutex::new(PendingState::default()),
         })
         .manage(RecentIcons::default())
+        // The generation the user has asked to stop, read by a running tag write
+        // between files. An Arc because the batch runs on a blocking worker that
+        // outlives the command's borrow of state.
+        .manage(Arc::new(TagWriteCancel::default()))
         // The security-scoped grants for the library roots. Managed on the builder
         // so the guards outlive every scan, watcher and tag write that depends on
         // them; see root_access.rs.
@@ -4059,7 +4772,9 @@ pub fn run() {
             window_number,
             prepare_external_file,
             write_tags,
+            cancel_tag_write,
             read_file_tags,
+            read_common_tags,
             read_artwork_file,
             audio_play,
             audio_play_stream,
@@ -4258,15 +4973,15 @@ mod tests {
             }
             let tag = tagged.primary_tag_mut().unwrap();
             let edits = TagEdits {
-                title: Some("Corneria".into()),
-                artist: Some("yeyeyeye".into()),
-                genre: Some("Chiptune".into()),
-                year: Some(1993),
-                disc: Some(2),
-                disc_total: Some(3),
-                track: Some(4),
-                track_total: Some(5),
-                comment: Some("line one\nline two".into()),
+                title: set("Corneria"),
+                artist: set("yeyeyeye"),
+                genre: set("Chiptune"),
+                year: Some(Some(1993)),
+                disc: Some(Some(2)),
+                disc_total: Some(Some(3)),
+                track: Some(Some(4)),
+                track_total: Some(Some(5)),
+                comment: set("line one\nline two"),
                 ..Default::default()
             }
             .normalized();
@@ -4278,7 +4993,7 @@ mod tests {
             }
             .resolve()
             .expect("read picture");
-            apply_tag_edits(tag, &edits, art);
+            apply_tag_edits(tag, &edits, &art);
             tagged
                 .save_to_path(&dst, lofty::config::WriteOptions::default())
                 .expect("save");
@@ -4319,39 +5034,131 @@ mod tests {
         0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
+    // Shorthands for the two loud halves of a patch literal, so the tests below
+    // read as the instructions they are rather than as nested Options.
+    fn set<T: Into<String>>(v: T) -> Option<Option<String>> {
+        Some(Some(v.into()))
+    }
+    fn clear<T>() -> Option<Option<T>> {
+        Some(None)
+    }
+
     #[test]
     fn tag_edits_deserialize_from_the_editor_payload() {
         let json = r#"{"title":null,"artist":"yeyeyeye","albumArtist":null,"album":null,
             "genre":null,"comment":"ueueueue","disc":2,"discTotal":3,"track":4,
             "trackTotal":5,"year":null,"artwork":{"kind":"set","path":"/tmp/x.png"}}"#;
         let edits: TagEdits = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(edits.artist.as_deref(), Some("yeyeyeye"));
-        assert_eq!(edits.disc_total, Some(3));
+        assert_eq!(edits.artist, set("yeyeyeye"));
+        assert_eq!(edits.disc_total, Some(Some(3)));
         assert!(matches!(edits.artwork, ArtworkEdit::Set { .. }));
         let keep = r#"{"artwork":{"kind":"keep"}}"#;
         let edits: TagEdits = serde_json::from_str(keep).expect("deserialize keep");
         assert!(matches!(edits.artwork, ArtworkEdit::Keep));
     }
 
+    // The distinction the whole patch rests on: serde reads an absent key and a
+    // present null identically on a plain Option, and these must not be the same
+    // instruction. Absent leaves the tag alone; null clears it.
+    #[test]
+    fn an_absent_key_is_not_a_null_one() {
+        let edits: TagEdits = serde_json::from_str(r#"{"album":"Night Bus"}"#).expect("patch");
+        assert_eq!(edits.album, set("Night Bus"));
+        assert_eq!(edits.title, None, "a key the form never sent");
+        assert_eq!(edits.year, None);
+
+        let edits: TagEdits = serde_json::from_str(r#"{"title":null,"year":null}"#).expect("nulls");
+        assert_eq!(edits.title, clear(), "an explicit null is a clear");
+        assert_eq!(edits.year, Some(None));
+    }
+
+    // An untouched field is not an instruction, so nothing about the file changes
+    // where the patch is silent — including the tags the editor doesn't offer.
+    #[test]
+    fn an_absent_key_leaves_its_tag_alone() {
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        tag.set_title("Borrowed Light".into());
+        tag.set_artist("Wren".into());
+        tag.insert_text(lofty::tag::ItemKey::Composer, "Hollis".into());
+        // The ID3 full date the old write path destroyed on every save: the year
+        // box shows 1979, and an unrelated edit used to write that back through
+        // set_year and lose the month and day.
+        tag.insert_text(lofty::tag::ItemKey::RecordingDate, "1979-10-05".into());
+
+        let album_only = TagEdits {
+            album: set("Night Bus"),
+            ..Default::default()
+        }
+        .normalized();
+        apply_tag_edits(&mut tag, &album_only, &ArtworkChange::Keep);
+
+        assert_eq!(tag.album().as_deref(), Some("Night Bus"));
+        assert_eq!(tag.title().as_deref(), Some("Borrowed Light"));
+        assert_eq!(tag.artist().as_deref(), Some("Wren"));
+        assert_eq!(
+            tag.get_string(&lofty::tag::ItemKey::Composer),
+            Some("Hollis")
+        );
+        assert_eq!(
+            tag.get_string(&lofty::tag::ItemKey::RecordingDate),
+            Some("1979-10-05"),
+            "an untouched Year box does not flatten a full date"
+        );
+
+        // And the explicit null still clears.
+        let drop_title = TagEdits {
+            title: clear(),
+            ..Default::default()
+        }
+        .normalized();
+        apply_tag_edits(&mut tag, &drop_title, &ArtworkChange::Keep);
+        assert_eq!(tag.title(), None);
+        assert_eq!(tag.artist().as_deref(), Some("Wren"));
+    }
+
+    // The corollary the cache and every surface depend on: a patch carrying only
+    // `album` describes the edit, not the file, so the fields handed back have to
+    // be read off the mutated tag. Built from the patch instead, this is 300 rows
+    // that have lost their titles while the files on disk are fine.
+    #[test]
+    fn the_read_back_reports_the_file_not_the_patch() {
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        tag.set_title("Borrowed Light".into());
+        tag.set_artist("Wren".into());
+        tag.set_year(1979);
+        let album_only = TagEdits {
+            album: set("Night Bus"),
+            ..Default::default()
+        }
+        .normalized();
+        apply_tag_edits(&mut tag, &album_only, &ArtworkChange::Keep);
+
+        let back = cached_fields(&tag);
+        assert_eq!(back.album.as_deref(), Some("Night Bus"));
+        assert_eq!(back.title.as_deref(), Some("Borrowed Light"));
+        assert_eq!(back.artist.as_deref(), Some("Wren"));
+        assert_eq!(back.year, Some(1979));
+    }
+
     #[test]
     fn tag_edits_round_trip_and_clear() {
         let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
         let filled = TagEdits {
-            title: Some("  Borrowed Light  ".into()),
-            artist: Some("Wren".into()),
-            album_artist: Some("Various Artists".into()),
-            album: Some("Night Bus".into()),
-            disc: Some(1),
-            disc_total: Some(2),
-            track: Some(3),
-            track_total: Some(12),
-            year: Some(1979),
-            genre: Some("Ambient".into()),
-            comment: Some("ripped from vinyl".into()),
+            title: set("  Borrowed Light  "),
+            artist: set("Wren"),
+            album_artist: set("Various Artists"),
+            album: set("Night Bus"),
+            disc: Some(Some(1)),
+            disc_total: Some(Some(2)),
+            track: Some(Some(3)),
+            track_total: Some(Some(12)),
+            year: Some(Some(1979)),
+            genre: set("Ambient"),
+            comment: set("ripped from vinyl"),
             artwork: ArtworkEdit::Keep,
         }
         .normalized();
-        apply_tag_edits(&mut tag, &filled, ArtworkChange::Keep);
+        apply_tag_edits(&mut tag, &filled, &ArtworkChange::Keep);
 
         // Trimmed on the way in, like every other text field.
         assert_eq!(tag.title().as_deref(), Some("Borrowed Light"));
@@ -4369,13 +5176,25 @@ mod tests {
         assert_eq!(tag.genre().as_deref(), Some("Ambient"));
         assert_eq!(tag.comment().as_deref(), Some("ripped from vinyl"));
 
-        // Whitespace is not a value: an all-spaces box clears, same as an empty one.
+        // Whitespace is not a value: a box typed full of spaces clears, same as
+        // one emptied. It reaches here as Some(Some("   ")) — a field the user
+        // touched — and normalized() turns it into the clear it means.
         let cleared = TagEdits {
-            title: Some("   ".into()),
-            ..Default::default()
+            title: set("   "),
+            artist: clear(),
+            album_artist: clear(),
+            album: clear(),
+            disc: Some(None),
+            disc_total: Some(None),
+            track: Some(None),
+            track_total: Some(None),
+            year: Some(None),
+            genre: clear(),
+            comment: clear(),
+            artwork: ArtworkEdit::Keep,
         }
         .normalized();
-        apply_tag_edits(&mut tag, &cleared, ArtworkChange::Keep);
+        apply_tag_edits(&mut tag, &cleared, &ArtworkChange::Keep);
         assert_eq!(tag.title(), None);
         assert_eq!(tag.artist(), None);
         assert_eq!(tag.get_string(&lofty::tag::ItemKey::AlbumArtist), None);
@@ -4434,12 +5253,12 @@ mod tests {
         ));
         let keep = TagEdits::default().normalized();
 
-        apply_tag_edits(&mut tag, &keep, ArtworkChange::Set(png(9)));
+        apply_tag_edits(&mut tag, &keep, &ArtworkChange::Set(png(9)));
         assert_eq!(tag.pictures().len(), 2);
         assert_eq!(tag.pictures()[0].data(), [9]);
         assert_eq!(tag.pictures()[1].data(), [2]);
 
-        apply_tag_edits(&mut tag, &keep, ArtworkChange::Remove);
+        apply_tag_edits(&mut tag, &keep, &ArtworkChange::Remove);
         assert_eq!(tag.pictures().len(), 1);
         assert_eq!(
             tag.pictures()[0].pic_type(),
@@ -4447,9 +5266,435 @@ mod tests {
         );
 
         // Removing from a file with no picture at all is a no-op, not a panic.
-        apply_tag_edits(&mut tag, &keep, ArtworkChange::Remove);
-        apply_tag_edits(&mut tag, &keep, ArtworkChange::Remove);
+        apply_tag_edits(&mut tag, &keep, &ArtworkChange::Remove);
+        apply_tag_edits(&mut tag, &keep, &ArtworkChange::Remove);
         assert!(tag.pictures().is_empty());
+    }
+
+    // === The batch loop ===
+    //
+    // Everything the loop talks to arrives as a closure, so these run against real
+    // files on disk and literal answers for the engine, the Stop button and the
+    // library cache. The one test that wants a real database says so.
+
+    // A scratch directory holding `n` copies of the sample MP3, named 0.mp3, 1.mp3...
+    // Returned as the path strings the loop takes. The caller removes the directory.
+    fn sample_copies(name: &str, n: usize) -> (PathBuf, Vec<String>) {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("pudding sample.mp3");
+        let dir =
+            std::env::temp_dir().join(format!("pudding-bulk-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let paths = (0..n)
+            .map(|i| {
+                let dst = dir.join(format!("{i}.mp3"));
+                std::fs::copy(&src, &dst).expect("copy sample");
+                dst.to_string_lossy().into_owned()
+            })
+            .collect();
+        (dir, paths)
+    }
+
+    // The patch every test below sends unless it wants something else: one field,
+    // touched. The rest of the file must come through unharmed.
+    fn album_patch(album: &str) -> TagEdits {
+        TagEdits {
+            album: set(album),
+            ..Default::default()
+        }
+        .normalized()
+    }
+
+    fn album_of(path: &str) -> Option<String> {
+        let tagged = open_tagged(std::path::Path::new(path), TAGS_ONLY).expect("read back");
+        let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+        tag.album().map(|s| s.to_string())
+    }
+
+    // A cache that always succeeds, for the tests that are not about the cache.
+    fn cache_ok(_: &str, _: &FileEntry, _: i64, _: i64) -> rusqlite::Result<usize> {
+        Ok(1)
+    }
+
+    fn nothing_held() -> Vec<String> {
+        Vec::new()
+    }
+
+    // One unwritable file must not cost the other two their edit — the difference
+    // between a bulk save and a bulk save that is safe to reach for.
+    #[test]
+    fn one_bad_file_does_not_sink_the_batch() {
+        let (dir, mut paths) = sample_copies("bad-file", 3);
+        let missing = dir.join("gone.mp3").to_string_lossy().into_owned();
+        paths[1] = missing.clone();
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            &cache_ok,
+            &nothing_held,
+            &|| false,
+            &|done, total| seen.borrow_mut().push((done, total)),
+        );
+
+        assert_eq!(report.ok.len(), 2);
+        assert!(!report.stopped);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].path, missing);
+        assert!(!report.failed[0].stale, "the file was not written at all");
+        assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
+        assert_eq!(album_of(&paths[2]).as_deref(), Some("Night Bus"));
+        // Every path reports, failures included: the label counts files handled,
+        // not files saved.
+        assert_eq!(*seen.borrow(), vec![(1, 3), (2, 3), (3, 3)]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The behaviour change the mode collapse brings, and the one a user could
+    // notice: a tag holding only whitespace shows as an empty box, so it is
+    // untouched, so it is not sent — and now survives a save that used to clear it.
+    #[test]
+    fn an_untouched_whitespace_only_tag_survives() {
+        let (dir, paths) = sample_copies("whitespace", 1);
+        {
+            let mut tagged = open_tagged(std::path::Path::new(&paths[0]), TAGS_ONLY).expect("read");
+            if tagged.primary_tag_mut().is_none() {
+                let tag_type = tagged.primary_tag_type();
+                tagged.insert_tag(lofty::tag::Tag::new(tag_type));
+            }
+            let tag = tagged.primary_tag_mut().unwrap();
+            tag.set_comment("   ".into());
+            tagged
+                .save_to_path(
+                    std::path::Path::new(&paths[0]),
+                    lofty::config::WriteOptions::default(),
+                )
+                .expect("seed comment");
+        }
+
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            &cache_ok,
+            &nothing_held,
+            &|| false,
+            &|_, _| {},
+        );
+        assert_eq!(report.ok.len(), 1);
+
+        let tagged = open_tagged(std::path::Path::new(&paths[0]), TAGS_ONLY).expect("read back");
+        let tag = tagged.primary_tag().expect("tag");
+        assert_eq!(tag.comment().as_deref(), Some("   "));
+        assert_eq!(tag.album().as_deref(), Some("Night Bus"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The engine is asked per file, not handed a path at submit: the decode
+    // frontier moves while a batch runs. A held file is refused and left exactly
+    // as it was — asserted on its bytes, since a rewrite under the decoder is the
+    // thing this exists to prevent.
+    #[test]
+    fn a_held_file_is_refused_and_left_byte_identical() {
+        let (dir, paths) = sample_copies("held", 3);
+        let before = std::fs::read(&paths[1]).expect("read before");
+        let held = paths[1].clone();
+
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            &cache_ok,
+            &|| vec![held.clone()],
+            &|| false,
+            &|_, _| {},
+        );
+
+        assert_eq!(report.ok.len(), 2);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].path, paths[1]);
+        assert_eq!(
+            report.failed[0].message,
+            "Can't write a track while it's playing"
+        );
+        assert_eq!(std::fs::read(&paths[1]).expect("read after"), before);
+        assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Stop means "write no more files", never "undo the ones already written" —
+    // and the files it did not reach are untouched, not half-written.
+    #[test]
+    fn a_cancel_between_files_stops_the_batch() {
+        let (dir, paths) = sample_copies("cancel", 3);
+        let untouched = std::fs::read(&paths[2]).expect("read before");
+        let handled = std::cell::Cell::new(0usize);
+
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            &cache_ok,
+            &nothing_held,
+            // Pressed while the first file was being written.
+            &|| handled.get() >= 1,
+            &|done, _| handled.set(done),
+        );
+
+        assert!(report.stopped);
+        assert_eq!(report.ok.len(), 1);
+        assert!(report.failed.is_empty(), "unreached is not failed");
+        assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
+        assert_eq!(std::fs::read(&paths[2]).expect("read after"), untouched);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The generation stamp: a Stop aimed at the batch the user already watched
+    // finish must not kill the one they started next.
+    #[test]
+    fn a_stale_cancel_does_not_stop_the_current_batch() {
+        let (dir, paths) = sample_copies("stale-cancel", 2);
+        let cancel = TagWriteCancel::default();
+        // The user stopped batch 1; this is batch 2.
+        cancel
+            .generation
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        let generation = 2u64;
+
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            &cache_ok,
+            &nothing_held,
+            &|| cancel.generation.load(std::sync::atomic::Ordering::Relaxed) == generation,
+            &|_, _| {},
+        );
+        assert!(!report.stopped);
+        assert_eq!(report.ok.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A library row that could not be updated is not a save that failed. The file
+    // is correct on disk — asserted on the file, because reporting this as a write
+    // failure is the one report worse than saying nothing.
+    #[test]
+    fn a_cache_failure_is_reported_stale_with_the_file_written() {
+        let (dir, paths) = sample_copies("cache-fail", 1);
+
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            &|_, _, _, _| Err(rusqlite::Error::InvalidQuery),
+            &nothing_held,
+            &|| false,
+            &|_, _| {},
+        );
+
+        assert!(report.ok.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.failed[0].stale);
+        assert_eq!(
+            report.failed[0].message,
+            "Saved the file, but the library list may be stale"
+        );
+        assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The busy latch. A scan holds SQLite's write lock across its entire library
+    // walk, so once one row times out every row will — at the full busy_timeout
+    // each. Three hundred files is up to 25 minutes of a loop sitting in the
+    // kernel with Stop read only between files, which is why the assertion that
+    // matters here is the attempt *count*: one, not one per file.
+    #[test]
+    fn the_busy_latch_stops_attempting_after_one_timeout() {
+        let (dir, paths) = sample_copies("busy-latch", 3);
+        let db_path = dir.join("library.db");
+        let conn = open_connection(&db_path).expect("open db");
+        init_schema(&conn).expect("schema");
+        // The real command waits 5 s per attempt; the point is made in a fraction
+        // of that, and the count is what is being asserted either way.
+        conn.busy_timeout(Duration::from_millis(100))
+            .expect("busy timeout");
+
+        // Stand in for a scan: one connection holding the write lock throughout.
+        let scanner = open_connection(&db_path).expect("open scanner");
+        scanner
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 INSERT INTO tracks (path, root, mtime, size) VALUES ('/x', '/', 1, 1)",
+            )
+            .expect("hold the write lock");
+
+        let attempts = std::cell::Cell::new(0usize);
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            &|path, tags, mtime, size| {
+                attempts.set(attempts.get() + 1);
+                update_cached_row(&conn, path, tags, mtime, size)
+            },
+            &nothing_held,
+            &|| false,
+            &|_, _| {},
+        );
+
+        assert_eq!(attempts.get(), 1, "latched after the first SQLITE_BUSY");
+        assert!(report.ok.is_empty());
+        assert_eq!(report.failed.len(), 3);
+        assert!(report.failed.iter().all(|f| f.stale));
+        // Every file is still correctly written: the batch stays disk-bound, and
+        // the rows recover on the next incremental scan because they kept their
+        // pre-edit mtime.
+        for path in &paths {
+            assert_eq!(album_of(path).as_deref(), Some("Night Bus"));
+        }
+
+        let _ = scanner.execute_batch("ROLLBACK");
+        drop(scanner);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Seed a copy the way a save would, so the fold below reads tags that went
+    // through the same write path the editor uses.
+    fn seed(path: &str, edits: TagEdits, artwork: &ArtworkChange) {
+        let report = write_tags_to_files(
+            &[path.to_string()],
+            &edits.normalized(),
+            artwork,
+            &cache_ok,
+            &nothing_held,
+            &|| false,
+            &|_, _| {},
+        );
+        assert!(report.failed.is_empty(), "seeding {path}");
+    }
+
+    fn png_picture(dir: &Path) -> ArtworkChange {
+        let png = dir.join("art.png");
+        std::fs::write(&png, PNG_1PX).expect("write png");
+        ArtworkEdit::Set {
+            path: png.to_string_lossy().into_owned(),
+        }
+        .resolve()
+        .expect("read picture")
+    }
+
+    // The bulk seed: what the selection shares lands in `common`, what it doesn't
+    // is *named* in `mixed` — a list, not a sentinel, so the form can tell "they
+    // all agree there's no comment" from "the comments differ".
+    #[test]
+    fn a_bulk_seed_folds_to_what_the_selection_shares() {
+        let (dir, paths) = sample_copies("common-tags", 3);
+        let art = png_picture(&dir);
+        for (i, path) in paths.iter().enumerate() {
+            seed(
+                path,
+                TagEdits {
+                    album: set("Night Bus"),
+                    year: Some(Some(1979)),
+                    title: set(format!("Track {i}")),
+                    ..Default::default()
+                },
+                &art,
+            );
+        }
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        let folded = fold_common_tags(&paths, &|done, total| seen.borrow_mut().push((done, total)))
+            .expect("fold");
+
+        assert_eq!(folded.common.album.as_deref(), Some("Night Bus"));
+        assert_eq!(folded.common.year, Some(1979));
+        assert!(!folded.mixed.iter().any(|k| k == "album"));
+
+        assert_eq!(folded.common.title, None, "a mixed field carries no value");
+        assert!(folded.mixed.iter().any(|k| k == "title"));
+        // Names differ across any real selection; the heading ignores it.
+        assert!(folded.mixed.iter().any(|k| k == "name"));
+
+        // The artwork carve-out: folded on digests, handed back as the picture.
+        assert!(!folded.mixed.iter().any(|k| k == "artwork"));
+        assert!(
+            folded
+                .common
+                .artwork
+                .as_deref()
+                .unwrap()
+                .starts_with("data:image/png;base64,"),
+            "the surviving cover is encoded once, at the end"
+        );
+        assert_eq!(*seen.borrow(), vec![(1, 3), (2, 3), (3, 3)]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Once every field disagrees there is nothing left to learn, and the files
+    // after that point are never opened — the assertion that matters is which
+    // files the fold touched, since on a large heterogeneous selection that is the
+    // whole cost of the read.
+    #[test]
+    fn a_selection_that_agrees_on_nothing_stops_the_read_early() {
+        let (dir, paths) = sample_copies("all-mixed", 4);
+        let art = png_picture(&dir);
+        for (i, path) in paths.iter().enumerate() {
+            let n = i as u32 + 1;
+            seed(
+                path,
+                TagEdits {
+                    title: set(format!("Title {i}")),
+                    artist: set(format!("Artist {i}")),
+                    album: set(format!("Album {i}")),
+                    album_artist: set(format!("Various {i}")),
+                    genre: set(format!("Genre {i}")),
+                    comment: set(format!("Comment {i}")),
+                    disc: Some(Some(n)),
+                    disc_total: Some(Some(n + 10)),
+                    track: Some(Some(n + 20)),
+                    track_total: Some(Some(n + 30)),
+                    year: Some(Some(1979 + n)),
+                    ..Default::default()
+                },
+                // The covers have to disagree too, or artwork holds the fold open.
+                if i % 2 == 0 {
+                    &art
+                } else {
+                    &ArtworkChange::Remove
+                },
+            );
+        }
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        let folded = fold_common_tags(&paths, &|done, total| seen.borrow_mut().push((done, total)))
+            .expect("fold");
+
+        assert_eq!(folded.common.title, None);
+        assert_eq!(folded.common.artwork, None);
+        for key in ["title", "artist", "album", "year", "artwork", "name"] {
+            assert!(folded.mixed.iter().any(|k| k == key), "{key} must be mixed");
+        }
+        // Two files settled every field; the last two were never opened. The
+        // second file's own number is never reported — the fold knows on reading
+        // it that the read is over, so the label goes straight to done rather
+        // than resting on 2 of 4.
+        assert_eq!(*seen.borrow(), vec![(1, 4), (4, 4)]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4607,5 +5852,401 @@ mod tests {
         assert!(move_stream(p.clone(), 0, 9).is_err());
 
         let _ = std::fs::remove_file(&path);
+    }
+    // === Never destroy a file ===
+    //
+    // lofty rewrites a file where it stands: for ID3v2 it reads the audio into
+    // memory, truncates the file to zero and writes it all back. Every test here
+    // exists because a save that dies between that truncate and the last byte used
+    // to leave an empty file where a song was. write_one_file stages on a copy and
+    // renames, so the assertions are all the same shape: after a failure, the track
+    // is byte-for-byte what it was.
+
+    // A small APFS volume that can actually be filled. There is no way to fake
+    // ENOSPC through std, and ENOSPC is precisely the failure that lands after the
+    // truncate — a read-only file or a missing one fails at the open instead, which
+    // is the safe half of the story and proves nothing. Returns None where hdiutil
+    // isn't available, and the test says it skipped rather than passing quietly.
+    struct TinyVolume {
+        dmg: PathBuf,
+        mount: PathBuf,
+    }
+
+    impl TinyVolume {
+        fn new(name: &str, megabytes: u32) -> Option<TinyVolume> {
+            let volname = format!("PuddingTiny{}{}", std::process::id(), name);
+            let dmg = std::env::temp_dir().join(format!("{volname}.dmg"));
+            let _ = std::fs::remove_file(&dmg);
+            let ok = std::process::Command::new("hdiutil")
+                .args([
+                    "create",
+                    "-size",
+                    &format!("{megabytes}m"),
+                    "-fs",
+                    "APFS",
+                    "-volname",
+                    &volname,
+                    "-quiet",
+                ])
+                .arg(&dmg)
+                .status()
+                .ok()?
+                .success();
+            if !ok {
+                return None;
+            }
+            let attached = std::process::Command::new("hdiutil")
+                .args(["attach", "-nobrowse", "-quiet"])
+                .arg(&dmg)
+                .status()
+                .ok()?
+                .success();
+            if !attached {
+                let _ = std::fs::remove_file(&dmg);
+                return None;
+            }
+            Some(TinyVolume {
+                dmg,
+                mount: PathBuf::from(format!("/Volumes/{volname}")),
+            })
+        }
+
+        // `n` copies of the sample, as the path strings the loop takes.
+        fn with_tracks(&self, n: usize) -> Vec<String> {
+            let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("pudding sample.mp3");
+            (0..n)
+                .map(|i| {
+                    let dst = self.mount.join(format!("{i}.mp3"));
+                    std::fs::copy(&src, &dst).expect("copy sample onto the tiny volume");
+                    dst.to_string_lossy().into_owned()
+                })
+                .collect()
+        }
+    }
+
+    impl Drop for TinyVolume {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("hdiutil")
+                .args(["detach", "-quiet", "-force"])
+                .arg(&self.mount)
+                .status();
+            let _ = std::fs::remove_file(&self.dmg);
+        }
+    }
+
+    // An uncompressed BMP of a known size, so a test can ask for "more than fits"
+    // exactly. Uncompressed because the number has to be predictable and because
+    // lofty sniffs the signature rather than decoding anything.
+    fn big_bmp(bytes_wanted: usize) -> Vec<u8> {
+        let w: i32 = 1000;
+        let row = (w as usize * 3).div_ceil(4) * 4;
+        let h = (bytes_wanted / row).max(1);
+        let pix = row * h;
+        let mut v = Vec::with_capacity(54 + pix);
+        v.extend_from_slice(b"BM");
+        v.extend_from_slice(&((54 + pix) as u32).to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&54u32.to_le_bytes());
+        v.extend_from_slice(&40u32.to_le_bytes());
+        v.extend_from_slice(&w.to_le_bytes());
+        v.extend_from_slice(&(h as i32).to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&24u16.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&(pix as u32).to_le_bytes());
+        v.extend_from_slice(&2835i32.to_le_bytes());
+        v.extend_from_slice(&2835i32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.resize(54 + pix, 0x40);
+        v
+    }
+
+    // An artwork change big enough that stamping it in will not fit. Staged in the
+    // ordinary temp directory and never on the volume under test — the picture has
+    // to be readable for the save to get as far as the write it cannot finish.
+    fn oversized_cover(name: &str, bytes: usize) -> ArtworkChange {
+        let art =
+            std::env::temp_dir().join(format!("pudding-cover-{}-{}.bmp", std::process::id(), name));
+        std::fs::write(&art, big_bmp(bytes)).expect("write cover");
+        ArtworkEdit::Set {
+            path: art.to_string_lossy().into_owned(),
+        }
+        .resolve()
+        .expect("a BMP is a picture")
+    }
+
+    // Anything left beside the track after a save is litter the next scan would
+    // trip over.
+    fn staged_leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".pudding-save-"))
+            .collect()
+    }
+
+    // The one that matters. A save that runs out of disk used to leave a 0-byte
+    // file: lofty had already truncated the original before it found out it could
+    // not write it back. The track must come through untouched instead.
+    #[test]
+    fn a_save_that_runs_out_of_disk_leaves_the_track_untouched() {
+        let Some(vol) = TinyVolume::new("nospace", 3) else {
+            eprintln!("skipped: hdiutil unavailable");
+            return;
+        };
+        let paths = vol.with_tracks(1);
+        let track = PathBuf::from(&paths[0]);
+        let before = std::fs::read(&track).expect("read before");
+
+        // Staged on the same volume, so the write has nowhere to go.
+        let art = oversized_cover("nospace", 3 * 1024 * 1024);
+        let failure = write_one_file(&track, &album_patch("Night Bus").normalized(), &art)
+            .err()
+            .expect("the disk is full, this cannot succeed");
+
+        assert!(
+            failure.fatal,
+            "a full disk is the mount talking, not this one file"
+        );
+        assert_eq!(
+            std::fs::read(&track).expect("read after"),
+            before,
+            "a failed save must leave the file byte for byte as it was"
+        );
+        assert!(
+            open_tagged(&track, WITH_PROPERTIES).is_ok(),
+            "still a playable audio file"
+        );
+        assert!(
+            staged_leftovers(&vol.mount).is_empty(),
+            "the staged copy is cleaned up"
+        );
+    }
+
+    // The same failure across a batch. Every file after the first used to be
+    // destroyed in turn, each one reported as a mild "couldn't be written" — a
+    // library quietly emptied while the form counted up.
+    #[test]
+    fn a_full_disk_stops_the_batch_instead_of_emptying_it() {
+        let Some(vol) = TinyVolume::new("batch", 5) else {
+            eprintln!("skipped: hdiutil unavailable");
+            return;
+        };
+        let paths = vol.with_tracks(4);
+        let before: Vec<Vec<u8>> = paths
+            .iter()
+            .map(|p| std::fs::read(p).expect("read before"))
+            .collect();
+
+        let art = oversized_cover("batch", 3 * 1024 * 1024);
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus").normalized(),
+            &art,
+            &cache_ok,
+            &nothing_held,
+            &|| false,
+            &|_, _| {},
+        );
+
+        assert!(report.ok.is_empty());
+        assert_eq!(
+            report.failed.len(),
+            1,
+            "the batch gives up after the first storage failure rather than \
+             attempting — and copying — every file behind it"
+        );
+        assert!(report.aborted.is_some(), "and says why it stopped short");
+        assert!(!report.stopped, "nobody pressed Stop");
+
+        for (path, was) in paths.iter().zip(&before) {
+            assert_eq!(
+                &std::fs::read(path).expect("read after"),
+                was,
+                "{path} must be exactly what it was"
+            );
+        }
+        assert!(staged_leftovers(&vol.mount).is_empty());
+    }
+
+    // A file's own problem is not the storage's: one unreadable track must not
+    // abort the batch the way a full disk does.
+    #[test]
+    fn a_single_bad_file_does_not_abort_the_batch() {
+        let (dir, mut paths) = sample_copies("not-fatal", 3);
+        paths[1] = dir.join("gone.mp3").to_string_lossy().into_owned();
+
+        let report = write_tags_to_files(
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            &cache_ok,
+            &nothing_held,
+            &|| false,
+            &|_, _| {},
+        );
+
+        assert_eq!(report.ok.len(), 2);
+        assert!(report.aborted.is_none(), "a missing file is not the disk");
+        assert!(staged_leftovers(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The editor reads `primary_tag().or_else(first_tag)`, so an MP3 carrying only
+    // an ID3v1 tag — ordinary in a library ripped before about 2005 — seeds the
+    // form from ID3v1 while the save lands on a new ID3v2. That new tag used to
+    // start empty, so editing the title alone wrote a tag holding nothing but the
+    // title, and being primary it shadowed the artist and album the form had shown
+    // a second earlier. The patch promises an absent key is a tag the file keeps.
+    #[test]
+    fn editing_one_field_keeps_the_rest_of_a_non_primary_tag() {
+        use lofty::tag::TagExt;
+        let (dir, paths) = sample_copies("id3v1-only", 1);
+        let track = PathBuf::from(&paths[0]);
+
+        // Strip the sample back to a single ID3v1 tag.
+        for t in [
+            lofty::tag::TagType::Id3v2,
+            lofty::tag::TagType::Id3v1,
+            lofty::tag::TagType::Ape,
+        ] {
+            let _ = t.remove_from_path(&track);
+        }
+        let mut v1 = lofty::tag::Tag::new(lofty::tag::TagType::Id3v1);
+        v1.set_title("Old Title".into());
+        v1.set_artist("Old Artist".into());
+        v1.set_album("Old Album".into());
+        v1.save_to_path(&track, lofty::config::WriteOptions::default())
+            .expect("write an ID3v1-only file");
+
+        // What the editor would show.
+        let shown = file_tags(&paths[0], ArtworkRead::DataUrl);
+        assert_eq!(shown.artist.as_deref(), Some("Old Artist"));
+        assert_eq!(shown.album.as_deref(), Some("Old Album"));
+
+        // The user edits the title and nothing else.
+        let edits = TagEdits {
+            title: set("New Title"),
+            ..Default::default()
+        }
+        .normalized();
+        let (cached, _, _) =
+            write_one_file(&track, &edits, &ArtworkChange::Keep).expect("write succeeds");
+
+        let after = file_tags(&paths[0], ArtworkRead::DataUrl);
+        assert_eq!(after.title.as_deref(), Some("New Title"));
+        assert_eq!(
+            after.artist.as_deref(),
+            Some("Old Artist"),
+            "an absent key is a tag the file keeps"
+        );
+        assert_eq!(after.album.as_deref(), Some("Old Album"));
+        // And the library row is read off that same tag, so it cannot disagree.
+        assert_eq!(cached.artist.as_deref(), Some("Old Artist"));
+        assert_eq!(cached.album.as_deref(), Some("Old Album"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Saving through a symlink must tag the track, not replace the link with a
+    // copy of it. The save ends in a rename, and rename swaps a directory entry —
+    // so without canonicalizing first, editing a symlinked track would leave a
+    // regular file where the link was and strand the original.
+    #[test]
+    fn saving_through_a_symlink_keeps_the_symlink() {
+        let (dir, paths) = sample_copies("symlink", 1);
+        let real = PathBuf::from(&paths[0]);
+        let link = dir.join("link.mp3");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        write_one_file(&link, &album_patch("Night Bus"), &ArtworkChange::Keep).expect("write");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("stat link")
+                .file_type()
+                .is_symlink(),
+            "the link is still a link"
+        );
+        assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
+        assert!(staged_leftovers(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The staged copy is what carries a file's metadata across the rename. Finder
+    // tags and comments live in xattrs, and losing them on every tag edit would be
+    // its own quiet data loss.
+    #[test]
+    fn extended_attributes_survive_a_save() {
+        let (dir, paths) = sample_copies("xattr", 1);
+        let wrote = std::process::Command::new("xattr")
+            .args([
+                "-w",
+                "com.apple.metadata:pudding_test",
+                "keep me",
+                &paths[0],
+            ])
+            .status();
+        if !matches!(wrote, Ok(s) if s.success()) {
+            eprintln!("skipped: xattr unavailable");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        write_one_file(
+            Path::new(&paths[0]),
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+        )
+        .expect("write");
+
+        let read = std::process::Command::new("xattr")
+            .args(["-p", "com.apple.metadata:pudding_test", &paths[0]])
+            .output()
+            .expect("read xattr");
+        assert!(
+            String::from_utf8_lossy(&read.stdout).contains("keep me"),
+            "the staged copy carries the file's metadata across the rename"
+        );
+        assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The latch reads the storage's answer, not the file's. Getting this wrong in
+    // either direction is bad: too eager and one odd file stops a 300-file save,
+    // too shy and a full disk is answered by copying 300 tracks into it.
+    #[test]
+    fn only_storage_failures_are_fatal_to_a_batch() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::StorageFull,
+            ErrorKind::ReadOnlyFilesystem,
+            ErrorKind::QuotaExceeded,
+        ] {
+            assert!(is_storage_fatal(&Error::from(kind)), "{kind:?}");
+        }
+        // EIO, ENXIO, ENODEV: a drive pulled out mid-batch. std gives these no
+        // named kind, so they have to be read off the raw errno.
+        for errno in [5, 6, 19] {
+            assert!(
+                is_storage_fatal(&Error::from_raw_os_error(errno)),
+                "{errno}"
+            );
+        }
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidData,
+        ] {
+            assert!(!is_storage_fatal(&Error::from(kind)), "{kind:?}");
+        }
     }
 }

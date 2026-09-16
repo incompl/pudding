@@ -6,7 +6,7 @@
 // a feature module, or import cycles become easy to introduce. State that needs
 // feature functions (paneView, queueIsActivePool) deliberately stays in main.ts.
 
-import { signal } from "@preact/signals-core";
+import { signal, computed } from "@preact/signals-core";
 import type { Store } from "@tauri-apps/plugin-store";
 import type {
   Queue,
@@ -112,6 +112,27 @@ export const currentPoolPath = signal<string | null>(null);
 // Backing field for the app.currentParent accessor below.
 let currentParentNode: TreeNode | null = null;
 
+// Backing signals for the two "the engine is holding nothing" flags. Both stay
+// plain fields on `app` — the playback paths write them on every track change and
+// read them constantly, and must not drag subscriptions along — but their setters
+// mirror here so a gate can react to them. The getters peek, so reading
+// app.queueEnded inside an effect subscribes to nothing.
+const queueEndedSignal = signal(false);
+const pendingResumeSignal = signal<{ time: number } | null>(null);
+
+// Whether the engine has a pool loaded that it hasn't drained — i.e. whether
+// currentNodePath names a file the decode thread may still have open. The two
+// false cases both leave a playhead standing with no engine behind it:
+//   drained    playback ran to the end. The handles are dropped, but folder
+//              continuation deliberately keeps its row highlighted so play
+//              resumes the finished track (see stopAtQueueEnd).
+//   armed      a session restored but never played, or a queue built at rest.
+// This is the renderer's mirror of the backend's queue_exhausted, which empties
+// held_paths_of for exactly the same reason.
+export const enginePoolLive = computed(
+  () => !queueEndedSignal.value && pendingResumeSignal.value == null,
+);
+
 export const app: AppState = {
   store: undefined as unknown as Store, // assigned in init(), like the old `let`
   rootNode: null,
@@ -136,7 +157,12 @@ export const app: AppState = {
   lastQueue: [],
   lastIndex: 0,
   pendingQueueIndex: null,
-  queueEnded: false,
+  get queueEnded(): boolean {
+    return queueEndedSignal.peek();
+  },
+  set queueEnded(ended: boolean) {
+    queueEndedSignal.value = ended;
+  },
   shuffleBag: [],
   shuffleHistory: [],
   lastPlaybackPush: 0,
@@ -152,7 +178,12 @@ export const app: AppState = {
   refreshDeferredWhileEditing: false,
   pendingRevealPlaylistPath: null,
   pendingRevealPlayingPath: null,
-  pendingResume: null,
+  get pendingResume(): { time: number } | null {
+    return pendingResumeSignal.peek();
+  },
+  set pendingResume(resume: { time: number } | null) {
+    pendingResumeSignal.value = resume;
+  },
 };
 
 // --- Reactive state ---

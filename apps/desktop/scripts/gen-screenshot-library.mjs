@@ -76,7 +76,7 @@ const albums = [
     genre: "Indie Pop",
     cover: HERO_COVER,
     tracks: [
-      ["Nothingness But Shining", 203],
+      ["The Deep Sweetness", 203],
       ["Peach Season", 189],
       ["Almost Symmetrical", 226],
       ["Sunday Diagram", 248],

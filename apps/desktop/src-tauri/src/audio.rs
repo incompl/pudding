@@ -364,6 +364,51 @@ struct Origins {
     // Most recently activated origin (frames_played has reached its
     // at_consumer_frame). None until the first origin activates.
     current: Option<Origin>,
+    // A file the decoder has opened but whose origin is not published yet. A
+    // track needing a sample-rate switch returns early with switch_to *before*
+    // publish_origin runs (see advance_to_next_playable), and its origin is
+    // deferred until the rebuild — so for that window the decoder holds a handle
+    // on a file named by neither `current` nor `pending`. Recorded here so
+    // held_paths covers the deferred-origin window too; publishing an origin
+    // clears it, which is the same moment the ordinary path fills it in and
+    // empties it again.
+    opened: Option<String>,
+}
+
+// The files the decode thread may be holding open right now: the audible track,
+// every track the read-ahead frontier has opened beyond it, and one it has opened
+// but not yet published an origin for. Writing a tag rewrites a file in place, so
+// this is what a write has to refuse (see write_tags).
+//
+// `queue_exhausted` empties the set. It is set the moment the frontier goes None
+// — no more files to decode, every handle already dropped — while `current` keeps
+// naming the last track for the benefit of Seek and the position thread. Without
+// this an album played to its end would report its final track as held forever,
+// and a bulk edit of that album would refuse one track with nothing playing.
+//
+// The accepted window: between `queue_exhausted` being set and the last track's
+// buffered audio running out, a *seek* can reopen that track. See the plan's
+// third named gap.
+fn held_paths_of(origins: &Origins, queue_exhausted: bool) -> Vec<String> {
+    if queue_exhausted {
+        return Vec::new();
+    }
+    let mut paths: Vec<String> = Vec::new();
+    let mut push = |p: &str| {
+        if !paths.iter().any(|held| held == p) {
+            paths.push(p.to_string());
+        }
+    };
+    if let Some(origin) = origins.current.as_ref() {
+        push(&origin.path);
+    }
+    for origin in &origins.pending {
+        push(&origin.path);
+    }
+    if let Some(path) = origins.opened.as_deref() {
+        push(path);
+    }
+    paths
 }
 
 // === Event payloads ===
@@ -424,9 +469,41 @@ pub struct AudioEngine {
     pub cmd_tx: Sender<Command>,
     shared: Arc<SharedState>,
     output_tx: Sender<OutputRequest>,
+    // Only so held_paths can answer. Origins are otherwise wholly the decode and
+    // position threads' business.
+    origins: Arc<Mutex<Origins>>,
+}
+
+// A live view of the held set, detached from the engine handle so a blocking
+// worker can keep asking. `State<AudioEngine>` cannot cross into spawn_blocking,
+// and a path snapshotted before a multi-second batch would answer for the wrong
+// file by the time the batch reached it.
+#[derive(Clone)]
+pub struct HeldProbe {
+    shared: Arc<SharedState>,
+    origins: Arc<Mutex<Origins>>,
+}
+
+impl HeldProbe {
+    // The files the decoder may have open, asked live. Callers that rewrite a
+    // file in place (write_tags) read this per file: the decode frontier runs
+    // ahead of the audible track, so the file being played is not the only file
+    // being held.
+    pub fn held_paths(&self) -> Vec<String> {
+        let exhausted = self.shared.queue_exhausted.load(Ordering::Relaxed);
+        let origins = self.origins.lock().unwrap_or_else(|e| e.into_inner());
+        held_paths_of(&origins, exhausted)
+    }
 }
 
 impl AudioEngine {
+    pub fn held_probe(&self) -> HeldProbe {
+        HeldProbe {
+            shared: Arc::clone(&self.shared),
+            origins: Arc::clone(&self.origins),
+        }
+    }
+
     pub fn send(&self, cmd: Command) {
         // The decode thread lives for the whole process, so send only fails if
         // the channel was somehow closed (shouldn't happen). Log and move on.
@@ -853,6 +930,7 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
         cmd_tx,
         shared,
         output_tx,
+        origins,
     })
 }
 
@@ -2148,6 +2226,14 @@ fn advance_to_next_playable(
         }
         match open_track(&queue[*frontier_idx], output_rate, rg_mode) {
             Some(reader) => {
+                // The handle exists from here on, so record it here — before the
+                // switch_to return below, which defers this track's origin until
+                // the rate rebuild and would otherwise leave an open file named
+                // nowhere (see Origins::opened). publish_origin clears it.
+                {
+                    let mut o = origins.lock().unwrap_or_else(|e| e.into_inner());
+                    o.opened = Some(reader.path.clone());
+                }
                 let target = desired_output_rate(
                     follow,
                     reader.input_rate_declared,
@@ -3329,6 +3415,7 @@ fn reset_for_new_playback(shared: &Arc<SharedState>, origins: &Arc<Mutex<Origins
     let mut o = origins.lock().unwrap_or_else(|e| e.into_inner());
     o.pending.clear();
     o.current = None;
+    o.opened = None;
 }
 
 // Prepare the replacement decoder before committing a paused flush. On any
@@ -3410,6 +3497,9 @@ fn publish_origin(
     let epoch = shared.play_epoch.load(Ordering::Relaxed);
     let token = shared.play_token.load(Ordering::Relaxed);
     let mut o = origins.lock().unwrap_or_else(|e| e.into_inner());
+    // This track is named by `pending` from here on, so the deferred-origin slot
+    // has nothing left to cover (see Origins::opened).
+    o.opened = None;
     o.pending.push_back(Origin {
         epoch,
         token,
@@ -4776,5 +4866,79 @@ mod rate_switch_tests {
         assert_eq!(device.current_rate().unwrap(), original);
         eprintln!("hardware nominal rate restored: {original} Hz");
         drop(stream);
+    }
+}
+
+#[cfg(test)]
+mod held_paths_tests {
+    //! The set write_tags refuses to rewrite. Tested on the plain function so it
+    //! needs no engine, no device and no audio: what it has to get right is which
+    //! of three slots count, and when a drained queue stops counting at all.
+    use super::*;
+
+    fn origin(path: &str) -> Origin {
+        Origin {
+            epoch: 0,
+            token: 0,
+            at_consumer_frame: 0,
+            queue_index: 0,
+            path: path.to_string(),
+            duration_seconds: 10.0,
+            start_offset_seconds: 0.0,
+            rate: 44_100,
+        }
+    }
+
+    // The audible track and the read-ahead frontier are both held: gapless
+    // playback opens the next track while the current one is still playing, so a
+    // check that saw only `current` would let a save rewrite a file under the
+    // decoder at exactly the moment it matters.
+    #[test]
+    fn current_and_pending_are_both_held() {
+        let origins = Origins {
+            current: Some(origin("/a.mp3")),
+            pending: [origin("/b.mp3")].into(),
+            ..Default::default()
+        };
+        assert_eq!(held_paths_of(&origins, false), vec!["/a.mp3", "/b.mp3"]);
+    }
+
+    // The deferred-origin window: a track that needs a sample-rate switch is open
+    // but published nowhere until the rebuild.
+    #[test]
+    fn a_track_opened_for_a_rate_switch_is_held() {
+        let origins = Origins {
+            current: Some(origin("/a.mp3")),
+            opened: Some("/b.flac".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(held_paths_of(&origins, false), vec!["/a.mp3", "/b.flac"]);
+    }
+
+    // A queue holding the same file twice must not report it twice — the caller
+    // uses this as a set.
+    #[test]
+    fn a_repeated_path_appears_once() {
+        let origins = Origins {
+            current: Some(origin("/a.mp3")),
+            pending: [origin("/a.mp3")].into(),
+            ..Default::default()
+        };
+        assert_eq!(held_paths_of(&origins, false), vec!["/a.mp3"]);
+    }
+
+    // Play an album to its end without pressing Stop and `current` still names
+    // the last track, though nothing is playing and no handle is held. Without
+    // this gate, selecting that album and editing it refuses one track with
+    // "Can't write a track while it's playing" — the whole reason the accessor
+    // reads queue_exhausted rather than `current` alone.
+    #[test]
+    fn nothing_is_held_once_the_queue_is_exhausted() {
+        let origins = Origins {
+            current: Some(origin("/a.mp3")),
+            pending: [origin("/b.mp3")].into(),
+            opened: Some("/c.mp3".to_string()),
+        };
+        assert!(held_paths_of(&origins, true).is_empty());
     }
 }

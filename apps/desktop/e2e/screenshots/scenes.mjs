@@ -347,6 +347,14 @@ async function equalizer(d, library, manifest) {
 // The tag editor, opened on a track that isn't the one playing: Save is disabled
 // while the engine holds the file open, and a greyed-out button with a warning
 // is the wrong thing to document.
+//
+// Save is also disabled until the form has been edited, because an untouched save
+// would rewrite every selected file to no effect (see buildInlineEditor's `armed`).
+// So the capture touches the field the form has already focused, by typing a
+// character and taking it back — the gesture a user makes when they change their
+// mind, and the one thing that arms Save without altering a single pixel of what
+// this image documents. The value it ends on is the value it started with, read
+// back rather than restated so the fixture's own title stays the only copy.
 async function metadataEditor(d, library, manifest) {
   await nowPlaying(d, library, manifest, { clearQueue: true });
   const [track] = albumPaths(library, manifest, 'Borrowed Light');
@@ -355,6 +363,12 @@ async function metadataEditor(d, library, manifest) {
     { message: 'The metadata editor did not open' });
   await d.waitFor(async () => await d.exists('#now-playing-panel.show-editor'),
     { message: 'The editor face did not take the pane' });
+  const { fields } = await d.action('editorFields');
+  const title = fields.Title.value;
+  await d.action('editorType', { label: 'Title', value: `${title} ` });
+  await d.action('editorType', { label: 'Title', value: title });
+  await d.waitFor(async () => (await d.action('editorFields')).submitDisabled === false,
+    { message: 'Save stayed disabled, so the capture would document a dead button' });
 }
 
 // The wide Files panel: the divider moved right until the leaf list is past its

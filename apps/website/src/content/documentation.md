@@ -4,6 +4,8 @@ If you hate reading AI-generated documentation, don't worry, I wrote this myself
 
 Pudding is a macOS music player. It plays local files and can connect to internet radio stations. It is not a streaming service or a store. You bring your own music collection and stream URLs.
 
+It's simple, powerful, and fast even with large collections (tested with up to 500,000 tracks).
+
 ## Layout
 
 Pudding is split into two panels. The left panel has two tabs: Files and Streams. The right panel shows Now Playing by default and will show other content depending on what you're doing.
@@ -140,6 +142,14 @@ When the output device supports the file’s sample rate, Pudding switches to it
 
 Changing the sample rate reconfigures the output device, so this setting can add a little latency between tracks if they have different sample rates. It also changes a system-wide setting used by other apps, which is why it's off by default. Pudding makes an effort to leave the setting how it found it.
 
+## Metadata editing
+
+Right click an audio file to edit its metadata. You can select multiple files to bulk edit.
+
+This app takes precautions to avoid data loss when editing your files. Nonetheless, the safest thing to do is to back up your files before editing them.
+
+![The metadata editor](../assets/metadata-editor.png)
+
 ## More cool features
 
 * Right click an audio file to edit its metadata (shown below)
@@ -147,8 +157,6 @@ Changing the sample rate reconfigures the output device, so this setting can add
 * Recent file list in File menu
 * macOS integration including Control Center and hardware media keys
 * Cloud files are shown in the UI but not fetched unless you play them
-
-![The metadata editor](../assets/metadata-editor.png)
 
 ## Supported Formats
 

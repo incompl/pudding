@@ -406,10 +406,12 @@ function renderTreeRow(row: TreeRow, index: number): HTMLElement {
       const items: ContextMenuItem[] = [];
       if (sel.length > 1) {
         // Multi-select: the per-track navigation verbs (Go to artist/album) don't
-        // apply to a heterogeneous set, so offer only the list-building verbs,
-        // acting on every selected track. Count in the label confirms the scope.
+        // apply to a heterogeneous set, so offer the verbs that do act on a whole
+        // set — the list-building ones and Edit metadata, which writes the same
+        // patch across every selected file. Count in the label confirms the scope.
         items.push(...queueMenuItems((sink) => sink(sel), sel.length));
         items.push(addToPlaylistItem(() => sel));
+        items.push(editMetadataItem(sel));
         // revealItemInDir takes one path; reveal the first selected track.
         items.push(showInFinderItem(sel[0].path));
       } else {
@@ -431,7 +433,7 @@ function renderTreeRow(row: TreeRow, index: number): HTMLElement {
         }
         items.push(...queueMenuItems((sink) => sink([nodeToTrack(node)])));
         items.push(addToPlaylistItem(() => [nodeToTrack(node)]));
-        items.push(editMetadataItem(node));
+        items.push(editMetadataItem([node]));
         items.push(showInFinderItem(node.path));
       }
       void showContextMenu(e.clientX, e.clientY, items);

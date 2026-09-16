@@ -5,5 +5,5 @@
   // slipped through to a runtime crash instead of a compile error. test:unit runs
   // this before the node:test run so that class of drift fails fast.
   "extends": "./tsconfig.json",
-  "include": ["src", "test", "e2e/harness.ts"]
+  "include": ["src", "test", "e2e/harness.ts", "e2e/tag-editing.ts"]
 }

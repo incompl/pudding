@@ -51,11 +51,11 @@ These features are bog standard for streaming service apps, but rare for file-ba
 - Built to scale: tested up to 500,000 tracks. Every long list  is windowed so only the on-screen rows exist in the DOM, opened views are cached, and the whole-library sort is served from a covering index
 - Live library watching: add or edit files on disk and the app updates itself
 - Search across title, artist, album, and filename, or match a folder and play it as an album
-- Cmd/Shift-click to select multiple tracks; every menu verb (play, queue, add to playlist) acts on the whole selection
+- Cmd/Shift-click to select multiple tracks; every menu verb (play, queue, add to playlist, edit tags) acts on the whole selection
 - Right-click a track to jump to its artist or album, or reveal it with Show in Finder
 - Embedded album art, and disc/track-number-aware sorting
 - Columns: pick the fields a track list shows — title, artist, album, album artist, disc, genre, year, kind, time, bit rate, sample rate, bit depth, gain, date created/modified — or leave it automatic and the pane picks them per list. Turn on the header to sort by any column and drag the dividers to set your own widths; narrow panes fold back to one line
-- Edit an audio file's metadata tags right in the app.
+- Edit metadata tags right in the app, one file or a whole selection at once — artwork included, with the fields a selection disagrees on left untouched
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
 - Drag music from Finder onto the window: a file or playlist opens, a folder or a multi-file drop plays as a queue
 - Cloud-friendly: point it at a library in iCloud Drive, Proton Drive, or Dropbox and it scans without downloading anything. Files whose bytes aren't on this Mac are marked "(Not downloaded)" and fetched only when you play them

@@ -9,9 +9,10 @@ import type { Signal } from "@preact/signals-core";
 // Does double duty (matching the Rust struct): a row of a browse listing, and what
 // write_tags hands back after a save. The column fields are populated only on the
 // listing path, so they are optional here and a write_tags response leaves most of
-// them undefined rather than null — it fills the tags it wrote, plus `modified`,
-// because writing tags rewrites the file and every open row's Date Modified goes
-// stale. The editor is *seeded* from EditorTags below, not from this.
+// them undefined rather than null — it fills the eight cached tag fields, read back
+// off the file it just wrote, plus `modified`, because writing tags rewrites the
+// file and every open row's Date Modified goes stale. The editor is *seeded* from
+// EditorTags below, not from this.
 export interface FileEntry {
   name: string;
   title: string | null;
@@ -58,6 +59,62 @@ export interface EditorTags {
   // The embedded cover as a data URL — the same picture the hero draws — or null
   // when the file carries none.
   artwork: string | null;
+}
+
+// What read_common_tags folds a selection down to: the value every selected file
+// agrees on, and the names of the fields they don't. Mirrors the Rust CommonTags.
+//
+// A name list rather than a sentinel value, because "they all hold nothing" and
+// "they disagree" are different facts about a field and the form shows them
+// differently — an empty box against an empty box that says "Multiple values".
+export interface CommonTags {
+  common: EditorTags;
+  // Editor field keys, plus "name" (any real selection disagrees on it) and
+  // "artwork".
+  mixed: string[];
+}
+
+// What write_tags reports for a batch of any size, one entry per path. Three
+// outcomes, not two: a path the loop never reached because the user pressed Stop
+// is neither ok nor failed, and "Saved 12 of 300" reads as 288 errors unless the
+// caller can tell which happened. Mirrors the Rust TagWriteReport.
+export interface TagWriteReport {
+  // Each written file and what it says afterwards — read back off the file, not
+  // echoed from the patch. The entry shape applyTagUpdates takes.
+  ok: { path: string; tags: FileEntry }[];
+  failed: TagWriteFailure[];
+  stopped: boolean;
+  // Set when the storage gave out under the batch — a full disk, a read-only
+  // mount, a drive pulled out — and the loop stopped rather than attempting the
+  // rest. Carries the failure that ended it. Every path not in `ok` or `failed` is
+  // untouched, which only reads as sense if the note says why it stopped.
+  aborted: string | null;
+}
+
+// `stale` is the difference between a file that was not written and one that was
+// written correctly but whose library row could not be updated. The second is not
+// a save failure: the note counts it with the saved and says the list will catch
+// up on the next scan.
+//
+// A failure with `stale: false` is a file still holding exactly what it held
+// before Save was pressed — the write is staged on a copy and renamed into place,
+// so a save that fails changes nothing.
+export interface TagWriteFailure {
+  path: string;
+  message: string;
+  stale: boolean;
+}
+
+// Per-file progress while a batch of tag work runs, for the editor's "Saving... 37
+// of 300" label and for the "Reading 300 tracks..." one the bulk seed fills in
+// behind. One payload, two events (`tag-write-progress`, `tag-read-progress`),
+// matching the Rust TagProgress: the same three numbers said twice would drift.
+// `generation` is the batch id the caller minted, so a label can ignore events
+// from a batch that isn't its own.
+export interface TagProgress {
+  generation: number;
+  done: number;
+  total: number;
 }
 
 export interface TrackMeta {
@@ -341,6 +398,13 @@ export interface InlineEditorField {
   label: string;
   value?: string;
   placeholder?: string;
+  // The selected files disagree about this tag. The box starts empty and says so
+  // in its placeholder rather than showing one file's value as everyone's — and
+  // that is a different fact from an empty box, which means they all agree on
+  // holding nothing. Nothing else follows from it: a mixed field the user never
+  // types in is simply not touched, so it is not sent, so the disagreement
+  // survives the save intact.
+  mixed?: boolean;
   // When true, Save stays disabled until this field is non-empty. A form with no
   // required fields keeps Save always enabled.
   required?: boolean;
@@ -357,7 +421,17 @@ export interface InlineEditorField {
   // A second numeric input on the same row, joined by "of": "Track [3] of [12]".
   // Its value comes back under its own key alongside the first. The pair is one
   // fact — 3 of 12 — and splitting it across two labelled rows would read as two.
-  total?: { key: string; value?: string; validate?: FieldValidator };
+  // Both halves carry the mixed state, because a selection can agree on the disc
+  // and differ on the disc total. Without `mixed` here that second box would
+  // render as an ordinary empty one — harmless to the save (untouched, so unsent)
+  // but it would tell the user those files carry no disc total.
+  total?: {
+    key: string;
+    value?: string;
+    placeholder?: string;
+    mixed?: boolean;
+    validate?: FieldValidator;
+  };
   // Why this value can't be written, or null when it can. Save stays disabled
   // while any field has a reason, and the first one shows as the form's note.
   // This is for values the *file format* can't hold — not for house rules about
@@ -383,7 +457,32 @@ export interface InlineEditorArtwork {
   label: string;
   // The file's current picture as a data URL, or null when it carries none.
   current: string | null;
+  // The selected files carry different pictures (or some carry one and some
+  // don't), so the well shows none of them. Remove stays offered anyway: stripping
+  // the covers off a mixed set is a legitimate verb, and it is the one verb an
+  // empty-looking well would otherwise hide.
+  mixed?: boolean;
   choose: () => Promise<ArtworkPick | null>;
+}
+
+// The form's working state, shown while something the form asked for is still
+// running — a save over hundreds of files, or the seed read that fills it in.
+// `label` replaces the note under the buttons ("Saving... 37 of 300"), the fields
+// and Save go inert for the duration, and when `stop` is given Cancel becomes a
+// Stop button wired to it. Stop is not undo: what it stops is the work not yet
+// started, which is why only a caller whose work can still be stopped passes one.
+export interface InlineEditorBusy {
+  label: string;
+  stop?: { label: string; onStop: () => void };
+}
+
+// A handle on a built form, for the state that arrives after the build. Handed to
+// the caller through `controls` below rather than returned, so the builder keeps
+// giving back a plain element and forms that never go busy need not know this
+// exists.
+export interface InlineEditorControls {
+  // Enter the working state, or leave it with null.
+  setBusy: (busy: InlineEditorBusy | null) => void;
 }
 
 export interface InlineEditorOptions {
@@ -401,17 +500,32 @@ export interface InlineEditorOptions {
   // reason: it is shown as the form's note, under the buttons, and the form stays
   // open. A save that fails has to say so where it was asked for — the console is
   // not a place the user is looking.
+  //
+  // `touched` names the fields the user actually typed in — the keys of `values`
+  // that fired an input event, totals included. It is membership, not difference:
+  // a field typed into and then put back reads as touched, because that is still
+  // an instruction about what the tag should say. A form that ignores it (the
+  // stream editors) reads every value out of `values` as before.
   onSubmit: (
     values: Record<string, string>,
     artwork: ArtworkEdit,
+    touched: Set<string>,
   ) => void | string | Promise<void | string>;
   onCancel: () => void;
+  // Receives the form's handle during the build (see InlineEditorControls).
+  controls?: (controls: InlineEditorControls) => void;
   // When set, Save is disabled whenever this returns true (on top of the
   // required-field check), and `blockedNote` shows above the buttons to say why.
   // It's read inside a reactive effect, so referencing a signal re-evaluates the
   // gate live (e.g. re-enabling Save the moment playback leaves the edited file).
   blocked?: () => boolean;
   blockedNote?: string;
+  // A standing line about the form itself, shown under the buttons whenever
+  // nothing louder is (see the note's priority chain in buildInlineEditor). It
+  // says something true for this whole edit rather than about a submit — today,
+  // that an album's cloud-only tracks were left out of the selection the form
+  // opened on.
+  note?: string;
 }
 
 export type DragPayload =

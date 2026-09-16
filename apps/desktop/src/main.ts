@@ -218,6 +218,7 @@ import { applyCellStatus, rowStatus } from "./row-status";
 import {
   closePaneEditor,
   editMetadataItem,
+  editMetadataProviderItem,
   editTags,
   startTitleEdit,
 } from "./editors";
@@ -1294,8 +1295,9 @@ async function addProviderToQueue(
 // Right-click menus for the Artists / Albums browse rows in the library
 // navigator. Built here (and injected into the navigator, which owns the rows) so
 // all menu construction — and the artist/album track providers behind Add to
-// queue / Add to playlist — reuses openArtistQueue / openAlbumQueue, addToQueue,
-// and addToPlaylistItem instead of a second implementation in the nav module.
+// queue / Add to playlist / Edit metadata — reuses openArtistQueue /
+// openAlbumQueue, addToQueue, and addToPlaylistItem instead of a second
+// implementation in the nav module.
 function showArtistContextMenu(x: number, y: number, name: string): void {
   const getTracks: TrackProvider = () =>
     invoke<SearchTrack[]>("artist_tracks", { artist: name });
@@ -1303,6 +1305,7 @@ function showArtistContextMenu(x: number, y: number, name: string): void {
     { label: "Play", action: () => void openArtistQueue(name) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
+    editMetadataProviderItem(getTracks),
   ]);
 }
 
@@ -1318,6 +1321,7 @@ function showAlbumContextMenu(
     { label: "Play", action: () => void openAlbumQueue(album, albumArtist) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
+    editMetadataProviderItem(getTracks),
   ]);
 }
 
@@ -1536,6 +1540,7 @@ export function renderLeafTrackList(
               void showContextMenu(e.clientX, e.clientY, [
                 ...queueMenuItems((sink) => sink(sel), sel.length),
                 addToPlaylistItem(() => sel),
+                editMetadataItem(sel),
                 showInFinderItem(sel[0].path),
                 columnsMenuItem("library", autoCols),
               ]);
@@ -1547,7 +1552,7 @@ export function renderLeafTrackList(
                 ...queueMenuItems((sink) => sink([t])),
                 addToPlaylistItem(() => [t]),
                 ...trackContextItems({ artist: t.artist, album: t.album, albumArtist: t.albumArtist }),
-                editMetadataItem(t),
+                editMetadataItem([t]),
                 showInFinderItem(t.path),
                 // Right-clicking a row scopes the picker to that row's pane
                 // implicitly, so it needs no "Library ▸" label and no
@@ -4491,17 +4496,30 @@ async function init(): Promise<void> {
       // modifiers). Dispatches a genuine MouseEvent so onNodeClick runs its true
       // branch (toggle / range / play).
       treeClick: (arg) => {
-        const a = arg as { selector: string; meta?: boolean; shift?: boolean };
+        const a = arg as {
+          selector: string;
+          meta?: boolean;
+          shift?: boolean;
+          dbl?: boolean;
+        };
         const el = document.querySelector<HTMLElement>(a.selector);
         if (!el) throw new Error(`no tree row for selector: ${a.selector}`);
-        el.dispatchEvent(
-          new MouseEvent("click", {
-            bubbles: true,
-            cancelable: true,
-            metaKey: !!a.meta,
-            shiftKey: !!a.shift,
-          }),
-        );
+        const mouse = (type: string): void => {
+          el.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              metaKey: !!a.meta,
+              shiftKey: !!a.shift,
+            }),
+          );
+        };
+        // `dbl` plays the row — the tree's second play verb, alongside the hover
+        // button. Both events, in the order a real double click sends them: the
+        // click selects and the dblclick plays, and a test that sent only the
+        // second would be playing a row the tree never selected.
+        mouse("click");
+        if (a.dbl) mouse("dblclick");
       },
       // Add the current file-tree selection to the queue via the same call the
       // multi-select context-menu verb makes, so tests assert the selection
@@ -4519,10 +4537,118 @@ async function init(): Promise<void> {
         searchInput.value = String((arg as { query: string }).query);
         searchInput.dispatchEvent(new Event("input", { bubbles: true }));
       },
-      // Open the tag editor for a path through the shared "Edit metadata..."
-      // verb, so the pane editor is built and seeded the same way every context
-      // menu builds it.
-      editMetadata: (arg) => editTags(String((arg as { path: string }).path)),
+      // Open the tag editor for a path — or for a selection of them — through the
+      // shared "Edit metadata..." verb, so the pane editor is built and seeded the
+      // same way every context menu builds it. `paths` is how a test reaches the
+      // bulk form, which no native context menu can be driven into from here.
+      editMetadata: (arg) => {
+        const a = arg as { path?: string; paths?: string[] };
+        return editTags(a.paths ? a.paths.map(String) : [String(a.path)]);
+      },
+      // The mounted metadata form, read back as data: the heading, the note under
+      // the buttons, whether Save is live, what the Cancel/Stop button currently
+      // says, and every field by its label — its value, the placeholder standing in
+      // for it, and whether the row is marked mixed. The form's rows carry no ids
+      // (they are built from a field table, and an id per field would be a second
+      // table to keep in step), so this is how a test asserts what the editor is
+      // showing without matching on rendered text or on DOM order.
+      editorFields: () => {
+        const form = document.querySelector<HTMLFormElement>("#pane-editor-view .inline-editor");
+        if (!form) throw new Error("no metadata editor is open");
+        const note = form.querySelector<HTMLElement>(".inline-editor-note")!;
+        const well = form.querySelector<HTMLElement>(".artwork-well");
+        const fields: Record<string, unknown> = {};
+        for (const row of form.querySelectorAll<HTMLElement>(".inline-editor-field")) {
+          if (row.classList.contains("inline-editor-artwork")) continue;
+          const label = row.querySelector(".inline-editor-label")?.textContent ?? "";
+          // Two boxes share the Disc/Track rows (the number and its total), and
+          // they are one row because they are one fact — so they come back as one
+          // entry, the total nested under the field it belongs to.
+          const boxes = [...row.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+            "input, textarea",
+          )].map((input) => ({
+            value: input.value,
+            placeholder: input.placeholder,
+            disabled: input.disabled,
+            // Touched, and so part of the patch the next save sends. The border
+            // this class draws is the only thing on screen that says so.
+            dirty: input.classList.contains("is-dirty"),
+          }));
+          fields[label] = {
+            ...boxes[0],
+            mixed: row.classList.contains("is-mixed"),
+            ...(boxes[1] ? { total: boxes[1] } : {}),
+          };
+        }
+        return {
+          fields,
+          heading: form.querySelector(".inline-editor-heading")?.textContent ?? "",
+          // Hidden is its own answer: an empty string would read as "the note says
+          // nothing", which is what a *cleared* refusal looks like.
+          note: note.classList.contains("hidden")
+            ? null
+            : note.textContent?.trim() ?? "",
+          submitDisabled: form.querySelector<HTMLButtonElement>(".inline-editor-submit")!
+            .disabled,
+          cancelLabel: form.querySelector(".inline-editor-cancel")?.textContent ?? "",
+          // The well says what it is standing in for when it is empty ("Multiple"
+          // across files that carry different covers, "No artwork" when they agree
+          // there is none) and nothing at all when it is showing a picture.
+          artwork: well
+            ? {
+                placeholder: well.querySelector<HTMLElement>(".artwork-well-image")!.hidden
+                  ? well.querySelector(".artwork-well-empty")?.textContent ?? ""
+                  : null,
+              }
+            : null,
+        };
+      },
+      // Type into one of the editor's fields, found by its label. Assigning the
+      // value and firing `input` is the whole point: that event is what marks the
+      // field *touched*, and only touched fields ride along in the patch — a test
+      // that set `.value` behind the form's back would save nothing at all.
+      editorType: (arg) => {
+        const a = arg as { label: string; value: string; total?: boolean };
+        const form = document.querySelector<HTMLFormElement>("#pane-editor-view .inline-editor");
+        if (!form) throw new Error("no metadata editor is open");
+        const row = [...form.querySelectorAll<HTMLElement>(".inline-editor-field")].find(
+          (r) => r.querySelector(".inline-editor-label")?.textContent === a.label,
+        );
+        if (!row) throw new Error(`no editor field labelled: ${a.label}`);
+        const boxes = row.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+          "input, textarea",
+        );
+        const input = a.total ? boxes[1] : boxes[0];
+        if (!input) throw new Error(`no ${a.total ? "total " : ""}box on: ${a.label}`);
+        input.value = a.value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      },
+      // Open a folder in Browse, through the same entry point "Show in Browse"
+      // uses: Files tab, Browse view, expanded and scrolled to the folder. A test
+      // that wants to read the tree has to ask for it — the Files panel starts on
+      // its root menu, and renderTree deliberately builds no DOM until Browse is
+      // the visible view (see tree-view's browseActive).
+      browseFolder: (arg) => goToFolder(String((arg as { path: string }).path)),
+      // What the Files tree is *showing* for each mounted row, by path. The point
+      // of reading it back is the corollary in the bulk-edit plan: a patch
+      // describes the edit, not the file, and a save that fed the patch to the
+      // surfaces would blank the title of every row it touched. Mounted rows only —
+      // the tree is windowed, and a row that isn't on screen has no title to show.
+      treeRowTitles: () =>
+        Object.fromEntries(
+          [...document.querySelectorAll<HTMLElement>(".node-label[data-path]")].map(
+            (row) => [
+              row.dataset.path,
+              row.querySelector(".title")?.textContent ?? "",
+            ],
+          ),
+        ),
+      // Match the device rate to the file's, through the real setter (the effect
+      // behind it pushes to the engine), so a test can exercise the rate-switch
+      // path — the one that opens the next track before its origin is published.
+      setFollowSampleRate: (arg) => {
+        setFollowSampleRate((arg as { enabled: boolean }).enabled);
+      },
       // Every path a panel puts on screen. Settings shows the library folders and
       // the stream list as absolute paths from whichever machine ran a capture,
       // and it carries them as input *values* — invisible to a text or pixel

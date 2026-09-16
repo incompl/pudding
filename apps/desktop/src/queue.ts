@@ -344,6 +344,7 @@ function buildQueueRow(
         void showContextMenu(e.clientX, e.clientY, [
           ...queueMenuItems((sink) => sink(sel), sel.length),
           addToPlaylistItem(() => sel),
+          editMetadataItem(sel),
           {
             label: `Remove ${sel.length} from list`,
             action: () => removeCuratedTracks(sel),
@@ -355,7 +356,7 @@ function buildQueueRow(
         void showContextMenu(e.clientX, e.clientY, [
           ...queueMenuItems((sink) => sink([t])),
           addToPlaylistItem(() => [t]),
-          editMetadataItem(t),
+          editMetadataItem([t]),
           showInFinderItem(t.path),
           // Right-clicking a row scopes the picker to that row's pane implicitly,
           // so it needs no "Queue ▸" label and no focused-pane guesswork.
