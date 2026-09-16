@@ -176,6 +176,16 @@ export interface Stream {
   image?: string | null;
 }
 
+// A stream list as read_stream_list returns it: the stations plus the mtime the
+// file carried at that read. The stamp goes back with every index-addressed edit
+// (update/move/delete), which the backend refuses if the file has moved on since —
+// the ordinals would address whichever station now sits there. Null for a remote
+// list, which is read-only anyway.
+export interface StreamList {
+  streams: Stream[];
+  mtime: number | null;
+}
+
 export interface SearchTrack {
   path: string;
   title: string | null;

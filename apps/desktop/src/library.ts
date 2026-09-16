@@ -6,7 +6,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { h } from "./dom";
-import type { DirListing, TreeNode, Stream, HeldRoot } from "./types";
+import type { DirListing, TreeNode, StreamList, HeldRoot } from "./types";
 import {
   app,
   libraryHasContent,
@@ -28,6 +28,7 @@ import { renderStreams } from "./streams-view";
 import { bootStep } from "./perf";
 import {
   setEmpty,
+  toast,
   queueIsActivePool,
   KEY_LIBRARY_ROOTS,
   KEY_ROOT_BOOKMARKS,
@@ -274,6 +275,7 @@ export async function refreshStreams(streamListPath: string): Promise<void> {
   streamListPathSet.value = !!streamListPath;
   if (!streamListPath) {
     app.allStreams = [];
+    app.streamListMtime = null;
     streamListPathValid.value = true;
     streamListWritable.value = false;
     // The panel-wide get-started prompt (streams-empty effect) covers this case.
@@ -282,10 +284,13 @@ export async function refreshStreams(streamListPath: string): Promise<void> {
   }
   setEmpty(streamsContainer, "Loading...", "loading");
   try {
-    const streams = await bootStep("  read_stream_list(invoke)", () =>
-      invoke<Stream[]>("read_stream_list", { path: streamListPath }),
+    const list = await bootStep("  read_stream_list(invoke)", () =>
+      invoke<StreamList>("read_stream_list", { path: streamListPath }),
     );
+    const streams = list.streams;
     app.allStreams = streams;
+    // The stamp every index-addressed edit will send back with its ordinals.
+    app.streamListMtime = list.mtime;
     streamListPathValid.value = true;
     // Only a valid local file is appendable; a remote list is read-only.
     streamListWritable.value = !isRemoteStreamList(streamListPath);
@@ -293,10 +298,21 @@ export async function refreshStreams(streamListPath: string): Promise<void> {
   } catch (e) {
     console.error("read_stream_list failed for", streamListPath, e);
     app.allStreams = [];
+    app.streamListMtime = null;
     streamListPathValid.value = false;
     streamListWritable.value = false;
     setEmpty(streamsContainer, "Invalid stream list path");
   }
+}
+
+// A station edit the backend refused. Say why — a stream list that changed on disk
+// is the one failure the user can't otherwise explain, since the row they acted on
+// is no longer the row the file has — and re-read the list so the pane, and the
+// stamp the next edit sends, match what is actually there.
+export async function streamEditFailed(what: string, e: unknown): Promise<void> {
+  console.error(what, e);
+  toast(String(e));
+  await refreshStreams(streamListPathInput.value);
 }
 
 // The one form a root path is ever stored or keyed under. Trailing separators are

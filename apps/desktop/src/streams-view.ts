@@ -16,8 +16,8 @@ import { streamsContainer, streamListPathInput } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
 import { attachStreamReorder } from "./drag-drop";
 import { buildInlineEditor, closePaneEditor, openPaneEditor } from "./editors";
-import { refreshStreams } from "./library";
-import { setEmpty } from "./main";
+import { refreshStreams, streamEditFailed } from "./library";
+import { setEmpty, toast } from "./main";
 import { playStream, applyStreamEdit, rowPlayButton } from "./playback";
 
 export function renderStreams(streams: Stream[]): void {
@@ -162,6 +162,7 @@ export function openAddStationEditor(): void {
         });
       } catch (e) {
         console.error("add_stream failed", e);
+        toast(String(e));
         return; // leave the form up so the user can correct and retry
       }
       closePaneEditor();
@@ -179,6 +180,13 @@ export function openAddStationEditor(): void {
 function openEditStationEditor(stream: Stream): void {
   const index = app.allStreams.indexOf(stream);
   if (index < 0) return;
+  // The stamp `index` is only meaningful against, captured with it and sent with it
+  // — a stamp read at submit time instead would be the stamp of whatever the pane
+  // has read since, which is exactly the file `index` no longer describes. A failed
+  // submit refreshes the list, and if that refresh read a different file than this
+  // form was built from, the ordinal below no longer names the station in the
+  // heading — see onSubmit.
+  const openedAt = app.streamListMtime;
   const editor = buildInlineEditor({
     fields: stationEditorFields(stream),
     submitLabel: "Save",
@@ -197,10 +205,21 @@ function openEditStationEditor(stream: Stream): void {
           name: next.name,
           url: next.url,
           image: next.image ?? null,
+          // The stamp of the read `index` came from: the edit is refused rather
+          // than applied to a station that moved into that slot meanwhile.
+          expectedMtime: openedAt,
         });
       } catch (e) {
-        console.error("update_stream failed", e);
-        return; // leave the form up so the user can correct and retry
+        await streamEditFailed("update_stream failed", e);
+        // A refusal the user can act on — a URL missing its scheme — fails before
+        // the file is touched, so the reread finds the same stamp and the form stays
+        // up, prefilled, to be corrected and retried. A refusal because the list
+        // moved on is not that: retrying would send this form's now-meaningless
+        // `index` against a file the reread has just made the stamp match again,
+        // renaming whichever station has since taken that slot. So the form goes
+        // with the read it belonged to, and the toast says why.
+        if (app.streamListMtime !== openedAt) closePaneEditor();
+        return;
       }
       // If this is the station now playing, update the hero at once — otherwise
       // the edited name/art wouldn't show until it was replayed.
@@ -215,15 +234,25 @@ function openEditStationEditor(stream: Stream): void {
 async function deleteStream(stream: Stream): Promise<void> {
   const index = app.allStreams.indexOf(stream);
   if (index < 0) return;
+  // Taken with `index`, not after the dialog: the confirm below is async, so the
+  // pane can re-read the list while it is up, and a stamp read on the far side of
+  // it would vouch for a file this `index` was never counted against.
+  const openedAt = app.streamListMtime;
   const ok = await confirm(`This will remove ${stream.name} from the stream list.`, {
     title: `Remove ${stream.name}?`,
     kind: "warning",
   });
   if (!ok) return;
   try {
-    await invoke("delete_stream", { path: streamListPathInput.value, index });
+    await invoke("delete_stream", {
+      path: streamListPathInput.value,
+      index,
+      // Without this stamp a list rewritten since the pane read it would lose the
+      // station now sitting at `index` — not the one this dialog just named.
+      expectedMtime: openedAt,
+    });
   } catch (e) {
-    console.error("delete_stream failed", e);
+    await streamEditFailed("delete_stream failed", e);
     return;
   }
   await refreshStreams(streamListPathInput.value);

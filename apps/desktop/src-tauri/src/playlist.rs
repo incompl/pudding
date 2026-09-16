@@ -34,7 +34,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use tauri::State;
 
-use crate::{fetch_meta, DbHandle};
+use crate::{fetch_meta, write_durably, DbHandle};
 
 pub const PLAYLIST_EXTS: &[&str] = &["m3u", "m3u8"];
 
@@ -154,7 +154,7 @@ struct ParsedEntry {
 
 // Decode playlist bytes non-lossily: UTF-8 when valid, else Windows-1252 (which
 // maps every byte to a codepoint, so it never errors and never drops bytes).
-fn decode_bytes(bytes: &[u8]) -> String {
+pub(crate) fn decode_bytes(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
         Err(_) => bytes.iter().map(|&b| cp1252_char(b)).collect(),
@@ -434,27 +434,39 @@ impl Preserved {
         (Path::new(raw).is_absolute() || self.base_dir == base_dir).then_some(raw.as_str())
     }
 
-    // Capture from the file a write is about to overwrite. A missing or unreadable
-    // file — a brand-new playlist, the common case — preserves nothing. Nor does
-    // one past the ceiling `read_rows` enforces: nothing that large opened as a
-    // playlist, so there is nothing of a playlist author's in it to keep, and
-    // building a row map over a few million junk lines is the cost this avoids.
-    fn from_file(path: &str) -> Self {
+    // Capture from the file a write is about to overwrite. A file that isn't there
+    // — a brand-new playlist, the common case — is the one failure that legitimately
+    // preserves nothing; every other one is an error the write must not survive.
+    // "Preserve nothing" and "couldn't look" are indistinguishable once they reach
+    // `serialize`, and the second written as the first silently drops the author's
+    // comments and `#EXTVLCOPT`-style directives for good, over what may have been a
+    // transient read error. The ceiling `read_rows` enforces is a refusal for the
+    // same reason: nothing that large opened as a playlist, so rewriting it from a
+    // blank slate would destroy a file we never read.
+    fn from_file(path: &str) -> Result<Self, String> {
         match std::fs::metadata(path) {
-            Ok(meta) if meta.len() <= MAX_PLAYLIST_BYTES => {}
-            _ => return Preserved::default(),
+            Ok(meta) if meta.len() > MAX_PLAYLIST_BYTES => {
+                return Err(format!(
+                    "not a playlist: {path} is {} MB",
+                    meta.len() / (1024 * 1024)
+                ))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Preserved::default()),
+            Err(e) => return Err(e.to_string()),
         }
-        match std::fs::read(path) {
-            Ok(bytes) => Self::from_content(&decode_bytes(&bytes), &playlist_base_dir(path)),
-            Err(_) => Preserved::default(),
-        }
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        Ok(Self::from_content(
+            &decode_bytes(&bytes),
+            &playlist_base_dir(path),
+        ))
     }
 }
 
 // mtime in milliseconds since the epoch: the token the frontend compares to notice
 // that a playlist changed underneath an open view. Milliseconds because that is
 // what a JS number holds exactly. None when the file is gone.
-fn file_mtime_ms(path: &str) -> Option<i64> {
+pub(crate) fn file_mtime_ms(path: &str) -> Option<i64> {
     mtime_ms(&std::fs::metadata(path).ok()?)
 }
 
@@ -926,12 +938,17 @@ pub fn write_playlist(
     // Read what we are about to overwrite, so its comments and extension
     // directives survive the rewrite. Cheap next to the write itself, and it is
     // the only place the originals still exist.
-    let preserved = Preserved::from_file(&path);
+    let preserved = Preserved::from_file(&path)?;
     let content = {
         let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
         serialize(&path, &name, &tracks, &preserved, &conn)?
     };
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    // Staged and renamed wherever the directory permits it: this is the app's most
+    // frequent write — every curation autosaves through it — and the file *is* the
+    // playlist. A half-finished plain write would leave the user's curation truncated
+    // or gone. A playlist opened as a single file from Finder has no writable
+    // directory to stage in and takes the plain write instead; see write_durably.
+    write_durably(Path::new(&path), content.as_bytes()).map_err(|e| e.to_string())?;
     // Hand back the mtime this write produced so the caller can record it as its
     // own. Otherwise the watcher sees our own file land, calls it an outside
     // change, and reloads the view out from under the edit that caused it.
@@ -1010,9 +1027,14 @@ fn move_playlist_inner(old_path: &str, new_path: &str, conn: &Connection) -> Res
     let same = is_same_file(old_path, new_path);
 
     let out = serialize(new_path, &name, &rows, &preserved, conn)?;
-    std::fs::write(new_path, out).map_err(|e| e.to_string())?;
+    write_durably(Path::new(new_path), out.as_bytes()).map_err(|e| e.to_string())?;
     // Best-effort remove of the original; skip it when source and destination are
-    // the same file (writing already rewrote it in place).
+    // the same file, where removing it would delete what we just wrote. Note the
+    // staged write does NOT rewrite in place — it renames a new inode over the
+    // destination — so two names for one inode (a hard link) leave the old one
+    // holding the old contents rather than seeing the new. The write_durably
+    // fallback does rewrite in place, and there a hard link sees the new contents;
+    // `same` is decided by is_same_file either way, so the removal stays correct.
     if !same {
         std::fs::remove_file(old_path).map_err(|e| e.to_string())?;
     }
@@ -1037,7 +1059,7 @@ pub fn rename_playlist(path: String, name: String, db: State<DbHandle>) -> Resul
         let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
         serialize(&path, &name, &rows, &preserved, &conn)?
     };
-    std::fs::write(&path, out).map_err(|e| e.to_string())
+    write_durably(Path::new(&path), out.as_bytes()).map_err(|e| e.to_string())
 }
 
 // Delete a playlist file from disk (tree Delete). Guarded to actual playlist
@@ -1425,7 +1447,7 @@ mod tests {
         std::fs::write(&list, original).unwrap();
 
         let path = list.to_str().unwrap();
-        let preserved = Preserved::from_file(path);
+        let preserved = Preserved::from_file(path).unwrap();
         let (_n, entries) = parse(original, &playlist_base_dir(path));
         // Reorder, exactly as a drag in the pane would.
         let mut rows = entries_as_rows(entries);
@@ -1508,7 +1530,7 @@ mod tests {
         std::fs::write(&list, &original).unwrap();
 
         let path = list.to_str().unwrap();
-        let preserved = Preserved::from_file(path);
+        let preserved = Preserved::from_file(path).unwrap();
         let (_n, entries) = parse(&original, &playlist_base_dir(path));
         let rows = entries_as_rows(entries);
         let out = serialize(path, "Mix", &rows, &preserved, &empty_db()).unwrap();
@@ -1538,7 +1560,7 @@ mod tests {
         .unwrap();
 
         let path = list.to_str().unwrap();
-        let preserved = Preserved::from_file(path);
+        let preserved = Preserved::from_file(path).unwrap();
         let rows: Vec<TrackRef> = ["01.flac", "02.flac", "03.flac"]
             .iter()
             .map(|n| TrackRef { path: track(n), title: None, duration: None })
@@ -1557,7 +1579,7 @@ mod tests {
             rel_path,
             "Rel",
             &rows[..2],
-            &Preserved::from_file(rel_path),
+            &Preserved::from_file(rel_path).unwrap(),
             &empty_db(),
         )
         .unwrap();
@@ -1611,13 +1633,13 @@ mod tests {
         let db = empty_db();
 
         let once = {
-            let pres = Preserved::from_file(path);
+            let pres = Preserved::from_file(path).unwrap();
             let (_n, e) = parse(original, &playlist_base_dir(path));
             serialize(path, "Mix", &entries_as_rows(e), &pres, &db).unwrap()
         };
         std::fs::write(&list, &once).unwrap();
         let twice = {
-            let pres = Preserved::from_file(path);
+            let pres = Preserved::from_file(path).unwrap();
             let (_n, e) = parse(&once, &playlist_base_dir(path));
             serialize(path, "Mix", &entries_as_rows(e), &pres, &db).unwrap()
         };
@@ -1784,7 +1806,7 @@ mod tests {
         std::fs::write(&list, original).unwrap();
 
         let path = list.to_str().unwrap();
-        let preserved = Preserved::from_file(path);
+        let preserved = Preserved::from_file(path).unwrap();
         let (_n, entries) = parse(original, &playlist_base_dir(path));
         let out = serialize(path, "Mixed", &entries_as_rows(entries), &preserved, &empty_db())
             .unwrap();
@@ -1799,6 +1821,35 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].path, "https://stream.example/6music");
         assert_eq!(back[1].path, "/outside/one.mp3");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preserving_from_a_read_that_failed_is_an_error() {
+        let root = scratch("preserr");
+
+        // Not there yet — a brand-new playlist — is the one failure that
+        // legitimately preserves nothing.
+        let missing = root.join("new.m3u8");
+        let fresh = Preserved::from_file(missing.to_str().unwrap()).unwrap();
+        assert!(fresh.raw.is_empty() && fresh.header.is_empty());
+
+        // Any other read failure is an error, never an empty map: handed to a write
+        // as "nothing to preserve" it would drop the file's comments and directives
+        // for good. A directory stats fine and refuses to be read.
+        let dir = root.join("adir.m3u8");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(Preserved::from_file(dir.to_str().unwrap()).is_err());
+
+        // Past the byte ceiling: not a file we ever read as a playlist, so not one
+        // we rewrite from a blank slate either.
+        let huge = root.join("huge.m3u8");
+        std::fs::write(&huge, vec![0u8; (MAX_PLAYLIST_BYTES + 1) as usize]).unwrap();
+        let err = Preserved::from_file(huge.to_str().unwrap())
+            .err()
+            .expect("a file past the ceiling must not preserve silently");
+        assert!(err.starts_with("not a playlist:"), "{err}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -18,7 +18,7 @@ const QUEUE_ROW_SEL = "li.queue-row:not(.colhead)";
 import { streamListWritable, app } from "./state";
 import { queueSel, selectedListTracks } from "./main";
 import { reorderCuratedTracks, insertCuratedTracks } from "./queue";
-import { refreshStreams } from "./library";
+import { refreshStreams, streamEditFailed } from "./library";
 
 // A drag only *starts* once the pointer travels this many px from where it went
 // down, so a plain click on a row still plays/commits it (no accidental reorder)
@@ -262,9 +262,16 @@ async function reorderStream(stream: Stream, to: number): Promise<void> {
   const from = app.allStreams.indexOf(stream);
   if (from < 0 || to === from || to === from + 1) return;
   try {
-    await invoke("move_stream", { path: streamListPathInput.value, from, to });
+    await invoke("move_stream", {
+      path: streamListPathInput.value,
+      from,
+      to,
+      // Both ordinals are positions in the list we last read; the stamp is what
+      // lets the backend refuse them against a file that has since changed.
+      expectedMtime: app.streamListMtime,
+    });
   } catch (e) {
-    console.error("move_stream failed", e);
+    await streamEditFailed("move_stream failed", e);
     return;
   }
   await refreshStreams(streamListPathInput.value);

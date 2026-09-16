@@ -247,6 +247,16 @@ struct PlaylistListing {
     name: String,
 }
 
+// A stream list as read: the stations plus the mtime the file carried when we
+// read it. That stamp is what the index-addressed edits compare against before
+// they touch a station — see check_stream_stamp. None for a remote list (nothing
+// to stat, and remote lists are read-only anyway).
+#[derive(Serialize)]
+struct StreamList {
+    streams: Vec<Stream>,
+    mtime: Option<i64>,
+}
+
 #[derive(Serialize)]
 struct Stream {
     name: String,
@@ -707,16 +717,37 @@ fn read_tags(path: &std::path::Path) -> Tags {
     }
 }
 
-fn walk_audio(root: &std::path::Path, out: &mut Vec<PathBuf>, visited: &mut HashSet<PathBuf>) {
+// `unreadable` collects the directories the walk could not look inside. Finding no
+// audio in a folder that would not open is not evidence that the folder holds none,
+// and run_scan has to tell those two apart before it deletes anything (see
+// preserve_unreadable). Callers that only want the files can pass a vec and drop it.
+//
+// Recorded as the path the walk was handed rather than its canonical form, because
+// that is the path the entries below are built from and therefore the one the
+// tracks rows are keyed by.
+fn walk_audio(
+    root: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+    unreadable: &mut Vec<PathBuf>,
+) {
     // Canonicalize so a symlink loop (e.g. /foo/back -> /foo) gets caught regardless
-    // of which path we entered the cycle from.
+    // of which path we entered the cycle from. A path that will not resolve is a
+    // hole rather than an empty folder: an ejected external is the common one, and
+    // its mount point stops existing the moment it goes.
     let Ok(canon) = std::fs::canonicalize(root) else {
+        unreadable.push(root.to_path_buf());
         return;
     };
+    // Reached twice under two names. Not a hole — whatever is down there went into
+    // `out` on the first visit.
     if !visited.insert(canon) {
         return;
     }
+    // Still there, still won't open: a permission that changed, or a share that
+    // mounted but did not answer.
     let Ok(entries) = std::fs::read_dir(root) else {
+        unreadable.push(root.to_path_buf());
         return;
     };
     for entry in entries.flatten() {
@@ -727,7 +758,7 @@ fn walk_audio(root: &std::path::Path, out: &mut Vec<PathBuf>, visited: &mut Hash
             continue;
         };
         if meta.is_dir() {
-            walk_audio(&path, out, visited);
+            walk_audio(&path, out, visited, unreadable);
         } else if meta.is_file() && is_audio_path(&path.to_string_lossy()) {
             out.push(path);
         }
@@ -744,11 +775,66 @@ fn normalize_root(s: &str) -> String {
         .to_string()
 }
 
+// Carry the rows the walk could not have found, because it could not look, into
+// scan_current as though it had seen them. Which is what they are: present,
+// unverified.
+//
+// Without this, a folder that would not open is indistinguishable from a folder
+// with nothing in it, and the prune below deletes every track under it — an
+// unplugged external, a share that didn't answer, a permission that changed. No
+// files are harmed and a rescan rebuilds the rows, but until the volume comes back
+// that part of the library reads as empty, and when it returns the user pays for a
+// full rescan of it.
+//
+// Scoped to the subtrees that actually failed, rather than suspending the prune for
+// the whole root: one unreadable folder must not stop a track deleted from a folder
+// we *did* read from leaving the library on this pass. That also covers the root
+// itself failing — everything under it is preserved and the prune finds nothing to
+// do — so there is no separate case for an unreachable root.
+//
+// Costs one pass over the root's rows, and only on a scan that hit a hole.
+fn preserve_unreadable(
+    conn: &Connection,
+    root_key: &str,
+    unreadable: &[PathBuf],
+) -> Result<(), String> {
+    if unreadable.is_empty() {
+        return Ok(());
+    }
+    let held: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT path FROM tracks WHERE root = ?1")
+            .map_err(|e| format!("select root rows failed: {}", e))?;
+        let rows = stmt
+            .query_map([root_key], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("select root rows failed: {}", e))?;
+        rows.filter_map(|r| r.ok())
+            .filter(|p| is_under_any(Path::new(p), unreadable))
+            .collect()
+    };
+    let mut insert = conn
+        .prepare("INSERT OR IGNORE INTO scan_current (path) VALUES (?1)")
+        .map_err(|e| format!("prepare preserve failed: {}", e))?;
+    for path in held {
+        insert
+            .execute([&path])
+            .map_err(|e| format!("preserve failed: {}", e))?;
+    }
+    Ok(())
+}
+
+// Path::starts_with compares whole components, so /Volumes/Ext does not swallow
+// /Volumes/Extra the way a string prefix would.
+fn is_under_any(path: &Path, dirs: &[PathBuf]) -> bool {
+    dirs.iter().any(|dir| path.starts_with(dir))
+}
+
 fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), String> {
     let root_key = normalize_root(&root.to_string_lossy());
     let mut files = Vec::new();
     let mut visited = HashSet::new();
-    walk_audio(&root, &mut files, &mut visited);
+    let mut unreadable = Vec::new();
+    walk_audio(&root, &mut files, &mut visited, &mut unreadable);
 
     // Total is known now (the walk is complete), so the footer can show a determinate
     // bar. Emitted for every scan, including instant watcher rescans; the frontend
@@ -852,6 +938,10 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
             dataless,
         );
     }
+
+    // Anything the walk couldn't look at counts as still there, so the delete below
+    // only ever removes what it actually looked for and didn't find.
+    preserve_unreadable(&tx, &root_key, &unreadable)?;
 
     // Remove rows for files that vanished from *this* root. A scan only walks one
     // library folder (rescan_libraries and the watcher both drive scans one root at a
@@ -1239,13 +1329,21 @@ async fn list_dir(path: String, db: State<'_, DbHandle>) -> Result<DirListing, S
 // http(s) URL (remote stream lists are fetched here rather than in the webview,
 // which the CSP blocks).
 #[tauri::command]
-async fn read_stream_list(path: String) -> Result<Vec<Stream>, String> {
+async fn read_stream_list(path: String) -> Result<StreamList, String> {
     // A remote stream list is fetched with a blocking 15s-timeout HTTP GET; a local
     // one is read from disk. Both are blocking I/O, so they run on a blocking thread
     // — a slow or dead host must never freeze the UI thread, which (were this sync)
     // it would for up to the full timeout on startup.
     tauri::async_runtime::spawn_blocking(move || {
-        let contents = if path.starts_with("http://") || path.starts_with("https://") {
+        let remote = path.starts_with("http://") || path.starts_with("https://");
+        // Stamp before reading, for the reason read_rows spells out: a write landing
+        // between the two pairs new content with an older mtime, which costs at worst
+        // a needless "changed on disk" refusal. The other order pairs old content
+        // with a newer stamp and the staleness is never noticed at all.
+        let mtime = (!remote)
+            .then(|| crate::playlist::file_mtime_ms(&path))
+            .flatten();
+        let contents = if remote {
             ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(15))
                 .user_agent(USER_AGENT)
@@ -1256,10 +1354,15 @@ async fn read_stream_list(path: String) -> Result<Vec<Stream>, String> {
                 .into_string()
                 .map_err(|e| e.to_string())?
         } else {
-            std::fs::read_to_string(&path).map_err(|e| e.to_string())?
+            // Decoded like a playlist rather than read as strict UTF-8: M3U in the
+            // wild is often Latin-1/Windows-1252, and a list that won't decode is a
+            // list the pane marks unwritable and refuses to edit.
+            read_stream_file(&path)?.ok_or_else(|| format!("{path}: no such file"))?
         };
-        parse_m3u_stream_list(&contents)
-            .ok_or_else(|| "not an M3U stream list (no #EXTM3U header or stream URLs)".to_string())
+        let streams = parse_m3u_stream_list(&contents).ok_or_else(|| {
+            "not an M3U stream list (no #EXTM3U header or stream URLs)".to_string()
+        })?;
+        Ok(StreamList { streams, mtime })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1347,7 +1450,93 @@ fn stream_spans(lines: &[&str]) -> Vec<(Option<usize>, usize)> {
     spans
 }
 
-// Append a station to a local stream list (.m3u8).
+// Read a local stream list for rewriting. Two things this is not: it is not
+// read_to_string — a Latin-1 list is common enough that the playlist reader has a
+// decoder for it, and failing to decode one here would mean rewriting a live list
+// from nothing. And it does not flatten failure into emptiness: only NotFound
+// answers None (the list hasn't been created yet, the sole case where starting
+// from a blank file is right); every other error propagates, because "couldn't
+// read it" written as "it was empty" replaces the user's stations with whatever we
+// were about to append.
+fn read_stream_file(path: &str) -> Result<Option<String>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(crate::playlist::decode_bytes(&bytes))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{path}: {e}")),
+    }
+}
+
+// Write a stream list back. A plain truncating write, deliberately — this is the
+// one file the app rewrites that write_atomic is wrong for.
+//
+// Staging means creating a sibling and renaming it, so it needs a writable
+// *directory* and not just a writable file. write_one_file accepts that trade, on
+// the grounds that it only ever touches files inside a library folder the user
+// granted wholesale. A playlist cannot assume that — one opened as a single file
+// from Finder is in the same position as a stream list — so it goes through
+// write_durably, which stages where it can and falls back where it can't.
+//
+// The stream list doesn't need even that much: browseStreamListPath picks a single
+// file and nothing bookmarks its directory, so under the App Sandbox the grant
+// covers that file and no sibling beside it. Staging here would fail on the
+// shipping configuration and succeed on none, making the attempt pure overhead.
+//
+// The exposure that buys is small and the opposite way round from a playlist's. A
+// playlist autosaves on every drag; a stream list is rewritten only when someone
+// deliberately adds, edits, reorders or removes a station, a handful of times in a
+// list's life. Losing the tail of one of those to a full disk is a real cost, just
+// not one worth trading a whole shipping configuration's ability to edit for.
+fn write_stream_file(path: &str, contents: &str) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|e| e.to_string())
+}
+
+// The newline a rewrite should re-emit. `lines()` drops the `\r` of a CRLF file,
+// so without this every edit would quietly convert a CRLF list to LF. A mixed file
+// settles on CRLF; it has to settle on something.
+fn stream_line_ending(contents: &str) -> &'static str {
+    if contents.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+// Rebuild a stream-list body from its lines, in the file's own line ending.
+fn join_stream_lines(lines: impl IntoIterator<Item = String>, eol: &str) -> String {
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&line);
+        out.push_str(eol);
+    }
+    out
+}
+
+// Refuse an index-addressed edit to a file that moved since the caller read it.
+// The ordinals in update/move/delete come from the station list the pane is
+// showing; against a file something else has rewritten they address whatever now
+// sits at that position, so the user renames or deletes a station other than the
+// one the dialog named. This is the stream-list equivalent of the mtime the
+// playlist views compare (notePlaylistMtime / reloadChangedPlaylists) — here as a
+// compare-and-swap, since stream lists have no watcher to reload them.
+//
+// No stamp from the caller, or no stamp on disk, means there is nothing to compare
+// and the edit goes through: the guard exists to catch a file that demonstrably
+// changed, not to block edits whenever a stat is unavailable.
+fn check_stream_stamp(path: &str, expected_mtime: Option<i64>) -> Result<(), String> {
+    let (Some(expected), Some(current)) = (expected_mtime, crate::playlist::file_mtime_ms(path))
+    else {
+        return Ok(());
+    };
+    if expected == current {
+        Ok(())
+    } else {
+        Err("the stream list changed on disk; reloading it".to_string())
+    }
+}
+
+// Append a station to a local stream list (.m3u8). Deliberately takes no mtime
+// stamp: appending is the one stream edit that addresses no ordinal, so it stays
+// correct against a file that changed since the pane read it.
 #[tauri::command]
 fn add_stream(
     path: String,
@@ -1357,25 +1546,27 @@ fn add_stream(
 ) -> Result<(), String> {
     reject_remote_list(&path)?;
     let url = clean_stream_url(&url)?;
-    // Start from the existing file (or a fresh header if it's missing/empty),
+    // Start from the existing file (or a fresh header when there is no file yet),
     // guaranteeing a trailing newline so the new #EXTINF starts its own line.
-    let mut contents = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = read_stream_file(&path)?.unwrap_or_default();
+    let eol = stream_line_ending(&existing);
+    let mut contents = existing;
     if contents.trim().is_empty() {
-        contents = "#EXTM3U\n".to_string();
+        contents = format!("#EXTM3U{eol}");
     } else if !contents.ends_with('\n') {
-        contents.push('\n');
+        contents.push_str(eol);
     }
     contents.push_str(&extinf_line(&name, image.as_deref()));
-    contents.push('\n');
+    contents.push_str(eol);
     contents.push_str(url);
-    contents.push('\n');
-    std::fs::write(&path, contents).map_err(|e| e.to_string())
+    contents.push_str(eol);
+    write_stream_file(&path, &contents)
 }
 
 // Rewrite the `index`-th station in place: replace its #EXTINF (inserting one
 // when the entry had none) and its URL line, leaving every other line untouched.
 // `index` is a station ordinal from read_stream_list, so it lines up with
-// stream_spans.
+// stream_spans — and with `expected_mtime`, the stamp of the read it came from.
 #[tauri::command]
 fn update_stream(
     path: String,
@@ -1383,32 +1574,32 @@ fn update_stream(
     name: String,
     url: String,
     image: Option<String>,
+    expected_mtime: Option<i64>,
 ) -> Result<(), String> {
     reject_remote_list(&path)?;
     let url = clean_stream_url(&url)?;
-    let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    check_stream_stamp(&path, expected_mtime)?;
+    let contents = read_stream_file(&path)?.ok_or_else(|| format!("{path}: no such file"))?;
+    let eol = stream_line_ending(&contents);
     let lines: Vec<&str> = contents.lines().collect();
     let &(extinf, url_line) = stream_spans(&lines)
         .get(index)
         .ok_or("stream index out of range")?;
     let new_extinf = extinf_line(&name, image.as_deref());
-    let mut out = String::new();
-    for (i, line) in lines.iter().enumerate() {
+    let out = lines.iter().enumerate().map(|(i, line)| {
         if Some(i) == extinf {
-            out.push_str(&new_extinf);
+            new_extinf.clone()
         } else if i == url_line {
             // No prior #EXTINF: introduce one so the new name/art persists.
-            if extinf.is_none() {
-                out.push_str(&new_extinf);
-                out.push('\n');
+            match extinf {
+                Some(_) => url.to_string(),
+                None => format!("{new_extinf}{eol}{url}"),
             }
-            out.push_str(url);
         } else {
-            out.push_str(line);
+            line.to_string()
         }
-        out.push('\n');
-    }
-    std::fs::write(&path, out).map_err(|e| e.to_string())
+    });
+    write_stream_file(&path, &join_stream_lines(out, eol))
 }
 
 // Move the station at `from` to sit before the station currently at `to` (both
@@ -1418,9 +1609,16 @@ fn update_stream(
 // travel with it; the preamble (#EXTM3U header and anything before the first
 // station) stays put. Rewrites the whole body in the new order.
 #[tauri::command]
-fn move_stream(path: String, from: usize, to: usize) -> Result<(), String> {
+fn move_stream(
+    path: String,
+    from: usize,
+    to: usize,
+    expected_mtime: Option<i64>,
+) -> Result<(), String> {
     reject_remote_list(&path)?;
-    let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    check_stream_stamp(&path, expected_mtime)?;
+    let contents = read_stream_file(&path)?.ok_or_else(|| format!("{path}: no such file"))?;
+    let eol = stream_line_ending(&contents);
     let lines: Vec<&str> = contents.lines().collect();
     let spans = stream_spans(&lines);
     if from >= spans.len() || to > spans.len() {
@@ -1440,42 +1638,39 @@ fn move_stream(path: String, from: usize, to: usize) -> Result<(), String> {
     let mut order: Vec<usize> = (0..spans.len()).collect();
     let moved = order.remove(from);
     order.insert(if to > from { to - 1 } else { to }, moved);
-    let mut out = String::new();
-    for line in &lines[..starts[0]] {
-        out.push_str(line);
-        out.push('\n');
-    }
-    for &i in &order {
-        let (s, e) = block(i);
-        for line in &lines[s..e] {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    std::fs::write(&path, out).map_err(|e| e.to_string())
+    let reordered = lines[..starts[0]].iter().copied().chain(
+        order
+            .iter()
+            .flat_map(|&i| {
+                let (s, e) = block(i);
+                &lines[s..e]
+            })
+            .copied(),
+    );
+    let out = join_stream_lines(reordered.map(str::to_string), eol);
+    write_stream_file(&path, &out)
 }
 
 // Remove the `index`-th station: drop its URL line and the whole run from its
 // #EXTINF down to that URL (taking any #EXTVLCOPT etc. that rode with it), so no
 // orphaned directive leaks onto the next station.
 #[tauri::command]
-fn delete_stream(path: String, index: usize) -> Result<(), String> {
+fn delete_stream(path: String, index: usize, expected_mtime: Option<i64>) -> Result<(), String> {
     reject_remote_list(&path)?;
-    let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    check_stream_stamp(&path, expected_mtime)?;
+    let contents = read_stream_file(&path)?.ok_or_else(|| format!("{path}: no such file"))?;
+    let eol = stream_line_ending(&contents);
     let lines: Vec<&str> = contents.lines().collect();
     let &(extinf, url_line) = stream_spans(&lines)
         .get(index)
         .ok_or("stream index out of range")?;
     let start = extinf.unwrap_or(url_line);
-    let mut out = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i >= start && i <= url_line {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    std::fs::write(&path, out).map_err(|e| e.to_string())
+    let kept = lines
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i < start || i > url_line)
+        .map(|(_, line)| line.to_string());
+    write_stream_file(&path, &join_stream_lines(kept, eol))
 }
 
 // A local file path → its file:// URL, so a station image picked from the file
@@ -1702,14 +1897,27 @@ const MAX_STREAM_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 // Returned as a data URL for the same reason get_art's is: the webview CSP
 // only permits 'self' and data: image sources, so neither remote URLs nor
 // arbitrary local files can be given to <img> directly.
+//
+// Async, and on a blocking thread, for the same reason read_stream_list is: a
+// sync #[tauri::command] runs on the main thread, which on macOS is the thread
+// that draws the window. A station whose art host is slow or dead would hold it
+// for the full 15s timeout — audio playing (it has its own threads) under a
+// window that can't paint the station that just started.
 #[tauri::command]
-fn get_stream_image(image: String) -> Option<String> {
+async fn get_stream_image(image: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || fetch_stream_image(&image))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn fetch_stream_image(image: &str) -> Option<String> {
     let (bytes, mime) = if image.starts_with("http://") || image.starts_with("https://") {
         let resp = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(15))
             .user_agent(USER_AGENT)
             .build()
-            .get(&image)
+            .get(image)
             .call()
             .map_err(|e| log::warn!("stream image fetch failed for {image}: {e}"))
             .ok()?;
@@ -2854,6 +3062,125 @@ impl Drop for StagedFile {
     }
 }
 
+// Replace a file's entire contents without ever leaving it truncated: write the
+// new bytes to a staged sibling, then rename that over the target. The same trade
+// write_one_file makes, for callers that author a whole file rather than patching
+// one — a plain `fs::write` truncates first, so anything that interrupts it (a full
+// disk, a drive pulled mid-write, a force-quit, an OS crash) leaves an empty or
+// half-written file where the user's data used to be. Rename is atomic, so the only
+// two things this can leave on disk are the old contents and the new.
+//
+// Staged by *copying* the original first, exactly as write_one_file does, even
+// though the caller already holds every byte and none of the copy's content is
+// kept. The copy is not there for the bytes: the rename lands a brand-new inode,
+// and everything hanging off the old one — Finder tags and comments and the rest
+// of the xattrs, the ACL, the mode — belongs to the inode, not the name. Cloning
+// the file and truncating the clone carries all of it across; creating the staged
+// file from scratch would silently strip it on every save, and a playlist is saved
+// on every drag. On APFS the clone costs no bytes, and a playlist is kilobytes
+// anywhere else.
+//
+// A target that isn't there yet (a new playlist, the common case) has nothing to
+// clone and nothing to inherit, so it starts from an empty file.
+pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    use std::io::Write;
+    // Resolve the link first, for the reason write_one_file does: rename replaces a
+    // *directory entry*, so renaming onto a symlink would leave a regular file where
+    // the link was. A path that won't resolve — a file being created, the ordinary
+    // case here — is used unchanged.
+    let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let staged = StagedFile(temp_sibling(&target)?);
+    // Missing target: nothing to inherit, so skip the clone rather than fail. Any
+    // other copy error is the write failing, and fails here with the original still
+    // whole — which is the entire point of staging.
+    match std::fs::copy(&target, &staged.0) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    // `truncate`, because the clone is the old file: without it a new body shorter
+    // than the old one would leave the old tail behind it.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&staged.0)?;
+    f.write_all(bytes)?;
+    // Flushed before the rename, not merely written. This is narrower than it
+    // sounds: a full disk or any other failed write returns above and never reaches
+    // the rename, and a force-quit leaves the page cache for the OS to flush. What
+    // it buys is the kernel panic and the power cut, where the rename could
+    // otherwise be on disk ahead of the bytes it publishes — the old file gone and
+    // the new one arbitrarily short.
+    //
+    // fsync(2), not F_FULLFSYNC: this flushes to the device but doesn't force the
+    // drive's own cache, so a power cut in that last window can still lose the tail.
+    // Forcing the cache costs tens of milliseconds, and every curation autosaves
+    // through here — not a trade worth making against the case an autosave is
+    // already re-derivable from.
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&staged.0, &target)
+}
+
+// A staged write where the directory allows one, a plain write where it doesn't.
+//
+// Staging creates a sibling and renames it, so it needs a writable *directory* and
+// not just a writable file — and there is a shipping configuration where a
+// playlist's directory is not ours. openAssociatedFile hands any .m3u8 opened from
+// Finder or Open… to browsePlaylistPath, and from then on it autosaves on every
+// drag like any other. Under the App Sandbox that file arrived through the
+// user-selected grant, which covers the file and no sibling beside it, so every
+// autosave of it would fail where a plain write succeeds. Read-only directories
+// holding a writable file land the same way, sandbox or not.
+//
+// Falling back costs nothing that was already lost: write_atomic reaches the
+// directory before it touches the target — temp_sibling, then the clone, then the
+// open — so a refusal there returns with the original whole and nothing staged.
+// What we give up is durability on the retry, and only for the files that could
+// never have had it.
+//
+// Deliberately narrow: only a permission refusal falls back. A full disk, an I/O
+// error or a vanished volume must keep failing loudly, because for those the plain
+// write is the dangerous one — it truncates first and then discovers it cannot
+// write, which is exactly the way write_one_file used to lose a track (see
+// is_storage_fatal).
+pub(crate) fn write_durably(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    match write_atomic(target, bytes) {
+        Err(e) if is_staging_denied(&e) => {
+            log::warn!(
+                "{}: staging denied ({e}), writing in place",
+                target.display()
+            );
+            std::fs::write(target, bytes)
+        }
+        other => other,
+    }
+}
+
+// Does this error mean "this directory is not yours to stage in", as opposed to
+// "this write failed"? EPERM and EACCES are the sandbox and the mode bits; EROFS is
+// a read-only mount, where a rename is refused for the same reason and a plain
+// write will fail identically a moment later — harmless to try, and it keeps the
+// set to the one question being asked.
+fn is_staging_denied(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        e.kind(),
+        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        matches!(e.raw_os_error(), Some(1 | 13 | 30))
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 // One file: open, patch, save, re-stat, read back. Returns what the file says
 // afterwards (read off the mutated tag, never off the patch — see cached_fields)
 // along with the post-write mtime and size. Mirrors read_file_tags in mutating the
@@ -3616,6 +3943,7 @@ async fn dropped_tracks(
         // Each dropped item's files, kept as its own group: a folder is sorted
         // internally, while the groups stay in drop order.
         let mut groups: Vec<Vec<PathBuf>> = Vec::new();
+        let mut unreadable = Vec::new();
         for p in &paths {
             let path = Path::new(p);
             // Follows symlinks (unlike a dirent's file_type), so a dropped alias to
@@ -3627,7 +3955,10 @@ async fn dropped_tracks(
             if meta.is_dir() {
                 // Left in readdir order for now — arbitrary, and a queue's order
                 // is not. Sorted properly once the tags are read, below.
-                walk_audio(path, &mut group, &mut visited);
+                // Nothing here deletes anything, so a folder that won't open is
+                // just a folder with no audio in it; the holes are collected and
+                // dropped.
+                walk_audio(path, &mut group, &mut visited, &mut unreadable);
             } else if meta.is_file() && is_audio_path(p) {
                 group.push(path.to_path_buf());
             }
@@ -5789,6 +6120,7 @@ mod tests {
             "Now Named".into(),
             "http://ex.am/bare2".into(),
             Some("file:///art/x.png".into()),
+            None,
         )
         .unwrap();
         let streams = parse_m3u_stream_list(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -5803,7 +6135,7 @@ mod tests {
 
         // Deleting index 1 takes its #EXTINF, its #EXTVLCOPT, and its URL, leaving
         // only the first station.
-        delete_stream(p.clone(), 1).unwrap();
+        delete_stream(p.clone(), 1, None).unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         let streams = parse_m3u_stream_list(&contents).unwrap();
         assert_eq!(streams.len(), 1);
@@ -5811,7 +6143,7 @@ mod tests {
         assert!(!contents.contains("#EXTVLCOPT"));
 
         // Out-of-range index is an error, not a silent no-op.
-        assert!(delete_stream(p.clone(), 9).is_err());
+        assert!(delete_stream(p.clone(), 9, None).is_err());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -5829,7 +6161,7 @@ mod tests {
         .unwrap();
 
         // Move B (index 1) to the front (before index 0).
-        move_stream(p.clone(), 1, 0).unwrap();
+        move_stream(p.clone(), 1, 0, None).unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         let streams = parse_m3u_stream_list(&contents).unwrap();
         assert_eq!(
@@ -5840,7 +6172,7 @@ mod tests {
         assert!(contents.starts_with("#EXTM3U\n#EXTINF:-1,B\n#EXTVLCOPT:network-caching=1000\n"));
 
         // Move A (now index 1) to the end (to == len).
-        move_stream(p.clone(), 1, 3).unwrap();
+        move_stream(p.clone(), 1, 3, None).unwrap();
         let streams = parse_m3u_stream_list(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
@@ -5848,11 +6180,121 @@ mod tests {
         );
 
         // Out-of-range indices are errors.
-        assert!(move_stream(p.clone(), 9, 0).is_err());
-        assert!(move_stream(p.clone(), 0, 9).is_err());
+        assert!(move_stream(p.clone(), 9, 0, None).is_err());
+        assert!(move_stream(p.clone(), 0, 9, None).is_err());
 
         let _ = std::fs::remove_file(&path);
     }
+    #[test]
+    fn stream_edits_refuse_a_file_that_moved_under_them() {
+        let path = std::env::temp_dir().join(format!("pudding-stale-{}.m3u8", std::process::id()));
+        let p = path.to_string_lossy().into_owned();
+        let original = "#EXTM3U\n#EXTINF:-1,A\nhttp://ex.am/a\n#EXTINF:-1,B\nhttp://ex.am/b\n";
+        std::fs::write(&path, original).unwrap();
+
+        // The ordinals the pane sends are only meaningful against the file it read.
+        // With a stamp from some other version of the file, every index-addressed
+        // edit refuses rather than renaming or deleting whichever station now sits
+        // at that position — and the file is left exactly as it was.
+        let stamp = crate::playlist::file_mtime_ms(&p).unwrap();
+        let stale = Some(stamp - 5000);
+        assert!(delete_stream(p.clone(), 1, stale).is_err());
+        assert!(move_stream(p.clone(), 1, 0, stale).is_err());
+        assert!(update_stream(
+            p.clone(),
+            0,
+            "X".into(),
+            "http://ex.am/x".into(),
+            None,
+            stale,
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        // The stamp the file actually carries lets the same edit through. Appending
+        // addresses no ordinal, so add_stream takes no stamp at all.
+        delete_stream(p.clone(), 1, Some(stamp)).unwrap();
+        let streams = parse_m3u_stream_list(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(streams.len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn add_stream_keeps_a_list_it_cannot_read_as_utf8() {
+        let path = std::env::temp_dir().join(format!("pudding-latin1-{}.m3u8", std::process::id()));
+        let p = path.to_string_lossy().into_owned();
+        // A Latin-1 list, the shape read_to_string chokes on — and choking must not
+        // read as "the file was empty", which would replace the user's stations with
+        // the one being added.
+        let mut bytes = b"#EXTM3U\n#EXTINF:-1,Caf".to_vec();
+        bytes.push(0xE9);
+        bytes.extend_from_slice(b" Radio\nhttp://ex.am/cafe\n");
+        std::fs::write(&path, &bytes).unwrap();
+
+        add_stream(p.clone(), "New".into(), "http://ex.am/new".into(), None).unwrap();
+        let contents = crate::playlist::decode_bytes(&std::fs::read(&path).unwrap());
+        let streams = parse_m3u_stream_list(&contents).unwrap();
+        assert_eq!(
+            streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Café Radio", "New"],
+        );
+
+        // A read that fails for a reason other than "no such file" is an error, not
+        // an empty slate: a directory stats fine and refuses to be read.
+        let dir = std::env::temp_dir().join(format!("pudding-dir-{}.m3u8", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(add_stream(
+            dir.to_string_lossy().into_owned(),
+            "x".into(),
+            "http://ex.am/x".into(),
+            None
+        )
+        .is_err());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stream_rewrites_keep_the_files_line_ending() {
+        let path = std::env::temp_dir().join(format!("pudding-crlf-{}.m3u8", std::process::id()));
+        let p = path.to_string_lossy().into_owned();
+        std::fs::write(
+            &path,
+            "#EXTM3U\r\n#EXTINF:-1,A\r\nhttp://ex.am/a\r\n#EXTINF:-1,B\r\nhttp://ex.am/b\r\n",
+        )
+        .unwrap();
+
+        // `lines()` drops the \r, so every rewrite has to put it back — otherwise
+        // editing one station silently converts the whole file to LF.
+        add_stream(p.clone(), "C".into(), "http://ex.am/c".into(), None).unwrap();
+        update_stream(
+            p.clone(),
+            0,
+            "A2".into(),
+            "http://ex.am/a".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        move_stream(p.clone(), 2, 0, None).unwrap();
+        delete_stream(p.clone(), 1, None).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.replace("\r\n", "").contains('\n'),
+            "a bare LF survived: {contents:?}"
+        );
+        let streams = parse_m3u_stream_list(&contents).unwrap();
+        assert_eq!(
+            streams.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["C", "B"],
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     // === Never destroy a file ===
     //
     // lofty rewrites a file where it stands: for ID3v2 it reads the audio into
@@ -5988,6 +6430,445 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(".pudding-save-"))
             .collect()
+    }
+
+    // --- write_atomic ------------------------------------------------------
+
+    // The whole point: an interrupted write must not be able to destroy what was
+    // already on disk. A full volume is the cheapest real interruption to stage.
+    #[test]
+    fn a_full_disk_leaves_the_old_contents_of_an_atomic_write() {
+        let Some(vol) = TinyVolume::new("atomicfull", 3) else {
+            eprintln!("skipped: hdiutil unavailable");
+            return;
+        };
+        let target = vol.mount.join("Road Trip.m3u8");
+        std::fs::write(&target, "#EXTM3U\n/Music/a.mp3\n").expect("seed");
+
+        // Staged on the same volume, so there is nowhere for these bytes to go.
+        let err = write_atomic(&target, &vec![b'x'; 8 * 1024 * 1024])
+            .err()
+            .expect("the volume is full, this cannot succeed");
+        assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
+
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read after"),
+            "#EXTM3U\n/Music/a.mp3\n",
+            "a failed write must leave the file exactly as it was"
+        );
+        assert!(
+            staged_leftovers(&vol.mount).is_empty(),
+            "the staged file is cleaned up on the way out"
+        );
+    }
+
+    // Rename replaces a directory entry, so an unresolved symlink target would be
+    // overwritten by a regular file and the real playlist stranded.
+    #[test]
+    fn an_atomic_write_through_a_symlink_keeps_the_symlink() {
+        let dir = std::env::temp_dir().join(format!("pudding-atomic-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let real = dir.join("real.m3u8");
+        let link = dir.join("link.m3u8");
+        std::fs::write(&real, "#EXTM3U\n").expect("seed");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        write_atomic(&link, b"#EXTM3U\n/Music/b.mp3\n").expect("write");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("stat link")
+                .file_type()
+                .is_symlink(),
+            "the link is still a link"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real).expect("read real"),
+            "#EXTM3U\n/Music/b.mp3\n",
+            "the bytes landed on the file the link points at"
+        );
+        assert!(staged_leftovers(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The rename lands a new inode, so the old file's mode has to be carried over
+    // explicitly or every save would quietly reset it to the umask default.
+    #[test]
+    fn an_atomic_write_keeps_the_files_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pudding-atomic-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let target = dir.join("private.m3u8");
+        std::fs::write(&target, "#EXTM3U\n").expect("seed");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        write_atomic(&target, b"#EXTM3U\n/Music/c.mp3\n").expect("write");
+
+        let mode = std::fs::metadata(&target)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the mode survived the rename");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A file that doesn't exist yet is the ordinary case (New Playlist), and it must
+    // not trip over the canonicalize or the permission copy.
+    #[test]
+    fn an_atomic_write_creates_a_file_that_was_not_there() {
+        let dir = std::env::temp_dir().join(format!("pudding-atomic-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let target = dir.join("Brand New.m3u8");
+
+        write_atomic(&target, b"#EXTM3U\n").expect("write");
+
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "#EXTM3U\n");
+        assert!(staged_leftovers(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Same guarantee extended_attributes_survive_a_save pins for a track, for the
+    // file a playlist lives in. Everything the user hangs off a playlist — a Finder
+    // tag, a comment — is attached to the inode, and the rename lands a new one, so
+    // only the clone carries it over. A playlist autosaves on every drag, which is
+    // how often this would otherwise be thrown away.
+    #[test]
+    fn extended_attributes_survive_an_atomic_write() {
+        let dir = std::env::temp_dir().join(format!("pudding-atomic-xattr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let target = dir.join("Road Trip.m3u8");
+        let p = target.to_string_lossy().into_owned();
+        std::fs::write(&target, "#EXTM3U\n/Music/a.mp3\n/Music/b.mp3\n").expect("seed");
+
+        let wrote = std::process::Command::new("xattr")
+            .args(["-w", "com.apple.metadata:pudding_test", "keep me", &p])
+            .status();
+        if !matches!(wrote, Ok(s) if s.success()) {
+            eprintln!("skipped: xattr unavailable");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        // Deliberately shorter than what it replaces: the clone starts out as the
+        // old file, so a body that doesn't cover it must still not leave a tail.
+        write_atomic(&target, b"#EXTM3U\n").expect("write");
+
+        let read = std::process::Command::new("xattr")
+            .args(["-p", "com.apple.metadata:pudding_test", &p])
+            .output()
+            .expect("read xattr");
+        assert!(
+            String::from_utf8_lossy(&read.stdout).contains("keep me"),
+            "the staged clone carries the file's metadata across the rename"
+        );
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "#EXTM3U\n");
+        assert!(staged_leftovers(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The stream list is the one file the app rewrites WITHOUT staging, because
+    // staging needs a writable directory and the stream list is reached by a
+    // single-file pick — under the App Sandbox that grant covers the file and no
+    // sibling beside it. A directory with no write bit stands in for that grant
+    // here: creating an entry in it is refused, writing an existing file in it is
+    // not. So a station edit has to go through where an atomic write cannot.
+    #[test]
+    fn a_station_edit_needs_only_the_file_not_its_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pudding-nodirw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("stations.m3u8");
+        let p = path.to_string_lossy().into_owned();
+        std::fs::write(&path, "#EXTM3U\n#EXTINF:-1,A\nhttp://ex.am/a\n").expect("seed");
+        // r-x: the file stays writable, the directory stops accepting new entries.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+
+        // Running as root would bypass the mode entirely and prove nothing.
+        if write_atomic(&path, b"#EXTM3U\n").is_ok() {
+            eprintln!("skipped: the directory mode is not being enforced (root?)");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        update_stream(
+            p.clone(),
+            0,
+            "A2".into(),
+            "http://ex.am/a".into(),
+            None,
+            None,
+        )
+        .expect("an edit must not need to create a sibling");
+        let renamed = std::fs::read_to_string(&path).expect("read after edit");
+        assert!(renamed.contains("#EXTINF:-1,A2"), "{renamed:?}");
+
+        delete_stream(p, 0, None).expect("nor must a delete");
+        let emptied = std::fs::read_to_string(&path).expect("read after delete");
+        assert!(!emptied.contains("http://ex.am/a"), "{emptied:?}");
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- write_durably -----------------------------------------------------
+
+    // A playlist opened from Finder autosaves on every drag into a directory the app
+    // was never granted. Same r-x stand-in as the stream-list test above: staging is
+    // refused, the file itself is still writable, and the curation has to land.
+    #[test]
+    fn a_playlist_in_an_unwritable_directory_still_saves() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("pudding-durable-nodirw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let target = dir.join("From Finder.m3u8");
+        std::fs::write(&target, "#EXTM3U\n/Music/a.mp3\n").expect("seed");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+
+        // Running as root would bypass the mode entirely and prove nothing.
+        if write_atomic(&target, b"#EXTM3U\n").is_ok() {
+            eprintln!("skipped: the directory mode is not being enforced (root?)");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        write_durably(&target, b"#EXTM3U\n/Music/a.mp3\n/Music/b.mp3\n")
+            .expect("an autosave must not need to create a sibling");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read after"),
+            "#EXTM3U\n/Music/a.mp3\n/Music/b.mp3\n"
+        );
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The fallback is for a directory we may not write, and nothing else. A full
+    // volume must still come back as an error with the old contents intact —
+    // retrying it as a plain write would truncate the playlist and then discover it
+    // has nothing to put there, which is the failure staging exists to prevent.
+    #[test]
+    fn a_full_disk_does_not_fall_back_to_a_plain_write() {
+        let Some(vol) = TinyVolume::new("durablefull", 3) else {
+            eprintln!("skipped: hdiutil unavailable");
+            return;
+        };
+        let target = vol.mount.join("Road Trip.m3u8");
+        std::fs::write(&target, "#EXTM3U\n/Music/a.mp3\n").expect("seed");
+
+        let err = write_durably(&target, &vec![b'x'; 8 * 1024 * 1024])
+            .err()
+            .expect("the volume is full, this cannot succeed");
+        assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read after"),
+            "#EXTM3U\n/Music/a.mp3\n",
+            "a failed write must leave the file exactly as it was"
+        );
+        assert!(staged_leftovers(&vol.mount).is_empty());
+    }
+
+    // Where the directory is ours, nothing changes: the write still goes through
+    // staging, so the guarantees the atomic tests above pin still hold for the
+    // ordinary in-library playlist.
+    #[test]
+    fn a_playlist_in_a_writable_directory_is_still_staged() {
+        use std::os::unix::fs::MetadataExt;
+        let dir =
+            std::env::temp_dir().join(format!("pudding-durable-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let target = dir.join("Road Trip.m3u8");
+        std::fs::write(&target, "#EXTM3U\n/Music/a.mp3\n").expect("seed");
+        let before = std::fs::metadata(&target).expect("stat").ino();
+
+        write_durably(&target, b"#EXTM3U\n").expect("write");
+
+        let after = std::fs::metadata(&target).expect("stat").ino();
+        assert_ne!(before, after, "a staged write lands a new inode");
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "#EXTM3U\n");
+        assert!(staged_leftovers(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- the walk's holes, and what survives a prune -------------------------
+
+    // A directory that will not open has to come back as a hole and not as an empty
+    // folder: everything downstream of the walk turns "found nothing" into "delete
+    // what was there".
+    #[test]
+    fn the_walk_reports_a_directory_it_could_not_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pudding-walk-holes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let reachable = dir.join("Albums");
+        let shut = dir.join("Bootlegs");
+        std::fs::create_dir_all(&reachable).expect("mkdir");
+        std::fs::create_dir_all(&shut).expect("mkdir");
+        std::fs::write(reachable.join("a.mp3"), b"x").expect("seed");
+        std::fs::write(shut.join("b.mp3"), b"x").expect("seed");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let mut files = Vec::new();
+        let mut visited = HashSet::new();
+        let mut unreadable = Vec::new();
+        walk_audio(&dir, &mut files, &mut visited, &mut unreadable);
+
+        // Running as root would bypass the mode entirely and prove nothing.
+        if files.len() == 2 {
+            eprintln!("skipped: the directory mode is not being enforced (root?)");
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        assert_eq!(
+            files,
+            vec![reachable.join("a.mp3")],
+            "the readable half walked"
+        );
+        assert_eq!(unreadable, vec![shut.clone()], "the other half is a hole");
+
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The unmounted external: the root itself is gone, so the whole root is one hole.
+    #[test]
+    fn the_walk_reports_a_root_that_is_not_there() {
+        let gone =
+            std::env::temp_dir().join(format!("pudding-no-such-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&gone);
+
+        let mut files = Vec::new();
+        let mut visited = HashSet::new();
+        let mut unreadable = Vec::new();
+        walk_audio(&gone, &mut files, &mut visited, &mut unreadable);
+
+        assert!(files.is_empty());
+        assert_eq!(unreadable, vec![gone]);
+    }
+
+    // The opposite case, and the one that makes deleting work at all: a folder the
+    // user actually emptied is not a hole, so its rows must still prune.
+    #[test]
+    fn a_readable_empty_root_is_not_a_hole() {
+        let dir = std::env::temp_dir().join(format!("pudding-empty-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let mut files = Vec::new();
+        let mut visited = HashSet::new();
+        let mut unreadable = Vec::new();
+        walk_audio(&dir, &mut files, &mut visited, &mut unreadable);
+
+        assert!(files.is_empty());
+        assert!(
+            unreadable.is_empty(),
+            "an empty folder is empty, not unreachable"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Run the prune the way run_scan does — scan_current from the walk, then the
+    // delete — against a root where one subtree was unreadable and the rest was not.
+    // The partial case is the one that matters: a scan that found *some* files used
+    // to be taken as authoritative for the whole root.
+    #[test]
+    fn an_unreadable_subtree_survives_a_prune_that_still_removes_the_rest() {
+        let conn = Connection::open_in_memory().expect("open");
+        init_schema(&conn).expect("schema");
+        conn.execute_batch("CREATE TEMP TABLE scan_current (path TEXT PRIMARY KEY)")
+            .expect("temp table");
+        for path in [
+            "/m/Albums/a.mp3",   // walked, still there
+            "/m/Albums/b.mp3",   // walked, deleted by the user
+            "/m/Bootlegs/c.mp3", // under the unreadable subtree
+            "/m/Bootlegs/d.mp3",
+        ] {
+            conn.execute(
+                "INSERT INTO tracks (path, root, mtime, size) VALUES (?1, '/m', 0, 0)",
+                [path],
+            )
+            .expect("insert");
+        }
+        // What the walk actually found.
+        conn.execute(
+            "INSERT INTO scan_current (path) VALUES ('/m/Albums/a.mp3')",
+            [],
+        )
+        .expect("insert");
+
+        preserve_unreadable(&conn, "/m", &[PathBuf::from("/m/Bootlegs")]).expect("preserve");
+        conn.execute(
+            "DELETE FROM tracks WHERE root = ?1 AND path NOT IN (SELECT path FROM scan_current)",
+            ["/m"],
+        )
+        .expect("prune");
+
+        let mut stmt = conn
+            .prepare("SELECT path FROM tracks ORDER BY path")
+            .expect("prepare");
+        let left: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(
+            left,
+            vec!["/m/Albums/a.mp3", "/m/Bootlegs/c.mp3", "/m/Bootlegs/d.mp3"],
+            "the unreadable subtree is untouched; the file deleted from the folder we \
+             did read is gone"
+        );
+    }
+
+    // A hole at the root preserves everything, which is the unplugged-drive case.
+    #[test]
+    fn an_unreachable_root_prunes_nothing() {
+        let conn = Connection::open_in_memory().expect("open");
+        init_schema(&conn).expect("schema");
+        conn.execute_batch("CREATE TEMP TABLE scan_current (path TEXT PRIMARY KEY)")
+            .expect("temp table");
+        for path in ["/Volumes/Ext/a.mp3", "/Volumes/Ext/Live/b.mp3"] {
+            conn.execute(
+                "INSERT INTO tracks (path, root, mtime, size) VALUES (?1, '/Volumes/Ext', 0, 0)",
+                [path],
+            )
+            .expect("insert");
+        }
+
+        preserve_unreadable(&conn, "/Volumes/Ext", &[PathBuf::from("/Volumes/Ext")])
+            .expect("preserve");
+        conn.execute(
+            "DELETE FROM tracks WHERE root = ?1 AND path NOT IN (SELECT path FROM scan_current)",
+            ["/Volumes/Ext"],
+        )
+        .expect("prune");
+
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM tracks", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 2, "an empty walk of an absent root deletes nothing");
+    }
+
+    // Whole components, not characters: the neighbouring folder is a different
+    // folder, and a string prefix would preserve its rows too.
+    #[test]
+    fn a_hole_does_not_cover_a_similarly_named_sibling() {
+        let holes = [PathBuf::from("/Volumes/Ext")];
+        assert!(is_under_any(Path::new("/Volumes/Ext/a.mp3"), &holes));
+        assert!(!is_under_any(Path::new("/Volumes/Extra/a.mp3"), &holes));
     }
 
     // The one that matters. A save that runs out of disk used to leave a 0-byte

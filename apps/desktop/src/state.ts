@@ -46,6 +46,11 @@ export interface AppState {
   // the keyboard cursor (activeKbdList) knows which surface bare ↑/↓ should drive.
   lastSelectionPane: "tree" | "list" | "stream" | "nav" | null;
   allStreams: Stream[];
+  // The mtime of the stream-list file allStreams was read from — the stamp each
+  // index-addressed edit sends back so the backend can refuse one aimed at a file
+  // that changed underneath the pane. Null when there is no such stamp (a remote
+  // list, or a read that failed).
+  streamListMtime: number | null;
   currentStreamName: string | null;
   // The synthetic/real parent whose children form the audible pool.
   currentParent: TreeNode | null;
@@ -142,6 +147,7 @@ export const app: AppState = {
   selectionAnchor: null,
   lastSelectionPane: null,
   allStreams: [],
+  streamListMtime: null,
   currentStreamName: null,
   get currentParent(): TreeNode | null {
     return currentParentNode;
