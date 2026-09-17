@@ -1427,7 +1427,7 @@ fn extinf_line(name: &str, image: Option<&str>) -> String {
 // The line spans of each stream in a stream-list body, in the same order (and
 // thus by the same index) as parse_m3u_stream_list yields them. Each entry is
 // (optional #EXTINF line index, URL line index): the #EXTINF is the most recent
-// one seen since the previous URL, matching the parser's pending-title rule
+// one seen since the previous track row, matching the parser's pending-title rule
 // (plain comments between #EXTINF and the URL don't reset it). Lets update and
 // delete edit one station surgically, preserving every other line (headers,
 // #EXTVLCOPT options, blank lines) verbatim.
@@ -1445,6 +1445,10 @@ fn stream_spans(lines: &[&str]) -> Vec<(Option<usize>, usize)> {
             // Other comments/options don't claim the pending title.
         } else if crate::playlist::is_url_row(line) {
             spans.push((pending_extinf.take(), i));
+        } else {
+            // Local tracks consume their metadata too; it must not become part
+            // of a following station's editable/deletable span.
+            pending_extinf = None;
         }
     }
     spans
@@ -1466,28 +1470,10 @@ fn read_stream_file(path: &str) -> Result<Option<String>, String> {
     }
 }
 
-// Write a stream list back. A plain truncating write, deliberately — this is the
-// one file the app rewrites that write_atomic is wrong for.
-//
-// Staging means creating a sibling and renaming it, so it needs a writable
-// *directory* and not just a writable file. write_one_file accepts that trade, on
-// the grounds that it only ever touches files inside a library folder the user
-// granted wholesale. A playlist cannot assume that — one opened as a single file
-// from Finder is in the same position as a stream list — so it goes through
-// write_durably, which stages where it can and falls back where it can't.
-//
-// The stream list doesn't need even that much: browseStreamListPath picks a single
-// file and nothing bookmarks its directory, so under the App Sandbox the grant
-// covers that file and no sibling beside it. Staging here would fail on the
-// shipping configuration and succeed on none, making the attempt pure overhead.
-//
-// The exposure that buys is small and the opposite way round from a playlist's. A
-// playlist autosaves on every drag; a stream list is rewritten only when someone
-// deliberately adds, edits, reorders or removes a station, a handful of times in a
-// list's life. Losing the tail of one of those to a full disk is a real cost, just
-// not one worth trading a whole shipping configuration's ability to edit for.
+// Stream lists have the same integrity requirements as local playlists. If the
+// directory cannot stage a replacement, leave the original intact and report it.
 fn write_stream_file(path: &str, contents: &str) -> Result<(), String> {
-    std::fs::write(path, contents).map_err(|e| e.to_string())
+    write_durably(Path::new(path), contents.as_bytes()).map_err(|e| e.to_string())
 }
 
 // The newline a rewrite should re-emit. `lines()` drops the `\r` of a CRLF file,
@@ -1718,6 +1704,9 @@ fn parse_m3u_stream_list(body: &str) -> Option<Vec<Stream>> {
                 url: line.to_string(),
                 image: pending_image.take(),
             });
+        } else {
+            pending_title = None;
+            pending_image = None;
         }
     }
     (saw_header || !streams.is_empty()).then_some(streams)
@@ -3083,6 +3072,15 @@ impl Drop for StagedFile {
 // A target that isn't there yet (a new playlist, the common case) has nothing to
 // clone and nothing to inherit, so it starts from an empty file.
 pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    write_atomic_checked(target, bytes, || Ok(()))
+}
+
+// Validate again after staging so an external edit during a slow save is refused.
+pub(crate) fn write_atomic_checked(
+    target: &Path,
+    bytes: &[u8],
+    before_replace: impl FnOnce() -> Result<(), std::io::Error>,
+) -> Result<(), std::io::Error> {
     use std::io::Write;
     // Resolve the link first, for the reason write_one_file does: rename replaces a
     // *directory entry*, so renaming onto a symlink would leave a regular file where
@@ -3120,49 +3118,28 @@ pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), std::io::E
     // already re-derivable from.
     f.sync_all()?;
     drop(f);
+    before_replace()?;
     std::fs::rename(&staged.0, &target)
 }
 
-// A staged write where the directory allows one, a plain write where it doesn't.
-//
-// Staging creates a sibling and renames it, so it needs a writable *directory* and
-// not just a writable file — and there is a shipping configuration where a
-// playlist's directory is not ours. openAssociatedFile hands any .m3u8 opened from
-// Finder or Open… to browsePlaylistPath, and from then on it autosaves on every
-// drag like any other. Under the App Sandbox that file arrived through the
-// user-selected grant, which covers the file and no sibling beside it, so every
-// autosave of it would fail where a plain write succeeds. Read-only directories
-// holding a writable file land the same way, sandbox or not.
-//
-// Falling back costs nothing that was already lost: write_atomic reaches the
-// directory before it touches the target — temp_sibling, then the clone, then the
-// open — so a refusal there returns with the original whole and nothing staged.
-// What we give up is durability on the retry, and only for the files that could
-// never have had it.
-//
-// Deliberately narrow: only a permission refusal falls back. A full disk, an I/O
-// error or a vanished volume must keep failing loudly, because for those the plain
-// write is the dangerous one — it truncates first and then discovers it cannot
-// write, which is exactly the way write_one_file used to lose a track (see
-// is_storage_fatal).
+// Never retry a failed staged write by truncating the original. A file-only
+// sandbox grant or an unwritable directory must fail safely too.
 pub(crate) fn write_durably(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
-    match write_atomic(target, bytes) {
-        Err(e) if is_staging_denied(&e) => {
-            log::warn!(
-                "{}: staging denied ({e}), writing in place",
-                target.display()
-            );
-            std::fs::write(target, bytes)
-        }
-        other => other,
+    write_atomic(target, bytes).map_err(safe_save_error)
+}
+
+fn safe_save_error(e: std::io::Error) -> std::io::Error {
+    if is_staging_denied(&e) {
+        std::io::Error::new(e.kind(), format!(
+            "Couldn't safely save the file; the original is unchanged. Allow access to its folder or choose a writable folder. ({e})"
+        ))
+    } else {
+        e
     }
 }
 
-// Does this error mean "this directory is not yours to stage in", as opposed to
-// "this write failed"? EPERM and EACCES are the sandbox and the mode bits; EROFS is
-// a read-only mount, where a rename is refused for the same reason and a plain
-// write will fail identically a moment later — harmless to try, and it keeps the
-// set to the one question being asked.
+// Permission failures can mean a file-only sandbox grant, directory mode bits,
+// or a read-only volume. All are refusals, never permission to truncate in place.
 fn is_staging_denied(e: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     if matches!(
@@ -3274,6 +3251,17 @@ fn write_one_file(
             // which the form has no room for.
             log::error!("write_tags: saving {} failed: {e}", target.display());
             WriteFailure::lofty("Couldn't save the tags", &e)
+        })?;
+
+    // Lofty has closed its writer, but the bytes can still be in the page cache.
+    // Flush before publishing the replacement, just as write_atomic_checked does.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&staged.0)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| {
+            log::error!("write_tags: flushing {} failed: {e}", target.display());
+            WriteFailure::io("Couldn't save the tags", &e)
         })?;
 
     // The staged copy is a correct, complete track carrying the new tags. This is
@@ -6432,6 +6420,73 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn deleting_a_station_preserves_the_preceding_local_track() {
+        let path = std::env::temp_dir().join(format!("pudding-mixed-delete-{}.m3u8", std::process::id()));
+        let local = "#EXTM3U\n#EXTINF:123 tvg-logo=\"local.jpg\",Local song\na.mp3\n";
+        let original = format!("{local}https://example.test/radio\n");
+        std::fs::write(&path, &original).unwrap();
+        let stations = parse_m3u_stream_list(&original).unwrap();
+        assert_ne!(stations[0].name, "Local song");
+        assert_eq!(stations[0].image, None);
+        update_stream(path.to_str().unwrap().into(), 0, "Radio".into(), "https://example.test/new".into(), None, None).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with(local));
+        // Repeat with the bare URL: this used to consume the local track's EXTINF.
+        std::fs::write(&path, &original).unwrap();
+        delete_stream(path.to_str().unwrap().into(), 0, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), local);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    // Isolate RLIMIT_FSIZE to a child process so parallel tests cannot inherit it.
+    #[test]
+    fn failed_playlist_writes_keep_originals() {
+        const CHILD: &str = "PUDDING_TEST_FAILED_PLAYLIST_WRITE";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::failed_playlist_writes_keep_originals", "--nocapture"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pudding-write-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mix.m3u8");
+        let original = b"#EXTM3U\na.mp3\n";
+        std::fs::write(&path, original).unwrap();
+        let mut prior: libc::rlimit = unsafe { std::mem::zeroed() };
+        unsafe {
+            assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut prior), 0);
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let limit = libc::rlimit { rlim_cur: 1024, rlim_max: prior.rlim_max };
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+        }
+        let stream_result = write_stream_file(path.to_str().unwrap(), &"x".repeat(4096));
+        let playlist_result = write_durably(&path, &vec![b'x'; 4096]);
+        unsafe { assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &prior), 0); }
+        assert!(stream_result.is_err());
+        assert!(playlist_result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(staged_leftovers(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_edit_during_staging_is_preserved() {
+        let dir = std::env::temp_dir().join(format!("pudding-before-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mix.m3u8");
+        std::fs::write(&path, b"old").unwrap();
+        let result = write_atomic_checked(&path, b"our edit", || {
+            std::fs::write(&path, b"external edit")?;
+            Err(std::io::Error::other("changed on disk"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"external edit");
+        assert!(staged_leftovers(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     // --- write_atomic ------------------------------------------------------
 
     // The whole point: an interrupted write must not be able to destroy what was
@@ -6571,14 +6626,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The stream list is the one file the app rewrites WITHOUT staging, because
-    // staging needs a writable directory and the stream list is reached by a
-    // single-file pick — under the App Sandbox that grant covers the file and no
-    // sibling beside it. A directory with no write bit stands in for that grant
-    // here: creating an entry in it is refused, writing an existing file in it is
-    // not. So a station edit has to go through where an atomic write cannot.
+    // A file-only grant must never cause a truncating fallback.
     #[test]
-    fn a_station_edit_needs_only_the_file_not_its_directory() {
+    fn a_station_edit_without_directory_access_preserves_the_file() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("pudding-nodirw-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -6605,13 +6655,13 @@ mod tests {
             None,
             None,
         )
-        .expect("an edit must not need to create a sibling");
+        .expect_err("unsafe in-place edits must be refused");
         let renamed = std::fs::read_to_string(&path).expect("read after edit");
-        assert!(renamed.contains("#EXTINF:-1,A2"), "{renamed:?}");
+        assert_eq!(renamed, "#EXTM3U\n#EXTINF:-1,A\nhttp://ex.am/a\n");
 
-        delete_stream(p, 0, None).expect("nor must a delete");
+        delete_stream(p, 0, None).expect_err("unsafe in-place deletes must be refused");
         let emptied = std::fs::read_to_string(&path).expect("read after delete");
-        assert!(!emptied.contains("http://ex.am/a"), "{emptied:?}");
+        assert_eq!(emptied, renamed);
 
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6621,9 +6671,9 @@ mod tests {
 
     // A playlist opened from Finder autosaves on every drag into a directory the app
     // was never granted. Same r-x stand-in as the stream-list test above: staging is
-    // refused, the file itself is still writable, and the curation has to land.
+    // refused, so saving must fail without touching the writable file.
     #[test]
-    fn a_playlist_in_an_unwritable_directory_still_saves() {
+    fn a_playlist_in_an_unwritable_directory_is_unchanged() {
         use std::os::unix::fs::PermissionsExt;
         let dir =
             std::env::temp_dir().join(format!("pudding-durable-nodirw-{}", std::process::id()));
@@ -6642,18 +6692,17 @@ mod tests {
         }
 
         write_durably(&target, b"#EXTM3U\n/Music/a.mp3\n/Music/b.mp3\n")
-            .expect("an autosave must not need to create a sibling");
+            .expect_err("an autosave must not truncate when staging is denied");
         assert_eq!(
             std::fs::read_to_string(&target).expect("read after"),
-            "#EXTM3U\n/Music/a.mp3\n/Music/b.mp3\n"
+            "#EXTM3U\n/Music/a.mp3\n"
         );
 
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The fallback is for a directory we may not write, and nothing else. A full
-    // volume must still come back as an error with the old contents intact —
+    // A full volume must come back as an error with the old contents intact —
     // retrying it as a plain write would truncate the playlist and then discover it
     // has nothing to put there, which is the failure staging exists to prevent.
     #[test]

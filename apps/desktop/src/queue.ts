@@ -5,6 +5,7 @@
 // (seed / arm / append / close / teardown) builds and dismantles the queue.
 
 import { invoke } from "@tauri-apps/api/core";
+import { createPlaylistAccess } from "./playlist-file";
 import { signal } from "@preact/signals-core";
 import { h, eqBars, append } from "./dom";
 import type {
@@ -13,8 +14,7 @@ import type {
   SearchFolder,
   TreeNode,
   ContextMenuItem,
-  PlaylistData,
-  PlaylistWriteRow,
+  PlaylistFileSession,
 } from "./types";
 import {
   app,
@@ -713,41 +713,21 @@ export function playlistChangedOnDisk(path: string, mtime: number): boolean {
 
 // Read a playlist file, noting its mtime. Throws like the raw invoke; every caller
 // already has a story for a playlist that won't open.
-export async function readPlaylist(path: string): Promise<PlaylistData> {
-  const data = await invoke<PlaylistData>("read_playlist", { path });
-  notePlaylistMtime(path, data.mtime);
-  return data;
-}
-
-// The one way a playlist file gets written. Each row carries its `#EXTINF` facts
-// alongside its path: the library DB wins for tracks it knows, but a row from
-// outside every library root has no other source of a title or runtime, and
-// dropping them here is what used to strip a hand-made playlist of its metadata on
-// its first reorder. Throws on failure; callers report.
-export async function writePlaylist(
-  path: string,
-  name: string,
-  tracks: PlaylistWriteRow[],
-): Promise<void> {
-  const mtime = await invoke<number | null>("write_playlist", {
-    path,
-    name,
-    tracks: tracks.map((t) => ({ path: t.path, title: t.title, duration: t.duration })),
-  });
-  // Claim the stamp we just produced, or the watcher sees our own file land a beat
-  // later, calls it an outside change, and reloads the pane out from under the
-  // edit that caused it.
-  notePlaylistMtime(path, mtime);
-}
+const playlistAccess = createPlaylistAccess(invoke, notePlaylistMtime);
+export const readPlaylist = playlistAccess.read;
+export const writePlaylist = playlistAccess.write;
+export const appendPlaylistFile = playlistAccess.append;
+export const renamePlaylistFile = playlistAccess.rename;
 
 // Persist the open playlist after an edit. Every row is written (missing included)
 // so the file round-trips.
-export async function saveOpenPlaylist(path: string, name: string, tracks: SearchTrack[]): Promise<void> {
+export async function saveOpenPlaylist(path: string, name: string, tracks: SearchTrack[], session?: PlaylistFileSession): Promise<void> {
   try {
-    await writePlaylist(path, name, tracks);
+    if (!session) throw "Reopen the playlist before saving; its current contents could not be read.";
+    await writePlaylist(path, name, tracks, session);
   } catch (e) {
     console.error("write_playlist (autosave) failed", path, e);
-    toast("Couldn't save playlist");
+    toast(typeof e === "string" ? e : "Couldn't save playlist");
   }
 }
 
@@ -762,6 +742,7 @@ export function adoptReloadedPlaylist(
   path: string,
   title: string,
   tracks: SearchTrack[],
+  fileSession: PlaylistFileSession,
 ): boolean {
   const browsed = browsedPlaylist.value;
   const active = activeQueue.value;
@@ -778,8 +759,8 @@ export function adoptReloadedPlaylist(
     : null;
 
   const subtitle = trackCountSubtitle(tracks);
-  if (hitsBrowsed) browsedPlaylist.value = { ...browsed!, title, tracks, subtitle };
-  if (hitsActive) activeQueue.value = { ...active!, title, tracks, subtitle };
+  if (hitsBrowsed) browsedPlaylist.value = { ...browsed!, title, tracks, subtitle, fileSession };
+  if (hitsActive) activeQueue.value = { ...active!, title, tracks, subtitle, fileSession };
 
   if (isPool) {
     reconcilePoolEdit(tracks, playingNew);
@@ -855,13 +836,13 @@ function applyCurationCore(newTracks: SearchTrack[]): void {
   // sync (sharing the edited objects) so a later autosave/reconcile of the queue
   // can't ship the pre-edit list.
   if (browsedIsActivePool && active) {
-    activeQueue.value = { ...active, tracks: newTracks, subtitle: updated.subtitle };
+    activeQueue.value = { ...active, tracks: newTracks, subtitle: updated.subtitle, fileSession: list.fileSession };
   }
 
   if (isPool) reconcilePoolEdit(newTracks, playingObj);
 
   if (isPlaylistSource(list) && list.sourcePath) {
-    void saveOpenPlaylist(list.sourcePath, list.title, newTracks);
+    void saveOpenPlaylist(list.sourcePath, list.title, newTracks, list.fileSession);
   }
 }
 
@@ -1072,7 +1053,7 @@ export function appendToActivePool(active: Queue, tracks: SearchTrack[]): void {
     subtitle: trackCountSubtitle(next),
   };
   if (isPool) reconcilePoolEdit(next, playingObj);
-  if (active.sourcePath) void saveOpenPlaylist(active.sourcePath, active.title, next);
+  if (active.sourcePath) void saveOpenPlaylist(active.sourcePath, active.title, next, active.fileSession);
 }
 
 // Insert `tracks` into the active queue at view index `at`, reconciling the live
@@ -1091,7 +1072,7 @@ export function insertIntoActiveQueueAt(tracks: SearchTrack[], at: number): void
   app.pendingQueueScrollIndex = at;
   activeQueue.value = { ...active, tracks: next, subtitle: trackCountSubtitle(next) };
   if (isPool) reconcilePoolEdit(next, playingObj);
-  if (active.sourcePath) void saveOpenPlaylist(active.sourcePath, active.title, next);
+  if (active.sourcePath) void saveOpenPlaylist(active.sourcePath, active.title, next, active.fileSession);
 }
 // --- Building the queue: Create queue / Play next / Add to queue ---
 //

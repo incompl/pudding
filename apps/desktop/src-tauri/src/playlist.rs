@@ -32,9 +32,10 @@ use std::time::SystemTime;
 
 use rusqlite::Connection;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::State;
 
-use crate::{fetch_meta, write_durably, DbHandle};
+use crate::{fetch_meta, write_atomic_checked, write_durably, DbHandle};
 
 pub const PLAYLIST_EXTS: &[&str] = &["m3u", "m3u8"];
 
@@ -128,6 +129,8 @@ pub struct PlaylistData {
     // our own writes means another app (or a text editor) rewrote the playlist,
     // and the open view is stale. None when the file vanished mid-read.
     mtime: Option<i64>,
+    // Hash of the exact bytes that produced these rows, independent of mtime.
+    revision: String,
 }
 
 // A library playlist for the index (Add to playlist ▸ / searchable playlists).
@@ -277,6 +280,19 @@ fn parse_extinf_secs(head: &str) -> Option<f64> {
     num.parse::<f64>().ok().filter(|s| *s >= 0.0)
 }
 
+// Attribute values (such as logo URLs) may contain commas of their own.
+fn split_extinf(inf: &str) -> Option<(&str, &str)> {
+    let mut quoted = false;
+    for (i, c) in inf.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ',' if !quoted => return Some((&inf[..i], &inf[i + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
 // Parse extended-M3U text into the display name and resolved entries.
 // `#PLAYLIST:` sets the name and `#EXTINF:<secs>,<title>` supplies the fallback
 // runtime and title for the next path line. Blank lines and other `#` directives
@@ -298,7 +314,7 @@ fn parse(content: &str, base_dir: &Path) -> (Option<String>, Vec<ParsedEntry>) {
                 } else if let Some(inf) = rest.strip_prefix("EXTINF:") {
                     // `<secs>,<title>` — both halves are kept now: the title names
                     // an out-of-library row and the seconds are its only runtime.
-                    if let Some((head, title)) = inf.split_once(',') {
+                    if let Some((head, title)) = split_extinf(inf) {
                         pending_secs = parse_extinf_secs(head);
                         pending_title =
                             Some(title.trim().to_string()).filter(|t| !t.is_empty());
@@ -318,34 +334,29 @@ fn parse(content: &str, base_dir: &Path) -> (Option<String>, Vec<ParsedEntry>) {
 // --- Preservation -----------------------------------------------------------
 
 // The parts of an existing playlist file that have no place in Pudding's data
-// model — plain comments and non-`#EXTINF` extension directives — captured so a
+// model — comments, extension directives and `#EXTINF` attributes — captured so a
 // rewrite can put them back. Curation autosaves on every edit, so without this a
 // single drag would silently strip whatever the file's original author wrote.
 //
-// `#EXTM3U`, `#PLAYLIST:` and `#EXTINF:` are deliberately *not* captured: all
-// three are regenerated from live state on every write, so carrying them over
-// would duplicate them.
+// The header, name, and `#EXTINF` duration/title are regenerated from live state.
+#[derive(Default)]
+struct PreservedRow {
+    attached: Vec<String>,
+    raw: String,
+    extinf_attrs: String,
+}
+
 #[derive(Default)]
 struct Preserved {
     // Plain `#` comments standing before the first track — a file banner
     // ("# Created by ..."), which belongs to the file rather than to any one row.
     header: Vec<String>,
-    // Directives that introduce a track, keyed by the resolved path they precede:
-    // `#EXTGRP`, `#EXTVLCOPT`, `#EXTALB` and friends. They travel with their row,
-    // so a reorder moves them rather than stranding them. First occurrence wins
-    // when one path appears twice — the two rows are indistinguishable by the only
-    // key we have.
-    attached: HashMap<String, Vec<String>>,
+    // Keep every occurrence, including ones without directives. Serialization
+    // consumes these in occurrence order for each resolved path, so repeated
+    // tracks keep distinct playback options, attributes, and path spellings.
+    rows: HashMap<String, Vec<PreservedRow>>,
     // Anything trailing the last track line.
     trailer: Vec<String>,
-    // The exact text each row was written with, keyed by the resolved path —
-    // `attached`'s key, so the two can never disagree about which row is which.
-    // A spelling is content its author chose: `./a.mp3`, a route that runs
-    // through a symlink, an accented filename in NFC where the DB holds NFD.
-    // Re-deriving one from the resolved path quietly rewrites all three, so a
-    // rewrite plays back the original bytes instead. First occurrence wins for a
-    // repeated path, as with `attached`.
-    raw: HashMap<String, String>,
     // The directory those spellings are relative to. A write aimed anywhere else
     // — the destination half of a move — must not reuse them: the same
     // `../Artist/x.mp3` names a different file read from a different folder.
@@ -376,6 +387,7 @@ impl Preserved {
             ..Preserved::default()
         };
         let mut run: Vec<String> = Vec::new();
+        let mut extinf_attrs = String::new();
         let mut seen_track = false;
         let mut all_absolute = true;
 
@@ -384,10 +396,15 @@ impl Preserved {
                 Line::Blank => {}
                 Line::Directive(d) => {
                     let rest = &d[1..];
-                    if rest.starts_with("EXTM3U")
-                        || rest.starts_with("PLAYLIST:")
-                        || rest.starts_with("EXTINF:")
-                    {
+                    if let Some(inf) = rest.strip_prefix("EXTINF:") {
+                        if let Some((head, _)) = split_extinf(inf) {
+                            let head = head.trim_start();
+                            let end = head.find(char::is_whitespace).unwrap_or(head.len());
+                            extinf_attrs = head[end..].to_string();
+                        }
+                        continue;
+                    }
+                    if rest.starts_with("EXTM3U") || rest.starts_with("PLAYLIST:") {
                         continue;
                     }
                     if !seen_track && !rest.starts_with("EXT") {
@@ -406,11 +423,11 @@ impl Preserved {
                         all_absolute &= Path::new(t).is_absolute();
                     }
                     let resolved = resolve_path(base_dir, t);
-                    let block = std::mem::take(&mut run);
-                    if !block.is_empty() {
-                        out.attached.entry(resolved.clone()).or_insert(block);
-                    }
-                    out.raw.entry(resolved).or_insert_with(|| t.to_string());
+                    out.rows.entry(resolved).or_default().push(PreservedRow {
+                        attached: std::mem::take(&mut run),
+                        raw: t.to_string(),
+                        extinf_attrs: std::mem::take(&mut extinf_attrs),
+                    });
                 }
             }
         }
@@ -429,8 +446,8 @@ impl Preserved {
     // keeps a move from carrying `../Artist/x.mp3` to a folder where it points
     // somewhere else entirely. An absolute spelling is immune to the move and
     // travels as it is.
-    fn row_spelling(&self, resolved: &str, base_dir: &Path) -> Option<&str> {
-        let raw = self.raw.get(resolved)?;
+    fn row_spelling<'a>(&self, row: &'a PreservedRow, base_dir: &Path) -> Option<&'a str> {
+        let raw = &row.raw;
         (Path::new(raw).is_absolute() || self.base_dir == base_dir).then_some(raw.as_str())
     }
 
@@ -443,6 +460,7 @@ impl Preserved {
     // transient read error. The ceiling `read_rows` enforces is a refusal for the
     // same reason: nothing that large opened as a playlist, so rewriting it from a
     // blank slate would destroy a file we never read.
+    #[cfg(test)]
     fn from_file(path: &str) -> Result<Self, String> {
         match std::fs::metadata(path) {
             Ok(meta) if meta.len() > MAX_PLAYLIST_BYTES => {
@@ -511,7 +529,7 @@ fn playlist_base_dir(path: &str) -> PathBuf {
 // pair new content with an older mtime, which only costs a redundant reload later.
 // The other order pairs old content with a newer mtime and the staleness is never
 // noticed at all.
-fn read_rows(path: &str) -> Result<(Option<String>, Vec<ParsedEntry>, Option<i64>), String> {
+fn read_rows(path: &str) -> Result<(Option<String>, Vec<ParsedEntry>, Option<i64>, String), String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let mtime = mtime_ms(&meta);
     // Size first, before a byte is read: past this the file is not a playlist that
@@ -530,14 +548,14 @@ fn read_rows(path: &str) -> Result<(Option<String>, Vec<ParsedEntry>, Option<i64
     if entries.len() > MAX_PLAYLIST_ROWS {
         return Err(format!("not a playlist: {path} has {} rows", entries.len()));
     }
-    Ok((name, entries, mtime))
+    Ok((name, entries, mtime, content_revision(&bytes)))
 }
 
 // Open a playlist file: decode, parse, and resolve each row's metadata against
 // the library DB (falling back to `#EXTINF`/filename for out-of-library rows).
 #[tauri::command]
 pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, String> {
-    let (name, entries, mtime) = read_rows(&path)?;
+    let (name, entries, mtime, revision) = read_rows(&path)?;
 
     let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
     let meta_map = {
@@ -635,6 +653,7 @@ pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, 
         path,
         tracks,
         mtime,
+        revision,
     })
 }
 
@@ -680,8 +699,14 @@ fn serialize(
         out.push_str(line);
         out.push('\n');
     }
+    let mut occurrences: HashMap<_, _> = preserved
+        .rows
+        .iter()
+        .map(|(path, rows)| (path, rows.iter()))
+        .collect();
     for r in rows {
-        for line in preserved.attached.get(&r.path).into_iter().flatten() {
+        let original = occurrences.get_mut(&r.path).and_then(Iterator::next);
+        for line in original.into_iter().flat_map(|row| &row.attached) {
             out.push_str(line);
             out.push('\n');
         }
@@ -702,9 +727,10 @@ fn serialize(
         let display = sanitize_line(&display);
         // A bare duration with no title is still worth a line: it is what the file
         // said, and dropping it would make the rewrite lossy for no gain.
-        if !display.is_empty() || secs.is_some() {
+        let attrs = original.map(|row| row.extinf_attrs.as_str()).unwrap_or("");
+        if !display.is_empty() || secs.is_some() || !attrs.is_empty() {
             let secs = secs.map(|d| d.round() as i64).unwrap_or(-1);
-            out.push_str(&format!("#EXTINF:{},{}\n", secs, display));
+            out.push_str(&format!("#EXTINF:{}{},{}\n", secs, attrs, display));
         }
         // A stream row is written back exactly as it came in. `relativize` would
         // decline it anyway (a URL shares no directory with the playlist), but only
@@ -717,11 +743,21 @@ fn serialize(
         }
         // A row the file already had keeps its author's spelling; only a row we
         // are adding gets one chosen for it.
-        match preserved.row_spelling(&r.path, &base_dir) {
-            Some(raw) => out.push_str(raw),
-            None if preserved.style == HouseStyle::AllAbsolute => out.push_str(&r.path),
-            None => out.push_str(&relativize(&base_dir, &r.path, &bounds)),
+        let spelling = original
+            .and_then(|row| preserved.row_spelling(row, &base_dir))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if preserved.style == HouseStyle::AllAbsolute {
+                    r.path.clone()
+                } else {
+                    relativize(&base_dir, &r.path, &bounds)
+                }
+            });
+        // A leading hash would turn this filename into a comment on the next read.
+        if spelling.starts_with('#') {
+            out.push_str("./");
         }
+        out.push_str(&spelling);
         out.push('\n');
     }
     for line in &preserved.trailer {
@@ -925,34 +961,73 @@ fn relativize(base_dir: &Path, track: &str, bounds: &Bounds) -> String {
         .unwrap_or_else(|| track.to_string())
 }
 
-// Write (create or overwrite) a playlist file. Used by New (empty tracks),
-// autosave after curation, Save-as-Playlist, and Add-to-playlist on a closed
-// file.
+fn content_revision(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[derive(Serialize)]
+pub struct PlaylistStamp {
+    mtime: Option<i64>,
+    revision: String,
+}
+
+const PLAYLIST_CONFLICT: &str = "The playlist changed on disk. Reopen it before saving; your changes were not written.";
+
+fn current_bytes(path: &str) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_PLAYLIST_BYTES => return Err("not a playlist: file is too large".into()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    }
+    std::fs::read(path).map(Some).map_err(|e| e.to_string())
+}
+
+fn write_playlist_inner(
+    path: &str,
+    name: &str,
+    tracks: &[TrackRef],
+    expected_revision: Option<&str>,
+    overwrite: bool,
+    conn: &Connection,
+) -> Result<PlaylistStamp, String> {
+    let original = current_bytes(path)?;
+    let revision = original.as_deref().map(content_revision);
+    // No revision means creation, not permission to overwrite an unknown file.
+    // Only an explicit Save dialog replacement may bypass the initial comparison.
+    if !overwrite && revision.as_deref() != expected_revision {
+        return Err(PLAYLIST_CONFLICT.into());
+    }
+    let preserved = original.as_deref().map(|bytes| {
+        Preserved::from_content(&decode_bytes(bytes), &playlist_base_dir(path))
+    }).unwrap_or_default();
+    let content = serialize(path, name, tracks, &preserved, conn)?;
+    write_atomic_checked(Path::new(path), content.as_bytes(), || {
+        let current = current_bytes(path).map_err(std::io::Error::other)?;
+        if current != original {
+            return Err(std::io::Error::other(PLAYLIST_CONFLICT));
+        }
+        Ok(())
+    }).map_err(|e| crate::safe_save_error(e).to_string())?;
+    Ok(PlaylistStamp {
+        mtime: file_mtime_ms(path),
+        revision: content_revision(content.as_bytes()),
+    })
+}
+
+// Saves carry the revision of the rows the caller edited. The connection lock
+// serializes in-app writes; the byte comparison also catches external changes.
 #[tauri::command]
 pub fn write_playlist(
     path: String,
     name: String,
     tracks: Vec<TrackRef>,
+    expected_revision: Option<String>,
+    overwrite: Option<bool>,
     db: State<DbHandle>,
-) -> Result<Option<i64>, String> {
-    // Read what we are about to overwrite, so its comments and extension
-    // directives survive the rewrite. Cheap next to the write itself, and it is
-    // the only place the originals still exist.
-    let preserved = Preserved::from_file(&path)?;
-    let content = {
-        let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-        serialize(&path, &name, &tracks, &preserved, &conn)?
-    };
-    // Staged and renamed wherever the directory permits it: this is the app's most
-    // frequent write — every curation autosaves through it — and the file *is* the
-    // playlist. A half-finished plain write would leave the user's curation truncated
-    // or gone. A playlist opened as a single file from Finder has no writable
-    // directory to stage in and takes the plain write instead; see write_durably.
-    write_durably(Path::new(&path), content.as_bytes()).map_err(|e| e.to_string())?;
-    // Hand back the mtime this write produced so the caller can record it as its
-    // own. Otherwise the watcher sees our own file land, calls it an outside
-    // change, and reloads the view out from under the edit that caused it.
-    Ok(file_mtime_ms(&path))
+) -> Result<PlaylistStamp, String> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    write_playlist_inner(&path, &name, &tracks, expected_revision.as_deref(), overwrite.unwrap_or(false), &conn)
 }
 
 // The playlist file's mtime, or None if it no longer exists. Deliberately cheap —
@@ -1032,9 +1107,7 @@ fn move_playlist_inner(old_path: &str, new_path: &str, conn: &Connection) -> Res
     // the same file, where removing it would delete what we just wrote. Note the
     // staged write does NOT rewrite in place — it renames a new inode over the
     // destination — so two names for one inode (a hard link) leave the old one
-    // holding the old contents rather than seeing the new. The write_durably
-    // fallback does rewrite in place, and there a hard link sees the new contents;
-    // `same` is decided by is_same_file either way, so the removal stays correct.
+    // holding the old contents rather than seeing the new.
     if !same {
         std::fs::remove_file(old_path).map_err(|e| e.to_string())?;
     }
@@ -1048,18 +1121,10 @@ fn move_playlist_inner(old_path: &str, new_path: &str, conn: &Connection) -> Res
 // filename, so the file path is stable.
 #[tauri::command]
 pub fn rename_playlist(path: String, name: String, db: State<DbHandle>) -> Result<(), String> {
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let content = decode_bytes(&bytes);
-    let base_dir = playlist_base_dir(&path);
-    let (_old_name, entries) = parse(&content, &base_dir);
-    let preserved = Preserved::from_content(&content, &base_dir);
-    let rows = entries_as_rows(entries);
-
-    let out = {
-        let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-        serialize(&path, &name, &rows, &preserved, &conn)?
-    };
-    write_durably(Path::new(&path), out.as_bytes()).map_err(|e| e.to_string())
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let (_, entries, _, revision) = read_rows(&path)?;
+    write_playlist_inner(&path, &name, &entries_as_rows(entries), Some(&revision), false, &conn)?;
+    Ok(())
 }
 
 // Delete a playlist file from disk (tree Delete). Guarded to actual playlist
@@ -1227,6 +1292,47 @@ fn parse_playlist_name(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_playlist_saves_preserve_external_edits_and_deletions() {
+        let root = scratch("stale-save");
+        let file = root.join("mix.m3u8");
+        let path = file.to_str().unwrap();
+        let original = b"#EXTM3U\na.mp3\n";
+        std::fs::write(&file, original).unwrap();
+        let (_, entries, _, revision) = read_rows(path).unwrap();
+        let rows = entries_as_rows(entries);
+        // Same byte length and same mtime: a millisecond timestamp is not a revision.
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let external = b"#EXTM3U\nb.mp3\n";
+        std::fs::write(&file, external).unwrap();
+        std::fs::File::options().write(true).open(&file).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+        let err = write_playlist_inner(path, "Renamed", &rows, Some(&revision), false, &empty_db()).err().unwrap();
+        assert_eq!(err, PLAYLIST_CONFLICT);
+        assert_eq!(std::fs::read(&file).unwrap(), external);
+        std::fs::remove_file(&file).unwrap();
+        assert!(write_playlist_inner(path, "Renamed", &rows, Some(&revision), false, &empty_db()).is_err());
+        assert!(!file.exists(), "a stale autosave must not resurrect a deleted file");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn playlist_saves_advance_revisions_and_require_explicit_replacement() {
+        let root = scratch("save-revisions");
+        let file = root.join("mix.m3u8");
+        let path = file.to_str().unwrap();
+        let db = empty_db();
+        let first = write_playlist_inner(path, "First", &[], None, false, &db).unwrap();
+        let second = write_playlist_inner(path, "Second", &[], Some(&first.revision), false, &db).unwrap();
+        assert_ne!(first.revision, second.revision);
+        assert_eq!(read_rows(path).unwrap().3, second.revision);
+        assert!(write_playlist_inner(path, "Stale", &[], Some(&first.revision), false, &db).is_err());
+        assert!(write_playlist_inner(path, "Unknown", &[], None, false, &db).is_err());
+        write_playlist_inner(path, "Replacement", &[], None, true, &db).unwrap();
+        assert!(std::fs::read_to_string(&file).unwrap().contains("Replacement"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn decode_utf8_and_cp1252() {
@@ -1418,21 +1524,114 @@ mod tests {
         assert_eq!(pres.header, vec!["# Created by SomeOtherPlayer".to_string()]);
         // `#EXT*` directives belong to the row they introduce and travel with it.
         assert_eq!(
-            pres.attached.get("/music/lists/a.mp3"),
-            Some(&vec!["#EXTGRP:Side A".to_string()])
+            pres.rows["/music/lists/a.mp3"][0].attached,
+            vec!["#EXTGRP:Side A".to_string()]
         );
         assert_eq!(
-            pres.attached.get("/music/lists/b.mp3"),
-            Some(&vec!["#EXTVLCOPT:start-time=30".to_string()])
+            pres.rows["/music/lists/b.mp3"][0].attached,
+            vec!["#EXTVLCOPT:start-time=30".to_string()]
         );
         assert_eq!(pres.trailer, vec!["# trailing note".to_string()]);
         // The three we regenerate are never captured, or a rewrite would double them.
         assert!(!pres.header.iter().any(|l| l.starts_with("#EXTM3U")));
         assert!(pres
-            .attached
+            .rows
             .values()
             .flatten()
+            .flat_map(|row| &row.attached)
             .all(|l| !l.starts_with("#EXTINF")));
+    }
+
+    #[test]
+    fn hash_prefixed_paths_survive_save_and_reopen() {
+        let root = scratch("hash-paths");
+        let file = root.join("mix.m3u8");
+        let path = file.to_str().unwrap();
+        let rows: Vec<_> = ["#1 Crush.mp3", "#Album/song.mp3"]
+            .iter()
+            .map(|name| TrackRef {
+                path: root.join(name).to_str().unwrap().to_string(),
+                title: None,
+                duration: None,
+            })
+            .collect();
+        let db = empty_db();
+        let stamp = write_playlist_inner(path, "Mix", &rows, None, false, &db).unwrap();
+        let contents = std::fs::read_to_string(&file).unwrap();
+        assert!(contents.contains("\n./#1 Crush.mp3\n"), "{contents}");
+        assert!(contents.contains("\n./#Album/song.mp3\n"), "{contents}");
+        let (_, entries, _, _) = read_rows(path).unwrap();
+        assert_eq!(
+            entries.iter().map(|e| &e.path).collect::<Vec<_>>(),
+            rows.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
+        write_playlist_inner(
+            path,
+            "Renamed",
+            &entries_as_rows(entries),
+            Some(&stamp.revision),
+            false,
+            &db,
+        )
+        .unwrap();
+        assert_eq!(read_rows(path).unwrap().1.len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_tracks_keep_each_occurrences_directives_and_spelling() {
+        let base = Path::new("/music");
+        // An empty directive block must still consume an occurrence, and an
+        // appended duplicate must not inherit another occurrence's directives.
+        let original = "#EXTM3U\na.mp3\n#EXTVLCOPT:start-time=10\n./a.mp3\n#EXTVLCOPT:start-time=20\nsub/../a.mp3\nb.mp3\n";
+        let mut rows = entries_as_rows(parse(original, base).1);
+        rows.rotate_right(1); // Move b ahead of all three occurrences of a.
+        rows.push(TrackRef {
+            path: "/music/a.mp3".into(),
+            title: None,
+            duration: None,
+        });
+        let preserved = Preserved::from_content(original, base);
+        let out = serialize("/music/mix.m3u8", "Renamed", &rows, &preserved, &empty_db()).unwrap();
+        assert_eq!(out, "#EXTM3U\n#PLAYLIST:Renamed\nb.mp3\na.mp3\n#EXTVLCOPT:start-time=10\n./a.mp3\n#EXTVLCOPT:start-time=20\nsub/../a.mp3\na.mp3\n");
+        let again = serialize(
+            "/music/mix.m3u8",
+            "Renamed",
+            &entries_as_rows(parse(&out, base).1),
+            &Preserved::from_content(&out, base),
+            &empty_db(),
+        )
+        .unwrap();
+        assert_eq!(again, out);
+    }
+
+    #[test]
+    fn extinf_attributes_survive_rewrites_and_metadata_changes() {
+        let base = Path::new("/music");
+        let original = "#EXTM3U\n#EXTINF:12 tvg-id=\"first\" tvg-logo=\"https://example.com/a,b.png\",First, title\na.mp3\n#EXTINF:-1 tvg-id=\"second\",\na.mp3\n#EXTINF:30,Other\nb.mp3\n";
+        let mut rows = entries_as_rows(parse(original, base).1);
+        assert_eq!(rows[0].title.as_deref(), Some("First, title"));
+        rows[0].title = Some("Updated".into());
+        rows[0].duration = Some(42.0);
+        rows.rotate_right(1);
+        let out = serialize(
+            "/music/mix.m3u8",
+            "Renamed",
+            &rows,
+            &Preserved::from_content(original, base),
+            &empty_db(),
+        )
+        .unwrap();
+        assert_eq!(out, "#EXTM3U\n#PLAYLIST:Renamed\n#EXTINF:30,Other\nb.mp3\n#EXTINF:42 tvg-id=\"first\" tvg-logo=\"https://example.com/a,b.png\",Updated\na.mp3\n#EXTINF:-1 tvg-id=\"second\",\na.mp3\n");
+        let again = serialize(
+            "/music/mix.m3u8",
+            "Renamed",
+            &entries_as_rows(parse(&out, base).1),
+            &Preserved::from_content(&out, base),
+            &empty_db(),
+        )
+        .unwrap();
+        assert_eq!(again, out);
     }
 
     #[test]
@@ -1833,7 +2032,7 @@ mod tests {
         // legitimately preserves nothing.
         let missing = root.join("new.m3u8");
         let fresh = Preserved::from_file(missing.to_str().unwrap()).unwrap();
-        assert!(fresh.raw.is_empty() && fresh.header.is_empty());
+        assert!(fresh.rows.is_empty() && fresh.header.is_empty());
 
         // Any other read failure is an error, never an empty map: handed to a write
         // as "nothing to preserve" it would drop the file's comments and directives
@@ -1876,7 +2075,7 @@ mod tests {
         // A real playlist of ordinary size is untouched by either.
         let fine = root.join("fine.m3u8");
         std::fs::write(&fine, "#EXTM3U\n#PLAYLIST:Fine\n/a.mp3\n").unwrap();
-        let (name, entries, _mtime) = read_rows(fine.to_str().unwrap()).unwrap();
+        let (name, entries, _mtime, _revision) = read_rows(fine.to_str().unwrap()).unwrap();
         assert_eq!(name.as_deref(), Some("Fine"));
         assert_eq!(entries.len(), 1);
 

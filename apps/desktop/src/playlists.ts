@@ -37,6 +37,8 @@ import {
   forgetCurationHistory,
   readPlaylist,
   writePlaylist,
+  appendPlaylistFile,
+  renamePlaylistFile,
   notePlaylistMtime,
   playlistChangedOnDisk,
   adoptReloadedPlaylist,
@@ -203,6 +205,7 @@ export async function playPlaylistPath(path: string): Promise<void> {
       subtitle: trackCountSubtitle(tracks),
       tracks,
       sourcePath: data.path,
+      fileSession: data.fileSession,
     },
     `queue:playlist:${path}`,
   );
@@ -264,6 +267,10 @@ function showPlaylistBrowse(
   const tracks = playlistViewTracks(data);
   // We're committing to show the browse in the pane. A failed read never reaches
   // here, so it leaves any open panel up rather than clearing the pane first.
+  if ([activeQueue.value, browsedPlaylist.value].some((q) =>
+    q?.sourcePath === data.path && q.fileSession !== data.fileSession)) {
+    adoptReloadedPlaylist(data.path, data.name, tracks, data.fileSession);
+  }
   dismissRightPanel();
   browsedPlaylist.value = {
     kind: "playlist",
@@ -271,6 +278,7 @@ function showPlaylistBrowse(
     subtitle: trackCountSubtitle(tracks),
     tracks,
     sourcePath: data.path,
+    fileSession: data.fileSession,
   };
   listFaceOpen.value = true;
   // Only an *opening* is recorded (Open..., Finder, an Open Recent row, or a
@@ -363,7 +371,7 @@ export async function reloadChangedPlaylists(): Promise<void> {
     }
     // Say so. The rows under the user's cursor just changed without them asking,
     // and a list that silently reorders itself reads as a bug.
-    if (adoptReloadedPlaylist(path, data.name, playlistViewTracks(data))) {
+    if (adoptReloadedPlaylist(path, data.name, playlistViewTracks(data), data.fileSession)) {
       toast(`"${data.name}" changed on disk`);
     }
   }
@@ -427,9 +435,10 @@ export async function menuNewPlaylist(): Promise<void> {
   if (!path) return;
   const name = playlistNameFromPath(path);
   try {
-    await writePlaylist(path, name, []);
+    await writePlaylist(path, name, [], undefined, true);
   } catch (e) {
     console.error("write_playlist failed", path, e);
+    toast(typeof e === "string" ? e : "Couldn't save playlist");
     return;
   }
   await refreshLibrary();
@@ -468,13 +477,14 @@ export async function saveQueueAsPlaylist(path: string): Promise<void> {
   if (!q || isPlaylistSource(q) || !queueIsActivePool()) return;
   const name = playlistNameFromPath(path);
   try {
-    await writePlaylist(path, name, q.tracks);
+    const fileSession = await writePlaylist(path, name, q.tracks, undefined, true);
+    if (activeQueue.value === q) {
+      activeQueue.value = { ...q, title: name, sourcePath: path, fileSession };
+    }
   } catch (e) {
     console.error("write_playlist failed", path, e);
+    toast(typeof e === "string" ? e : "Couldn't save playlist");
     return;
-  }
-  if (activeQueue.value === q) {
-    activeQueue.value = { ...q, title: name, sourcePath: path };
   }
   toast(`Saved playlist "${name}"`);
   await refreshLibrary();
@@ -534,10 +544,11 @@ export async function renameOpenPlaylist(input: string): Promise<void> {
   browsedPlaylist.value = retitle(browsedPlaylist.value);
   activeQueue.value = retitle(activeQueue.value);
   try {
-    await writePlaylist(path, name, list.tracks);
+    if (!list.fileSession) throw "Reopen the playlist before saving.";
+    await writePlaylist(path, name, list.tracks, list.fileSession);
   } catch (e) {
     console.error("write_playlist (rename) failed", path, e);
-    toast("Couldn't rename playlist");
+    toast(typeof e === "string" ? e : "Couldn't rename playlist");
     return;
   }
   updateRecentItem(path, { name });
@@ -576,10 +587,11 @@ async function commitPlaylistRename(path: string, name: string): Promise<boolean
   browsedPlaylist.value = retitle(browsedPlaylist.value);
   activeQueue.value = retitle(activeQueue.value);
   try {
-    await invoke("rename_playlist", { path, name });
+    const data = await renamePlaylistFile(path, name);
+    adoptReloadedPlaylist(path, data.name, playlistViewTracks(data), data.fileSession);
   } catch (e) {
     console.error("rename_playlist failed", path, e);
-    toast("Couldn't rename playlist");
+    toast(typeof e === "string" ? e : "Couldn't rename playlist");
     return false;
   }
   updateRecentItem(path, { name });
@@ -679,10 +691,10 @@ export async function newPlaylistWithTracks(getTracks: TrackProvider): Promise<v
   if (!path) return;
   const name = playlistNameFromPath(path);
   try {
-    await writePlaylist(path, name, tracks);
+    await writePlaylist(path, name, tracks, undefined, true);
   } catch (e) {
     console.error("write_playlist (new) failed", path, e);
-    toast("Couldn't create playlist");
+    toast(typeof e === "string" ? e : "Couldn't create playlist");
     return;
   }
   await refreshLibrary();
@@ -714,28 +726,17 @@ export async function addTracksToPlaylist(path: string, getTracks: TrackProvider
     toast(`Added to "${active!.title}"`);
     return;
   }
-  // Closed file: read the current rows (missing included, to round-trip), append
-  // the new paths, and rewrite.
-  let data: PlaylistData;
+  // Read and append as one ordered operation so simultaneous additions cannot
+  // replace one another, and the write carries the revision of the rows read.
   try {
-    data = await readPlaylist(path);
-  } catch (e) {
-    console.error("read_playlist failed", path, e);
-    toast("Couldn't open playlist");
-    return;
-  }
-  // The file's own rows keep the `#EXTINF` values they were read with, so
-  // appending to a hand-made playlist can't strip the rows already in it.
-  const combined = [...data.tracks, ...tracks];
-  try {
-    await writePlaylist(path, data.name, combined);
+    await appendPlaylistFile(path, tracks);
   } catch (e) {
     console.error("write_playlist (append) failed", path, e);
-    toast("Couldn't save playlist");
+    toast(typeof e === "string" ? e : "Couldn't save playlist");
     return;
   }
   await refreshLibrary();
-  toast(`Added to "${data.name}"`);
+  toast("Added to playlist");
 }
 
 

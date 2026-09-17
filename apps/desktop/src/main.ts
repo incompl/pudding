@@ -1999,7 +1999,7 @@ async function persistSessionNow(): Promise<void> {
     return;
   }
   const session: PersistedSession = {
-    queue: q,
+    queue: { ...q, fileSession: undefined },
     index: queuePlayingIndex.value ?? 0,
     path: currentNodePath.value ?? "",
     time: currentTime.value,
@@ -2064,10 +2064,11 @@ async function refreshPlaylistSnapshot(queue: Queue): Promise<Queue> {
       subtitle: trackCountSubtitle(tracks),
       tracks,
       sourcePath: data.path,
+      fileSession: data.fileSession,
     };
   } catch (e) {
     console.error("read_playlist failed", queue.sourcePath, e);
-    return queue;
+    return { ...queue, fileSession: undefined };
   }
 }
 

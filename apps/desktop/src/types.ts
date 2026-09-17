@@ -300,6 +300,7 @@ export interface Queue {
   // OS menu act on the open playlist (Move Playlist File...). Absent for ephemeral
   // queues and other sources.
   sourcePath?: string;
+  fileSession?: PlaylistFileSession;
   // Curation-undo identity for an *ephemeral* queue (which has no sourcePath to key
   // its history by). Stamped lazily on the first curation and carried forward by the
   // `{...list}` spread every edit makes, so one queue's undo stack stays distinct
@@ -635,7 +636,13 @@ export interface PlaylistTrack {
   modified: number | null;
 }
 
+export interface PlaylistFileSession {
+  revision: string;
+}
+
 export interface PlaylistData {
+  revision: string;
+  fileSession: PlaylistFileSession;
   name: string;
   path: string;
   tracks: PlaylistTrack[];
