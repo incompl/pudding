@@ -1,7 +1,7 @@
 // Library navigator: the left-pane browser that lives under the Files tab. Its
 // home is an in-pane root menu listing the library views (Browse / Songs /
-// Artists / Albums) *and*, below them, every playlist — Apple-Music-style
-// sidebar shape.
+// Artists / Albums / Genres / Decades) *and*, below them, every playlist —
+// Apple-Music-style sidebar shape.
 //
 // Two open behaviors, split by what the thing IS:
 //   - Views are read-only slices of the library, so they DRILL LEFT (Replace +
@@ -23,13 +23,36 @@ import type {
 import { h, eqBars } from "./dom";
 import { windowedList } from "./windowed-list";
 
-type IconKind = "browse" | "songs" | "playlist" | "artist" | "album";
+type IconKind =
+  | "browse"
+  | "songs"
+  | "playlist"
+  | "artist"
+  | "album"
+  | "genre"
+  | "decade";
 
 // The library views — the read-only slices that drill left. Playlists are NOT a
 // view (they're editable documents that open right), so they're absent here and
 // listed as their own root-menu section instead.
-export type View = "browse" | "songs" | "artist" | "album";
-const DRILL_VIEWS: View[] = ["browse", "songs", "artist", "album"];
+export type View =
+  | "browse"
+  | "songs"
+  | "artist"
+  | "album"
+  | "genre"
+  | "decade";
+// Root-menu order, and the order the ⌘-less springboard reads top to bottom: the
+// two ways *into* the library first (the folder tree, then every song), then the
+// tag groupings from the most-used to the least.
+const DRILL_VIEWS: View[] = [
+  "browse",
+  "songs",
+  "artist",
+  "album",
+  "genre",
+  "decade",
+];
 
 // A serializable description of one level in the drill stack, so the user's place
 // in the Files tab survives an app restart. The bottom step is always a view; the
@@ -38,13 +61,26 @@ const DRILL_VIEWS: View[] = ["browse", "songs", "artist", "album"];
 export type NavStep =
   | { t: "view"; view: View }
   | { t: "artist"; name: string }
-  | { t: "album"; album: string; albumArtist: string };
+  | { t: "album"; album: string; albumArtist: string }
+  | { t: "genre"; name: string }
+  // The decade's starting year (1990), not its label ("1990s") — the backend only
+  // ever speaks the year, and a stored label would have to be parsed back.
+  | { t: "decade"; decade: number };
 const VIEW_LABEL: Record<View, string> = {
   browse: "Browse",
   songs: "Songs",
   artist: "Artists",
   album: "Albums",
+  genre: "Genres",
+  decade: "Decades",
 };
+
+// A decade's label wherever one is shown — a row, a back header, a queue title.
+// One function so the three can't drift; exported because the queue a decade row
+// plays is titled by main.ts.
+export function decadeLabel(decade: number): string {
+  return `${decade}s`;
+}
 
 // The bits of the app the navigator borrows: backend loaders, the shared leaf-row
 // list builder, the artist/album/playlist row context menus, and the play/open
@@ -65,6 +101,15 @@ export interface LibraryNavDeps {
   // of the artist-detail view (a flat list of the artist's whole catalog).
   artistTracks: (artist: string) => Promise<SearchTrack[]>;
   albumTracks: (album: string, albumArtist: string) => Promise<SearchTrack[]>;
+  // Every distinct genre tag in the library, and every track carrying one of them
+  // — the Genres view and what a genre row opens. A genre is a bare string
+  // (unlike an album, it has no second key), so it needs no type of its own.
+  listAllGenres: () => Promise<string[]>;
+  genreTracks: (genre: string) => Promise<SearchTrack[]>;
+  // Every decade the library has music from, as starting years (1990, 2000...),
+  // and every track from one of them — the Decades view and what it opens.
+  listAllDecades: () => Promise<number[]>;
+  decadeTracks: (decade: number) => Promise<SearchTrack[]>;
   renderLeafTrackList: (tracks: SearchTrack[], ctx: LeafListContext) => HTMLElement;
   // A playlist row: single-click opens it in the right pane (the editable target),
   // double-click plays it. Both reuse the app's existing playlist paths.
@@ -85,6 +130,10 @@ export interface LibraryNavDeps {
   // supplies the click coordinates and the artist/album/playlist identity.
   showArtistMenu: (x: number, y: number, name: string) => void;
   showAlbumMenu: (x: number, y: number, album: string, albumArtist: string) => void;
+  // The same menu for a whole genre / a whole decade. Both resolve their tracks
+  // lazily when a verb is chosen, exactly as the artist and album menus do.
+  showGenreMenu: (x: number, y: number, genre: string) => void;
+  showDecadeMenu: (x: number, y: number, decade: number) => void;
   showPlaylistMenu: (
     x: number,
     y: number,
@@ -338,6 +387,12 @@ function viewPane(view: View): Pane {
       break;
     case "album":
       base = albumsPane();
+      break;
+    case "genre":
+      base = genresPane();
+      break;
+    case "decade":
+      base = decadesPane();
       break;
   }
   base.view = view;
@@ -740,6 +795,124 @@ function albumsPane(): Pane {
   };
 }
 
+// Genres: the library's distinct genre tags as drill rows. Opening one lands
+// straight on its tracks (see genreDetailPane). Right-click plays / queues the
+// whole genre through the injected menu. Windowed like Artists and Albums (a
+// well-tagged library can run to hundreds of genres, most of them one-offs).
+function genresPane(): Pane {
+  return {
+    title: "Genres",
+    build: () =>
+      asyncListBody<string>({
+        load: () => cached("genres", deps.listAllGenres),
+        empty: "No genres in the library",
+        errorLabel: "list_all_genres failed",
+        fill: (genres, host) => {
+          windowDrillRows(
+            genres,
+            host,
+            (g) =>
+              drillRow({
+                icon: "genre",
+                primary: g,
+                onOpen: () => push(genreDetailPane(g)),
+                onMenu: (x, y) => deps.showGenreMenu(x, y, g),
+              }),
+            (g) => push(genreDetailPane(g)),
+          );
+        },
+      }),
+  };
+}
+
+// Genre detail: every track in the genre as one flat, playable leaf list — no
+// intermediate index of its artists.
+//
+// A genre (like a decade) is a filter, not a hierarchy: unlike an artist, who owns
+// albums, it has no sub-structure of its own to browse. So landing on the tracks
+// costs one click instead of two, and nothing is lost — each row's menu still
+// carries Go to artist / Go to album, and a click on the Artist column header
+// regroups the list into exactly the index a drill level would have been.
+//
+// The pool path is byte-for-byte openGenreQueue's key, so playing a row here and
+// Play on the genre row share one pool identity (the same rule album detail
+// follows) — which is also what lets revealNowPlaying bring you back to this list.
+function genreDetailPane(name: string): Pane {
+  return {
+    title: name,
+    step: { t: "genre", name },
+    build: () =>
+      asyncListBody<SearchTrack>({
+        load: () => cached(`genreTracks\0${name}`, () => deps.genreTracks(name)),
+        empty: "No tracks in this genre",
+        errorLabel: "genre_tracks failed",
+        fill: (tracks, host) => {
+          host.appendChild(
+            deps.renderLeafTrackList(tracks, {
+              title: name,
+              syntheticPath: `queue:genre:${name}`,
+            }),
+          );
+        },
+      }),
+  };
+}
+
+// Decades: every decade the library has music from, newest first — the year tag
+// rounded down, so it costs no new bookkeeping. Opening one lands straight on its
+// tracks. Right-click plays / queues the whole decade.
+function decadesPane(): Pane {
+  return {
+    title: "Decades",
+    build: () =>
+      asyncListBody<number>({
+        load: () => cached("decades", deps.listAllDecades),
+        empty: "No years in the library",
+        errorLabel: "list_all_decades failed",
+        fill: (decades, host) => {
+          windowDrillRows(
+            decades,
+            host,
+            (d) =>
+              drillRow({
+                icon: "decade",
+                primary: decadeLabel(d),
+                onOpen: () => push(decadeDetailPane(d)),
+                onMenu: (x, y) => deps.showDecadeMenu(x, y, d),
+              }),
+            (d) => push(decadeDetailPane(d)),
+          );
+        },
+      }),
+  };
+}
+
+// Decade detail: every track from the decade as one flat, playable leaf list, for
+// the reasons genreDetailPane gives — a decade indexes nothing, it filters. Its
+// tracks arrive year by year, so the list reads forward through the decade, and a
+// track whose year disagrees with the rest of its album still lands in the decade
+// it actually claims. Pool path matches openDecadeQueue's key.
+function decadeDetailPane(decade: number): Pane {
+  return {
+    title: decadeLabel(decade),
+    step: { t: "decade", decade },
+    build: () =>
+      asyncListBody<SearchTrack>({
+        load: () => cached(`decadeTracks\0${decade}`, () => deps.decadeTracks(decade)),
+        empty: "No tracks from this decade",
+        errorLabel: "decade_tracks failed",
+        fill: (tracks, host) => {
+          host.appendChild(
+            deps.renderLeafTrackList(tracks, {
+              title: decadeLabel(decade),
+              syntheticPath: `queue:decade:${decade}`,
+            }),
+          );
+        },
+      }),
+  };
+}
+
 // Album detail: the album's tracks through the shared leaf-row list, so play /
 // queue / select / context / drag all behave as everywhere else. The synthetic pool
 // path mirrors openAlbumQueue's key (albumArtist NUL album) so playing a row here
@@ -923,6 +1096,12 @@ function restoreLocation(steps: NavStep[]): void {
         break;
       case "album":
         stack.push(albumDetailPane(step.album, step.albumArtist));
+        break;
+      case "genre":
+        stack.push(genreDetailPane(step.name));
+        break;
+      case "decade":
+        stack.push(decadeDetailPane(step.decade));
         break;
     }
   }

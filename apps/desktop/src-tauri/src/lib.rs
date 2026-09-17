@@ -619,6 +619,12 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             duration
         );",
     )?;
+    // The Recently Added list was withdrawn, and with it the only query that
+    // ordered the whole table by arrival time. Drop its index rather than leave it:
+    // nothing reads it now, and it was maintained on every scan insert. Unconditional
+    // (IF EXISTS), so a database written by a version that had the list sheds it on
+    // first open and a fresh one never pays for it.
+    conn.execute_batch("DROP INDEX IF EXISTS idx_tracks_added;")?;
     if version != SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -4333,6 +4339,154 @@ async fn list_all_albums(db: State<'_, DbHandle>) -> Result<Vec<AlbumResult>, St
     .await
 }
 
+// --- Genres / Decades --------------------------------------------------------
+//
+// Two more read-only slices of the same table. Unlike an artist (who owns albums)
+// a genre and a decade have no sub-structure of their own — they are pure filters
+// — so each is two queries and no hierarchy: the distinct values for the browse
+// list, and every track behind one of them, which serves BOTH the row's Play /
+// Add to queue verbs and the flat list you land on by opening it. The album and
+// artist are still one right-click away from any of those rows (Go to album / Go
+// to artist), which is why indexing them here would have bought nothing but an
+// extra level to click through.
+//
+// Neither needs bookkeeping of its own — a genre is the `genre` tag and a decade
+// is the `year` tag rounded down — so both stay true through a cache wipe and
+// through changes made outside the app.
+
+// Every distinct genre in the library, alphabetized. The `genre` twin of
+// list_all_artists; a bare string per row, since a genre carries no second key
+// the way an album carries its album artist. Backs the Genres browse list.
+#[tauri::command]
+async fn list_all_genres(db: State<'_, DbHandle>) -> Result<Vec<String>, String> {
+    db.read(move |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT genre FROM tracks
+                 WHERE genre IS NOT NULL AND genre <> ''
+                 ORDER BY genre COLLATE NOCASE",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
+}
+
+// Every track tagged with this genre, in the artist-then-album order
+// artist_tracks uses — so the flat list reads grouped rather than scrambled, and
+// a column sort can regroup it any other way. Backs both the Genres drill-in and
+// the genre row's Play / Add to queue / Add to playlist / Edit metadata verbs (the
+// same lazily-resolved track provider those menus take for an artist or an album).
+// Reuses SearchResult.
+#[tauri::command]
+async fn genre_tracks(
+    genre: String,
+    db: State<'_, DbHandle>,
+) -> Result<Vec<SearchResult>, String> {
+    db.read(move |conn| {
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks
+             WHERE genre = ?1
+             ORDER BY artist IS NULL, artist COLLATE NOCASE,
+                      album IS NULL, album COLLATE NOCASE,
+                      disc, track, path COLLATE NOCASE"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&genre], |row| {
+                // Flat/positional list, like artist_tracks: the gutter numbers the
+                // rows, so the within-album ordinal is dropped.
+                Ok(SearchResult {
+                    track: None,
+                    ..track_row(row)?
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
+}
+
+// The decade a `year` tag falls in, as SQL: 1994 → 1990. The frontend labels it
+// ("1990s"); the backend only ever speaks the starting year, which is also the
+// argument decade_tracks takes.
+const DECADE_EXPR: &str = "(year / 10) * 10";
+// Which years count as a real release year. A tag below 1000 is junk — a bare
+// "94", a stray "0" left by a tagger — not a medieval recording, and letting one
+// through mints a nonsense "90s" bucket sitting next to the real "1990s". Every
+// decade query shares this one condition so they can never disagree about it.
+const DECADE_YEARS: &str = "year IS NOT NULL AND year >= 1000";
+
+// Every decade the library has music from, newest first — the end of the list
+// worth landing on. Returns the starting years (2020, 2010, ...); the Decades
+// browse list labels them.
+#[tauri::command]
+async fn list_all_decades(db: State<'_, DbHandle>) -> Result<Vec<i64>, String> {
+    db.read(move |conn| {
+        let sql = format!(
+            "SELECT DISTINCT {DECADE_EXPR} AS decade FROM tracks
+             WHERE {DECADE_YEARS}
+             ORDER BY decade DESC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
+}
+
+// Every track from one decade, oldest year first and then artist by artist — the
+// decade twin of genre_tracks, backing both the Decades drill-in and the decade
+// row's Play / Add to queue verbs. Year leads the sort because inside a decade
+// that is the axis the list is *about*. Reuses SearchResult.
+#[tauri::command]
+async fn decade_tracks(
+    decade: i64,
+    db: State<'_, DbHandle>,
+) -> Result<Vec<SearchResult>, String> {
+    db.read(move |conn| {
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks
+             WHERE {DECADE_YEARS} AND {DECADE_EXPR} = ?1
+             ORDER BY year, artist IS NULL, artist COLLATE NOCASE,
+                      album IS NULL, album COLLATE NOCASE,
+                      disc, track, path COLLATE NOCASE"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([decade], |row| {
+                Ok(SearchResult {
+                    track: None,
+                    ..track_row(row)?
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
+}
+
 // Distinct albums that contain a track by this artist, carrying the album-artist
 // grouping key (ALBUM_ARTIST_EXPR) so a drill-in via album_tracks / openAlbumQueue
 // matches — including a compilation whose album_artist differs from the track
@@ -5080,6 +5234,10 @@ pub fn run() {
             list_all_songs,
             list_all_artists,
             list_all_albums,
+            list_all_genres,
+            genre_tracks,
+            list_all_decades,
+            decade_tracks,
             artist_albums,
             artist_albumless_tracks,
             get_art,

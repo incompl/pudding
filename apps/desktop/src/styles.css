@@ -49,6 +49,11 @@
      person for artist rows, a disc for album rows in the search dropdown. */
   --artist-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E");
   --album-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Ccircle cx='12' cy='12' r='2.5'/%3E%3C/svg%3E");
+  /* Two more gutter glyphs in that same stroked recipe, for the navigator's
+     Genres / Decades rows: a tag, because a genre is a label stuck on the music,
+     and a calendar, because a decade is a span of release years. */
+  --genre-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M11.6 3H4a1 1 0 0 0-1 1v7.6a2 2 0 0 0 .6 1.4l7.4 7.4a2 2 0 0 0 2.8 0l6.6-6.6a2 2 0 0 0 0-2.8L13 3.6a2 2 0 0 0-1.4-.6z'/%3E%3Ccircle cx='7.5' cy='7.5' r='1.2'/%3E%3C/svg%3E");
+  --decade-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='18' height='17' x='3' y='4' rx='2'/%3E%3Cpath d='M3 10h18'/%3E%3Cpath d='M8 2v4'/%3E%3Cpath d='M16 2v4'/%3E%3C/svg%3E");
   /* Open-flap variant of the folder icon, swapped in for expanded tree rows. */
   --folder-open-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 14 1.45-2.9A2 2 0 0 1 9.24 10H21a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2'/%3E%3C/svg%3E");
   /* Radio icon for stream rows — same stroked recipe as the folder icons,
@@ -4965,6 +4970,14 @@ body.playback-paused .node-label.playing .icon.playlist .eq-bars,
 .nav-album {
   -webkit-mask-image: var(--album-icon);
   mask-image: var(--album-icon);
+}
+.nav-genre {
+  -webkit-mask-image: var(--genre-icon);
+  mask-image: var(--genre-icon);
+}
+.nav-decade {
+  -webkit-mask-image: var(--decade-icon);
+  mask-image: var(--decade-icon);
 }
 .nav-playlist {
   -webkit-mask-image: var(--playlist-icon);

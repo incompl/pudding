@@ -46,7 +46,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 ### Library
 
 - Point it at one or more folders: no import step, your files browsed as they are
-- Four views for the same library, switched from the Files pane: Browse the real folder tree, or view it flat as Songs, Artists, or Albums — the last three drill iPod-style (artist → album → tracks) and remember your place across restarts
+- Six views of the same library, switched from the Files pane: Browse the real folder tree, or view it flat as Songs, Artists, Albums, Genres, or Decades — Artists and Albums drill iPod-style (artist → album → tracks), Genres and Decades open straight onto their tracks, and every view remembers your place across restarts
 - Fast SQLite metadata cache, scanned in the background
 - Built to scale: tested up to 500,000 tracks. Every long list  is windowed so only the on-screen rows exist in the DOM, opened views are cached, and the whole-library sort is served from a covering index
 - Live library watching: add or edit files on disk and the app updates itself

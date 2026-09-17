@@ -22,6 +22,8 @@ The Files tab has multiple ways to browse your files:
 * Songs: Shows all your music in one flat list. Useful if you want to shuffle everything.
 * Artists: Shows a list of all artists found in your collection's file metadata. You can drill down on albums and individual tracks.
 * Albums: Shows a list of all albums found in your collection's file metadata.
+* Genres: Shows a list of all genres found in your collection's file metadata.
+* Decades: Shows a list of all decades found in your collection's file metadata (uses Release Year).
 
 Below that, the Files panel shows a list of all playlists found in your library folders (you can also find them where they sit in the Browse view).
 

@@ -289,7 +289,15 @@ export type SearchItem =
 // Queue shape leave room for a future mutable "playlist" kind without reworking
 // the view or the advancement logic — which already treats poolPaths() (the
 // current synthetic parent's children) as "the queue".
-export type QueueKind = "artist" | "album" | "folder" | "playlist";
+// The browse slice a queue was built from. Purely descriptive — nothing branches
+// on it — so a new library view adds its name here and nothing else.
+export type QueueKind =
+  | "artist"
+  | "album"
+  | "genre"
+  | "decade"
+  | "folder"
+  | "playlist";
 
 export interface Queue {
   kind: QueueKind;

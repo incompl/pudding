@@ -82,6 +82,11 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     { path: "/m/z1.m4a", title: "Z1", artist: "Zoe", album: "Split", albumArtist: "Various" },
   ];
   const artists: SearchArtist[] = [{ name: "Alice" }, { name: "Zoe" }];
+  // Alice is the 90s ambient half of the fixture, Zoe the 2020s synthwave half —
+  // so a genre and a decade each pick out exactly one of the two tracks, and
+  // opening either lands on a list we can name.
+  const genres = ["Ambient", "Synthwave"];
+  const decades = [2020, 1990];
   const albums: SearchAlbum[] = [
     { album: "Debut", artist: "Alice" },
     { album: "Split", artist: "Various" },
@@ -103,6 +108,12 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
         : [{ album: "Split", artist: "Various" }],
     artistTracks: async () => [],
     albumTracks: async () => songs,
+    listAllGenres: async () => genres,
+    genreTracks: async (genre) =>
+      songs.filter((t) => (genre === "Ambient" ? t.artist === "Alice" : t.artist === "Zoe")),
+    listAllDecades: async () => decades,
+    decadeTracks: async (decade) =>
+      songs.filter((t) => (decade === 1990 ? t.album === "Debut" : t.album === "Split")),
     libraryEmpty: () => null,
     renderLeafTrackList: (tracks, ctx) => {
       leafCtx.push(ctx);
@@ -115,6 +126,8 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     playingPlaylistPath: () => null,
     showArtistMenu: rec("showArtistMenu"),
     showAlbumMenu: rec("showAlbumMenu"),
+    showGenreMenu: rec("showGenreMenu"),
+    showDecadeMenu: rec("showDecadeMenu"),
     showPlaylistMenu: rec("showPlaylistMenu"),
     startPlaylistRename: rec("startPlaylistRename"),
     persistLocation: (steps) => void (saved.steps = steps),
@@ -195,13 +208,13 @@ test("a library with content hides the prompt and builds the springboard", async
   const { container, filesEmpty } = setup();
   await flush();
   assert.ok(filesEmpty.classList.contains("hidden"), "prompt must stay hidden");
-  assert.deepEqual(labels(container).slice(0, 4), ["Browse", "Songs", "Artists", "Albums"]);
+  assert.deepEqual(labels(container).slice(0, 6), ["Browse", "Songs", "Artists", "Albums", "Genres", "Decades"]);
 });
 
-test("root menu lists the four views, then the cached playlist index", async () => {
+test("root menu lists the six views, then the cached playlist index", async () => {
   const { container, createBtn, folderTree } = setup();
-  // The four views render synchronously; playlists arrive after the load.
-  assert.deepEqual(labels(container).slice(0, 4), ["Browse", "Songs", "Artists", "Albums"]);
+  // The views render synchronously; playlists arrive after the load.
+  assert.deepEqual(labels(container).slice(0, 6), ["Browse", "Songs", "Artists", "Albums", "Genres", "Decades"]);
   await flush();
   assert.ok(labels(container).includes("Roadtrip"), "playlist row never rendered");
   // At the root the create-playlist button shows and the folder tree is hidden.
@@ -222,7 +235,7 @@ test("a view drills in (replace + back header); back returns to the root menu", 
   container.queryAll("nav-back")[0].fire("click");
   await flush();
   assert.ok(!hasBackHeader(container), "back should return to the root");
-  assert.deepEqual(labels(container).slice(0, 4), ["Browse", "Songs", "Artists", "Albums"]);
+  assert.deepEqual(labels(container).slice(0, 6), ["Browse", "Songs", "Artists", "Albums", "Genres", "Decades"]);
   assert.ok(!createBtn.classList.contains("hidden"), "create button returns at root");
 });
 
@@ -277,7 +290,7 @@ test("popNavToRoot collapses a multi-level drill back to the root menu", async (
 
   popNavToRoot();
   assert.ok(!hasBackHeader(container), "popNavToRoot must return to the root menu");
-  assert.deepEqual(labels(container).slice(0, 4), ["Browse", "Songs", "Artists", "Albums"]);
+  assert.deepEqual(labels(container).slice(0, 6), ["Browse", "Songs", "Artists", "Albums", "Genres", "Decades"]);
 });
 
 test("artist detail hides the album-artist secondary only when it differs", async () => {
@@ -318,6 +331,84 @@ test("album detail builds the exact openAlbumQueue synthetic pool path", async (
   const split = tracks?.find((t) => t.album === "Split");
   assert.ok(split, "album detail leaf list is missing the compilation track");
   assert.equal(split.albumArtist, "Various");
+  popNavToRoot();
+});
+
+// Genres and Decades are filters, not hierarchies: opening one lands straight on
+// its tracks rather than on an index of artists or albums. These two tests pin
+// that shape and — the part that actually breaks things quietly — the pool key of
+// the list it lands on, which must be the one the row's own Play verb uses
+// (openGenreQueue / openDecadeQueue) or the two fork into separate pools.
+test("a genre opens a flat track list under openGenreQueue's pool key", async () => {
+  const { container, saved, leafCtx, leafTracks } = setup();
+  rowByLabel(container, "Genres").fire("click");
+  await flush();
+  assert.deepEqual(labels(container), ["Ambient", "Synthwave"]);
+
+  rowByLabel(container, "Ambient").fire("click");
+  await flush();
+  // A leaf list, not drill rows — and a back trail that remembers we came via Genres.
+  assert.deepEqual(labels(container), [], "a genre must not index its artists");
+  assert.deepEqual(saved.steps, [
+    { t: "view", view: "genre" },
+    { t: "genre", name: "Ambient" },
+  ]);
+  const ctx = leafCtx.at(-1);
+  assert.equal(ctx?.syntheticPath, "queue:genre:Ambient");
+  assert.equal(ctx?.title, "Ambient");
+  assert.deepEqual(leafTracks.at(-1)?.map((t) => t.title), ["A1"]);
+  popNavToRoot();
+});
+
+test("a decade is labelled '1990s' and opens a flat track list under its own pool key", async () => {
+  const { container, saved, leafCtx, leafTracks } = setup();
+  rowByLabel(container, "Decades").fire("click");
+  await flush();
+  // Newest first, as the backend returns them, and labelled — the step stores the
+  // starting year, not the label.
+  assert.deepEqual(labels(container), ["2020s", "1990s"]);
+
+  rowByLabel(container, "2020s").fire("click");
+  await flush();
+  assert.deepEqual(labels(container), [], "a decade must not index its albums");
+  assert.deepEqual(saved.steps, [
+    { t: "view", view: "decade" },
+    { t: "decade", decade: 2020 },
+  ]);
+  // The label is what the reader sees; the key carries the year, matching
+  // openDecadeQueue.
+  assert.equal(leafCtx.at(-1)?.syntheticPath, "queue:decade:2020");
+  assert.equal(leafCtx.at(-1)?.title, "2020s");
+  assert.deepEqual(leafTracks.at(-1)?.map((t) => t.title), ["Z1"]);
+  popNavToRoot();
+});
+
+test("genre and decade rows raise their injected context menus", async () => {
+  const { container, calls } = setup();
+  rowByLabel(container, "Genres").fire("click");
+  await flush();
+  rowByLabel(container, "Ambient").fire("contextmenu", { clientX: 5, clientY: 6 });
+  assert.deepEqual(calls.at(-1), { name: "showGenreMenu", args: [5, 6, "Ambient"] });
+
+  popNavToRoot();
+  rowByLabel(container, "Decades").fire("click");
+  await flush();
+  // The menu is handed the year, not the label — it queries the backend with it.
+  rowByLabel(container, "1990s").fire("contextmenu", { clientX: 7, clientY: 8 });
+  assert.deepEqual(calls.at(-1), { name: "showDecadeMenu", args: [7, 8, 1990] });
+  popNavToRoot();
+});
+
+test("restores a persisted decade drill on init", async () => {
+  const { container, leafCtx } = setup({}, [
+    { t: "view", view: "decade" },
+    { t: "decade", decade: 1990 },
+  ]);
+  await flush();
+  assert.ok(hasBackHeader(container), "restore should rebuild the decade drill");
+  // The back bar names where we are, by label rather than by stored year.
+  assert.equal(container.queryAll("nav-back-title")[0]?.textContent, "1990s");
+  assert.equal(leafCtx.at(-1)?.syntheticPath, "queue:decade:1990");
   popNavToRoot();
 });
 
@@ -449,6 +540,6 @@ test("a malformed persisted location falls back to the root menu", async () => {
   const { container } = setup({}, [{ t: "artist", name: "Alice" }]);
   await flush();
   assert.ok(!hasBackHeader(container), "malformed location must not leave a broken stack");
-  assert.deepEqual(labels(container).slice(0, 4), ["Browse", "Songs", "Artists", "Albums"]);
+  assert.deepEqual(labels(container).slice(0, 6), ["Browse", "Songs", "Artists", "Albums", "Genres", "Decades"]);
   popNavToRoot();
 });

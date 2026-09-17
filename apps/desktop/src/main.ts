@@ -38,6 +38,7 @@ import { createVisualizer, type Visualizer } from "./visualizer";
 import { bootProfileStart, bootStep, bootProfileReport } from "./perf";
 import {
   initLibraryNav,
+  decadeLabel,
   navigateTo,
   currentNavStep,
   popNavToRoot,
@@ -1048,6 +1049,51 @@ export async function openAlbumQueue(album: string, albumArtist: string): Promis
   );
 }
 
+// Play a whole genre / a whole decade, the genre and decade twins of
+// openArtistQueue. Same shape throughout: resolve the slice's tracks, then hand
+// them to playQueue under a synthetic pool path that names the slice, so the pool
+// identity says where the queue came from (see revealNowPlaying's reading of
+// these keys).
+async function openGenreQueue(genre: string): Promise<void> {
+  let tracks: SearchTrack[];
+  try {
+    tracks = await invoke<SearchTrack[]>("genre_tracks", { genre });
+  } catch (e) {
+    console.error("genre_tracks failed", genre, e);
+    return;
+  }
+  if (tracks.length === 0) return;
+  playQueue(
+    {
+      kind: "genre",
+      title: genre,
+      subtitle: trackCountSubtitle(tracks),
+      tracks,
+    },
+    `queue:genre:${genre}`,
+  );
+}
+
+async function openDecadeQueue(decade: number): Promise<void> {
+  let tracks: SearchTrack[];
+  try {
+    tracks = await invoke<SearchTrack[]>("decade_tracks", { decade });
+  } catch (e) {
+    console.error("decade_tracks failed", decade, e);
+    return;
+  }
+  if (tracks.length === 0) return;
+  playQueue(
+    {
+      kind: "decade",
+      title: decadeLabel(decade),
+      subtitle: trackCountSubtitle(tracks),
+      tracks,
+    },
+    `queue:decade:${decade}`,
+  );
+}
+
 // A brief, self-dismissing confirmation (e.g. "Added 12 tracks"). Add-to-queue
 // often lands on the list where the growth is visible anyway, but the toast
 // confirms the append even when the tracks scroll in below the fold.
@@ -1196,6 +1242,8 @@ export async function goToFile(path: string): Promise<void> {
 //   queue:album:<albumArtist>\0<album>  → the Albums view's album detail
 //   queue:artist:<name>                 → the Artists view's artist detail
 //   queue:songs                         → the Songs view
+//   queue:genre:<name>                  → the Genres view's genre detail
+//   queue:decade:<year>                 → the Decades view's decade detail
 //   an active playlist / folder queue / ad-hoc queue → that source's list face
 //   anything else (a real folder pool, or no pool at all for a search / OS-opened
 //     file) reveals where the file lives — its folder in Browse. For library views
@@ -1236,6 +1284,16 @@ export function revealNowPlaying(): void {
     goToFilesTab();
     app.pendingRevealPlayingPath = path;
     navigateTo([{ t: "view", view: "songs" }]);
+  } else if (pool.startsWith("queue:genre:")) {
+    const name = pool.slice("queue:genre:".length);
+    goToFilesTab();
+    app.pendingRevealPlayingPath = path;
+    navigateTo([{ t: "view", view: "genre" }, { t: "genre", name }]);
+  } else if (pool.startsWith("queue:decade:")) {
+    const decade = Number(pool.slice("queue:decade:".length));
+    goToFilesTab();
+    app.pendingRevealPlayingPath = path;
+    navigateTo([{ t: "view", view: "decade" }, { t: "decade", decade }]);
   } else if (queueIsActivePool() && activeQueue.value) {
     // Playlist, played-folder, and explicit/ad-hoc queue sources already retain
     // their exact ordered list in activeQueue. Reopen that source rather than
@@ -1319,6 +1377,32 @@ function showAlbumContextMenu(
     invoke<SearchTrack[]>("album_tracks", { album, albumArtist });
   void showContextMenu(x, y, [
     { label: "Play", action: () => void openAlbumQueue(album, albumArtist) },
+    ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
+    addToPlaylistItem(getTracks),
+    editMetadataProviderItem(getTracks),
+  ]);
+}
+
+// The same menu for a Genres / Decades row. A genre and a decade are slices of
+// the library exactly as an artist and an album are, so they get the identical
+// verb set off the identical lazily-resolved track provider — nothing here is a
+// new mechanism, only a new WHERE clause behind getTracks.
+function showGenreContextMenu(x: number, y: number, genre: string): void {
+  const getTracks: TrackProvider = () =>
+    invoke<SearchTrack[]>("genre_tracks", { genre });
+  void showContextMenu(x, y, [
+    { label: "Play", action: () => void openGenreQueue(genre) },
+    ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
+    addToPlaylistItem(getTracks),
+    editMetadataProviderItem(getTracks),
+  ]);
+}
+
+function showDecadeContextMenu(x: number, y: number, decade: number): void {
+  const getTracks: TrackProvider = () =>
+    invoke<SearchTrack[]>("decade_tracks", { decade });
+  void showContextMenu(x, y, [
+    { label: "Play", action: () => void openDecadeQueue(decade) },
     ...queueMenuItems((sink) => void addProviderToQueue(getTracks, sink)),
     addToPlaylistItem(getTracks),
     editMetadataProviderItem(getTracks),
@@ -4223,6 +4307,10 @@ async function init(): Promise<void> {
       invoke<SearchTrack[]>("artist_tracks", { artist }),
     albumTracks: (album, albumArtist) =>
       invoke<SearchTrack[]>("album_tracks", { album, albumArtist }),
+    listAllGenres: () => invoke<string[]>("list_all_genres"),
+    genreTracks: (genre) => invoke<SearchTrack[]>("genre_tracks", { genre }),
+    listAllDecades: () => invoke<number[]>("list_all_decades"),
+    decadeTracks: (decade) => invoke<SearchTrack[]>("decade_tracks", { decade }),
     renderLeafTrackList,
     // A playlist row: single-click opens it in the right pane, double-click plays.
     openPlaylist: (path) => void browsePlaylistPath(path),
@@ -4238,6 +4326,8 @@ async function init(): Promise<void> {
         : null,
     showArtistMenu: showArtistContextMenu,
     showAlbumMenu: showAlbumContextMenu,
+    showGenreMenu: showGenreContextMenu,
+    showDecadeMenu: showDecadeContextMenu,
     showPlaylistMenu: showPlaylistContextMenu,
     startPlaylistRename: startNavPlaylistRename,
     persistLocation: persistNavLocation,
