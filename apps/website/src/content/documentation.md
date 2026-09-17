@@ -14,7 +14,7 @@ Pudding is split into two panels. The left panel has two tabs: Files and Streams
 
 ## Files
 
-To show your music collection in the Files panel, go to Pudding > Settings in the main menu and add one or more library folders. When you do this, your music collection is automatically scanned to power Pudding features such as Search. It may be instant, or depending on your hardware and library size, you may see a "Scanning" progress bar at the bottom of the Files panel. While it's scanning you can still use the app, but you might not be able to find files that aren't scanned yet. Your library folders are automatically watched while Pudding is open so external changes are reflected automatically. Pudding also automatically checks for library changes on re-launch.
+To show your music collection in the Files panel, click **Choose Music Folder** on first run. You can add or remove more folders later from Pudding > Settings. When you choose a folder, your music collection is automatically scanned to power Pudding features such as Search. It may be instant, or depending on your hardware and library size, you may see a "Scanning" progress bar at the bottom of the Files panel. While it's scanning you can still use the app, but you might not be able to find files that aren't scanned yet. Your library folders are automatically watched while Pudding is open so external changes are reflected automatically. Pudding also automatically checks for library changes on re-launch.
 
 The Files tab has multiple ways to browse your files:
 

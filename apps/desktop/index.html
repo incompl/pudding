@@ -71,13 +71,18 @@
         <div class="tab-panel" id="tab-files">
           <!-- Get-started prompt shown across the whole Files panel whenever it
                has nothing to browse — no library folder configured, or one that
-               holds no music — hiding the navigator/tree/footer. The lead span
-               says which of the two it is; see library-nav's render(). -->
+               holds no music — hiding the navigator/tree/footer. First run needs
+               no explaining beyond the button, so the lead only appears for the
+               configured-but-empty case; see library-nav's render(). -->
           <div id="files-empty" class="panel-empty hidden">
-            <h2 class="files-empty-title">Let's get started.</h2>
-            <p class="files-empty-copy">
-              <span id="files-empty-lead">Add a library folder in</span>
-              <button id="files-empty-settings" type="button" class="link-btn">settings</button>.
+            <h2 class="files-empty-title">Let's get started</h2>
+            <p id="files-empty-lead" class="files-empty-copy hidden"></p>
+            <div class="files-empty-actions">
+              <button id="files-empty-choose" type="button" class="files-empty-primary">Choose Music Folder</button>
+            </div>
+            <p class="files-empty-detail">
+              You can manage folders later in
+              <button id="files-empty-settings" type="button" class="link-btn">Settings</button>.
             </p>
           </div>
           <!-- Library browse-mode navigator (Replace + back): the root mode menu

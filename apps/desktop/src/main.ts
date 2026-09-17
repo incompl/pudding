@@ -2748,8 +2748,15 @@ function setupSettings(restoredEq: EqState | null): void {
   // version from tauri.conf.json, read via the Tauri app API.
   void getVersion().then((v) => { aboutVersionEl.textContent = `pudding ${v}`; });
 
-  // The get-started prompts' inline settings links (Files: no library root,
-  // Streams: no stream list path) open the settings panel.
+  // The first-run Files panel exposes its one useful action directly: choose a
+  // folder through the same bookmark-aware path as Settings. The bundled sample
+  // needs no button of its own — it is already loaded in Now Playing, playable
+  // from the transport. Settings remains available for managing more folders.
+  document
+    .getElementById("files-empty-choose")
+    ?.addEventListener("click", () => void browseLibraryRoot());
+
+  // The get-started prompts' settings links open the settings panel.
   for (const id of ["files-empty-settings", "streams-empty-settings"]) {
     document
       .getElementById(id)

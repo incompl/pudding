@@ -189,6 +189,7 @@ let folderTree: HTMLElement;
 let createBtn: HTMLElement;
 let filesEmpty: HTMLElement;
 let filesEmptyLead: HTMLElement;
+let filesEmptyChoose: HTMLButtonElement;
 const stack: Pane[] = [];
 // Set for a single navigateTo when the caller wants the landing detail's Back-bar
 // title to flash — the "here it is" cue for album/artist search hits, which (unlike
@@ -1024,10 +1025,16 @@ function render(): void {
   const empty = deps.libraryEmpty();
   filesEmpty.classList.toggle("hidden", empty === null);
   if (empty !== null) {
+    // First run says nothing but the invitation: the button is the whole story.
+    // A configured root that turned up no music does need explaining, so the lead
+    // appears only there.
+    filesEmptyLead.classList.toggle("hidden", empty === "no-root");
     filesEmptyLead.textContent =
       empty === "no-root"
-        ? "Add a library folder in"
-        : "No music in your library folder. Drop files here, or pick another in";
+        ? ""
+        : "No music was found in your library folder. Drop files there or add another folder.";
+    filesEmptyChoose.textContent =
+      empty === "no-root" ? "Choose Music Folder" : "Add Another Folder";
     folderTree.classList.add("hidden");
     createBtn.classList.add("hidden");
     return;
@@ -1116,6 +1123,7 @@ export function initLibraryNav(d: LibraryNavDeps, initial?: NavStep[]): void {
   createBtn = document.getElementById("create-playlist-btn") as HTMLElement;
   filesEmpty = document.getElementById("files-empty") as HTMLElement;
   filesEmptyLead = document.getElementById("files-empty-lead") as HTMLElement;
+  filesEmptyChoose = document.getElementById("files-empty-choose") as HTMLButtonElement;
 
   // Restore the last place (empty / malformed → root menu), then render once.
   if (initial) restoreLocation(initial);

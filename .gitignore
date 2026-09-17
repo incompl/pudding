@@ -34,3 +34,7 @@ dist-ssr
 
 # Native screenshot run profiles, fixtures, captures, and review reports
 /apps/desktop/.screenshots/
+
+# Local Mac App Store provisioning profile. The distribution Tauri overlay
+# embeds it in the app bundle; profiles are tied to an Apple Developer account.
+/apps/desktop/src-tauri/AppStore.provisionprofile

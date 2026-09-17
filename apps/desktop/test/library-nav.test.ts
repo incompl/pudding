@@ -49,6 +49,7 @@ interface Fixture {
   createBtn: FakeEl;
   filesEmpty: FakeEl;
   filesEmptyLead: FakeEl;
+  filesEmptyChoose: FakeEl;
   calls: Call[];
   leafCtx: LeafListContext[];
   // The track lists handed to each renderLeafTrackList call, in order — so a test
@@ -68,6 +69,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
   const createBtn = doc.registerRoot("create-playlist-btn");
   const filesEmpty = doc.registerRoot("files-empty");
   const filesEmptyLead = doc.registerRoot("files-empty-lead");
+  const filesEmptyChoose = doc.registerRoot("files-empty-choose");
 
   const calls: Call[] = [];
   const leafCtx: LeafListContext[] = [];
@@ -144,6 +146,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     createBtn,
     filesEmpty,
     filesEmptyLead,
+    filesEmptyChoose,
     calls,
     leafCtx,
     leafTracks,
@@ -180,25 +183,37 @@ beforeEach(() => {
 });
 
 // The get-started prompt covers both dead ends. A configured-but-empty root gets
-// recovery copy; no root gets the library-setup copy. Both suppress the springboard,
-// folder tree, and create button.
+// recovery copy; no root gets the button alone, with no lead at all. Both suppress
+// the springboard, folder tree, and create button.
 test("an empty library shows the get-started prompt, not an empty springboard", async () => {
-  const { container, filesEmpty, filesEmptyLead, folderTree, createBtn } = setup({
+  const {
+    container,
+    filesEmpty,
+    filesEmptyLead,
+    filesEmptyChoose,
+    folderTree,
+    createBtn,
+  } = setup({
     libraryEmpty: () => "empty",
   });
   await flush();
   assert.ok(!filesEmpty.classList.contains("hidden"), "prompt must show for an empty library");
-  assert.match(filesEmptyLead.textContent, /No music in your library folder/);
+  assert.match(filesEmptyLead.textContent, /No music was found in your library folder/);
+  assert.equal(filesEmptyChoose.textContent, "Add Another Folder");
+  assert.ok(!filesEmptyLead.classList.contains("hidden"), "an empty root must explain itself");
   assert.equal(labels(container).length, 0, "springboard must not be built");
   assert.ok(folderTree.classList.contains("hidden"), "folder tree is a dead end here");
   assert.ok(createBtn.classList.contains("hidden"), "create button is a dead end here");
 });
 
 test("no library folder shows the concise setup prompt", async () => {
-  const { container, filesEmpty, filesEmptyLead } = setup({ libraryEmpty: () => "no-root" });
+  const { container, filesEmpty, filesEmptyLead, filesEmptyChoose } = setup({
+    libraryEmpty: () => "no-root",
+  });
   await flush();
   assert.ok(!filesEmpty.classList.contains("hidden"), "setup prompt must show");
-  assert.equal(filesEmptyLead.textContent, "Add a library folder in");
+  assert.ok(filesEmptyLead.classList.contains("hidden"), "first run needs no lead copy");
+  assert.equal(filesEmptyChoose.textContent, "Choose Music Folder");
   assert.equal(labels(container).length, 0, "springboard must not be built");
 });
 

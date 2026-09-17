@@ -16,6 +16,7 @@
     "preview": "pnpm --filter @pudding/desktop preview",
     "tauri": "pnpm --filter @pudding/desktop tauri",
     "build:mas": "pnpm --filter @pudding/desktop build:mas",
+    "build:mas:distribution": "pnpm --filter @pudding/desktop build:mas:distribution",
     "build:e2e": "pnpm --filter @pudding/desktop build:e2e",
     "test:unit": "pnpm --filter @pudding/desktop test:unit",
     "test:e2e": "pnpm --filter @pudding/desktop test:e2e",

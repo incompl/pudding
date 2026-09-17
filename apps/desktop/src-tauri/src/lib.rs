@@ -4716,13 +4716,18 @@ pub fn run() {
                 "open-equalizer" => {
                     let _ = app.emit("open-equalizer", ());
                 }
-                // Help ▸ Website and Help ▸ Support open the site in the default
-                // browser. Support is the in-app path App Review expects, and it
-                // is the same URL given in App Store Connect.
+                // Help links open the site in the default browser. Privacy and
+                // Support are the direct in-app paths App Review expects, and use
+                // the same URLs supplied in App Store Connect.
                 "open-website" => {
                     let _ = app
                         .opener()
                         .open_url("https://puddingisgood.com", None::<&str>);
+                }
+                "open-privacy" => {
+                    let _ = app
+                        .opener()
+                        .open_url("https://puddingisgood.com/privacy/", None::<&str>);
                 }
                 "open-support" => {
                     let _ = app
@@ -5207,6 +5212,8 @@ pub fn run() {
             // indexes every menu item — type "equalizer" and it points you at the
             // item; see wire_macos_help_menu).
             let website_item = MenuItemBuilder::with_id("open-website", "Website").build(app)?;
+            let privacy_item =
+                MenuItemBuilder::with_id("open-privacy", "Privacy Policy").build(app)?;
             // Support is a store requirement as much as a courtesy: the app has to
             // offer a way to reach the developer without leaving it to find one.
             let support_item = MenuItemBuilder::with_id("open-support", "Support").build(app)?;
@@ -5217,6 +5224,7 @@ pub fn run() {
                 MenuItemBuilder::with_id("open-licenses", "Licenses").build(app)?;
             let help_menu = SubmenuBuilder::new(app, "Help")
                 .item(&website_item)
+                .item(&privacy_item)
                 .item(&support_item)
                 .item(&licenses_item)
                 .build()?;

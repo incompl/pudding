@@ -25,6 +25,11 @@
   be added here too, or it will be dropped from the macOS build.
 -->
 <dict>
+  <!-- Pudding uses published, industry-standard TLS only for user-directed
+       HTTPS connections. France is excluded from the initial storefronts, so
+       no French declaration is required for the bundled Rust TLS provider. -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
