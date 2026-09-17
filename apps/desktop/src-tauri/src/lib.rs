@@ -654,12 +654,28 @@ const TAGS_ONLY: bool = false;
 fn open_tagged(
     path: &std::path::Path,
     read_properties: bool,
-) -> Result<lofty::file::TaggedFile, lofty::error::LoftyError> {
+) -> Result<lofty::file::TaggedFile, lofty::error::FileParseError> {
     lofty::probe::Probe::open(path)?
         .options(lofty::config::ParseOptions::new().read_properties(read_properties))
         // Options first: the sniff reads as far as they allow it to.
         .guess_file_type()?
         .read()
+}
+
+// Lofty 0.23 replaced the year-only Accessor API with ISO-8601 Timestamps. The
+// UI deliberately exposes only the year, so keep that narrow view here while
+// preserving the rest of a valid date when the user changes its year.
+fn tag_year(tag: &lofty::tag::Tag) -> Option<u32> {
+    tag.date().map(|date| u32::from(date.year))
+}
+
+fn set_tag_year(tag: &mut lofty::tag::Tag, year: u32) {
+    let Ok(year) = u16::try_from(year) else {
+        return;
+    };
+    let mut date = tag.date().unwrap_or_default();
+    date.year = year;
+    tag.set_date(date);
 }
 
 fn read_tags(path: &std::path::Path) -> Tags {
@@ -697,12 +713,12 @@ fn read_tags(path: &std::path::Path) -> Tags {
         // No Accessor shortcut for album artist; pull it by key. Cow-wrapped so
         // it flows through the same norm() (trim + drop-if-empty) as the rest.
         album_artist: norm(
-            tag.get_string(&lofty::tag::ItemKey::AlbumArtist)
+            tag.get_string(lofty::tag::ItemKey::AlbumArtist)
                 .map(std::borrow::Cow::Borrowed),
         ),
         disc: tag.disk(),
         track: tag.track(),
-        year: tag.year(),
+        year: tag_year(tag),
         genre: norm(tag.genre()),
         duration,
         bitrate,
@@ -712,7 +728,7 @@ fn read_tags(path: &std::path::Path) -> Tags {
         // Parsed the same way the engine parses it (see replaygain_multiplier) so the
         // column can't disagree with what playback actually acts on.
         rg_track_gain: tag
-            .get_string(&lofty::tag::ItemKey::ReplayGainTrackGain)
+            .get_string(lofty::tag::ItemKey::ReplayGainTrackGain)
             .and_then(|v| {
                 v.trim()
                     .trim_end_matches(|c: char| c.is_alphabetic())
@@ -2252,14 +2268,14 @@ fn file_tags(path: &str, artwork: ArtworkRead) -> EditorTags {
         album: norm(tag.album()),
         // No Accessor shortcut for album artist; pull it by key, as read_tags does.
         album_artist: norm(
-            tag.get_string(&lofty::tag::ItemKey::AlbumArtist)
+            tag.get_string(lofty::tag::ItemKey::AlbumArtist)
                 .map(std::borrow::Cow::Borrowed),
         ),
         disc: tag.disk(),
         disc_total: tag.disk_total(),
         track: tag.track(),
         track_total: tag.track_total(),
-        year: tag.year(),
+        year: tag_year(tag),
         genre: norm(tag.genre()),
         comment: norm(tag.comment()),
         artwork: match artwork {
@@ -2624,7 +2640,7 @@ fn apply_tag_edits(tag: &mut lofty::tag::Tag, edits: &TagEdits, artwork: &Artwor
     // No Accessor shortcut for album artist (see read_file_tags): set/clear by key.
     match &edits.album_artist {
         None => {}
-        Some(None) => tag.remove_key(&lofty::tag::ItemKey::AlbumArtist),
+        Some(None) => tag.remove_key(lofty::tag::ItemKey::AlbumArtist),
         Some(Some(v)) => {
             tag.insert_text(lofty::tag::ItemKey::AlbumArtist, v.clone());
         }
@@ -2659,29 +2675,13 @@ fn apply_tag_edits(tag: &mut lofty::tag::Tag, edits: &TagEdits, artwork: &Artwor
         Some(None) => tag.remove_track_total(),
         Some(Some(t)) => tag.set_track_total(t),
     }
-    // ID3v2 keeps the year inside the recording-time frame, so a file carrying a
-    // full date (1979-10-05) shows in the editor as the year alone — and writing
-    // that back destroys the month and day. Under a patch that only happens when
-    // the user actually typed in the Year box: an untouched Year is an absent key,
-    // and the date survives the save untouched.
+    // A full date (1979-10-05) shows in the editor as the year alone. An untouched
+    // Year is an absent key and survives unchanged; an edited year is applied to
+    // Lofty's parsed Timestamp so any valid month and day survive too.
     match edits.year {
         None => {}
-        Some(None) => tag.remove_year(),
-        Some(Some(y)) => {
-            // Keeping that month and day is a splice over the first four *bytes* of
-            // the date, which panics when byte four is inside a character. ID3v2
-            // won't hand us one — it rejects a non-ASCII timestamp when it reads the
-            // file — but a Vorbis comment's DATE is free-form text, so a FLAC can.
-            // There is nothing in a date that shaped to preserve: drop it and let
-            // the year box write a plain year.
-            let unsplittable = tag
-                .get_string(&lofty::tag::ItemKey::RecordingDate)
-                .is_some_and(|d| d.len() >= 4 && !d.is_char_boundary(4));
-            if unsplittable {
-                tag.remove_key(&lofty::tag::ItemKey::RecordingDate);
-            }
-            tag.set_year(y);
-        }
+        Some(None) => tag.remove_date(),
+        Some(Some(y)) => set_tag_year(tag, y),
     }
     // Picture 0 and only picture 0 — the one the well showed, and the one
     // picture_data_url hands the hero. A file with a back cover or a band photo
@@ -2721,12 +2721,12 @@ fn cached_fields(tag: &lofty::tag::Tag) -> FileEntry {
         artist: norm(tag.artist()),
         album: norm(tag.album()),
         album_artist: norm(
-            tag.get_string(&lofty::tag::ItemKey::AlbumArtist)
+            tag.get_string(lofty::tag::ItemKey::AlbumArtist)
                 .map(std::borrow::Cow::Borrowed),
         ),
         disc: tag.disk(),
         track: tag.track(),
-        year: tag.year(),
+        year: tag_year(tag),
         genre: norm(tag.genre()),
         ..Default::default()
     }
@@ -3002,14 +3002,24 @@ impl WriteFailure {
     // A lofty error is only ever fatal to the batch when it is an io error
     // underneath — a malformed tag or an unsupported container says nothing about
     // the next file.
-    fn lofty(context: &str, e: &lofty::error::LoftyError) -> Self {
+    fn lofty(context: &str, e: &(dyn std::error::Error + 'static)) -> Self {
         WriteFailure {
             message: format!("{}: {}", context, e),
-            fatal: match e.kind() {
-                lofty::error::ErrorKind::Io(io) => is_storage_fatal(io),
-                _ => false,
-            },
+            fatal: error_source::<std::io::Error>(e).is_some_and(is_storage_fatal),
         }
+    }
+}
+
+// Lofty 0.25 replaced its single enum error with source-based parse/encoding
+// errors. Walk that chain to preserve the batch's fatal-I/O decision.
+fn error_source<'a, E: std::error::Error + 'static>(
+    mut error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a E> {
+    loop {
+        if let Some(found) = error.downcast_ref::<E>() {
+            return Some(found);
+        }
+        error = error.source()?;
     }
 }
 
@@ -3178,169 +3188,6 @@ fn is_staging_denied(e: &std::io::Error) -> bool {
     }
 }
 
-// Fold a run of stacked ID3v2 tags into the first one's declared length, so a file
-// carrying two of them back to back looks like every other tagged MP3. Returns
-// whether it changed anything.
-//
-// Nothing here rewrites tag data. It moves one boundary — the four syncsafe size
-// bytes of the leading tag, widened to cover the tags piled behind it. Those tags
-// stay exactly where they are, now inside the span the first one claims, which is
-// what any reader honouring the header treats as padding and what lofty is about
-// to replace with the edited tag anyway.
-//
-// It exists for one failure. lofty identifies an MPEG file by skipping the first
-// ID3v2 tag and searching the next 1024 bytes for a frame sync; a second tag
-// bigger than that pushes the audio out of reach and the sniff comes back empty.
-// Reads survive it — open_tagged names the type from the extension when the bytes
-// say nothing — but lofty's ID3v2 writer re-sniffs the bare handle it was handed,
-// with no path left to fall back on (0.21, id3/v2/write/mod.rs), and refuses the
-// save. The file is ordinary otherwise: one tagger writing over another's work
-// leaves this, and every other tagger reads it.
-//
-// The chain is walked structurally, header by declared header, and never by
-// hunting for a frame sync in tag bytes that could contain anything — an embedded
-// cover is full of plausible sync words, and guessing wrong would swallow audio
-// into the tag. A file that doesn't open with ID3v2, or whose next bytes aren't
-// another tag header, is left untouched.
-fn swallow_stacked_id3(path: &Path) -> std::io::Result<bool> {
-    use std::io::{Seek, SeekFrom, Write};
-
-    const HEADER: u64 = 10;
-    // Enough for the pile a chain of taggers leaves; past that the file is
-    // something other than what this was written for, and it keeps its shape.
-    const MAX_TAGS: usize = 8;
-
-    // One tag's total footprint, header included, or None if these ten bytes
-    // aren't a tag header. The length is seven bits per byte — a set high bit
-    // means this isn't the field we think it is — and a v2.4 footer is ten more.
-    fn span(h: &[u8; 10]) -> Option<u64> {
-        if &h[0..3] != b"ID3" || !matches!(h[3], 2..=4) || h[4] == 0xFF {
-            return None;
-        }
-        if h[6..10].iter().any(|b| b & 0x80 != 0) {
-            return None;
-        }
-        let size = h[6..10]
-            .iter()
-            .fold(0u64, |acc, b| (acc << 7) | u64::from(*b));
-        let footer = if h[5] & 0x10 != 0 { HEADER } else { 0 };
-        Some(HEADER + size + footer)
-    }
-
-    fn header_at(f: &mut std::fs::File, at: u64, buf: &mut [u8; 10]) -> std::io::Result<bool> {
-        f.seek(SeekFrom::Start(at))?;
-        match f.read_exact(buf) {
-            Ok(()) => Ok(true),
-            // Short of ten bytes is the end of the chain, not a failure.
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)?;
-    let mut head = [0u8; 10];
-    if !header_at(&mut f, 0, &mut head)? {
-        return Ok(false);
-    }
-    // A leading tag carrying its own footer is left alone: the footer belongs at
-    // the tag's end, and widening the length would strand it in the middle of the
-    // span it describes.
-    if head[5] & 0x10 != 0 {
-        return Ok(false);
-    }
-    let Some(first) = span(&head) else {
-        return Ok(false);
-    };
-
-    let mut end = first;
-    let mut next = [0u8; 10];
-    for _ in 0..MAX_TAGS {
-        if !header_at(&mut f, end, &mut next)? {
-            break;
-        }
-        let Some(stacked) = span(&next) else { break };
-        end += stacked;
-    }
-    // One tag after all: the sniff failed for some reason this doesn't address,
-    // and the caller reports what lofty said.
-    if end == first {
-        return Ok(false);
-    }
-
-    // Twenty-eight bits is the whole of a syncsafe length. A chain past that can't
-    // be described by the field, so the file keeps the shape it came with.
-    let body = end - HEADER;
-    if body > 0x0FFF_FFFF {
-        return Ok(false);
-    }
-    let size = [
-        ((body >> 21) & 0x7F) as u8,
-        ((body >> 14) & 0x7F) as u8,
-        ((body >> 7) & 0x7F) as u8,
-        (body & 0x7F) as u8,
-    ];
-    f.seek(SeekFrom::Start(6))?;
-    f.write_all(&size)?;
-    log::info!(
-        "write_tags: folded {} bytes of stacked ID3v2 tags into the leading tag of {}",
-        end - first,
-        path.display()
-    );
-    Ok(true)
-}
-
-// ID3v1 is not a list of items but a fixed 128-byte block: 30 bytes for the title,
-// 30 for the artist, 30 for the album, 4 for the year and 28 for the comment, each
-// of them a run of Latin-1 with no length of its own. Anything longer has to be
-// cut, and lofty cuts it with a byte-index split on the &str — which panics
-// outright when the cut lands inside a multi-byte character instead of trimming a
-// character early.
-//
-// That is not a rare shape. Taggers have written UTF-8 into these Latin-1 runs for
-// decades, so a Cyrillic or accented comment comes back off disk as one character
-// per byte, each of them costing two bytes again in UTF-8: 28 bytes stored, 50-odd
-// bytes in hand, and a cut at 28 with even odds of landing mid-character. The file
-// is never the thing being edited — the editor writes ID3v2 — but a save rewrites
-// every tag the file carries, so one such comment took down the whole batch with a
-// panic, whichever field the user had actually typed in.
-//
-// Doing the cut here, on character boundaries, writes exactly the bytes lofty was
-// trying to write. Nothing is lost that the format could have held: the run is 28
-// bytes wide either way, and the ID3v2 tag beside it — the one every reader
-// including this app prefers — keeps the full text.
-fn clamp_id3v1_text(tagged: &mut lofty::file::TaggedFile) {
-    use lofty::tag::ItemKey;
-    let Some(tag) = tagged.tag_mut(lofty::tag::TagType::Id3v1) else {
-        return;
-    };
-    // lofty's own widths, including the 28-byte comment: the last two bytes of
-    // that run are the ID3v1.1 track number, and it reserves them whether or not
-    // the file has one.
-    for (key, limit) in [
-        (ItemKey::TrackTitle, 30),
-        (ItemKey::TrackArtist, 30),
-        (ItemKey::AlbumTitle, 30),
-        (ItemKey::Year, 4),
-        (ItemKey::Comment, 28),
-    ] {
-        let Some(value) = tag.get_string(&key) else {
-            continue;
-        };
-        if value.len() <= limit {
-            continue;
-        }
-        let cut = (0..=limit)
-            .rev()
-            .find(|&i| value.is_char_boundary(i))
-            .unwrap_or(0);
-        let trimmed = value[..cut].to_string();
-        tag.insert_text(key, trimmed);
-    }
-}
-
 // One file: open, patch, save, re-stat, read back. Returns what the file says
 // afterwards (read off the mutated tag, never off the patch — see cached_fields)
 // along with the post-write mtime and size. Mirrors read_file_tags in mutating the
@@ -3394,11 +3241,6 @@ fn write_one_file(
 
     apply_tag_edits(tag, edits, artwork);
     let mut tags = cached_fields(tag);
-    // After the patch and after the read-back, because it touches a tag neither of
-    // them looks at: the editor shows the primary tag, and this trims the *other*
-    // one down to what its fixed-width fields can hold, so the save can't panic on
-    // text nobody here typed.
-    clamp_id3v1_text(&mut tagged);
     // From the path the caller gave, not the canonicalized one: a symlinked track
     // is its own row under its own name, and the library shows the name the user
     // has for it.
@@ -3432,35 +3274,22 @@ fn write_one_file(
         WriteFailure::io("Couldn't save the tags", &e)
     })?;
 
-    // Save first and ask questions only if it fails, so the thousands of files that
-    // save on the first try pay nothing for the one that doesn't. The single
-    // failure worth a second attempt is a file lofty could not identify: an MP3
-    // with a second ID3v2 tag stacked behind the first hides its own audio from
-    // the sniff the ID3v2 writer runs, and folding the chain into one tag — what
-    // every other tagger's save leaves behind anyway — puts the audio back in view.
-    //
-    // Gated on lofty's verdict rather than on the shape of the file, which is what
-    // makes it self-disarming: the day the sniff, or the writer's need for it,
-    // improves upstream, UnknownFormat stops arriving and this becomes dead code to
-    // delete rather than a workaround quietly fighting the fix.
-    let write_options = lofty::config::WriteOptions::default();
-    if let Err(e) = tagged.save_to_path(&staged.0, write_options) {
-        let folded = matches!(e.kind(), lofty::error::ErrorKind::UnknownFormat)
-            && swallow_stacked_id3(&staged.0).unwrap_or(false);
-        if !folded {
-            // The frontend shows this string in the form; the log keeps the path,
-            // which the form has no room for.
-            log::error!("write_tags: saving {} failed: {e}", target.display());
-            return Err(WriteFailure::lofty("Couldn't save the tags", &e));
-        }
-        tagged.save_to_path(&staged.0, write_options).map_err(|e| {
-            log::error!(
-                "write_tags: saving {} failed after folding stacked ID3v2 tags: {e}",
-                target.display()
-            );
-            WriteFailure::lofty("Couldn't save the tags", &e)
-        })?;
-    }
+    // Lofty re-identifies the container while writing. Its default 1 KiB search
+    // window cannot reach audio behind a second, stacked ID3v2 tag, so 0.21 needed
+    // a local retry that rewrote the first tag's size field. Since 0.25 the writer
+    // accepts ParseOptions; a generous bounded window handles the same real-world
+    // files without Pudding changing their structure before the library writes.
+    const WRITE_MAX_JUNK_BYTES: usize = 16 * 1024 * 1024;
+    let parse_options = lofty::config::ParseOptions::new()
+        .read_properties(false)
+        .max_junk_bytes(WRITE_MAX_JUNK_BYTES);
+    let write_options = lofty::config::WriteOptions::new().parse_options(parse_options);
+    tagged.save_to_path(&staged.0, write_options).map_err(|e| {
+        // The frontend shows this string in the form; the log keeps the path,
+        // which the form has no room for.
+        log::error!("write_tags: saving {} failed: {e}", target.display());
+        WriteFailure::lofty("Couldn't save the tags", &e)
+    })?;
 
     // Lofty has closed its writer, but the bytes can still be in the page cache.
     // Flush before publishing the replacement, just as write_atomic_checked does.
@@ -5762,7 +5591,7 @@ mod tests {
         tag.insert_text(lofty::tag::ItemKey::Composer, "Hollis".into());
         // The ID3 full date the old write path destroyed on every save: the year
         // box shows 1979, and an unrelated edit used to write that back through
-        // set_year and lose the month and day.
+        // replacing the date and lose the month and day.
         tag.insert_text(lofty::tag::ItemKey::RecordingDate, "1979-10-05".into());
 
         let album_only = TagEdits {
@@ -5776,11 +5605,11 @@ mod tests {
         assert_eq!(tag.title().as_deref(), Some("Borrowed Light"));
         assert_eq!(tag.artist().as_deref(), Some("Wren"));
         assert_eq!(
-            tag.get_string(&lofty::tag::ItemKey::Composer),
+            tag.get_string(lofty::tag::ItemKey::Composer),
             Some("Hollis")
         );
         assert_eq!(
-            tag.get_string(&lofty::tag::ItemKey::RecordingDate),
+            tag.get_string(lofty::tag::ItemKey::RecordingDate),
             Some("1979-10-05"),
             "an untouched Year box does not flatten a full date"
         );
@@ -5805,7 +5634,7 @@ mod tests {
         let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
         tag.set_title("Borrowed Light".into());
         tag.set_artist("Wren".into());
-        tag.set_year(1979);
+        set_tag_year(&mut tag, 1979);
         let album_only = TagEdits {
             album: set("Night Bus"),
             ..Default::default()
@@ -5844,7 +5673,7 @@ mod tests {
         assert_eq!(tag.title().as_deref(), Some("Borrowed Light"));
         assert_eq!(tag.artist().as_deref(), Some("Wren"));
         assert_eq!(
-            tag.get_string(&lofty::tag::ItemKey::AlbumArtist),
+            tag.get_string(lofty::tag::ItemKey::AlbumArtist),
             Some("Various Artists")
         );
         assert_eq!(tag.album().as_deref(), Some("Night Bus"));
@@ -5852,7 +5681,7 @@ mod tests {
         assert_eq!(tag.disk_total(), Some(2));
         assert_eq!(tag.track(), Some(3));
         assert_eq!(tag.track_total(), Some(12));
-        assert_eq!(tag.year(), Some(1979));
+        assert_eq!(tag_year(&tag), Some(1979));
         assert_eq!(tag.genre().as_deref(), Some("Ambient"));
         assert_eq!(tag.comment().as_deref(), Some("ripped from vinyl"));
 
@@ -5877,13 +5706,13 @@ mod tests {
         apply_tag_edits(&mut tag, &cleared, &ArtworkChange::Keep);
         assert_eq!(tag.title(), None);
         assert_eq!(tag.artist(), None);
-        assert_eq!(tag.get_string(&lofty::tag::ItemKey::AlbumArtist), None);
+        assert_eq!(tag.get_string(lofty::tag::ItemKey::AlbumArtist), None);
         assert_eq!(tag.album(), None);
         assert_eq!(tag.disk(), None);
         assert_eq!(tag.disk_total(), None);
         assert_eq!(tag.track(), None);
         assert_eq!(tag.track_total(), None);
-        assert_eq!(tag.year(), None);
+        assert_eq!(tag_year(&tag), None);
         assert_eq!(tag.genre(), None);
         assert_eq!(tag.comment(), None);
     }
@@ -5898,17 +5727,17 @@ mod tests {
     fn a_year_is_four_digits_or_it_is_not_read_back() {
         let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Mp4Ilst);
         tag.insert_text(lofty::tag::ItemKey::RecordingDate, "1993".into());
-        assert_eq!(tag.year(), Some(1993));
+        assert_eq!(tag_year(&tag), Some(1993));
         tag.insert_text(lofty::tag::ItemKey::RecordingDate, "123".into());
         assert_eq!(
-            tag.year(),
+            tag_year(&tag),
             None,
             "a three-digit year does not survive the read"
         );
         // And a full date still answers with its year, which is why the editor
         // writes back only the year it showed (see apply_tag_edits).
         tag.insert_text(lofty::tag::ItemKey::RecordingDate, "1979-10-05".into());
-        assert_eq!(tag.year(), Some(1979));
+        assert_eq!(tag_year(&tag), Some(1979));
     }
 
     // The well shows picture 0, so a save may replace or drop picture 0 — and must
@@ -5916,21 +5745,19 @@ mod tests {
     #[test]
     fn artwork_edit_touches_only_the_first_picture() {
         let png = |byte: u8| {
-            lofty::picture::Picture::new_unchecked(
-                lofty::picture::PictureType::CoverFront,
-                Some(lofty::picture::MimeType::Png),
-                None,
-                vec![byte],
-            )
+            lofty::picture::Picture::unchecked(vec![byte])
+                .pic_type(lofty::picture::PictureType::CoverFront)
+                .mime_type(lofty::picture::MimeType::Png)
+                .build()
         };
         let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
         tag.push_picture(png(1));
-        tag.push_picture(lofty::picture::Picture::new_unchecked(
-            lofty::picture::PictureType::CoverBack,
-            Some(lofty::picture::MimeType::Png),
-            None,
-            vec![2],
-        ));
+        tag.push_picture(
+            lofty::picture::Picture::unchecked(vec![2])
+                .pic_type(lofty::picture::PictureType::CoverBack)
+                .mime_type(lofty::picture::MimeType::Png)
+                .build(),
+        );
         let keep = TagEdits::default().normalized();
 
         apply_tag_edits(&mut tag, &keep, &ArtworkChange::Set(png(9)));
@@ -6043,11 +5870,8 @@ mod tests {
     // didn't touch them.
     //
     // The second tag holds text and padding, like the file this was written for.
-    // That detail is the fixture: a tag carrying a cover is full of byte pairs
-    // that look like frame syncs, and lofty's sniff lands on one and guesses right
-    // by luck — so a stacked file with artwork saves fine today and a stacked file
-    // of plain text does not. Sniffing for audio in tag data is exactly the guess
-    // swallow_stacked_id3 refuses to make.
+    // That detail keeps false audio-frame syncs out of the fixture, making the
+    // configured write-side search window the behavior under test.
     fn stacked_tag_copy(name: &str) -> (PathBuf, String, Vec<u8>) {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -6108,21 +5932,19 @@ mod tests {
             .file_type()
     }
 
-    // A second ID3v2 tag stacked behind the first hides the audio from lofty's
-    // sniff — it skips one tag and searches 1024 bytes for a frame sync — so the
-    // writer refuses a file the reader was perfectly happy with. Real libraries
-    // are full of these; every other tagger writes them without comment.
+    // A second ID3v2 tag stacked behind the first hides the audio from Lofty's
+    // default 1024-byte sniff. Lofty 0.25 lets its writer use a larger ParseOptions
+    // window, so this no longer needs Pudding to rewrite the tag boundary first.
     #[test]
     fn a_second_id3_tag_does_not_cost_the_save() {
         let (dir, path, audio) = stacked_tag_copy("saves");
 
-        // The tripwire this whole path hangs on. If it ever fails, lofty has
-        // learned to identify a stacked file on its own and swallow_stacked_id3,
-        // its retry, and these two tests can all be deleted.
+        // Prove this is still outside the default window; otherwise the test would
+        // not exercise the write option that replaced the workaround.
         assert_eq!(
             sniffed_type(&path),
             None,
-            "lofty now identifies stacked ID3v2 tags; the fold is dead code"
+            "fixture must exceed Lofty's default junk window"
         );
 
         let report = write_tags_to_files(
@@ -6148,32 +5970,17 @@ mod tests {
         assert_eq!(report.ok.len(), 1);
         assert_eq!(album_of(&path).as_deref(), Some("Night Bus"));
 
-        // The fold moves a length, never a byte of audio. This is the assertion
-        // that says a save can't quietly cost a track its music.
+        // The upstream-supported path writes the edit and leaves the audio intact.
         let after = std::fs::read(&path).expect("read back");
         assert!(
             after.ends_with(&audio),
-            "the audio must come through the fold untouched"
+            "the audio must come through the save untouched"
         );
-        // And the file is now shaped like every other MP3: one tag, audio behind
-        // it, identifiable without knowing its name.
-        assert_eq!(sniffed_type(&path), Some(lofty::file::FileType::Mpeg));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // The fold runs only where lofty has already refused the file, but it is a
-    // structural rewrite and the blast radius is a whole library. An ordinary file
-    // must come out of it byte for byte.
-    #[test]
-    fn an_ordinary_file_is_never_reshaped() {
-        let (dir, paths) = sample_copies("unreshaped", 1);
-        let before = std::fs::read(&paths[0]).expect("read");
-
-        let folded = swallow_stacked_id3(std::path::Path::new(&paths[0])).expect("fold");
-
-        assert!(!folded, "a single-tag file has nothing to fold");
-        assert_eq!(before, std::fs::read(&paths[0]).expect("read back"));
+        assert_eq!(
+            sniffed_type(&path),
+            None,
+            "the save must not fold or otherwise reshape the stacked tags"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7543,14 +7350,14 @@ mod tests {
         let (dir, paths) = sample_copies("id3v1-only", 1);
         let track = PathBuf::from(&paths[0]);
 
-        // Strip the sample back to a single ID3v1 tag.
-        for t in [
-            lofty::tag::TagType::Id3v2,
-            lofty::tag::TagType::Id3v1,
-            lofty::tag::TagType::Ape,
-        ] {
-            let _ = t.remove_from_path(&track);
-        }
+        // Strip the sample's leading ID3v2 bytes, leaving only MPEG audio, then
+        // append the one ID3v1 tag this scenario needs.
+        let sample = std::fs::read(&track).expect("read sample");
+        assert_eq!(&sample[..3], b"ID3", "sample starts with ID3v2");
+        let tag_size = sample[6..10]
+            .iter()
+            .fold(0usize, |acc, b| (acc << 7) | usize::from(*b));
+        std::fs::write(&track, &sample[10 + tag_size..]).expect("strip sample tag");
         let mut v1 = lofty::tag::Tag::new(lofty::tag::TagType::Id3v1);
         v1.set_title("Old Title".into());
         v1.set_artist("Old Artist".into());
@@ -7641,19 +7448,13 @@ mod tests {
         let after = file_tags(&paths[0], ArtworkRead::DataUrl);
         assert_eq!(after.genre, None);
 
-        // The ID3v1 tag is still there, still a well-formed 128-byte block with a
-        // comment in it — trimmed to fit the field rather than taken down with the
-        // save. (What it holds is not byte-for-byte what it held: lofty 0.21 puts
-        // the UTF-8 of a string into these Latin-1 runs, so non-ASCII text comes
-        // out re-encoded. That is its own defect, older than this one, and not what
-        // this test is about.)
+        // Lofty's current writer safely truncates by encoded Latin-1 bytes, so the
+        // local character-boundary clamp is no longer needed and the original
+        // fixed-width field survives byte for byte.
         let bytes = std::fs::read(&track).expect("read the file back");
         let v1_block = &bytes[bytes.len() - 128..];
         assert_eq!(&v1_block[..3], b"TAG", "the ID3v1 tag survives the save");
-        assert!(
-            v1_block[97..125].iter().any(|b| *b != 0),
-            "and its comment is not blanked"
-        );
+        assert_eq!(&v1_block[97..125], &comment);
 
         // The tag the editor actually writes is untouched by any of that: the full
         // comment is still in the ID3v2 tag, at full length.
@@ -7662,7 +7463,7 @@ mod tests {
             .tag(lofty::tag::TagType::Id3v2)
             .expect("the file has an ID3v2 tag");
         assert!(
-            v2.get_string(&lofty::tag::ItemKey::Comment)
+            v2.get_string(lofty::tag::ItemKey::Comment)
                 .is_none_or(|c| c.len() > 28),
             "the primary tag is not the one with a 28-byte field"
         );
@@ -7670,12 +7471,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The same byte-index cut, one field over. lofty writes a new year over the
-    // first four bytes of an existing recording date so that a full date keeps its
-    // month and day — and a date whose fourth byte is inside a character takes the
-    // save down instead. ID3v2 never gets that far (it refuses a non-ASCII
-    // timestamp when the file is read), but a Vorbis comment's DATE is free-form
-    // text and a FLAC can carry anything in it.
+    // Lofty's timestamp API replaces the old byte-index year splice. A malformed
+    // free-form Vorbis DATE becomes the requested plain year without panicking,
+    // while a valid full date keeps its month and day.
     #[test]
     fn a_year_edit_survives_an_unsplittable_recording_date() {
         let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::VorbisComments);
@@ -7688,14 +7486,14 @@ mod tests {
         .normalized();
         apply_tag_edits(&mut tag, &edits, &ArtworkChange::Keep);
 
-        assert_eq!(tag.year(), Some(1999), "the year the user typed lands");
+        assert_eq!(tag_year(&tag), Some(1999), "the year the user typed lands");
 
         // And a date that can be spliced still is: the month and day survive.
         let mut dated = lofty::tag::Tag::new(lofty::tag::TagType::VorbisComments);
         dated.insert_text(lofty::tag::ItemKey::RecordingDate, "1979-10-05".into());
         apply_tag_edits(&mut dated, &edits, &ArtworkChange::Keep);
         assert_eq!(
-            dated.get_string(&lofty::tag::ItemKey::RecordingDate),
+            dated.get_string(lofty::tag::ItemKey::RecordingDate),
             Some("1999-10-05")
         );
     }

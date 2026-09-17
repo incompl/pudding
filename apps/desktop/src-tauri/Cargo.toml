@@ -7,6 +7,7 @@ license = "Apache-2.0"
 homepage = "https://puddingisgood.com"
 repository = "https://github.com/incompl/pudding"
 edition = "2021"
+rust-version = "1.89"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -41,7 +42,7 @@ tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 log = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
-lofty = "0.21"
+lofty = "0.25.2"
 base64 = "0.22"
 notify = "6"
 notify-debouncer-full = "0.3"

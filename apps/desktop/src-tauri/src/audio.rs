@@ -3115,7 +3115,7 @@ fn replaygain_multiplier(path: &std::path::Path, mode: u8) -> f32 {
     };
 
     // A gain tag is a signed dB figure, usually suffixed " dB" (e.g. "-7.89 dB").
-    let parse_db = |k: &ItemKey| -> Option<f32> {
+    let parse_db = |k: ItemKey| -> Option<f32> {
         tag.get_string(k).and_then(|s| {
             s.trim()
                 .trim_end_matches(|c: char| c.is_alphabetic())
@@ -3125,7 +3125,7 @@ fn replaygain_multiplier(path: &std::path::Path, mode: u8) -> f32 {
         })
     };
     // A peak tag is a linear sample value (typically 0..~1); ignore non-positive.
-    let parse_peak = |k: &ItemKey| -> Option<f32> {
+    let parse_peak = |k: ItemKey| -> Option<f32> {
         tag.get_string(k)
             .and_then(|s| s.trim().parse::<f32>().ok())
             .filter(|p| *p > 0.0)
@@ -3134,15 +3134,15 @@ fn replaygain_multiplier(path: &std::path::Path, mode: u8) -> f32 {
     // mode 2 = album: prefer album tags, fall back to track tags.
     let (gain_db, peak) = if mode == 2 {
         (
-            parse_db(&ItemKey::ReplayGainAlbumGain)
-                .or_else(|| parse_db(&ItemKey::ReplayGainTrackGain)),
-            parse_peak(&ItemKey::ReplayGainAlbumPeak)
-                .or_else(|| parse_peak(&ItemKey::ReplayGainTrackPeak)),
+            parse_db(ItemKey::ReplayGainAlbumGain)
+                .or_else(|| parse_db(ItemKey::ReplayGainTrackGain)),
+            parse_peak(ItemKey::ReplayGainAlbumPeak)
+                .or_else(|| parse_peak(ItemKey::ReplayGainTrackPeak)),
         )
     } else {
         (
-            parse_db(&ItemKey::ReplayGainTrackGain),
-            parse_peak(&ItemKey::ReplayGainTrackPeak),
+            parse_db(ItemKey::ReplayGainTrackGain),
+            parse_peak(ItemKey::ReplayGainTrackPeak),
         )
     };
 
