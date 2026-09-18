@@ -89,6 +89,15 @@ export interface TagWriteReport {
   // rest. Carries the failure that ended it. Every path not in `ok` or `failed` is
   // untouched, which only reads as sense if the note says why it stopped.
   aborted: string | null;
+  // Files an *undo* restored the text of but not the cover, because the save being
+  // undone displaced more artwork than the journal would hold. Always 0 for a
+  // save; only an undo can be partial in this one way, and a half-restored file
+  // that says nothing about it reads as a bug.
+  artworkDropped: number;
+  // Files from this exact save that the journal can restore. It can be smaller
+  // than `ok` when the file write succeeded but recording its inverse did not.
+  // Used to decide whether this result screen can honestly offer Revert update.
+  revertTracks: number;
 }
 
 // `stale` is the difference between a file that was not written and one that was

@@ -44,15 +44,62 @@ Sandbox, entitlements, and bookmarked roots are done
 
 ### Data safety and user messaging
 
-- [ ] Journal each track's complete pre-write tag (every `items()` entry, plus
-      the picture only when `picture_digest` says it changed) to the library DB
-      before the first write of a batch, and offer Undo on the last N batches.
-      Bounded by batch count, not by disk. Restore re-applies through
-      `write_one_file`, so it inherits the staged-write atomicity and can never
-      touch the audio stream. Rejected: whole-file backups — lofty rewrites the
-      whole file, so a retained APFS clone holds the original's blocks alive and
-      costs 2x per tagged file, and `clonefile` is same-volume only, which would
-      force the copies to live inside the user's music folder.
+- [x] Journal the **inverse patch** of every tag save to the library DB, and keep
+      its one-time **Revert update** action in that save's editor result screen.
+      Done 2026-09-17, as described below.
+
+      Not a tag snapshot. `apply_tag_edits` touches only the items the patch
+      names, which is exactly why a composer, a grouping, or someone else's TXXX
+      survives a save; restoring a journaled `items()` dump would rebuild the tag
+      and drop every frame lofty's generic `Tag` can't represent — undo would
+      destroy the metadata the save it is undoing preserved. So journal only the
+      pre-write value of the keys the patch names (the same three states
+      TagEdits has: absent / had nothing / had this). Journal the raw `date`
+      item, not the year the form showed, or undo flattens 1979-10-05 to 1979 —
+      the bug the `edits.year` arm exists to avoid.
+
+      Captured inside the staged write, immediately before `apply_tag_edits`,
+      where the tag is already open and parsed: no second read pass, and no
+      journal row for a file the loop skipped or failed. Written per file, right
+      after that file's write succeeds, so a batch interrupted anywhere is
+      undoable up to where it got. A journal write that fails costs that file its
+      undo and never fails the save.
+
+      Restore goes through the same staged-write core as a save (copy, tag,
+      fsync, atomic rename), so it inherits the atomicity and can never touch the
+      audio stream, and through the same batch loop, so it inherits the
+      playing-file refusal, the fatal-storage abort, progress and Stop.
+
+      Artwork: `ArtworkChange` already says statically whether the save touches
+      picture 0 — `Keep` journals nothing, `Remove`/`Set` journals the old
+      picture. Do NOT gate this on `picture_digest`: it is a `DefaultHasher`
+      output, documented as unstable across Rust releases and never persisted.
+      Old covers are the only unbounded part, so cap them per batch
+      (`MAX_UNDO_ART_BYTES`) and mark the files past the cap as art-uncaptured so
+      the result screen can say the cover won't come back.
+
+      Staleness: journal the post-write mtime+size `write_one_file` already
+      computes, and skip any file that no longer matches — undo must not silently
+      revert what another app changed after the save.
+
+      N = 1 (the last batch), which is the failure that actually happens: the
+      wrong selection, noticed immediately. Keyed by batch id + sequence so
+      raising N later is a query change, not a rewrite. Older batches are pruned
+      on each save, so the journal is bounded by one batch.
+
+      Lives in the library DB but is NOT part of the cache: `init_schema` drops
+      `tracks` on a SCHEMA_VERSION bump and must leave `tag_undo` alone.
+
+      The editor stays open through review, progress and outcome. Its result
+      screen carries **Revert update** beside **Done**, so the recovery belongs to
+      the exact batch it affects rather than competing with focus-routed ⌘Z
+      (text/curation undo) in the Edit menu. Choosing Done deliberately ends that
+      one-click recovery surface.
+
+      Rejected: whole-file backups — lofty rewrites the whole file, so a retained
+      APFS clone holds the original's blocks alive and costs 2x per tagged file,
+      and `clonefile` is same-volume only, which would force the copies to live
+      inside the user's music folder.
 - [ ] Validate staged audio before replacing the original: probe the staged file
       with symphonia (already a dependency) and pull one packet, immediately
       before the `fs::rename` in `write_one_file` — the same point

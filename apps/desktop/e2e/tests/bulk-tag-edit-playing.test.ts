@@ -30,7 +30,6 @@ import {
   FIXTURES,
   digest,
   editorForm,
-  editorOpen,
   makeLibrary,
   readTags,
   save,
@@ -100,9 +99,10 @@ async function pauseHoldingTheNextTrack(d: Driver, file: string): Promise<void> 
   );
 }
 
-// Edit `paths`, set one album across them, and hand back the note the form came
-// up with. A save that has anything to report leaves the form up — which is the
-// case both of these tests are about.
+// Edit `paths`, set one album across them, confirm the batch review, and return
+// the result-panel message. The review is intentionally driven here rather than
+// bypassed: these tests need the real save to reach the decoder's file-handle
+// gate, and a batch does not write until the user confirms it.
 async function saveAlbumAcross(
   d: Driver,
   paths: string[],
@@ -116,15 +116,23 @@ async function saveAlbumAcross(
   const ready = await editorForm(d);
   assert.equal(ready.submitDisabled, false, `Save was disabled: ${ready.note}`);
   await save(d);
-  return d.waitFor(
+  await d.waitFor(
     async () => {
-      if (!(await editorOpen(d))) return "closed";
-      const note = (await editorForm(d)).note;
-      // Skip past the running label; what this wants is the outcome.
-      return note && !note.startsWith("Saving...") ? note : null;
+      return (
+        (await d.exists("#pane-editor-view .tag-operation")) &&
+        (await d.text("#pane-editor-view .inline-editor-heading")) === `Update ${paths.length} tracks`
+      );
     },
+    { interval: 20, message: "the save never reached its review" },
+  );
+  await d.click("#pane-editor-view .inline-editor-submit");
+  await d.waitFor(
+    async () =>
+      (await d.exists("#pane-editor-view .tag-operation")) &&
+      (await d.text("#pane-editor-view .inline-editor-heading")) === "Update complete",
     { interval: 20, message: "the save never reported an outcome" },
-  ).then((note) => (note === "closed" ? null : note));
+  );
+  return d.text("#pane-editor-view .tag-operation-message");
 }
 
 test("the track the decoder has read ahead into is refused, and playback crosses into it unbroken", async () => {
@@ -140,6 +148,11 @@ test("the track the decoder has read ahead into is refused, and playback crosses
   // the form's own gate (which only knows the audible track) lets the save run.
   const note = await saveAlbumAcross(d, [b, c], "Frontier Album");
   assert.equal(note, "Saved 1 of 2. 1 couldn't be written.");
+  assert.equal(
+    await d.text("#pane-editor-view .tag-operation-errors"),
+    `${b}: Can't write a track while it's playing`,
+    "the result should show the per-file write error",
+  );
   assert.equal(await digest(b), held, "the held file was rewritten under the decoder");
   assert.equal((await readTags(d, c)).album, "Frontier Album", "the free file was skipped");
 
@@ -222,10 +235,7 @@ test("an album played to its end can be edited whole", async () => {
   );
 
   const note = await saveAlbumAcross(d, paths, "Whole Album");
-  // Null: the form closed, which it only does when every file was written. A
-  // refusal here would read "Saved 2 of 3. 1 couldn't be written." — the exact
-  // shape the two tests above assert *for*.
-  assert.equal(note, null, "a drained queue still refused one of its own tracks");
+  assert.equal(note, "Updated 3 tracks.", "a drained queue still refused one of its own tracks");
   for (const file of paths) {
     assert.equal((await readTags(d, file)).album, "Whole Album", path.basename(file));
   }
@@ -270,7 +280,7 @@ test("an album played to its end from the tree can be edited whole", async () =>
   );
 
   const note = await saveAlbumAcross(d, lib.paths, "Whole Folder");
-  assert.equal(note, null, "a finished folder still refused its own last track");
+  assert.equal(note, "Updated 2 tracks.", "a finished folder still refused its own last track");
   for (const file of lib.paths) {
     assert.equal((await readTags(d, file)).album, "Whole Folder", path.basename(file));
   }

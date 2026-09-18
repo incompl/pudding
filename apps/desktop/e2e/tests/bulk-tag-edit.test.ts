@@ -13,7 +13,6 @@ import type { Harness } from "../harness.ts";
 import {
   digest,
   editorForm,
-  editorFormOrClosed,
   editorOpen,
   makeLibrary,
   readTags,
@@ -106,12 +105,23 @@ test("a bulk edit writes the fields that were typed in, and only those", async (
 
   await typeInEditor(d, "Album", "One True Album");
   await save(d);
-  // A save with nothing to report closes the form. Anything else — a refusal, a
-  // partial batch — leaves it up with a note, so this is also the assertion that
-  // all three files were written.
-  await d.waitFor(async () => !(await editorOpen(d)), {
-    message: "the editor stayed open, so the save had something to report",
-  });
+  await d.waitFor(
+    async () =>
+      (await d.exists("#pane-editor-view .tag-operation")) &&
+      (await d.text("#pane-editor-view .inline-editor-heading")) === "Update 3 tracks",
+    { message: "the bulk edit skipped its review" },
+  );
+  await d.click("#pane-editor-view .inline-editor-submit");
+  await d.waitFor(
+    async () =>
+      (await d.exists("#pane-editor-view .tag-operation")) &&
+      (await d.text("#pane-editor-view .inline-editor-heading")) === "Update complete",
+    {
+      message: "the bulk tag update did not complete",
+    },
+  );
+  // The complete panel is also the assertion that the asynchronous write finished
+  // before we inspect the files below.
 
   for (const [file, title, year] of [
     [one, "Alpha", 1999],
@@ -138,6 +148,26 @@ test("a bulk edit writes the fields that were typed in, and only those", async (
   assert.equal(titles[one], "Alpha");
   assert.equal(titles[two], "Bravo");
   assert.equal(titles[three], "Charlie");
+});
+
+test("a one-track edit saves without the batch review", async () => {
+  const d = h.driver;
+  const { dir, paths } = await makeLibrary(root, "single", 1);
+  const [file] = paths;
+  await writeTags(d, [file], { title: "Before" });
+  await useLibrary(d, { dir, paths }, { [file]: "Before" });
+
+  await d.action("editMetadata", { path: file });
+  await typeInEditor(d, "Title", "After");
+  await save(d);
+
+  await d.waitFor(
+    async () =>
+      (await d.exists("#pane-editor-view .tag-operation")) &&
+      (await d.text("#pane-editor-view .inline-editor-heading")) === "Update complete",
+    { message: "the single-track save did not run directly" },
+  );
+  assert.equal((await readTags(d, file)).title, "After");
 });
 
 test("emptying a mixed field clears that tag on every file, and says so before it does", async () => {
@@ -192,9 +222,19 @@ test("emptying a mixed field clears that tag on every file, and says so before i
   assert.equal(armed.fields.Album.dirty, false);
 
   await save(d);
-  await d.waitFor(async () => !(await editorOpen(d)), {
-    message: "the editor stayed open, so the save had something to report",
-  });
+  await d.waitFor(
+    async () =>
+      (await d.exists("#pane-editor-view .tag-operation")) &&
+      (await d.text("#pane-editor-view .inline-editor-heading")) === "Update 3 tracks",
+    { message: "the bulk clear skipped its review" },
+  );
+  await d.click("#pane-editor-view .inline-editor-submit");
+  await d.waitFor(
+    async () =>
+      (await d.exists("#pane-editor-view .tag-operation")) &&
+      (await d.text("#pane-editor-view .inline-editor-heading")) === "Update complete",
+    { message: "the bulk clear did not complete" },
+  );
 
   for (const [file, comment] of [[one, "one"], [two, "two"], [three, null]] as const) {
     const tags = await readTags(d, file);
@@ -233,6 +273,13 @@ test("stopping a large save keeps what it wrote and leaves the rest untouched", 
   await d.action("editMetadata", { paths: order });
   await typeInEditor(d, "Title", "Bulk Renamed");
   await save(d);
+  await d.waitFor(
+    async () =>
+      (await d.exists("#pane-editor-view .tag-operation")) &&
+      (await d.text("#pane-editor-view .inline-editor-heading")) === `Update ${COUNT} tracks`,
+    { message: "the bulk rename skipped its review" },
+  );
+  await d.click("#pane-editor-view .inline-editor-submit");
 
   // Stop as soon as the first file is through. Polled tightly because the window is
   // the length of the batch: this is racing a loop that rewrites a small file in a
@@ -242,24 +289,25 @@ test("stopping a large save keeps what it wrote and leaves the rest untouched", 
     "raise COUNT until it doesn't";
   const during = await d.waitFor(
     async () => {
-      const form = await editorFormOrClosed(d);
-      if (!form) assert.fail(outran);
-      return form.note && /^Saving\.\.\. [1-9]/.test(form.note) ? form : null;
+      if (!(await d.exists("#pane-editor-view .tag-operation"))) return null;
+      if ((await d.text("#pane-editor-view .inline-editor-heading")) !== "Updating tags") return null;
+      const message = await d.text("#pane-editor-view .tag-operation-message");
+      return /^Updating\.\.\. [1-9]/.test(message) ? message : null;
     },
     { interval: 5, message: outran },
   );
-  assert.match(during.note!, new RegExp(`^Saving\\.\\.\\. \\d+ of ${COUNT}$`));
-  // While a batch is running the form is inert and the button beside Save changes
-  // what it means — Cancel is Stop, because that is the only thing left to do.
-  assert.equal(during.cancelLabel, "Stop");
-  assert.equal(during.fields.Title.disabled, true);
+  assert.match(during, new RegExp(`^Updating\\.\\.\\. \\d+ of ${COUNT}$`));
+  // While a batch is running the draft is replaced with its progress panel. The
+  // only remaining action is Stop, so the user cannot alter the patch mid-write.
+  assert.equal(await d.text("#pane-editor-view .inline-editor-cancel"), "Stop");
   await d.click("#pane-editor-view .inline-editor-cancel");
 
   const stopped = await d.waitFor(
     async () => {
-      const form = await editorFormOrClosed(d);
-      if (!form) assert.fail(outran);
-      return form.note?.startsWith("Stopped.") ? form.note : null;
+      if (!(await d.exists("#pane-editor-view .tag-operation"))) return null;
+      if ((await d.text("#pane-editor-view .inline-editor-heading")) !== "Update stopped") return null;
+      const message = await d.text("#pane-editor-view .tag-operation-message");
+      return message.startsWith("Stopped.") ? message : null;
     },
     { interval: 20, message: "the form never reported the batch as stopped" },
   );

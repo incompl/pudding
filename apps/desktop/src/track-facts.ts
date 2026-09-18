@@ -51,6 +51,38 @@ export interface FactsPatched {
   list: boolean;
 }
 
+// A watcher scan may start after the first atomic replacement in a bulk write,
+// then finish after write_tags has patched the in-memory tree. Its listing can
+// therefore describe a few paths from before their cache-row UPDATE, and
+// reconcileNode would otherwise replace the freshly patched nodes with those old
+// copies. Keep the newest local facts by path, with the revision at which they
+// landed, so that a reconciliation can overlay only edits that happened while
+// its list_dir request was in flight.
+//
+// This is deliberately a session-local, latest-value map rather than a second
+// source of truth. A later reconciliation starts at the current revision and
+// uses its database listing normally, so an external tagger is never masked.
+let tagFactsRevision = 0;
+const latestTagFacts = new Map<string, { revision: number; facts: TrackFacts }>();
+
+// Take this immediately before requesting a directory listing. The matching
+// overlay below has reach only to tag updates that arrive after this point.
+export function tagFactsRevisionSnapshot(): number {
+  return tagFactsRevision;
+}
+
+// Apply only facts newer than a directory listing's snapshot to that listing's
+// freshly-created leaf nodes. Folder reconciliation calls this before replacing
+// node.children, closing the race between an explicit tag save and its watcher
+// refresh without changing the ordering or expansion state of the tree.
+export function applyTagFactsSinceSnapshot(nodes: TreeNode[], snapshot: number): void {
+  if (snapshot === tagFactsRevision) return;
+  for (const node of nodes) {
+    const update = latestTagFacts.get(node.path);
+    if (update && update.revision > snapshot) Object.assign(node, update.facts);
+  }
+}
+
 // Write `facts` into every copy of this path the UI is holding. Does not repaint:
 // the two callers repaint different things (see applyDownloaded, applyTagUpdates).
 export function patchTrackFacts(path: string, facts: TrackFacts): FactsPatched {
@@ -172,6 +204,10 @@ export function applyTagUpdates(
       // learned, and "we don't know the new mtime" is not "there isn't one".
       ...(tags.modified != null ? { modified: tags.modified } : {}),
     });
+  }
+  const revision = ++tagFactsRevision;
+  for (const [path, update] of facts) {
+    latestTagFacts.set(path, { revision, facts: update });
   }
   const patched = patchTracksFacts(facts);
   if (patched.tree) renderTree();

@@ -3606,6 +3606,68 @@ body.dragging-noselect * {
   background: var(--bg);
 }
 
+/* The final three phases of a metadata update live in the same pane as the
+   editor: review what will change, follow the write, then either revert it or
+   leave deliberately. It is not an alert, so it borrows the editor's restrained
+   heading/actions vocabulary while keeping its explanation pleasantly readable
+   rather than squeezing it into the old form-note slot. */
+.tag-operation {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7em;
+  min-width: 0;
+  min-height: 100%;
+  padding: 0 0.25em;
+}
+
+#pane-editor-view .tag-operation .inline-editor-heading {
+  color: var(--text);
+  font-size: 0.95em;
+  margin-bottom: 0.35em;
+}
+
+.tag-operation-message {
+  max-width: 34em;
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.tag-operation-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tag-operation-details li {
+  padding: 0.45em 0.6em;
+  border-radius: 4px;
+  background: var(--surface-raised);
+}
+
+/* Keep the raw failure report legible in the pane: preserve its one-error-per-line
+   shape, but let long file paths and messages break instead of widening the pane. */
+.tag-operation-errors {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#pane-editor-view .tag-operation-actions {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  padding: 0.5em 0;
+  background: var(--bg);
+}
+
 .empty-state,
 .loading-state {
   color: var(--surface-hover);

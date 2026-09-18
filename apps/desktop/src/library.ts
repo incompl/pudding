@@ -24,6 +24,7 @@ import {
   streamListPathInput,
 } from "./dom-refs";
 import { nodesFromListing, renderTree, revealTreeRow } from "./tree-view";
+import { applyTagFactsSinceSnapshot, tagFactsRevisionSnapshot } from "./track-facts";
 import { renderStreams } from "./streams-view";
 import { bootStep } from "./perf";
 import {
@@ -149,6 +150,11 @@ async function reconcileNode(node: TreeNode): Promise<void> {
     return;
   }
   let listing: DirListing;
+  // A tag save can finish while this listing is in flight. Remember the boundary
+  // so its newer in-memory facts survive the wholesale children replacement
+  // below; the watcher that prompted this refresh is commonly the save's own
+  // sequence of atomic renames.
+  const tagFactsSnapshot = tagFactsRevisionSnapshot();
   try {
     listing = await invoke<DirListing>("list_dir", { path: node.path });
   } catch (e) {
@@ -161,6 +167,7 @@ async function reconcileNode(node: TreeNode): Promise<void> {
   for (const c of node.children) if (c.isFolder) oldFolders.set(c.name, c);
 
   const next = nodesFromListing(node.path, listing, oldFolders);
+  applyTagFactsSinceSnapshot(next, tagFactsSnapshot);
   node.children = next;
   // Reconcile sibling subtrees concurrently: each level must await its own
   // list_dir before it knows its children, but independent branches have no

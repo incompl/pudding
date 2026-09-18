@@ -37,6 +37,10 @@ configured library are intentionally not restored across launches.
 3. Change a text field such as Title, then click **Save**.
 4. Reopen the editor or inspect the file in another tag reader to confirm the
    change was written to the selected file.
+5. In the tag editor's completed-update screen, choose **Revert update**, then
+   confirm the previous value is back. Only the fields that save wrote are
+   restored; the audio stream is never touched, as every write lands as an atomic
+   rename over a staged copy.
 
 ### Test playlists and queue
 

@@ -56,6 +56,7 @@ These features are bog standard for streaming service apps, but rare for file-ba
 - Embedded album art, and disc/track-number-aware sorting
 - Columns: pick the fields a track list shows — title, artist, album, album artist, disc, genre, year, kind, time, bit rate, sample rate, bit depth, gain, date created/modified — or leave it automatic and the pane picks them per list. Turn on the header to sort by any column and drag the dividers to set your own widths; narrow panes fold back to one line
 - Edit metadata tags right in the app, one file or a whole selection at once — artwork included, with the fields a selection disagrees on left untouched
+- Review and revert a tag update in one place: a bulk edit names the fields and tracks it will change, shows its progress and result in the editor, and leaves a Revert update action there until you choose Done. Only the fields that save actually wrote are restored, so anything another tagger wrote is left alone — as is any file something else has changed in the meantime
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
 - Drag music from Finder onto the window: a file or playlist opens, a folder or a multi-file drop plays as a queue
 - Cloud-friendly: point it at a library in iCloud Drive, Proton Drive, or Dropbox and it scans without downloading anything. Files whose bytes aren't on this Mac are marked "(Not downloaded)" and fetched only when you play them

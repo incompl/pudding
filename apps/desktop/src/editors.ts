@@ -115,10 +115,10 @@ async function runTagWrite(
       generation,
       controls,
       total: paths.length,
-      // "Saving..." at one file, a count past it: "37 of 1" is noise, and at
+      // "Updating..." at one file, a count past it: "37 of 1" is noise, and at
       // three hundred the count is the whole point of the line.
       label: (done, total) =>
-        total > 1 ? `Saving... ${done} of ${total}` : "Saving...",
+        total > 1 ? `Updating... ${done} of ${total}` : "Updating...",
       stop:
         paths.length > 1
           ? {
@@ -129,6 +129,156 @@ async function runTagWrite(
     },
     () => invoke<TagWriteReport>("write_tags", { paths, generation, tags }),
   );
+}
+
+// One line for what a revert did. Four things can be true of it and only the first
+// is the happy path, so each of the others gets said rather than folded into a
+// count that doesn't add up.
+function revertOutcome(report: TagWriteReport): string {
+  // A file written correctly whose library row couldn't be updated is not a
+  // failure — the same call the editor's own note makes (see `outcome`).
+  const stale = report.failed.filter((f) => f.stale);
+  const failed = report.failed.filter((f) => !f.stale);
+  const restored = report.ok.length + stale.length;
+  const total = restored + failed.length;
+  if (total === 0) return "No tag update to revert.";
+  if (restored === 0) return failed[0]?.message ?? "Couldn't revert that tag update.";
+  const files = restored === 1 ? "1 track" : `${restored} tracks`;
+  let line =
+    failed.length > 0
+      ? `Reverted ${restored} of ${total}. ${failed.length} couldn't be changed back.`
+      : `Reverted the tag update on ${files}.`;
+  // The one way an undo can be quietly partial: the cover the save displaced was
+  // past what the journal will hold, so the text came back and the artwork didn't.
+  // Better said than discovered.
+  if (report.artworkDropped > 0) {
+    line += ` Cover art couldn't be restored on ${report.artworkDropped}.`;
+  }
+  return line;
+}
+
+type TagOperationButton = { label: string; primary?: boolean; onClick: () => void };
+
+// The metadata editor stays mounted as one operation rather than handing its
+// completion to a toast or a global menu item. These small panels are deliberately
+// separate from buildInlineEditor: a review/result is not a form, and keeping it
+// out of the generic field editor means stream editing retains its simple Save →
+// close behavior.
+function buildTagOperationPanel(opts: {
+  heading: string;
+  message: string;
+  details?: string[];
+  errors?: string;
+  buttons: TagOperationButton[];
+}): HTMLElement {
+  const detailList = opts.details?.length
+    ? h(
+        "ul",
+        { class: "tag-operation-details" },
+        ...opts.details.map((detail) => h("li", { text: detail })),
+      )
+    : null;
+  const errors = opts.errors
+    ? h("pre", { class: "tag-operation-errors" }, h("code", { text: opts.errors }))
+    : null;
+  const actions = h(
+    "div",
+    { class: "inline-editor-actions tag-operation-actions" },
+    ...opts.buttons.map((button) =>
+      h("button", {
+        class: button.primary ? "inline-editor-submit" : "inline-editor-cancel",
+        attrs: { type: "button" },
+        text: button.label,
+        on: { click: button.onClick },
+      }),
+    ),
+  );
+  return h(
+    "section",
+    { class: "tag-operation", attrs: { "aria-live": "polite" } },
+    h("div", { class: "inline-editor-heading", text: opts.heading }),
+    h("p", { class: "tag-operation-message", text: opts.message }),
+    detailList,
+    errors,
+    actions,
+  );
+}
+
+// A progress panel is a form-control shaped adapter for withTagProgress. The
+// write loop can therefore retain its single progress/cancellation implementation
+// while the status lives with this operation rather than in a temporary toast.
+function buildTagProgressPanel(heading: string): {
+  panel: HTMLElement;
+  controls: InlineEditorControls;
+} {
+  const status = h("p", { class: "tag-operation-message", text: heading });
+  const stop = h("button", {
+    class: "inline-editor-cancel hidden",
+    attrs: { type: "button" },
+  });
+  const actions = h("div", { class: "inline-editor-actions tag-operation-actions" }, stop);
+  const panel = h(
+    "section",
+    { class: "tag-operation", attrs: { "aria-live": "polite" } },
+    h("div", { class: "inline-editor-heading", text: heading }),
+    status,
+    actions,
+  );
+  return {
+    panel,
+    controls: {
+      setBusy: (busy) => {
+        if (!busy) {
+          stop.classList.add("hidden");
+          return;
+        }
+        status.textContent = busy.label;
+        if (busy.stop) {
+          stop.textContent = busy.stop.label;
+          stop.onclick = busy.stop.onStop;
+          stop.classList.remove("hidden");
+        } else {
+          stop.classList.add("hidden");
+        }
+      },
+    },
+  };
+}
+
+function tagPatchDetails(patch: Record<string, unknown>): string[] {
+  const labels: Record<string, string> = {
+    title: "Title",
+    artist: "Artist",
+    album: "Album",
+    albumArtist: "Album artist",
+    genre: "Genre",
+    comment: "Comment",
+    year: "Year",
+    disc: "Disc",
+    discTotal: "Disc total",
+    track: "Track",
+    trackTotal: "Track total",
+  };
+  const details: string[] = [];
+  for (const [key, label] of Object.entries(labels)) {
+    if (!(key in patch)) continue;
+    const value = patch[key];
+    if (value == null) {
+      details.push(`${label}: clear`);
+      continue;
+    }
+    // A review should identify the destination without becoming a second editor
+    // when someone pastes a paragraph into Comment. Collapse whitespace so a
+    // newline cannot turn one review row into a surprising multi-line block, then
+    // retain enough of the value to catch a wrong selection or paste.
+    const compact = String(value).replace(/\s+/g, " ").trim();
+    const shown = compact.length > 80 ? `${compact.slice(0, 79)}…` : compact;
+    details.push(`${label}: ${shown}`);
+  }
+  const artwork = patch.artwork as ArtworkEdit | undefined;
+  if (artwork?.kind === "set") details.push("Cover art: replace");
+  if (artwork?.kind === "remove") details.push("Cover art: remove");
+  return details;
 }
 
 // Fold `paths` down to the tags they share, with the form counting the files off
@@ -711,11 +861,11 @@ function openMetadataEditor(paths: string[], note?: string): Promise<void> {
   const fourDigitYear: FieldValidator = (v) =>
     v === "" || /^\d{4}$/.test(v) ? null : "Year must be four digits";
 
-  // The count is the whole of the confirmation: it is the one place the user sees
-  // what they are about to do and to how many files, and it is on screen from the
-  // first frame because the tags it would otherwise wait for say nothing about
-  // that. The file name comes off the path rather than out of the seed for the
-  // same reason — this has to read right before the read returns.
+  // The heading establishes the edit's scope from the first frame, before the tag
+  // read returns. Batch edits repeat that scope in their review; a single edit
+  // names its file here and saves directly. The file name comes off the path
+  // rather than out of the seed because this has to read right before the read
+  // returns.
   const heading =
     paths.length === 1
       ? `Editing ${paths[0].split("/").pop() ?? paths[0]}`
@@ -753,10 +903,10 @@ function openMetadataEditor(paths: string[], note?: string): Promise<void> {
   // Repointed at each build, so it always names the form that is mounted.
   let controls: InlineEditorControls | null = null;
 
-  // What the form says when a batch comes back. Four outcomes, and the batch that
-  // fully succeeded is the only one that closes it — every other one has something
-  // to tell the user, and the note under the buttons is where it gets told.
-  const outcome = (report: TagWriteReport): string | void => {
+  // What the operation result screen says when a batch comes back. A full save is
+  // news too: it stays visible with its Revert action instead of closing the pane
+  // underneath a toast.
+  const writeOutcome = (report: TagWriteReport): string => {
     // A file whose library row couldn't be updated was still written correctly, so
     // it counts with the saved: telling someone a save failed when it didn't is
     // the one report worse than no report at all.
@@ -798,7 +948,120 @@ function openMetadataEditor(paths: string[], note?: string): Promise<void> {
         ? `Saved ${saved === 1 ? "the track" : saved}. The library list will catch up on the next scan.`
         : `Saved ${saved}. ${stale.length} library ${stale.length === 1 ? "row" : "rows"} will refresh on the next scan.`;
     }
-    closePaneEditor();
+    return `Updated ${saved === 1 ? "1 track" : `${saved} tracks`}.`;
+  };
+
+  const savedCount = (report: TagWriteReport): number =>
+    report.ok.length + report.failed.filter((f) => f.stale).length;
+
+  const showRevertResult = (report: TagWriteReport): void => {
+    applyTagUpdates(report.ok);
+    for (const f of report.failed) console.error("undo_tag_write failed", f.path, f.message);
+    openPaneEditor(
+      "metadata",
+      buildTagOperationPanel({
+        heading: "Tag update reverted",
+        message: revertOutcome(report),
+        buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
+      }),
+    );
+  };
+
+  const startRevert = (): void => {
+    const { panel, controls: progress } = buildTagProgressPanel("Reverting tag update");
+    openPaneEditor("metadata", panel);
+    void (async () => {
+      const generation = nextTagGeneration();
+      try {
+        const report = await withTagProgress(
+          {
+            event: "tag-write-progress",
+            generation,
+            controls: progress,
+            total: paths.length,
+            label: (done, total) =>
+              total > 1 ? `Reverting... ${done} of ${total}` : "Reverting...",
+          },
+          () => invoke<TagWriteReport>("undo_tag_write", { generation }),
+        );
+        showRevertResult(report);
+      } catch (e) {
+        console.error("undo_tag_write failed", e);
+        openPaneEditor(
+          "metadata",
+          buildTagOperationPanel({
+            heading: "Couldn't revert tag update",
+            message: typeof e === "string" ? e : "Couldn't revert that tag update.",
+            buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
+          }),
+        );
+      }
+    })();
+  };
+
+  const showWriteResult = (report: TagWriteReport): void => {
+    const saved = savedCount(report);
+    const errors = report.failed
+      .filter((failure) => !failure.stale)
+      .map((failure) => `${failure.path}: ${failure.message}`)
+      .join("\n");
+    const buttons: TagOperationButton[] = [{ label: "Done", primary: true, onClick: closePaneEditor }];
+    if (report.revertTracks > 0) buttons.unshift({ label: "Revert update", onClick: startRevert });
+    const recoveryDetail =
+      saved > 0 && report.revertTracks === 0
+        ? "A recovery copy couldn't be prepared for this update."
+        : report.revertTracks > 0 && report.revertTracks < saved
+          ? `Revert can restore ${report.revertTracks} of ${saved} tracks.`
+          : undefined;
+    openPaneEditor(
+      "metadata",
+      buildTagOperationPanel({
+        heading: report.stopped ? "Update stopped" : "Update complete",
+        message: writeOutcome(report),
+        details: recoveryDetail ? [recoveryDetail] : undefined,
+        errors: errors || undefined,
+        buttons,
+      }),
+    );
+  };
+
+  const startWrite = (patch: Record<string, unknown>): void => {
+    const { panel, controls: progress } = buildTagProgressPanel("Updating tags");
+    openPaneEditor("metadata", panel);
+    void (async () => {
+      try {
+        showWriteResult(await runTagWrite(paths, patch, progress));
+      } catch (e) {
+        // A throw is a batch-level failure (for example, an artwork file that
+        // became unreadable). It is still shown where the edit was made rather
+        // than as a toast after the panel disappeared.
+        console.error("write_tags failed", e);
+        openPaneEditor(
+          "metadata",
+          buildTagOperationPanel({
+            heading: "Couldn't update tags",
+            message: typeof e === "string" ? e : "Couldn't save the tags.",
+            buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
+          }),
+        );
+      }
+    })();
+  };
+
+  const showReview = (patch: Record<string, unknown>, form: HTMLFormElement): void => {
+    const count = paths.length === 1 ? "1 track" : `${paths.length} tracks`;
+    openPaneEditor(
+      "metadata",
+      buildTagOperationPanel({
+        heading: `Update ${count}`,
+        message: `These changes will be applied to ${count}. Everything else will be left alone.`,
+        details: tagPatchDetails(patch),
+        buttons: [
+          { label: "Back", onClick: () => openPaneEditor("metadata", form) },
+          { label: `Update ${count}`, primary: true, onClick: () => startWrite(patch) },
+        ],
+      }),
+    );
   };
 
   // Build the form on `seed`, or on nothing while the fold is still running.
@@ -808,7 +1071,8 @@ function openMetadataEditor(paths: string[], note?: string): Promise<void> {
     // for any single file, where there is nothing to disagree with.
     const mixed = new Set(seed?.mixed ?? []);
     const differs = (key: string): boolean => mixed.has(key);
-    return buildInlineEditor({
+    let form: HTMLFormElement;
+    form = buildInlineEditor({
       note,
       controls: (c) => {
         controls = c;
@@ -917,21 +1181,15 @@ function openMetadataEditor(paths: string[], note?: string): Promise<void> {
         for (const key of ["year", "disc", "discTotal", "track", "trackTotal"]) {
           if (touched.has(key)) patch[key] = parsePositive(values[key]);
         }
-        let report: TagWriteReport;
-        try {
-          report = await runTagWrite(paths, patch, controls);
-        } catch (e) {
-          // A throw is the batch-level failure (an unreadable artwork pick); a
-          // file that couldn't be written comes back in `failed`. Both are written
-          // as sentences, so the one the backend gives is the one to show. The
-          // form stays up with the user's typing in it — a lost form full of
-          // retyped tags is its own bug.
-          console.error("write_tags failed", e);
-          return typeof e === "string" ? e : "Couldn't save the tags.";
-        }
-        return outcome(report);
+        // A one-track edit is already scoped by the editor's filename heading, so
+        // Save can write it directly. A batch still gets a review: the detached
+        // form is retained for Back, so its exact values, touched-field marks and
+        // picked artwork survive the review without needing a second draft model.
+        if (paths.length === 1) startWrite(patch);
+        else showReview(patch, form);
       },
     });
+    return form;
   };
 
   const reading = build(null);
@@ -942,11 +1200,19 @@ function openMetadataEditor(paths: string[], note?: string): Promise<void> {
       seed = await runTagRead(paths, controls);
     } catch (e) {
       console.error("read_common_tags failed", e);
-      // Close rather than leave an empty form up: an unseeded form is
-      // indistinguishable from files that carry no tags at all, and saving from it
-      // would be the user writing that emptiness over every one of them.
-      if (reading.isConnected) closePaneEditor();
-      toast(typeof e === "string" ? e : "Couldn't read those tags.");
+      // An unseeded form is indistinguishable from files that carry no tags at
+      // all, so it cannot be left editable. Keep the failure in this pane instead
+      // of dropping it into a toast after the editor vanishes.
+      if (reading.isConnected) {
+        openPaneEditor(
+          "metadata",
+          buildTagOperationPanel({
+            heading: "Couldn't read tags",
+            message: typeof e === "string" ? e : "Couldn't read those tags.",
+            buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
+          }),
+        );
+      }
       return;
     }
     // The form the user walked away from is not the form to fill in. Cancel, Esc
