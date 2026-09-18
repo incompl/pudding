@@ -37,6 +37,7 @@ import { renameOpenPlaylist } from "./playlists";
 import { curatedList } from "./queue";
 import { toast } from "./main";
 import { applyTagUpdates } from "./track-facts";
+import { puddingProgress } from "./pudding-progress";
 
 // Batch id for a run of tag work — a write, or the seed read that fills the form
 // in — minted here and sent with the call. It rides on every progress event and
@@ -74,7 +75,7 @@ async function withTagProgress<T>(
 ): Promise<T> {
   const { controls, label, stop } = opts;
   const busy = (done: number, total: number): void =>
-    controls?.setBusy({ label: label(done, total), stop });
+    controls?.setBusy({ label: label(done, total), progress: { done, total }, stop });
   busy(0, opts.total);
   // Inside the try from here on, because the busy state is already on: a listen()
   // that rejects would otherwise strand the form inert behind a Stop button for a
@@ -211,6 +212,7 @@ function buildTagProgressPanel(heading: string): {
   panel: HTMLElement;
   controls: InlineEditorControls;
 } {
+  const cup = puddingProgress(heading);
   const status = h("p", { class: "tag-operation-message", text: heading });
   const stop = h("button", {
     class: "inline-editor-cancel hidden",
@@ -221,7 +223,7 @@ function buildTagProgressPanel(heading: string): {
     "section",
     { class: "tag-operation", attrs: { "aria-live": "polite" } },
     h("div", { class: "inline-editor-heading", text: heading }),
-    status,
+    h("div", { class: "tag-operation-progress" }, cup.element, status),
     actions,
   );
   return {
@@ -233,6 +235,9 @@ function buildTagProgressPanel(heading: string): {
           return;
         }
         status.textContent = busy.label;
+        if (busy.progress) {
+          cup.update(busy.progress.done, busy.progress.total, busy.label);
+        }
         if (busy.stop) {
           stop.textContent = busy.stop.label;
           stop.onclick = busy.stop.onStop;

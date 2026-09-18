@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 432 144" role="img" aria-labelledby="title desc">
+  <title id="title">Batch metadata update progress</title>
+  <desc id="desc">Three minimal container indicators showing empty, partial, and complete update states.</desc>
+
+  <defs>
+    <clipPath id="vessel-clip">
+      <path d="M23 49 35 100c1 5 5 8 10 9 12 2 24 2 36 0 5-1 9-4 10-9l12-51Z"/>
+    </clipPath>
+    <g id="vessel">
+      <path d="M18 38 31 98c1 8 7 13 15 15 11 2 22 2 33 0 8-2 14-7 15-15l13-60" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"/>
+      <path d="M18 31 58 18c4-1 8-1 12 0l39 13c6 2 6 10 0 13L70 58c-4 1-8 1-12 0L18 45c-6-2-6-10 0-14Z" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round"/>
+    </g>
+  </defs>
+
+  <!-- Empty -->
+  <g transform="translate(0 8)">
+    <use href="#vessel"/>
+  </g>
+
+  <!-- Partially complete -->
+  <g transform="translate(144 8)">
+    <g clip-path="url(#vessel-clip)">
+      <path d="M20 86c13-4 26-4 40 0 14 4 28 4 44 0v34H20Z" fill="currentColor"/>
+    </g>
+    <use href="#vessel"/>
+  </g>
+
+  <!-- Complete -->
+  <g transform="translate(288 8)">
+    <g clip-path="url(#vessel-clip)">
+      <path d="M20 48c13-4 27-4 41 0 14 4 28 4 43 0v72H20Z" fill="currentColor"/>
+    </g>
+    <use href="#vessel"/>
+  </g>
+</svg>

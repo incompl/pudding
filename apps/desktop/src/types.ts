@@ -501,6 +501,7 @@ export interface InlineEditorArtwork {
 // started, which is why only a caller whose work can still be stopped passes one.
 export interface InlineEditorBusy {
   label: string;
+  progress?: { done: number; total: number };
   stop?: { label: string; onStop: () => void };
 }
 
