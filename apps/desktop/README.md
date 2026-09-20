@@ -63,59 +63,15 @@ These features are bog standard for streaming service apps, but rare for file-ba
 
 ### Metadata editing and data safety
 
-Pudding edits tags in the music files themselves, so a current backup is still
-the best protection against hardware failure, filesystem bugs, or defects in
-Pudding and its dependencies. For each save, Pudding resolves symlinks, opens the
-real track read/write, and keeps that descriptor open for the entire operation.
-It makes one complete sibling backup of the original and flushes that backup
-durably before allowing the file to change.
+When editing track metadata, Pudding edits tags in the music files themselves.
+We try to do it safely, but backing up your files before editing them is always safest.
 
-After the backup is made, Pudding waits for its own readers to finish and checks
-the path, open descriptor, filesystem stamp, and complete digest again. It then
-asks Lofty to edit the already-open original file directly. This preserves the
-inode, so existing hard links observe the edit and symlinks remain symlinks. It
-also produces the expected file-version entry in Proton Drive, as verified
-against the live service.
-
-Before deleting the backup, Pudding flushes the edited file and verifies that the
-path and descriptor still name the original inode, the file parses again, and the
-saved metadata matches the requested change. When the original could decode an
-audio packet, the result must do so too. MPEG saves additionally compare the
-audio payload with the backup.
-
-If writing or verification fails, Pudding attempts to restore the backup by
-overwriting the same open descriptor, preserving the inode. A successful restore
-is reported as a failed save with the original restored. If restoration cannot
-be completed and verified, the batch stops, the backup is retained, and the
-error identifies both the track and the backup's exact path. Pudding never uses
-an inode-replacing rename as a recovery fallback.
-
-This is not an atomic or crash-safe transaction. A process crash, OS crash, or
-power loss during the direct write can leave the track torn. The sibling backup
-should survive, but Pudding has no durable transaction journal and performs no
-automatic startup recovery. Keep normal backups of the music library.
-
-The editor's **Revert update** action is deliberately narrower than restoring a
-whole-file backup. Pudding records the prior value of only the fields that the
-save changed and restores only those values. A field written later by another
-tagger is therefore left alone, and a track whose exact inode, filesystem stamp,
-or SHA-256 digest has changed since the save is skipped. Hard-link aliases in one
-batch are written and journaled once as a physical file, while every selected path
-is refreshed. The one-click action covers the most recent completed
-batch and remains available until **Done** is chosen. Previous artwork is also
-captured up to a bounded per-batch limit; the result screen identifies any track
-whose artwork could not be included.
-
-For maintainers, saves and reverts share the same per-track direct-write path.
-Undo data is an inverse patch, not a serialized tag: rebuilding a tag from
-Lofty's generic item list could discard format-specific frames that Pudding never
-intended to edit. The journal therefore records the raw prior value—including the
-full date rather than only its displayed year—immediately before applying a
-patch, and persists that entry only after the file write succeeds. It lives in
-the library database independently of the rebuildable track cache, and only the
-latest batch is retained. The whole-file backup exists only while one file is
-being saved (unless rollback fails); retaining it as undo history would
-unnecessarily keep a second copy of every edited file's data.
+Each save first creates and durably records a recovery copy outside the
+library, then writes the original file directly to preserve links and file identity,
+verifies the finished file and requested metadata, and restores the
+original in place if anything fails. Interrupted writes are detected and recovered
+at startup where possible; otherwise the recovery files are kept for manual
+resolution.
 
 ### Playback queue
 
