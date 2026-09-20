@@ -316,8 +316,7 @@ fn parse(content: &str, base_dir: &Path) -> (Option<String>, Vec<ParsedEntry>) {
                     // an out-of-library row and the seconds are its only runtime.
                     if let Some((head, title)) = split_extinf(inf) {
                         pending_secs = parse_extinf_secs(head);
-                        pending_title =
-                            Some(title.trim().to_string()).filter(|t| !t.is_empty());
+                        pending_title = Some(title.trim().to_string()).filter(|t| !t.is_empty());
                     }
                 }
             }
@@ -529,7 +528,9 @@ fn playlist_base_dir(path: &str) -> PathBuf {
 // pair new content with an older mtime, which only costs a redundant reload later.
 // The other order pairs old content with a newer mtime and the staleness is never
 // noticed at all.
-fn read_rows(path: &str) -> Result<(Option<String>, Vec<ParsedEntry>, Option<i64>, String), String> {
+fn read_rows(
+    path: &str,
+) -> Result<(Option<String>, Vec<ParsedEntry>, Option<i64>, String), String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let mtime = mtime_ms(&meta);
     // Size first, before a byte is read: past this the file is not a playlist that
@@ -971,11 +972,14 @@ pub struct PlaylistStamp {
     revision: String,
 }
 
-const PLAYLIST_CONFLICT: &str = "The playlist changed on disk. Reopen it before saving; your changes were not written.";
+const PLAYLIST_CONFLICT: &str =
+    "The playlist changed on disk. Reopen it before saving; your changes were not written.";
 
 fn current_bytes(path: &str) -> Result<Option<Vec<u8>>, String> {
     match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_PLAYLIST_BYTES => return Err("not a playlist: file is too large".into()),
+        Ok(meta) if meta.len() > MAX_PLAYLIST_BYTES => {
+            return Err("not a playlist: file is too large".into())
+        }
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.to_string()),
@@ -998,9 +1002,10 @@ fn write_playlist_inner(
     if !overwrite && revision.as_deref() != expected_revision {
         return Err(PLAYLIST_CONFLICT.into());
     }
-    let preserved = original.as_deref().map(|bytes| {
-        Preserved::from_content(&decode_bytes(bytes), &playlist_base_dir(path))
-    }).unwrap_or_default();
+    let preserved = original
+        .as_deref()
+        .map(|bytes| Preserved::from_content(&decode_bytes(bytes), &playlist_base_dir(path)))
+        .unwrap_or_default();
     let content = serialize(path, name, tracks, &preserved, conn)?;
     write_atomic_checked(Path::new(path), content.as_bytes(), || {
         let current = current_bytes(path).map_err(std::io::Error::other)?;
@@ -1008,7 +1013,8 @@ fn write_playlist_inner(
             return Err(std::io::Error::other(PLAYLIST_CONFLICT));
         }
         Ok(())
-    }).map_err(|e| crate::safe_save_error(e).to_string())?;
+    })
+    .map_err(|e| crate::safe_save_error(e).to_string())?;
     Ok(PlaylistStamp {
         mtime: file_mtime_ms(path),
         revision: content_revision(content.as_bytes()),
@@ -1027,7 +1033,14 @@ pub fn write_playlist(
     db: State<DbHandle>,
 ) -> Result<PlaylistStamp, String> {
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    write_playlist_inner(&path, &name, &tracks, expected_revision.as_deref(), overwrite.unwrap_or(false), &conn)
+    write_playlist_inner(
+        &path,
+        &name,
+        &tracks,
+        expected_revision.as_deref(),
+        overwrite.unwrap_or(false),
+        &conn,
+    )
 }
 
 // The playlist file's mtime, or None if it no longer exists. Deliberately cheap —
@@ -1123,7 +1136,14 @@ fn move_playlist_inner(old_path: &str, new_path: &str, conn: &Connection) -> Res
 pub fn rename_playlist(path: String, name: String, db: State<DbHandle>) -> Result<(), String> {
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let (_, entries, _, revision) = read_rows(&path)?;
-    write_playlist_inner(&path, &name, &entries_as_rows(entries), Some(&revision), false, &conn)?;
+    write_playlist_inner(
+        &path,
+        &name,
+        &entries_as_rows(entries),
+        Some(&revision),
+        false,
+        &conn,
+    )?;
     Ok(())
 }
 
@@ -1306,14 +1326,26 @@ mod tests {
         let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
         let external = b"#EXTM3U\nb.mp3\n";
         std::fs::write(&file, external).unwrap();
-        std::fs::File::options().write(true).open(&file).unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
-        let err = write_playlist_inner(path, "Renamed", &rows, Some(&revision), false, &empty_db()).err().unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let err = write_playlist_inner(path, "Renamed", &rows, Some(&revision), false, &empty_db())
+            .err()
+            .unwrap();
         assert_eq!(err, PLAYLIST_CONFLICT);
         assert_eq!(std::fs::read(&file).unwrap(), external);
         std::fs::remove_file(&file).unwrap();
-        assert!(write_playlist_inner(path, "Renamed", &rows, Some(&revision), false, &empty_db()).is_err());
-        assert!(!file.exists(), "a stale autosave must not resurrect a deleted file");
+        assert!(
+            write_playlist_inner(path, "Renamed", &rows, Some(&revision), false, &empty_db())
+                .is_err()
+        );
+        assert!(
+            !file.exists(),
+            "a stale autosave must not resurrect a deleted file"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1324,13 +1356,18 @@ mod tests {
         let path = file.to_str().unwrap();
         let db = empty_db();
         let first = write_playlist_inner(path, "First", &[], None, false, &db).unwrap();
-        let second = write_playlist_inner(path, "Second", &[], Some(&first.revision), false, &db).unwrap();
+        let second =
+            write_playlist_inner(path, "Second", &[], Some(&first.revision), false, &db).unwrap();
         assert_ne!(first.revision, second.revision);
         assert_eq!(read_rows(path).unwrap().3, second.revision);
-        assert!(write_playlist_inner(path, "Stale", &[], Some(&first.revision), false, &db).is_err());
+        assert!(
+            write_playlist_inner(path, "Stale", &[], Some(&first.revision), false, &db).is_err()
+        );
         assert!(write_playlist_inner(path, "Unknown", &[], None, false, &db).is_err());
         write_playlist_inner(path, "Replacement", &[], None, true, &db).unwrap();
-        assert!(std::fs::read_to_string(&file).unwrap().contains("Replacement"));
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("Replacement"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1421,13 +1458,19 @@ mod tests {
     fn relativize_walks_up_to_a_sibling_tree() {
         // The ordinary layout — playlists in their own folder beside the music —
         // which the old prefix-strip had to write absolute, killing portability.
-        assert_eq!(rel("/music/Playlists", "/music/Artist/x.mp3"), "../Artist/x.mp3");
+        assert_eq!(
+            rel("/music/Playlists", "/music/Artist/x.mp3"),
+            "../Artist/x.mp3"
+        );
         assert_eq!(
             rel("/Users/me/Music/lists", "/Users/me/Downloads/y.flac"),
             "../../Downloads/y.flac"
         );
         // A separate volume still goes absolute: one shared component is the root.
-        assert_eq!(rel("/Users/me/Music", "/Volumes/Ext/z.mp3"), "/Volumes/Ext/z.mp3");
+        assert_eq!(
+            rel("/Users/me/Music", "/Volumes/Ext/z.mp3"),
+            "/Volumes/Ext/z.mp3"
+        );
     }
 
     #[test]
@@ -1491,13 +1534,22 @@ mod tests {
         // Inside the same synced tree it stays relative — that is the whole point
         // of the container: those two ends do travel together.
         assert_eq!(
-            rel(list, "/Users/me/Library/CloudStorage/ProtonDrive-x-folder/Artist/x.mp3"),
+            rel(
+                list,
+                "/Users/me/Library/CloudStorage/ProtonDrive-x-folder/Artist/x.mp3"
+            ),
             "../Artist/x.mp3"
         );
         // Same rule one boundary out: a playlist on a volume reaches across that
         // volume freely and off it never.
-        assert_eq!(rel("/Volumes/Ext/lists", "/Volumes/Ext/Artist/x.mp3"), "../Artist/x.mp3");
-        assert_eq!(rel("/Volumes/Ext/lists", "/Users/me/mp3s/x.mp3"), "/Users/me/mp3s/x.mp3");
+        assert_eq!(
+            rel("/Volumes/Ext/lists", "/Volumes/Ext/Artist/x.mp3"),
+            "../Artist/x.mp3"
+        );
+        assert_eq!(
+            rel("/Volumes/Ext/lists", "/Users/me/mp3s/x.mp3"),
+            "/Users/me/mp3s/x.mp3"
+        );
     }
 
     #[test]
@@ -1521,7 +1573,10 @@ mod tests {
         let content = "#EXTM3U\n                       # Created by SomeOtherPlayer\n                       #EXTGRP:Side A\n                       #EXTINF:212,Artist - Song\n                       a.mp3\n                       #EXTVLCOPT:start-time=30\n                       b.mp3\n                       # trailing note\n";
         let pres = Preserved::from_content(content, base);
         // A plain comment before any track is the file's banner, not row 1's.
-        assert_eq!(pres.header, vec!["# Created by SomeOtherPlayer".to_string()]);
+        assert_eq!(
+            pres.header,
+            vec!["# Created by SomeOtherPlayer".to_string()]
+        );
         // `#EXT*` directives belong to the row they introduce and travel with it.
         assert_eq!(
             pres.rows["/music/lists/a.mp3"][0].attached,
@@ -1660,14 +1715,20 @@ mod tests {
         // The group directive followed its row to the file's second half.
         let group = out.find("#EXTGRP:Side A").expect("group directive dropped");
         let one = out.find("/outside/one.mp3").unwrap();
-        assert!(group < one && group > out.find("/outside/two.mp3").unwrap(), "{out}");
+        assert!(
+            group < one && group > out.find("/outside/two.mp3").unwrap(),
+            "{out}"
+        );
         // And the whole thing re-reads as what we wrote.
         let (name, back) = parse(&out, &playlist_base_dir(path));
         assert_eq!(name.as_deref(), Some("Mix"));
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].path, "/outside/two.mp3");
         assert_eq!(back[0].extinf_secs, Some(180.0));
-        assert_eq!(back[0].extinf_title.as_deref(), Some("Artist Two - Song Two"));
+        assert_eq!(
+            back[0].extinf_title.as_deref(),
+            Some("Artist Two - Song Two")
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1701,7 +1762,10 @@ mod tests {
             out.contains("../Artist/Album/01.flac"),
             "row did not go relative: {out}"
         );
-        assert!(!out.contains(root.to_str().unwrap()), "absolute row leaked: {out}");
+        assert!(
+            !out.contains(root.to_str().unwrap()),
+            "absolute row leaked: {out}"
+        );
         // And the relative row still resolves to the file it names.
         let (_n, back) = parse(&out, &playlist_base_dir(list.to_str().unwrap()));
         assert_eq!(back[0].path, track.to_str().unwrap());
@@ -1734,8 +1798,14 @@ mod tests {
         let rows = entries_as_rows(entries);
         let out = serialize(path, "Mix", &rows, &preserved, &empty_db()).unwrap();
 
-        assert!(out.contains(&format!("\n{}\n", abs_s)), "absolute row restyled: {out}");
-        assert!(!out.contains("../Artist/01.flac"), "absolute row restyled: {out}");
+        assert!(
+            out.contains(&format!("\n{}\n", abs_s)),
+            "absolute row restyled: {out}"
+        );
+        assert!(
+            !out.contains("../Artist/01.flac"),
+            "absolute row restyled: {out}"
+        );
         assert!(out.contains("\n./b.mp3\n"), "`./` spelling lost: {out}");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1754,7 +1824,11 @@ mod tests {
 
         std::fs::write(
             &list,
-            format!("#EXTM3U\n#PLAYLIST:Mix\n{}\n{}\n", track("01.flac"), track("02.flac")),
+            format!(
+                "#EXTM3U\n#PLAYLIST:Mix\n{}\n{}\n",
+                track("01.flac"),
+                track("02.flac")
+            ),
         )
         .unwrap();
 
@@ -1762,11 +1836,18 @@ mod tests {
         let preserved = Preserved::from_file(path).unwrap();
         let rows: Vec<TrackRef> = ["01.flac", "02.flac", "03.flac"]
             .iter()
-            .map(|n| TrackRef { path: track(n), title: None, duration: None })
+            .map(|n| TrackRef {
+                path: track(n),
+                title: None,
+                duration: None,
+            })
             .collect();
         let out = serialize(path, "Mix", &rows, &preserved, &empty_db()).unwrap();
 
-        assert!(out.contains(&format!("\n{}\n", track("03.flac"))), "new row went relative: {out}");
+        assert!(
+            out.contains(&format!("\n{}\n", track("03.flac"))),
+            "new row went relative: {out}"
+        );
         assert!(!out.contains("../Artist"), "new row went relative: {out}");
 
         // The same addition to an all-relative file goes relative, which is the
@@ -1782,7 +1863,10 @@ mod tests {
             &empty_db(),
         )
         .unwrap();
-        assert!(out.contains("../Artist/02.flac"), "new row went absolute: {out}");
+        assert!(
+            out.contains("../Artist/02.flac"),
+            "new row went absolute: {out}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1811,11 +1895,20 @@ mod tests {
         move_playlist_inner(old.to_str().unwrap(), new.to_str().unwrap(), &empty_db()).unwrap();
 
         let out = std::fs::read_to_string(&new).unwrap();
-        assert!(out.contains("../../Music/x.mp3"), "relative row not rebased: {out}");
-        assert!(out.contains(&format!("\n{}\n", abs_s)), "absolute row restyled: {out}");
+        assert!(
+            out.contains("../../Music/x.mp3"),
+            "relative row not rebased: {out}"
+        );
+        assert!(
+            out.contains(&format!("\n{}\n", abs_s)),
+            "absolute row restyled: {out}"
+        );
         // The rebased row still names the file it named before the move.
         let (_n, back) = parse(&out, &playlist_base_dir(new.to_str().unwrap()));
-        assert_eq!(back[0].path, root.join("Music").join("x.mp3").to_str().unwrap());
+        assert_eq!(
+            back[0].path,
+            root.join("Music").join("x.mp3").to_str().unwrap()
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1987,7 +2080,8 @@ mod tests {
         // The bug this fixes: a URL is *relative* as far as `Path` is concerned, so
         // every station row used to be joined onto the playlist's own folder.
         let base = Path::new("/music/lists");
-        let content = "#EXTM3U\n#EXTINF:-1,BBC 6 Music\nhttps://stream.example/6music\n../a/track.mp3\n";
+        let content =
+            "#EXTM3U\n#EXTINF:-1,BBC 6 Music\nhttps://stream.example/6music\n../a/track.mp3\n";
         let (_name, entries) = parse(content, base);
         assert_eq!(entries[0].path, "https://stream.example/6music");
         assert_eq!(entries[0].extinf_title.as_deref(), Some("BBC 6 Music"));
@@ -2007,8 +2101,14 @@ mod tests {
         let path = list.to_str().unwrap();
         let preserved = Preserved::from_file(path).unwrap();
         let (_n, entries) = parse(original, &playlist_base_dir(path));
-        let out = serialize(path, "Mixed", &entries_as_rows(entries), &preserved, &empty_db())
-            .unwrap();
+        let out = serialize(
+            path,
+            "Mixed",
+            &entries_as_rows(entries),
+            &preserved,
+            &empty_db(),
+        )
+        .unwrap();
 
         assert!(out.contains("\nhttps://stream.example/6music\n"), "{out}");
         assert!(out.contains("#EXTINF:-1,BBC 6 Music"), "{out}");

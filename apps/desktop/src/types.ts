@@ -106,8 +106,10 @@ export interface TagWriteReport {
 // up on the next scan.
 //
 // A failure with `stale: false` is a file still holding exactly what it held
-// before Save was pressed — the write is staged on a copy and renamed into place,
-// so a save that fails changes nothing.
+// before Save was pressed — the write is prepared and validated on a copy before
+// an inode-preserving transaction publishes it, so an ordinary pre-publication
+// failure changes nothing. An ambiguous publication failure is quarantined and
+// surfaced separately with both complete versions retained.
 export interface TagWriteFailure {
   path: string;
   message: string;

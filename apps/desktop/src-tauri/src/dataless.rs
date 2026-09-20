@@ -43,8 +43,11 @@ mod imp {
     const SF_DATALESS: u32 = 0x4000_0000;
 
     extern "C" {
-        fn setiopolicy_np(iotype: libc::c_int, scope: libc::c_int, policy: libc::c_int)
-            -> libc::c_int;
+        fn setiopolicy_np(
+            iotype: libc::c_int,
+            scope: libc::c_int,
+            policy: libc::c_int,
+        ) -> libc::c_int;
         // Only the test below reads the policy back; declaring it unconditionally
         // would be an unused item in every real build.
         #[cfg(test)]
@@ -97,7 +100,9 @@ mod imp {
     /// engine. A path that cannot be stat'd is not dataless — it is missing,
     /// which is a different state with a different answer in the UI.
     pub fn path_is_dataless(path: &Path) -> bool {
-        std::fs::metadata(path).map(|m| is_dataless(&m)).unwrap_or(false)
+        std::fs::metadata(path)
+            .map(|m| is_dataless(&m))
+            .unwrap_or(false)
     }
 }
 

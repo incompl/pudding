@@ -1145,6 +1145,11 @@ fn fill_output(state: &mut ConsumerState, out: &mut [f32]) {
 // a control command interrupts.
 
 struct TrackReader {
+    // Local files keep a reader lease for the lifetime of the decoder. Tag
+    // publication waits for these leases before it starts its in-place copy, so
+    // Pudding can never decode a half-published track. Streams have no local path
+    // and carry None.
+    _file_read: Option<crate::FileReadLease>,
     reader: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     track_id: u32,
@@ -2025,6 +2030,7 @@ fn open_stream(
 
     Ok(OpenedStream {
         reader: TrackReader {
+            _file_read: None,
             reader,
             decoder,
             track_id,
@@ -3013,7 +3019,56 @@ fn build_replacement(
 
 // === Symphonia helpers ===
 
+// A bounded integrity check for a tag-written file. This deliberately stops
+// after one packet: it catches a broken container/header without turning a large
+// metadata batch into a full library decode. The caller applies it relatively —
+// only when the preserved original also probes — because Lofty can tag formats
+// not enabled in this Symphonia build.
+pub(crate) fn probe_one_audio_packet(
+    path: &std::path::Path,
+    named_as: &std::path::Path,
+) -> Result<(), String> {
+    let _lease = crate::begin_file_read(path).map_err(|e| e.to_string())?;
+    probe_one_audio_packet_unleased(path, named_as)
+}
+
+// The tag writer already holds the exclusive file-write lease while verifying
+// its result. Taking a read lease there would deadlock, so it uses this inner
+// probe after establishing that the path still names its open descriptor.
+pub(crate) fn probe_one_audio_packet_unleased(
+    path: &std::path::Path,
+    named_as: &std::path::Path,
+) -> Result<(), String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = named_as.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut reader = probed.format;
+    reader.next_packet().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn open_track(path: &std::path::Path, output_rate: u32, rg_mode: u8) -> Option<TrackReader> {
+    let file_read = match crate::begin_file_read(path) {
+        Ok(lease) => lease,
+        Err(e) => {
+            log::warn!("audio: refusing to open {}: {e}", path.display());
+            return None;
+        }
+    };
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
@@ -3075,6 +3130,7 @@ fn open_track(path: &std::path::Path, output_rate: u32, rg_mode: u8) -> Option<T
     let resampler = make_resampler(input_rate, output_rate, input_channels);
 
     Some(TrackReader {
+        _file_read: Some(file_read),
         reader,
         decoder,
         track_id,

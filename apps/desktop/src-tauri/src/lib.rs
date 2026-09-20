@@ -16,9 +16,9 @@ mod playlist;
 pub mod root_access;
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use base64::Engine;
@@ -37,11 +37,14 @@ use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
 
 const DB_FILE: &str = "metadata.db";
+const METADATA_RECOVERY_DIR: &str = "metadata-recovery";
 
-// Under the app data dir: one marker per tag save that is mid-publish. Empty
-// whenever the app is not actually writing a track, so anything found here at
-// startup is a save a crash interrupted. See publish_staged.
-const INFLIGHT_DIR: &str = "inflight-writes";
+// Configured during application setup, before a command can start a metadata
+// write. Keeping this out of the library directory is just as important as it
+// was for the old temporary backup: a sync provider must never mistake our
+// private recovery state for music-library activity.
+static METADATA_RECOVERY_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
 // Default stream list seeded on first run, alongside the library DB in the app
 // data dir. Created empty (header only) so the Streams panel starts as a valid,
 // empty list rather than an unconfigured dead-end; the path stays an editable
@@ -174,7 +177,7 @@ struct RecentItem {
 // tag fields, plus `modified`, are). Default exists for that second use, so the
 // write path says what it isn't filling in rather than listing the Nones. The
 // editor is *seeded* from EditorTags, not from this — the two sets only overlap.
-#[derive(Serialize, Default)]
+#[derive(Clone, Serialize, Default)]
 struct FileEntry {
     name: String,
     title: Option<String>,
@@ -637,9 +640,10 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // unrelated schema change into data loss.
     //
     // One row per file actually written, holding the *inverse* of the patch that
-    // was applied (see TagUndo) — not a snapshot of the tag. `mtime`/`size` are the
-    // post-write stat, so a restore can tell a file it still owns from one another
-    // app has since rewritten.
+    // was applied (see TagUndo) — not a snapshot of the tag. `version` carries the
+    // post-write inode/stat and SHA-256 digest, so a restore can prove it still
+    // owns the exact bytes rather than trusting a whole-second timestamp. The old
+    // mtime/size columns remain for on-disk compatibility with earlier journals.
     //
     // The eleven text and number fields ride as JSON in `fields` (they are small,
     // sparse, and only ever read back as a whole); the old cover gets columns of
@@ -660,9 +664,39 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             picture_mime TEXT,
             picture_desc TEXT,
             picture_type INTEGER,
+            version TEXT,
+            aliases TEXT,
             PRIMARY KEY (batch, seq)
         );",
     )?;
+    // tag_undo deliberately survives cache schema rebuilds, so additions to it
+    // need their own small migration. A NULL version is a row written by an older
+    // build; undo declines it rather than relying on the former whole-second
+    // mtime+size check.
+    let has_undo_version = {
+        let mut stmt = conn.prepare("PRAGMA table_info(tag_undo)")?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut found = false;
+        for name in names {
+            found |= name? == "version";
+        }
+        found
+    };
+    if !has_undo_version {
+        conn.execute_batch("ALTER TABLE tag_undo ADD COLUMN version TEXT;")?;
+    }
+    let has_undo_aliases = {
+        let mut stmt = conn.prepare("PRAGMA table_info(tag_undo)")?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut found = false;
+        for name in names {
+            found |= name? == "aliases";
+        }
+        found
+    };
+    if !has_undo_aliases {
+        conn.execute_batch("ALTER TABLE tag_undo ADD COLUMN aliases TEXT;")?;
+    }
     if version != SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -676,6 +710,119 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 // instead of failing at the door.
 const WITH_PROPERTIES: bool = true;
 const TAGS_ONLY: bool = false;
+
+// Tag publication is deliberately in-place so the track keeps its inode. Unlike
+// rename, that means a reader opened during publication could observe a mixture
+// of the old and new bytes. This small path-keyed gate coordinates every Pudding
+// reader with that non-atomic interval. It is not intended to lock out other
+// processes; the write path's identity and content checks handle those races.
+#[derive(Default)]
+struct FileIoState {
+    readers: HashMap<FileIoKey, usize>,
+    waiting_writers: HashSet<FileIoKey>,
+    writers: HashSet<FileIoKey>,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum FileIoKey {
+    #[cfg(unix)]
+    Unix {
+        device: u64,
+        inode: u64,
+    },
+    Path(PathBuf),
+}
+
+fn file_io_gate() -> &'static (Mutex<FileIoState>, Condvar) {
+    static GATE: OnceLock<(Mutex<FileIoState>, Condvar)> = OnceLock::new();
+    GATE.get_or_init(|| (Mutex::new(FileIoState::default()), Condvar::new()))
+}
+
+fn canonical_io_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn file_io_key(path: &Path) -> FileIoKey {
+    #[cfg(unix)]
+    if let Ok(metadata) = std::fs::metadata(path) {
+        use std::os::unix::fs::MetadataExt;
+        return FileIoKey::Unix {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+    }
+    FileIoKey::Path(canonical_io_path(path))
+}
+
+pub(crate) struct FileReadLease {
+    key: FileIoKey,
+}
+
+pub(crate) fn begin_file_read(path: &Path) -> Result<FileReadLease, std::io::Error> {
+    let path = canonical_io_path(path);
+    let key = file_io_key(&path);
+    let (mutex, wake) = file_io_gate();
+    let mut state = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    while state.writers.contains(&key) || state.waiting_writers.contains(&key) {
+        state = wake.wait(state).unwrap_or_else(|e| e.into_inner());
+    }
+    *state.readers.entry(key.clone()).or_default() += 1;
+    Ok(FileReadLease { key })
+}
+
+impl Drop for FileReadLease {
+    fn drop(&mut self) {
+        let (mutex, wake) = file_io_gate();
+        let mut state = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(readers) = state.readers.get_mut(&self.key) {
+            *readers -= 1;
+            if *readers == 0 {
+                state.readers.remove(&self.key);
+            }
+        }
+        wake.notify_all();
+    }
+}
+
+struct FileWriteLease {
+    key: FileIoKey,
+}
+
+fn begin_file_write(path: &Path) -> Result<FileWriteLease, std::io::Error> {
+    let path = canonical_io_path(path);
+    let key = file_io_key(&path);
+    let (mutex, wake) = file_io_gate();
+    let mut state = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    state.waiting_writers.insert(key.clone());
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while state.writers.contains(&key) || state.readers.get(&key).copied().unwrap_or(0) != 0 {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            state.waiting_writers.remove(&key);
+            wake.notify_all();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "the track became busy while its metadata update was being prepared",
+            ));
+        }
+        let (next, _) = wake
+            .wait_timeout(state, deadline - now)
+            .unwrap_or_else(|e| e.into_inner());
+        state = next;
+    }
+    state.waiting_writers.remove(&key);
+    state.writers.insert(key.clone());
+    Ok(FileWriteLease { key })
+}
+
+impl Drop for FileWriteLease {
+    fn drop(&mut self) {
+        let (mutex, wake) = file_io_gate();
+        let mut state = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        state.writers.remove(&self.key);
+        wake.notify_all();
+    }
+}
 
 // Open a file for tag work. Two things this does that lofty::read_from_path does
 // not, and every tag read and write in the app goes through it:
@@ -692,12 +839,14 @@ const TAGS_ONLY: bool = false;
 fn open_tagged(
     path: &std::path::Path,
     read_properties: bool,
-) -> Result<lofty::file::TaggedFile, lofty::error::FileParseError> {
-    lofty::probe::Probe::open(path)?
+) -> Result<lofty::file::TaggedFile, Box<dyn std::error::Error + Send + Sync>> {
+    let _lease = begin_file_read(path)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(lofty::probe::Probe::open(path)?
         .options(lofty::config::ParseOptions::new().read_properties(read_properties))
         // Options first: the sniff reads as far as they allow it to.
         .guess_file_type()?
-        .read()
+        .read()?)
 }
 
 // Lofty 0.23 replaced the year-only Accessor API with ISO-8601 Timestamps. The
@@ -948,7 +1097,6 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
             "INSERT OR IGNORE INTO scan_current (path) VALUES (?)",
             [&path_str],
         );
-
         // `duration IS NOT NULL` doubles as "we have actually read this file":
         // it comes from the decoded audio properties rather than from a tag, so
         // every file we could open has one, and a NULL row is one read_tags
@@ -988,14 +1136,7 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
 
         let tags = read_tags(file);
         let _ = upsert_track(
-            &tx,
-            &path_str,
-            &root_key,
-            mtime,
-            size,
-            created,
-            &tags,
-            dataless,
+            &tx, &path_str, &root_key, mtime, size, created, &tags, dataless,
         );
     }
 
@@ -1255,9 +1396,7 @@ fn fetch_meta(conn: &Connection, paths: &[String]) -> Result<HashMap<String, Met
     let mut map: HashMap<String, MetaRow> = HashMap::with_capacity(paths.len());
     for chunk in paths.chunks(900) {
         let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT {TRACK_COLUMNS} FROM tracks WHERE path IN ({placeholders})"
-        );
+        let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE path IN ({placeholders})");
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params_from_iter(chunk), |row| {
@@ -2774,32 +2913,76 @@ struct TagUndo {
 // turn an undo into an edit of its own.
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
 struct UndoFields {
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     title: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     artist: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     album_artist: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     album: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     genre: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     comment: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     disc: Option<Option<u32>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     disc_total: Option<Option<u32>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     track: Option<Option<u32>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     track_total: Option<Option<u32>>,
     // The date item as the *file* stated it (lofty's own ISO-8601 Display), not the
     // year the editor showed. A file carrying 1979-10-05 shows "1979" in the form,
     // and journaling that number would make undo write 1979 back — flattening the
     // month and day, which is the very loss the year arm of apply_tag_edits exists
     // to prevent. Undoing an edit must not do damage the edit itself declined to do.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "double_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     date: Option<Option<String>>,
 }
 
@@ -2872,11 +3055,7 @@ fn undo_field<T>(touched: bool, had: Option<T>) -> Option<Option<T>> {
 // and hold the progress label at zero for the length of one), and a file the loop
 // skips, refuses or fails on never produces a journal row at all — so the journal
 // can never describe a write that did not happen.
-fn capture_tag_undo(
-    tag: &lofty::tag::Tag,
-    edits: &TagEdits,
-    artwork: &ArtworkChange,
-) -> TagUndo {
+fn capture_tag_undo(tag: &lofty::tag::Tag, edits: &TagEdits, artwork: &ArtworkChange) -> TagUndo {
     // Whitespace-only becomes a clear rather than a restored blank: an empty item
     // written back is junk every reader treats as absent anyway. A real value is
     // kept verbatim and untrimmed — a restore is meant to put the file back as it
@@ -3053,17 +3232,9 @@ struct WrittenTrack {
 // the one report worse than no report — so the form counts it with the saved and
 // says the list will catch up.
 //
-// A file in here with `stale: false` is, in all but one case, a file still holding
-// exactly what it held before Save was pressed: staged_tag_write does the whole
-// write on a copy, so every ordinary failure — locked, unreadable, a full disk, a
-// container lofty will not parse — happens before the track is touched, and
-// "couldn't be written" means untouched rather than damaged.
-//
-// The exception is a publish that failed partway through copying the staged file
-// back (see publish_staged). That one leaves the track incomplete, and it carries
-// its own message saying so — the wording is the only thing distinguishing the two
-// here, because the recovery is automatic and the user's next action is the same
-// either way: look at the file again after a restart.
+// A file in here with `stale: false` is either untouched or was restored from its
+// backup. If rollback could not be completed and verified, the failure is fatal,
+// names the retained backup, and stops the batch.
 #[derive(Serialize)]
 struct FailedWrite {
     path: String,
@@ -3132,9 +3303,8 @@ struct TagWriteCancel {
 
 // Stop a running tag write between files. Cancellation is never inside a file: a
 // save already under way runs to completion. It is safe to stop one now — the
-// write is staged on a copy and the track is only replaced by an atomic rename —
-// but a half-tagged staged file is still wasted work, so the loop finishes the
-// file it is on and checks between them.
+// its durable backup is already being prepared, so the loop finishes the file
+// it is on and checks between them.
 #[tauri::command]
 fn cancel_tag_write(generation: u64, cancel: State<'_, Arc<TagWriteCancel>>) {
     cancel
@@ -3204,19 +3374,74 @@ enum TagJob<'a> {
         edits: &'a TagEdits,
         artwork: &'a ArtworkChange,
     },
-    Restore(&'a TagUndo),
+    Restore {
+        undo: &'a TagUndo,
+        expected: &'a SavedFileVersion,
+    },
 }
 
-// One file the batch has just finished writing, as the journal records it: where
-// it is, what it looked like the instant the write landed, and the inverse of what
-// was done to it. The stat is the post-write one, which is the point of carrying it
-// — it is how a later restore tells a file it still recognizes from one something
-// else has rewritten since (see restorable_rows).
+// One physical file the batch has just finished writing, as the journal records
+// it: every selected path naming it, the exact post-write version, and the inverse
+// of what was done. A later restore must match that version inside the staged
+// transaction before it applies the inverse.
 struct UndoEntry<'a> {
     path: &'a str,
     mtime: i64,
     size: i64,
     undo: &'a TagUndo,
+    version: &'a SavedFileVersion,
+    aliases: &'a [String],
+}
+
+#[derive(Clone)]
+enum PhysicalWriteResult {
+    Written {
+        tags: Box<FileEntry>,
+        mtime: i64,
+        size: i64,
+    },
+    Failed(String),
+}
+
+fn report_written_path(
+    report: &mut TagWriteReport,
+    cache_locked: &mut bool,
+    cache: &dyn Fn(&str, &FileEntry, i64, i64) -> rusqlite::Result<usize>,
+    path: &str,
+    tags: &FileEntry,
+    mtime: i64,
+    size: i64,
+) {
+    let synced = if *cache_locked {
+        Err("Saved the file, but the library list may be stale".to_string())
+    } else {
+        cache(path, tags, mtime, size).map(|_| ()).map_err(|e| {
+            if is_sqlite_busy(&e) {
+                *cache_locked = true;
+            }
+            log::error!("write_tags: cache update for {path} failed: {e}");
+            "Saved the file, but the library list may be stale".to_string()
+        })
+    };
+    match synced {
+        Ok(()) => {
+            let mut reported = tags.clone();
+            reported.name = Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            reported.modified = Some(mtime);
+            report.ok.push(WrittenTrack {
+                path: path.to_string(),
+                tags: reported,
+            });
+        }
+        Err(message) => report.failed.push(FailedWrite {
+            path: path.to_string(),
+            message,
+            stale: true,
+        }),
+    }
 }
 
 // The batch itself: do each file's job, journaling what it displaced and keeping
@@ -3254,21 +3479,68 @@ fn write_tags_to_files(
     // wait out its own 5 s timeout, and what is lost is the batch's undo rather
     // than the freshness of a list.
     let mut journal_locked = false;
+    // Different path strings can name one inode. Mutate and journal that physical
+    // file once, then fan the read-back/cache result out to every alias. Besides
+    // avoiding wasted work, this keeps the second alias from journaling the first
+    // alias's already-edited value as though it were the original.
+    let mut physical_results: HashMap<FileIoKey, PhysicalWriteResult> = HashMap::new();
+    let mut aliases_by_file: HashMap<FileIoKey, Vec<String>> = HashMap::new();
+    let mut reported_written_paths: HashSet<String> = HashSet::new();
+    for (path, _) in jobs {
+        aliases_by_file
+            .entry(file_io_key(Path::new(path)))
+            .or_default()
+            .push(path.clone());
+    }
     let total = jobs.len();
     for (done, (path, job)) in jobs.iter().enumerate() {
+        let p = PathBuf::from(path);
+        let key = file_io_key(&p);
+
+        // An alias of a physical file already processed changed at the same
+        // instant as its first path. Report/cache it even if Stop arrived since;
+        // calling it untouched would misdescribe what inode-stable publication
+        // necessarily did.
+        if let Some(previous) = physical_results.get(&key).cloned() {
+            match previous {
+                PhysicalWriteResult::Written { tags, mtime, size } => {
+                    reported_written_paths.insert(path.clone());
+                    report_written_path(
+                        &mut report,
+                        &mut cache_locked,
+                        cache,
+                        path,
+                        &tags,
+                        mtime,
+                        size,
+                    );
+                }
+                PhysicalWriteResult::Failed(message) => report.failed.push(FailedWrite {
+                    path: path.clone(),
+                    message,
+                    stale: false,
+                }),
+            }
+            progress(done + 1, total);
+            continue;
+        }
         if cancelled() {
             report.stopped = true;
             break;
         }
-        let p = PathBuf::from(path);
 
         // Asked of the engine, now, for this file. The decode frontier runs ahead
         // of the audible track (gapless opens the next one early), so "the track
         // that is playing" is not the whole answer.
-        if held().iter().any(|h| h == path) {
+        if held()
+            .iter()
+            .any(|held_path| file_io_key(Path::new(held_path)) == key)
+        {
+            let message = "Can't write a track while it's playing".to_string();
+            physical_results.insert(key, PhysicalWriteResult::Failed(message.clone()));
             report.failed.push(FailedWrite {
                 path: path.clone(),
-                message: "Can't write a track while it's playing".to_string(),
+                message,
                 stale: false,
             });
             progress(done + 1, total);
@@ -3279,15 +3551,16 @@ fn write_tags_to_files(
         // rather than extending it: with one batch kept there is nothing for a
         // redo to be written into.
         let written = match job {
-            TagJob::Save { edits, artwork } => {
-                write_one_file(&p, edits, artwork).map(|(t, m, s, undo)| (t, m, s, Some(undo)))
-            }
-            TagJob::Restore(undo) => restore_one_file(&p, undo).map(|(t, m, s)| (t, m, s, None)),
+            TagJob::Save { edits, artwork } => write_one_file(&p, edits, artwork)
+                .map(|(t, m, s, undo, version)| (t, m, s, Some(undo), version)),
+            TagJob::Restore { undo, expected } => restore_one_file(&p, undo, expected)
+                .map(|(t, m, s, version)| (t, m, s, None, version)),
         };
-        let (tags, mtime, size, undo) = match written {
+        let (tags, mtime, size, undo, version) = match written {
             Ok(v) => v,
             Err(failure) => {
                 let fatal = failure.fatal;
+                physical_results.insert(key, PhysicalWriteResult::Failed(failure.message.clone()));
                 report.failed.push(FailedWrite {
                     path: path.clone(),
                     message: failure.message.clone(),
@@ -3324,6 +3597,11 @@ fn write_tags_to_files(
                     mtime,
                     size,
                     undo,
+                    version: &version,
+                    aliases: aliases_by_file
+                        .get(&key)
+                        .map(Vec::as_slice)
+                        .unwrap_or(std::slice::from_ref(path)),
                 };
                 if let Err(e) = journal(&entry) {
                     if is_sqlite_busy(&e) {
@@ -3334,43 +3612,49 @@ fn write_tags_to_files(
             }
         }
 
-        // What is left is the library row (see update_cached_row). A row that could
-        // not be updated is its own outcome, not a write failure.
-        let synced = if cache_locked {
-            Err("Saved the file, but the library list may be stale".to_string())
-        } else {
-            // Zero rows updated is not a failure: a file outside every library
-            // root has no cached row to keep in step.
-            cache(path, &tags, mtime, size).map(|_| ()).map_err(|e| {
-                if is_sqlite_busy(&e) {
-                    cache_locked = true;
-                }
-                log::error!("write_tags: cache update for {} failed: {e}", p.display());
-                "Saved the file, but the library list may be stale".to_string()
-            })
-        };
-
-        match synced {
-            Ok(()) => report.ok.push(WrittenTrack {
-                path: path.clone(),
-                tags: FileEntry {
-                    // The one column field an edit changes that the user didn't
-                    // type. Writing tags rewrites the file, so every open row's Date
-                    // Modified cell is stale the moment this returns; handing back
-                    // the post-write mtime lets the caller patch it (see
-                    // applyTagUpdate) instead of waiting for a rescan that the
-                    // mtime/size pre-sync has deliberately made a no-op.
-                    modified: Some(mtime),
-                    ..tags
-                },
-            }),
-            Err(message) => report.failed.push(FailedWrite {
-                path: path.clone(),
-                message,
-                stale: true,
-            }),
-        }
+        physical_results.insert(
+            key,
+            PhysicalWriteResult::Written {
+                tags: Box::new(tags.clone()),
+                mtime,
+                size,
+            },
+        );
+        // Zero rows updated is not a failure: a file outside every library root
+        // has no cached row to keep in step. The one column fact the user did not
+        // type, modified, is attached to the report by this helper.
+        reported_written_paths.insert(path.clone());
+        report_written_path(
+            &mut report,
+            &mut cache_locked,
+            cache,
+            path,
+            &tags,
+            mtime,
+            size,
+        );
         progress(done + 1, total);
+    }
+    // Stop can arrive on a different physical file before the loop reaches a
+    // later alias of an inode already written. That alias nevertheless changed
+    // with the inode; include it in the final result and refresh its cache row.
+    for (key, result) in &physical_results {
+        let PhysicalWriteResult::Written { tags, mtime, size } = result else {
+            continue;
+        };
+        for alias in aliases_by_file.get(key).into_iter().flatten() {
+            if reported_written_paths.insert(alias.clone()) {
+                report_written_path(
+                    &mut report,
+                    &mut cache_locked,
+                    cache,
+                    alias,
+                    tags,
+                    *mtime,
+                    *size,
+                );
+            }
+        }
     }
     report
 }
@@ -3402,6 +3686,93 @@ impl WriteFailure {
             fatal: error_source::<std::io::Error>(e).is_some_and(is_storage_fatal),
         }
     }
+}
+
+// NSFileCoordinator is the API File Provider extensions use to serialize access
+// to a managed item. Its accessor can receive a replacement URL, so the complete
+// transaction must use that URL rather than the path which initiated the save.
+// We coordinate one track at a time because each transaction has its own
+// backup/rollback state and the batch loop already isolates per-file failures.
+#[cfg(all(target_os = "macos", not(test)))]
+fn with_coordinated_metadata_write<T>(
+    path: &Path,
+    transaction: impl FnOnce(&Path) -> Result<T, WriteFailure>,
+) -> Result<T, WriteFailure> {
+    use std::cell::RefCell;
+    use std::ptr::NonNull;
+
+    use block2::RcBlock;
+    use objc2_foundation::{
+        NSError, NSFileCoordinator, NSFileCoordinatorWritingOptions, NSString, NSURL,
+    };
+
+    // File coordination treats `/var` and `/private/var` as different items even
+    // though macOS resolves the former symlink in ordinary file I/O. Normalize
+    // when possible before making the initial URL; the accessor URL remains the
+    // source of truth for the actual transaction.
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = path.to_str().ok_or_else(|| WriteFailure {
+        message: format!(
+            "Couldn't coordinate metadata save: {} is not valid UTF-8",
+            path.display()
+        ),
+        fatal: false,
+    })?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+    let transaction = RefCell::new(Some(transaction));
+    let completed = RefCell::new(None);
+    let accessor = RcBlock::new(|coordinated_url: NonNull<NSURL>| {
+        let transaction = transaction
+            .borrow_mut()
+            .take()
+            .expect("NSFileCoordinator invoked its metadata accessor more than once");
+        let coordinated_path = unsafe { coordinated_url.as_ref() }
+            .path()
+            .map(|path| PathBuf::from(path.to_string()));
+        *completed.borrow_mut() = Some(match coordinated_path {
+            Some(path) => transaction(&path),
+            None => Err(WriteFailure {
+                message: "Couldn't coordinate metadata save: provider returned a non-file URL"
+                    .into(),
+                fatal: false,
+            }),
+        });
+    });
+    let coordinator = NSFileCoordinator::new();
+    let mut coordination_error: Option<objc2::rc::Retained<NSError>> = None;
+    coordinator.coordinateWritingItemAtURL_options_error_byAccessor(
+        &url,
+        NSFileCoordinatorWritingOptions::empty(),
+        Some(&mut coordination_error),
+        &accessor,
+    );
+    // The accessor is synchronous, but drop its Rust owner before taking the
+    // outcome out of the RefCell it borrowed.
+    drop(accessor);
+    completed.into_inner().unwrap_or_else(|| {
+        Err(WriteFailure {
+            message: format!(
+                "Couldn't coordinate metadata save: {}",
+                coordination_error
+                    .as_ref()
+                    .map(|error| error.localizedDescription().to_string())
+                    .unwrap_or_else(|| "the provider did not grant access".to_string())
+            ),
+            fatal: false,
+        })
+    })
+}
+
+// XCTest / cargo test threads are not File Provider client processes, and
+// NSFileCoordinator declines their throwaway files before it invokes the
+// accessor. The direct-write tests exercise the transaction itself below; the
+// shipping macOS build always goes through the coordinator above.
+#[cfg(any(not(target_os = "macos"), test))]
+fn with_coordinated_metadata_write<T>(
+    path: &Path,
+    transaction: impl FnOnce(&Path) -> Result<T, WriteFailure>,
+) -> Result<T, WriteFailure> {
+    transaction(path)
 }
 
 // Lofty 0.25 replaced its single enum error with source-based parse/encoding
@@ -3455,97 +3826,79 @@ fn temp_sibling(target: &Path) -> Result<PathBuf, std::io::Error> {
     let dir = target.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
     })?;
-    Ok(dir.join(format!(
-        ".pudding-save-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )))
-}
-
-// Deletes the staged copy on every way out of staged_tag_write except the two that
-// consume it — the rename that publishes it, and the in-place publish that copies
-// it back over the track. Without this a failed save leaves litter beside the
-// track, and the next scan would be indexing half-written files.
-struct StagedFile(PathBuf);
-
-impl StagedFile {
-    // Give up ownership without deleting. The one caller is a failed in-place
-    // publish, where this file is the *only* complete copy of the track and
-    // recover_inflight_writes needs to find it on the next launch.
-    fn keep(self) -> PathBuf {
-        let path = self.0.clone();
-        std::mem::forget(self);
-        path
+    loop {
+        let path = dir.join(format!(
+            ".pudding-save-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
     }
 }
 
+// Recovery copies must not live beside the track. Cloud-file providers observe
+// every sibling create/delete as library activity, even though this private
+// rollback aid is owned by Pudding and now survives a process crash.
+fn metadata_recovery_root() -> PathBuf {
+    // Unit tests exercise the write protocol without starting Tauri. Their
+    // artifacts remain in the system temporary area; the shipping application
+    // installs its durable app-data root during setup.
+    METADATA_RECOVERY_ROOT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::env::temp_dir().join("pudding-metadata-backups"))
+}
+
+fn backup_sibling(_target: &Path) -> Result<PathBuf, std::io::Error> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = metadata_recovery_root();
+    std::fs::create_dir_all(&dir)?;
+    loop {
+        let path = dir.join(format!(
+            ".pudding-backup-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+// Deletes a staged whole-file write on every way out except the rename that
+// publishes it. This remains for playlist atomic writes; metadata saves use the
+// separate one-backup lifecycle below.
+struct StagedFile(PathBuf);
+
 impl Drop for StagedFile {
     fn drop(&mut self) {
-        // After a successful rename there is nothing at this path and the remove
-        // fails with ENOENT, which is exactly the no-op wanted.
         let _ = std::fs::remove_file(&self.0);
     }
 }
 
-// === Publishing a staged save in place ===
+// === Direct, inode-preserving tag writes ===
 
-// Where the in-flight markers live: one directory, set once at startup from the
-// app data dir. A OnceLock rather than a threaded parameter because this is a
-// process-wide constant and not per-save state — and because leaving it unset is
-// exactly what the non-Tauri contexts (unit tests, the sandbox_check example)
-// want, since publish_staged falls back to the atomic rename when it is absent.
-static PUBLISH_MARKER_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-// Called once from setup(), before anything reads or writes a track.
-pub(crate) fn set_publish_marker_dir(dir: PathBuf) {
-    let _ = PUBLISH_MARKER_DIR.set(dir);
-}
-
-// The directory this process records in-flight publishes in, or None when it has
-// none and saves must therefore fall back to the atomic rename.
-//
-// Under `cargo test` there is no setup() to arm it, and leaving it unset would
-// quietly route the entire tag-writing suite down the fallback and leave the path
-// that actually ships untested. A per-process scratch directory gives every test
-// the real in-place publish; the tests that want the fallback ask publish_staged
-// for it directly by passing None.
-fn publish_marker_dir() -> Option<PathBuf> {
-    if let Some(dir) = PUBLISH_MARKER_DIR.get() {
-        return Some(dir.clone());
-    }
-    #[cfg(test)]
-    {
-        Some(std::env::temp_dir().join(format!("pudding-test-inflight-{}", std::process::id())))
-    }
-    #[cfg(not(test))]
-    {
-        None
-    }
-}
-
-// One in-flight publish, recorded so a crash can finish it. Serialized rather than
-// line-delimited because a path may legally contain a newline.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct InflightWrite {
-    target: PathBuf,
-    staged: PathBuf,
-    // The file as it was immediately before the in-place copy started. A marker
-    // can outlive a fully completed copy (a crash between the fsync and cleanup),
-    // and the user or a sync client can change the target while Pudding is down.
-    // Recovery may only resume a copy if this still matches: a torn target and an
-    // externally replaced target are otherwise indistinguishable, and choosing
-    // to overwrite the latter would turn crash recovery into data loss.
-    #[serde(default)]
-    target_stamp: Option<InflightTargetStamp>,
-}
-
-// A cheap, filesystem-level identity for the pre-publish target. The mtime is
+// A cheap, filesystem-level identity for the pre-write target. The mtime is
 // kept at its native resolution rather than the cache's whole-second form: an
 // external tag write commonly preserves a file's size, so the timestamp needs
 // to carry the other half of that distinction. inode/device catch the usual
 // sync-client replacement, which changes neither path nor necessarily size.
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-struct InflightTargetStamp {
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct FileStamp {
     size: u64,
     modified_ns: Option<u128>,
     #[cfg(unix)]
@@ -3554,8 +3907,21 @@ struct InflightTargetStamp {
     inode: u64,
 }
 
-fn inflight_target_stamp(path: &Path) -> Result<InflightTargetStamp, std::io::Error> {
+// The exact post-save state an undo is allowed to replace. Identity and a
+// nanosecond-resolution stat make the common rejection cheap to understand; the
+// digest is authoritative when another tagger preserves both size and timestamps.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct SavedFileVersion {
+    stamp: FileStamp,
+    sha256: String,
+}
+
+fn file_stamp(path: &Path) -> Result<FileStamp, std::io::Error> {
     let metadata = std::fs::metadata(path)?;
+    Ok(file_stamp_from_metadata(&metadata))
+}
+
+fn file_stamp_from_metadata(metadata: &std::fs::Metadata) -> FileStamp {
     let modified_ns = metadata
         .modified()
         .ok()
@@ -3564,277 +3930,524 @@ fn inflight_target_stamp(path: &Path) -> Result<InflightTargetStamp, std::io::Er
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        Ok(InflightTargetStamp {
+        FileStamp {
             size: metadata.len(),
             modified_ns,
             device: metadata.dev(),
             inode: metadata.ino(),
-        })
+        }
     }
     #[cfg(not(unix))]
     {
-        Ok(InflightTargetStamp {
+        FileStamp {
             size: metadata.len(),
             modified_ns,
-        })
-    }
-}
-
-// The marker file for one in-flight publish. Created — and made durable — before
-// the first byte of the track is overwritten; removed only after the new contents
-// are fsynced. That ordering is the whole recovery argument: a marker on disk
-// means the target may be torn, and its absence means the target is whole.
-struct InflightMarker(PathBuf);
-
-impl InflightMarker {
-    // Unique per marker (pid + counter) rather than one well-known name: saves run
-    // one at a time within a batch, but the test suite runs them in parallel in a
-    // single process, and two saves sharing a marker path would each delete the
-    // other's recovery record.
-    fn create(dir: &Path, target: &Path, staged: &Path) -> Result<Self, std::io::Error> {
-        use std::io::Write;
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        std::fs::create_dir_all(dir)?;
-        let path = dir.join(format!(
-            "{}-{}.inflight",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let record = serde_json::to_vec(&InflightWrite {
-            target: target.to_path_buf(),
-            staged: staged.to_path_buf(),
-            target_stamp: Some(inflight_target_stamp(target)?),
-        })
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let mut f = std::fs::File::create(&path)?;
-        f.write_all(&record)?;
-        // The bytes, then the directory entry that names them. Without the second
-        // fsync a power cut can leave the marker's contents on disk under a name
-        // that was never committed, which is the same as having no marker at all.
-        f.sync_all()?;
-        drop(f);
-        if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
         }
-        Ok(Self(path))
-    }
-
-    // Matches StagedFile::keep, and for the same reason: a failed publish must
-    // leave its marker behind for the next launch to act on.
-    fn keep(self) {
-        std::mem::forget(self);
     }
 }
 
-impl Drop for InflightMarker {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+fn same_file_identity(a: &FileStamp, b: &FileStamp) -> bool {
+    #[cfg(unix)]
+    {
+        a.device == b.device && a.inode == b.inode
+    }
+    #[cfg(not(unix))]
+    {
+        a == b
     }
 }
 
-// Copy the staged bytes back over the original file, keeping its inode.
-//
-// This is the step that makes a tag edit read as a modification rather than as a
-// delete and a create. A rename publishes a *different* file under the same name,
-// and the inode changes with it — so anything keyed on file identity rather than
-// on the path treats the track as new: file-level aliases and bookmarks other apps
-// hold go stale (measured: an NSURL bookmark resolves with isStale set after a
-// rename publish and clean after this one), and sync and backup clients that track
-// files by identity record a delete and a create rather than a modification.
-// Hard links to the track see the edit too, where a rename would have left them
-// pointing at the old contents.
-//
-// What this does NOT buy, despite the folklore: the file's dates. The staged file
-// is a clone, so birth time, xattrs, Finder tags, ACL and mode already survive a
-// rename publish, and kMDItemDateAdded is derived from the birth time and survives
-// with it. That was measured too, both ways — it is not a reason for this code to
-// exist, and it should not be cited as one.
-//
-// Deliberately NOT O_TRUNC. Truncating first would empty the file for the length
-// of the copy; writing over it and trimming at the end means every offset holds
-// either the old bytes or the new ones throughout, never nothing.
-//
-// The cost this accepts is that the publish is no longer atomic. Two consequences,
-// and they are not the same:
-//
-//   * A crash mid-copy leaves the track torn. That is what the marker is for: the
-//     staged file outlives this call, so the next launch finishes the copy.
-//   * A reader that has the file open mid-copy sees torn bytes, where a rename
-//     would have left it reading the old inode undisturbed. write_tags_to_files
-//     refuses to write a track the engine holds, so this is about other processes
-//     — a Spotlight importer, a QuickLook preview, another player. Brief, and on a
-//     file the user is deliberately editing, but it is a real hazard that renaming
-//     did not have and no ordering here removes.
-fn publish_in_place(target: &Path, staged: &Path) -> Result<(), std::io::Error> {
-    let mut src = std::fs::File::open(staged)?;
-    let mut dst = std::fs::OpenOptions::new().write(true).open(target)?;
-    let copied = std::io::copy(&mut src, &mut dst)?;
+fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn sha256_open_file(file: &mut std::fs::File) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    let old = file.stream_position()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    file.seek(SeekFrom::Start(old))?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn sync_parent(path: &Path) -> Result<(), std::io::Error> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        )
+    })?;
+    std::fs::File::open(parent)?.sync_all()
+}
+
+fn sync_durable(file: &std::fs::File) -> Result<(), std::io::Error> {
+    file.sync_all()?;
+    // Metadata edits are infrequent and protect user-owned audio, so pay the
+    // macOS cost to push through the device's volatile cache as well as the OS
+    // page cache. Other platforms retain sync_all's strongest available promise.
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
+            let error = std::io::Error::last_os_error();
+            if !matches!(
+                error.raw_os_error(),
+                Some(libc::EINVAL) | Some(libc::ENOTSUP)
+            ) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn durable_copy_with(
+    source: &Path,
+    destination: &Path,
+    copy: impl FnOnce(&Path, &Path) -> Result<(), std::io::Error>,
+) -> Result<(), std::io::Error> {
+    copy(source, destination)?;
+    let file = std::fs::OpenOptions::new().write(true).open(destination)?;
+    sync_durable(&file)?;
+    sync_parent(destination)?;
+    Ok(())
+}
+
+fn durable_copy(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    durable_copy_with(source, destination, |source, destination| {
+        std::fs::copy(source, destination).map(|_| ())
+    })
+}
+
+// Restore a backup over the already-open original descriptor. Deliberately do
+// not truncate first: write from offset zero and trim only after the complete copy,
+// so a failed restore retains as much valid data as possible and never substitutes
+// a new inode by rename.
+fn overwrite_open_file(dst: &mut std::fs::File, source: &Path) -> Result<(), std::io::Error> {
+    let mut src = std::fs::File::open(source)?;
+    dst.seek(SeekFrom::Start(0))?;
+    let copied = std::io::copy(&mut src, dst)?;
     // The new tag may be smaller than the old one; without this the file keeps the
     // tail of whatever it held before.
     dst.set_len(copied)?;
-    dst.sync_all()
+    sync_durable(dst)
 }
 
-// Publish a verified staged save over the target, preferring the in-place copy and
-// falling back to the atomic rename.
-//
-// The fallback is not a lesser path taken grudgingly — it is the safety property
-// holding. An in-place publish is only honest if a crash can be recovered from, so
-// when no marker can be written (no marker directory configured, or an app data
-// dir that will not take one) the answer is to publish the way that needs no
-// recovery at all, and accept the inode change.
-fn publish_staged(
-    target: &Path,
-    staged: StagedFile,
-    marker_dir: Option<&Path>,
-) -> Result<(), std::io::Error> {
-    let marker = marker_dir.and_then(|dir| match InflightMarker::create(dir, target, &staged.0) {
-        Ok(m) => Some(m),
-        Err(e) => {
-            log::warn!(
-                "write_tags: no in-flight marker for {} ({e}); publishing by rename",
-                target.display()
-            );
-            None
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RecoveryState {
+    Prepared,
+    Committed,
+}
+
+// The manifest makes a recovery copy actionable after a force-quit or power
+// loss. `Prepared` means the target may have been interrupted mid-write and must
+// be restored; `Committed` means the write was fully verified and the remaining
+// files are only cleanup left behind by a crash.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RecoveryManifest {
+    version: u8,
+    state: RecoveryState,
+    target: PathBuf,
+    backup: PathBuf,
+    original_stamp: FileStamp,
+    original_sha256: String,
+}
+
+impl RecoveryManifest {
+    fn path_for_backup(backup: &Path) -> Result<PathBuf, std::io::Error> {
+        let name = backup.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "backup has no file name")
+        })?;
+        Ok(backup.with_file_name(format!("{}.json", name.to_string_lossy())))
+    }
+
+    fn prepare(
+        target: &Path,
+        backup: &Path,
+        original_stamp: FileStamp,
+        original_sha256: String,
+    ) -> Result<(Self, PathBuf), std::io::Error> {
+        let manifest = Self {
+            version: 1,
+            state: RecoveryState::Prepared,
+            target: target.to_path_buf(),
+            backup: backup.to_path_buf(),
+            original_stamp,
+            original_sha256,
+        };
+        let path = Self::path_for_backup(backup)?;
+        let bytes = serde_json::to_vec(&manifest)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(&bytes)?;
+        sync_durable(&file)?;
+        sync_parent(&path)?;
+        Ok((manifest, path))
+    }
+
+    fn mark_committed(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        self.state = RecoveryState::Committed;
+        let bytes =
+            serde_json::to_vec(self).map_err(|error| std::io::Error::other(error.to_string()))?;
+        let staged = path.with_extension(format!(
+            "json.stage-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)?;
+        file.write_all(&bytes)?;
+        sync_durable(&file)?;
+        std::fs::rename(&staged, path)?;
+        sync_parent(path)
+    }
+}
+
+// A save owns one complete backup and, once the backup is verified, its durable
+// manifest. Ordinary exits remove both; a failed or unverifiable rollback retains
+// both so startup recovery (and the error path) still knows what the copy is for.
+struct BackupFile {
+    path: PathBuf,
+    manifest: Option<(RecoveryManifest, PathBuf)>,
+}
+
+impl BackupFile {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            manifest: None,
         }
-    });
+    }
 
-    let Some(marker) = marker else {
-        return std::fs::rename(&staged.0, target);
-    };
+    fn attach_manifest(&mut self, manifest: RecoveryManifest, path: PathBuf) {
+        self.manifest = Some((manifest, path));
+    }
 
-    match publish_in_place(target, &staged.0) {
-        Ok(()) => {
-            // Staged file first, then the marker: a crash between them leaves a
-            // marker whose staged file is gone, which recovery reads as "already
-            // finished" — correct, because the target was fsynced above. The
-            // reverse order would leave a staged file nothing points at.
-            drop(staged);
-            drop(marker);
+    fn mark_committed(&mut self) -> Result<(), std::io::Error> {
+        if let Some((manifest, path)) = &mut self.manifest {
+            manifest.mark_committed(path)
+        } else {
             Ok(())
         }
-        Err(e) => {
-            // The target may be torn right now, and the user is looking at the app.
-            // Waiting for the next launch to repair it would leave a broken track in
-            // the library in the meantime — playable, scannable, wrong — so retry the
-            // copy once before giving up on it. The operation is idempotent, so a
-            // transient failure (a drive that blipped, a momentarily full disk) costs
-            // nothing to retry and fixes the file outright.
-            log::error!("write_tags: in-place publish of {} failed: {e}", target.display());
-            if let Err(again) = publish_in_place(target, &staged.0) {
-                // Still broken. Leave the staged file and the marker on disk for
-                // recover_inflight_writes rather than letting the guards tidy away
-                // the one complete copy of the track that still exists.
-                log::error!(
-                    "write_tags: retry of {} failed too: {again}; left for recovery",
-                    target.display()
-                );
-                staged.keep();
-                marker.keep();
-                return Err(torn_file_error(target, again));
+    }
+
+    fn retain(self) -> PathBuf {
+        let path = self.path.clone();
+        std::mem::forget(self);
+        path
+    }
+}
+
+impl Drop for BackupFile {
+    fn drop(&mut self) {
+        if let Some((_, manifest)) = &self.manifest {
+            if std::fs::remove_file(manifest).is_err() {
+                return;
             }
-            log::info!("write_tags: retry of {} succeeded", target.display());
-            drop(staged);
-            drop(marker);
-            Ok(())
+            let _ = sync_parent(manifest);
+        }
+        if std::fs::remove_file(&self.path).is_ok() {
+            let _ = sync_parent(&self.path);
         }
     }
 }
 
-// The one failure in the whole save path that can leave a file worse than it was.
-// Everything else — a full disk, a container lofty will not parse, a payload check
-// that fails — happens while the track is still untouched and is reported as a save
-// that did not happen. This one has to say something different, because the file on
-// disk really is incomplete and the thing that fixes it is a restart.
-fn torn_file_error(target: &Path, e: std::io::Error) -> std::io::Error {
-    std::io::Error::new(
-        e.kind(),
-        format!(
-            "Couldn't finish saving {}; the file is incomplete and will be repaired \
-             the next time Pudding starts. ({e})",
-            target
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| target.display().to_string())
-        ),
-    )
+fn discard_recovery_artifact(backup: &Path, manifest: &Path) -> Result<(), std::io::Error> {
+    std::fs::remove_file(manifest)?;
+    sync_parent(manifest)?;
+    std::fs::remove_file(backup)?;
+    sync_parent(backup)
 }
 
-// Finish any publish that a crash interrupted. Runs at startup, before the scanner
-// or the engine can read a track that may be half-overwritten.
-//
-// A marker whose staged file is gone is a publish that completed, and has nothing
-// left to do but drop the marker. When both files remain, recovery resumes only if
-// the target still has the pre-publish identity in the marker. A torn target and
-// one another app replaced while Pudding was down cannot be told apart safely, so
-// an ambiguous marker is retained with its complete staged copy rather than
-// overwriting possibly newer user data.
-pub(crate) fn recover_inflight_writes(dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut repaired = 0;
-    for entry in entries.flatten() {
-        let marker = entry.path();
-        if marker.extension().is_none_or(|e| e != "inflight") {
+// Finish the transaction a previous process left behind. A manifest is never
+// removed before a verified write is marked committed, so an uncommitted entry
+// is deliberately recovered even if the interruption happened in the small
+// window after bytes first reached the track. We refuse to overwrite a path that
+// now names a different inode: an external replacement is newer information than
+// the stale recovery record and must be resolved by the user.
+fn recover_incomplete_metadata_writes(dir: &Path) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(dir)?;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let manifest_path = entry.path();
+        let is_manifest = manifest_path.extension().is_some_and(|ext| ext == "json")
+            && manifest_path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".pudding-backup-"));
+        if !is_manifest {
             continue;
         }
-        let record = std::fs::read(&marker)
+        let manifest: RecoveryManifest = match std::fs::read(&manifest_path)
             .ok()
-            .and_then(|b| serde_json::from_slice::<InflightWrite>(&b).ok());
-        let Some(record) = record else {
-            log::warn!("recovery: unreadable in-flight marker {}", marker.display());
-            let _ = std::fs::remove_file(&marker);
-            continue;
-        };
-        // A publish only ever overwrites the target, never unlinks it, so a crash
-        // cannot be why it is missing — something removed the track afterwards.
-        // Finishing the save would resurrect a file the user deleted, so this
-        // record is moot: drop it and the staged copy with it.
-        if !record.target.exists() {
-            log::info!(
-                "recovery: dropping the interrupted save of {}, which no longer exists",
-                record.target.display()
-            );
-            let _ = std::fs::remove_file(&record.staged);
-            let _ = std::fs::remove_file(&marker);
-            continue;
-        }
-        if record.staged.exists() {
-            let current_stamp = inflight_target_stamp(&record.target).ok();
-            if record.target_stamp.as_ref() != current_stamp.as_ref() {
-                log::warn!(
-                    "recovery: not overwriting {} because it changed after the interrupted save",
-                    record.target.display()
+            .and_then(|bytes| serde_json::from_slice::<RecoveryManifest>(&bytes).ok())
+        {
+            Some(manifest) if manifest.version == 1 => manifest,
+            _ => {
+                log::error!(
+                    "metadata recovery: preserving unreadable manifest {}",
+                    manifest_path.display()
                 );
-                // Keep both paths. The staged file is a complete version the
-                // user can still recover manually, while touching the target now
-                // would overwrite an external edit just as readily as it would
-                // repair a torn write.
                 continue;
             }
-            match publish_in_place(&record.target, &record.staged) {
-                Ok(()) => {
-                    log::info!("recovery: finished the save of {}", record.target.display());
-                    repaired += 1;
-                    let _ = std::fs::remove_file(&record.staged);
-                }
-                Err(e) => {
-                    // Keep the marker: whatever stopped this — an unmounted volume,
-                    // a permission the user has yet to grant — may not be true at
-                    // the next launch, and the staged file is still the only
-                    // complete copy.
-                    log::error!(
-                        "recovery: could not finish the save of {}: {e}",
-                        record.target.display()
-                    );
-                    continue;
-                }
-            }
+        };
+
+        if !manifest.backup.is_file() {
+            log::error!(
+                "metadata recovery: backup for {} is missing; preserving {}",
+                manifest.target.display(),
+                manifest_path.display()
+            );
+            continue;
         }
-        let _ = std::fs::remove_file(&marker);
+        let backup_hash = match sha256_file(&manifest.backup) {
+            Ok(hash) if hash == manifest.original_sha256 => hash,
+            Ok(_) | Err(_) => {
+                log::error!(
+                    "metadata recovery: backup for {} does not match its manifest; preserving it",
+                    manifest.target.display()
+                );
+                continue;
+            }
+        };
+
+        if manifest.state == RecoveryState::Committed {
+            if let Err(error) = discard_recovery_artifact(&manifest.backup, &manifest_path) {
+                log::warn!(
+                    "metadata recovery: couldn't clean completed save for {}: {error}",
+                    manifest.target.display()
+                );
+            }
+            continue;
+        }
+
+        let mut target = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&manifest.target)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                log::error!(
+                    "metadata recovery: couldn't open {}: {error}; preserving recovery copy",
+                    manifest.target.display()
+                );
+                continue;
+            }
+        };
+        let still_original_inode =
+            path_and_descriptor_match(&manifest.target, &target, &manifest.original_stamp)
+                .unwrap_or(false);
+        if !still_original_inode {
+            log::error!(
+                "metadata recovery: {} was replaced after the interrupted save; preserving recovery copy",
+                manifest.target.display()
+            );
+            continue;
+        }
+
+        let already_original = sha256_open_file(&mut target).is_ok_and(|hash| hash == backup_hash);
+        let recovered =
+            already_original || overwrite_open_file(&mut target, &manifest.backup).is_ok();
+        let verified = recovered
+            && sha256_open_file(&mut target).is_ok_and(|hash| hash == backup_hash)
+            && path_and_descriptor_match(&manifest.target, &target, &manifest.original_stamp)
+                .unwrap_or(false);
+        if !verified {
+            log::error!(
+                "metadata recovery: couldn't restore {}; preserving recovery copy",
+                manifest.target.display()
+            );
+            continue;
+        }
+        if let Err(error) = discard_recovery_artifact(&manifest.backup, &manifest_path) {
+            log::warn!(
+                "metadata recovery: restored {} but couldn't clean its artifacts: {error}",
+                manifest.target.display()
+            );
+        } else {
+            log::warn!(
+                "metadata recovery: restored {} after an interrupted metadata save",
+                manifest.target.display()
+            );
+        }
     }
-    repaired
+    Ok(())
+}
+
+fn path_and_descriptor_match(
+    target: &Path,
+    target_file: &std::fs::File,
+    original: &FileStamp,
+) -> Result<bool, std::io::Error> {
+    let path_stamp = file_stamp(target)?;
+    let fd_stamp = file_stamp_from_metadata(&target_file.metadata()?);
+    Ok(same_file_identity(original, &path_stamp) && same_file_identity(original, &fd_stamp))
+}
+
+fn restore_after_failed_write(
+    target: &Path,
+    target_file: &mut std::fs::File,
+    original_stamp: &FileStamp,
+    original_sha256: &str,
+    backup: BackupFile,
+    mut failure: WriteFailure,
+    restore: impl FnOnce(&mut std::fs::File, &Path) -> Result<(), std::io::Error>,
+) -> WriteFailure {
+    let restore_error = restore(target_file, &backup.path).err();
+    let restored = path_and_descriptor_match(target, target_file, original_stamp).unwrap_or(false)
+        && sha256_open_file(target_file).is_ok_and(|digest| digest == original_sha256)
+        && sync_durable(target_file).is_ok();
+    if restored {
+        failure.message = format!("{}; the original file was restored", failure.message);
+        return failure;
+    }
+
+    let backup_path = backup.retain();
+    let detail = restore_error
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| "restored bytes or inode could not be verified".to_string());
+    WriteFailure {
+        message: format!(
+            "Fatal metadata save failure for {}: rollback failed ({detail}). \
+             The recovery backup was retained at {}",
+            target.display(),
+            backup_path.display()
+        ),
+        fatal: true,
+    }
+}
+
+// Hold Pudding's writer lease across the only non-atomic interval. The caller's
+// write closure edits the already-open descriptor; any write or verification
+// failure is rolled back through that same descriptor, never through a rename.
+fn perform_direct_write(
+    target: &Path,
+    target_file: &mut std::fs::File,
+    original_stamp: FileStamp,
+    original_sha256: String,
+    mut backup: BackupFile,
+    write: impl FnOnce(&mut std::fs::File) -> Result<(), WriteFailure>,
+    verify: impl FnOnce(&mut std::fs::File) -> Result<String, WriteFailure>,
+    restore: impl FnOnce(&mut std::fs::File, &Path) -> Result<(), std::io::Error>,
+) -> Result<SavedFileVersion, WriteFailure> {
+    let _lease = begin_file_write(target)
+        .map_err(|error| WriteFailure::io("Couldn't save the tags", &error))?;
+    let unchanged = path_and_descriptor_match(target, target_file, &original_stamp)
+        .and_then(|same| {
+            if !same {
+                return Ok(false);
+            }
+            sha256_open_file(target_file).map(|digest| digest == original_sha256)
+        })
+        .map_err(|error| WriteFailure::io("Couldn't validate the original file", &error))?;
+    let current_stamp = file_stamp(target)
+        .map_err(|error| WriteFailure::io("Couldn't validate the original file", &error))?;
+    if !unchanged || current_stamp != original_stamp {
+        return Err(WriteFailure {
+            message: "Couldn't save the tags: the file changed after its backup was made".into(),
+            fatal: false,
+        });
+    }
+
+    let written = write(target_file).and_then(|()| {
+        sync_durable(target_file)
+            .map_err(|error| WriteFailure::io("Couldn't flush the edited file", &error))
+    });
+    if let Err(failure) = written {
+        return Err(restore_after_failed_write(
+            target,
+            target_file,
+            &original_stamp,
+            &original_sha256,
+            backup,
+            failure,
+            restore,
+        ));
+    }
+
+    let verification = (|| {
+        if !path_and_descriptor_match(target, target_file, &original_stamp)
+            .map_err(|error| WriteFailure::io("Couldn't verify the edited file", &error))?
+        {
+            return Err(WriteFailure {
+                message:
+                    "Couldn't verify the edited file: its path no longer names the original inode"
+                        .into(),
+                fatal: false,
+            });
+        }
+        let digest = verify(target_file)?;
+        let after = file_stamp_from_metadata(
+            &target_file
+                .metadata()
+                .map_err(|error| WriteFailure::io("Couldn't verify the edited file", &error))?,
+        );
+        if !same_file_identity(&original_stamp, &after)
+            || !path_and_descriptor_match(target, target_file, &original_stamp)
+                .map_err(|error| WriteFailure::io("Couldn't verify the edited file", &error))?
+        {
+            return Err(WriteFailure {
+                message: "Couldn't verify the edited file: its inode changed".into(),
+                fatal: false,
+            });
+        }
+        Ok(SavedFileVersion {
+            stamp: after,
+            sha256: digest,
+        })
+    })();
+
+    match verification {
+        Ok(version) => {
+            if let Err(error) = backup.mark_committed() {
+                return Err(restore_after_failed_write(
+                    target,
+                    target_file,
+                    &original_stamp,
+                    &original_sha256,
+                    backup,
+                    WriteFailure::io("Couldn't finalize the recovery manifest", &error),
+                    restore,
+                ));
+            }
+            Ok(version)
+        }
+        Err(failure) => Err(restore_after_failed_write(
+            target,
+            target_file,
+            &original_stamp,
+            &original_sha256,
+            backup,
+            failure,
+            restore,
+        )),
+    }
 }
 
 // Return the bytes after a leading ID3v2 tag, or all of the file when it has no
@@ -3856,15 +4469,21 @@ fn mpeg_payload_after_id3v2(bytes: &[u8]) -> Option<&[u8]> {
     bytes.get(10 + tag_size + footer_size..)
 }
 
+fn mpeg_payload_matches(original: &Path, edited: &Path) -> Result<bool, std::io::Error> {
+    let original = std::fs::read(original)?;
+    let edited = std::fs::read(edited)?;
+    Ok(mpeg_payload_after_id3v2(&original) == mpeg_payload_after_id3v2(&edited))
+}
+
 // Replace a file's entire contents without ever leaving it truncated: write the
 // new bytes to a staged sibling, then rename that over the target. The same trade
-// staged_tag_write makes, for callers that author a whole file rather than patching
+// playlist writer makes, for callers that author a whole file rather than patching
 // one — a plain `fs::write` truncates first, so anything that interrupts it (a full
 // disk, a drive pulled mid-write, a force-quit, an OS crash) leaves an empty or
 // half-written file where the user's data used to be. Rename is atomic, so the only
 // two things this can leave on disk are the old contents and the new.
 //
-// Staged by *copying* the original first, exactly as staged_tag_write does, even
+// Staged by *copying* the original first, even
 // though the caller already holds every byte and none of the copy's content is
 // kept. The copy is not there for the bytes: the rename lands a brand-new inode,
 // and everything hanging off the old one — Finder tags and comments and the rest
@@ -3887,7 +4506,7 @@ pub(crate) fn write_atomic_checked(
     before_replace: impl FnOnce() -> Result<(), std::io::Error>,
 ) -> Result<(), std::io::Error> {
     use std::io::Write;
-    // Resolve the link first, for the reason staged_tag_write does: rename replaces a
+    // Resolve the link first: rename replaces a
     // *directory entry*, so renaming onto a symlink would leave a regular file where
     // the link was. A path that won't resolve — a file being created, the ordinary
     // case here — is used unchanged.
@@ -3963,36 +4582,175 @@ fn is_staging_denied(e: &std::io::Error) -> bool {
     }
 }
 
-// One file: open, patch, save, re-stat, read back. Returns what the file says
+#[derive(Debug, PartialEq, Eq)]
+struct TagWriteFingerprint {
+    title: Option<String>,
+    artist: Option<String>,
+    album_artist: Option<String>,
+    album: Option<String>,
+    genre: Option<String>,
+    comment: Option<String>,
+    disc: Option<u32>,
+    disc_total: Option<u32>,
+    track: Option<u32>,
+    track_total: Option<u32>,
+    date: Option<String>,
+    picture_count: usize,
+    first_picture_sha256: Option<String>,
+}
+
+fn tag_write_fingerprint(tag: &lofty::tag::Tag) -> TagWriteFingerprint {
+    use sha2::{Digest, Sha256};
+    let text = |value: Option<std::borrow::Cow<'_, str>>| value.map(|value| value.into_owned());
+    TagWriteFingerprint {
+        title: text(tag.title()),
+        artist: text(tag.artist()),
+        album_artist: tag
+            .get_string(lofty::tag::ItemKey::AlbumArtist)
+            .map(str::to_owned),
+        album: text(tag.album()),
+        genre: text(tag.genre()),
+        comment: text(tag.comment()),
+        disc: tag.disk(),
+        disc_total: tag.disk_total(),
+        track: tag.track(),
+        track_total: tag.track_total(),
+        date: tag.date().map(|date| date.to_string()),
+        picture_count: tag.picture_count() as usize,
+        first_picture_sha256: tag.pictures().first().map(|picture| {
+            let mut digest = Sha256::new();
+            digest.update(picture.data());
+            format!("{:x}", digest.finalize())
+        }),
+    }
+}
+
+fn verified_cached_fields(
+    saved_tag: Option<&lofty::tag::Tag>,
+    expected_tag: &TagWriteFingerprint,
+    expected_tag_is_empty: bool,
+) -> Result<FileEntry, WriteFailure> {
+    let Some(saved_tag) = saved_tag else {
+        // Lofty represents an empty tag by removing it from the container. That
+        // is the correct result when the edit removed the tag's last item, but a
+        // missing tag is still data loss when *any* item (including one outside
+        // the editor's fingerprint, such as Composer) was meant to survive.
+        if expected_tag_is_empty {
+            return Ok(FileEntry::default());
+        }
+        return Err(WriteFailure {
+            message: "Couldn't validate the edited file: the saved tag is missing".into(),
+            fatal: false,
+        });
+    };
+    if tag_write_fingerprint(saved_tag) != *expected_tag {
+        return Err(WriteFailure {
+            message:
+                "Couldn't validate the edited file: the saved metadata does not match the requested change"
+                    .into(),
+            fatal: false,
+        });
+    }
+    Ok(cached_fields(saved_tag))
+}
+
+// One file: open, patch, save directly through its descriptor, re-stat, read
+// back. Returns what the file says
 // afterwards (read off the mutated tag, never off the patch — see cached_fields)
 // along with the post-write mtime and size. Mirrors read_file_tags in mutating the
 // *primary* tag, creating one of the container's native type when the file is
 // untagged.
-// The staged write itself — copy, tag, flush, atomic rename — shared by a save and
-// an undo. `mutate` is handed the file's primary tag and returns whatever the
+// The protocol — one durable backup, direct same-inode edit, verification and
+// attempted rollback — is shared by a save and an undo. `mutate` is handed the
+// file's primary tag and returns whatever the
 // caller wants carried back out from beside it (a save returns its own inverse; an
 // undo returns nothing), which is what lets both verbs have the identical
-// guarantee: the track is replaced only by a complete, fsynced copy, and only by a
-// rename. An undo that had its own writer would be a second chance to get that
-// wrong on the one path where being wrong is unrecoverable.
-fn staged_tag_write<T>(
+// guarantee. An undo that had its own writer would be a second chance to get the
+// recovery protocol wrong on the one path where being wrong is unrecoverable.
+fn direct_tag_write<T>(
     p: &Path,
+    expected: Option<&SavedFileVersion>,
     mutate: impl FnOnce(&mut lofty::tag::Tag) -> T,
-) -> Result<(T, FileEntry, i64, i64), WriteFailure> {
+) -> Result<(T, FileEntry, i64, i64, SavedFileVersion), WriteFailure> {
+    with_coordinated_metadata_write(p, |coordinated_path| {
+        direct_tag_write_uncoordinated(coordinated_path, expected, mutate)
+    })
+}
+
+fn direct_tag_write_uncoordinated<T>(
+    p: &Path,
+    expected: Option<&SavedFileVersion>,
+    mutate: impl FnOnce(&mut lofty::tag::Tag) -> T,
+) -> Result<(T, FileEntry, i64, i64, SavedFileVersion), WriteFailure> {
     // Resolve the link first, so that every step below acts on the real file.
-    // It matters most to the rename publish_staged falls back to: rename replaces a
-    // *directory entry*, so renaming onto a symlink would leave a regular file where
-    // the link was and strand the track it pointed at. It matters to the in-place
-    // publish too, though less sharply — open(2) follows the link on its own, but
-    // the staged copy still wants to land beside the real file rather than beside
-    // the link, where it may be on another volume entirely. A path that won't
-    // resolve is handed on unchanged, for open_tagged to reject with its own
-    // message.
+    // open(2) follows a symlink, but the recovery artifacts must land beside the
+    // real file and every identity check must name that same target. A path that
+    // will not resolve is handed on unchanged for open_tagged to reject.
     let target = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
 
+    // Keep the descriptor whose identity this write promises to preserve. Lofty
+    // writes through it rather than reopening the path after a slow tag encode,
+    // where an external replacement could redirect the write.
+    let open_lease =
+        begin_file_read(&target).map_err(|e| WriteFailure::io("Couldn't read that file", &e))?;
+    let mut target_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&target)
+        .map_err(|e| WriteFailure::io("Couldn't read that file", &e))?;
+    let target_stamp = file_stamp_from_metadata(
+        &target_file
+            .metadata()
+            .map_err(|e| WriteFailure::io("Couldn't read that file", &e))?,
+    );
+    drop(open_lease);
+
+    // The original is the one durable recovery artifact.
+    // std::fs::copy uses cloning where the platform/filesystem supports it and a
+    // real copy elsewhere; correctness is identical in both cases.
+    let mut backup = BackupFile::new(
+        backup_sibling(&target).map_err(|e| WriteFailure::io("Couldn't save the tags", &e))?,
+    );
+    durable_copy(&target, &backup.path).map_err(|e| {
+        log::error!("write_tags: preserving {} failed: {e}", target.display());
+        WriteFailure::io("Couldn't prepare a recovery copy", &e)
+    })?;
+    let original_hash = sha256_file(&backup.path)
+        .map_err(|e| WriteFailure::io("Couldn't validate the recovery copy", &e))?;
+    let opened_hash = sha256_open_file(&mut target_file)
+        .map_err(|e| WriteFailure::io("Couldn't validate the original file", &e))?;
+    if original_hash != opened_hash {
+        return Err(WriteFailure {
+            message: "Couldn't save the tags: the file changed while its recovery copy was made"
+                .into(),
+            fatal: false,
+        });
+    }
+    if expected
+        .is_some_and(|version| version.stamp != target_stamp || version.sha256 != original_hash)
+    {
+        return Err(WriteFailure {
+            message: "Changed since the save; left as it is".into(),
+            fatal: false,
+        });
+    }
+    let (manifest, manifest_path) = RecoveryManifest::prepare(
+        &target,
+        &backup.path,
+        target_stamp.clone(),
+        original_hash.clone(),
+    )
+    .map_err(|e| WriteFailure::io("Couldn't record the recovery copy", &e))?;
+    backup.attach_manifest(manifest, manifest_path);
+    let original_audio_probed = audio::probe_one_audio_packet(&backup.path, &target).is_ok();
+
+    // Parse through the real name so Lofty can use its extension as the fallback
+    // for unusual-but-supported layouts such as stacked ID3v2 tags. The final
+    // identity+hash precondition still rejects an external change during this
+    // read.
     let mut tagged = open_tagged(&target, TAGS_ONLY).map_err(|e| {
         log::error!("write_tags: reading {} failed: {e}", target.display());
-        WriteFailure::lofty("Couldn't read that file", &e)
+        WriteFailure::lofty("Couldn't read that file", e.as_ref())
     })?;
 
     // Untagged files have no tag to mutate; give them one of the container's
@@ -4024,61 +4782,12 @@ fn staged_tag_write<T>(
         .expect("primary tag present (inserted above when absent)");
 
     let carried = mutate(tag);
-    let mut tags = cached_fields(tag);
-    // From the path the caller gave, not the canonicalized one: a symlinked track
-    // is its own row under its own name, and the library shows the name the user
-    // has for it.
-    tags.name = p
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    // Stage the write on a copy, and never let lofty near the track itself. lofty
-    // rewrites a file where it stands: for ID3v2 it reads the audio into memory,
-    // truncates the file to zero bytes and writes the whole thing back. A save
-    // interrupted anywhere between that truncate and the last byte leaves an empty
-    // or half-written file where a song used to be — a full disk does it, so does a
-    // drive pulled mid-batch, a force-quit, or a power cut.
-    //
-    // Staging moves every way a save can fail — a full disk, a container lofty
-    // mis-parses, the MPEG payload check below — to a point where the track has not
-    // been touched. Only once the staged file is known to be a complete, correct
-    // copy does publish_staged put it over the original, and only then is there any
-    // window at all.
-    //
-    // On APFS the copy is a clone: no second copy of the bytes, and the xattrs,
-    // ACLs and Finder tags come along with it. Elsewhere it is a real copy, which
-    // costs the track's own size in temporary space for the length of one save.
-    // That is the price of never destroying a file, and it is worth it.
-    //
-    // It does mean a save needs a writable *directory* and not just a writable
-    // file, so a track sitting in a read-only folder can no longer be tagged where
-    // it once could. That case is close to imaginary in a music library, and it
-    // fails cleanly with the file intact — which is the trade being made.
-    let staged = StagedFile(
-        temp_sibling(&target).map_err(|e| WriteFailure::io("Couldn't save the tags", &e))?,
-    );
-    std::fs::copy(&target, &staged.0).map_err(|e| {
-        log::error!("write_tags: staging {} failed: {e}", target.display());
-        WriteFailure::io("Couldn't save the tags", &e)
-    })?;
-
-    // Lofty reopens the staged file to write its ID3v2 tag. Its extended junk
-    // search is needed for stacked tags, but an invalid `ID3` byte sequence in
-    // MPEG audio can make an affected Lofty version copy only the suffix after
-    // that sequence. The staged copy means we can detect that exact loss before
-    // rename: an MP3 tag edit may change its leading tag, never its payload.
-    //
-    // Keep this guard in Pudding even after Lofty fixes the cursor bug. It turns
-    // any future writer regression into one failed edit with the original file
-    // still present, rather than publishing a shorter song.
-    let original_mpeg_bytes = (tagged.file_type() == lofty::file::FileType::Mpeg)
-        .then(|| std::fs::read(&staged.0))
-        .transpose()
-        .map_err(|e| {
-            log::error!("write_tags: reading staged MPEG {} failed: {e}", target.display());
-            WriteFailure::io("Couldn't save the tags", &e)
-        })?;
+    let expected_tag = tag_write_fingerprint(tag);
+    // TagExt::is_empty covers generic items and pictures. A companion holds
+    // format-specific data that Lofty will also write, so it makes the serialized
+    // tag nonempty even when none of the editor-visible fields remain.
+    let expected_tag_is_empty = tag.is_empty() && !tag.has_format_specific_items();
+    let is_mpeg = tagged.file_type() == lofty::file::FileType::Mpeg;
 
     // Lofty re-identifies the container while writing. Its default 1 KiB search
     // window cannot reach audio behind a second, stacked ID3v2 tag, so 0.21 needed
@@ -4090,50 +4799,74 @@ fn staged_tag_write<T>(
         .read_properties(false)
         .max_junk_bytes(WRITE_MAX_JUNK_BYTES);
     let write_options = lofty::config::WriteOptions::new().parse_options(parse_options);
-    tagged.save_to_path(&staged.0, write_options).map_err(|e| {
-        // The frontend shows this string in the form; the log keeps the path,
-        // which the form has no room for.
-        log::error!("write_tags: saving {} failed: {e}", target.display());
-        WriteFailure::lofty("Couldn't save the tags", &e)
-    })?;
+    let mut verified_tags = None;
+    let backup_path = backup.path.clone();
+    let saved_version = perform_direct_write(
+        &target,
+        &mut target_file,
+        target_stamp,
+        original_hash,
+        backup,
+        |file| {
+            tagged.save_to(file, write_options).map_err(|error| {
+                log::error!("write_tags: saving {} failed: {error}", target.display());
+                WriteFailure::lofty("Couldn't save the tags", &error)
+            })
+        },
+        |file| {
+            let reparsed = (|| -> Result<
+                lofty::file::TaggedFile,
+                Box<dyn std::error::Error + Send + Sync>,
+            > {
+                Ok(lofty::probe::Probe::open(&target)?
+                    .options(
+                        lofty::config::ParseOptions::new()
+                            .read_properties(false)
+                            .max_junk_bytes(WRITE_MAX_JUNK_BYTES),
+                    )
+                    .guess_file_type()?
+                    .read()?)
+            })()
+            .map_err(|error| {
+                WriteFailure::lofty("Couldn't validate the edited file", error.as_ref())
+            })?;
+            let saved_tag = reparsed.primary_tag().or_else(|| reparsed.first_tag());
+            let cached = verified_cached_fields(saved_tag, &expected_tag, expected_tag_is_empty)?;
+            if original_audio_probed {
+                audio::probe_one_audio_packet_unleased(&target, &target).map_err(|error| {
+                    WriteFailure {
+                        message: format!("Couldn't validate the edited audio: {error}"),
+                        fatal: false,
+                    }
+                })?;
+            }
+            if is_mpeg {
+                let payload_matches =
+                    mpeg_payload_matches(&backup_path, &target).map_err(|error| {
+                        WriteFailure::io("Couldn't verify the MPEG payload", &error)
+                    })?;
+                if !payload_matches {
+                    return Err(WriteFailure {
+                        message: "Couldn't validate the edited file: the audio changed during the tag write".into(),
+                        fatal: false,
+                    });
+                }
+            }
+            verified_tags = Some(cached);
+            sha256_open_file(file)
+                .map_err(|error| WriteFailure::io("Couldn't verify the edited file", &error))
+        },
+        overwrite_open_file,
+    )?;
 
-    if let Some(original) = original_mpeg_bytes {
-        let old_payload = mpeg_payload_after_id3v2(&original);
-        let written = std::fs::read(&staged.0).map_err(|e| {
-            log::error!("write_tags: reading saved MPEG {} failed: {e}", target.display());
-            WriteFailure::io("Couldn't save the tags", &e)
-        })?;
-        let new_payload = mpeg_payload_after_id3v2(&written);
-        if old_payload != new_payload {
-            log::error!(
-                "write_tags: refusing to replace {}: tag writer changed MPEG payload",
-                target.display()
-            );
-            return Err(WriteFailure {
-                message: "Couldn't save the tags: the audio changed during the tag write".into(),
-                fatal: false,
-            });
-        }
-    }
-
-    // Lofty has closed its writer, but the bytes can still be in the page cache.
-    // Flush before publishing the replacement, just as write_atomic_checked does.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&staged.0)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| {
-            log::error!("write_tags: flushing {} failed: {e}", target.display());
-            WriteFailure::io("Couldn't save the tags", &e)
-        })?;
-
-    // The staged copy is a correct, complete track carrying the new tags. This is
-    // the instant it becomes the file — see publish_staged for why that is normally
-    // a copy back into the original inode rather than a rename over it.
-    publish_staged(&target, staged, publish_marker_dir().as_deref()).map_err(|e| {
-        log::error!("write_tags: replacing {} failed: {e}", target.display());
-        WriteFailure::io("Couldn't save the tags", &e)
-    })?;
+    let mut tags = verified_tags.expect("successful verification records the saved tag");
+    // From the path the caller gave, not the canonicalized one: a symlinked track
+    // is its own row under its own name, and the library shows the name the user
+    // has for it.
+    tags.name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     // Re-stat after the write so the cached mtime/size match the file lofty just
     // rewrote. The incremental scan skips rows whose mtime+size are unchanged, so
@@ -4150,7 +4883,7 @@ fn staged_tag_write<T>(
             (mtime, m.len() as i64)
         })
         .unwrap_or((0, 0));
-    Ok((carried, tags, mtime, size))
+    Ok((carried, tags, mtime, size, saved_version))
 }
 
 // Apply one patch to one file, and come back with the inverse of what it did.
@@ -4163,21 +4896,25 @@ fn write_one_file(
     p: &Path,
     edits: &TagEdits,
     artwork: &ArtworkChange,
-) -> Result<(FileEntry, i64, i64, TagUndo), WriteFailure> {
-    staged_tag_write(p, |tag| {
+) -> Result<(FileEntry, i64, i64, TagUndo, SavedFileVersion), WriteFailure> {
+    direct_tag_write(p, None, |tag| {
         let undo = capture_tag_undo(tag, edits, artwork);
         apply_tag_edits(tag, edits, artwork);
         undo
     })
-    .map(|(undo, tags, mtime, size)| (tags, mtime, size, undo))
+    .map(|(undo, tags, mtime, size, version)| (tags, mtime, size, undo, version))
 }
 
 // Put one journaled file back. No inverse comes out of this: the journal holds a
 // single batch (UNDO_BATCHES_KEPT) and a restore spends it, so there is no redo to
 // feed.
-fn restore_one_file(p: &Path, undo: &TagUndo) -> Result<(FileEntry, i64, i64), WriteFailure> {
-    staged_tag_write(p, |tag| apply_tag_undo(tag, undo))
-        .map(|((), tags, mtime, size)| (tags, mtime, size))
+fn restore_one_file(
+    p: &Path,
+    undo: &TagUndo,
+    expected: &SavedFileVersion,
+) -> Result<(FileEntry, i64, i64, SavedFileVersion), WriteFailure> {
+    direct_tag_write(p, Some(expected), |tag| apply_tag_undo(tag, undo))
+        .map(|((), tags, mtime, size, version)| (tags, mtime, size, version))
 }
 
 // === The journal on disk ===
@@ -4210,10 +4947,9 @@ const MAX_UNDO_ART_BYTES: i64 = 64 * 1024 * 1024;
 // the batch then fails partway: the journal is never larger than
 // UNDO_BATCHES_KEPT batches at any instant.
 fn open_undo_batch(conn: &Connection) -> rusqlite::Result<i64> {
-    let batch: i64 =
-        conn.query_row("SELECT IFNULL(MAX(batch), 0) + 1 FROM tag_undo", [], |r| {
-            r.get(0)
-        })?;
+    let batch: i64 = conn.query_row("SELECT IFNULL(MAX(batch), 0) + 1 FROM tag_undo", [], |r| {
+        r.get(0)
+    })?;
     conn.execute(
         "DELETE FROM tag_undo WHERE batch <= ?1",
         params![batch - UNDO_BATCHES_KEPT],
@@ -4257,11 +4993,15 @@ fn journal_undo_row(
     // in the one place that records it.
     let fields = serde_json::to_string(&entry.undo.fields)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let version = serde_json::to_string(entry.version)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let aliases = serde_json::to_string(entry.aliases)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     conn.execute(
         "INSERT OR REPLACE INTO tag_undo
              (batch, seq, path, mtime, size, fields, art, picture, picture_mime,
-              picture_desc, picture_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              picture_desc, picture_type, version, aliases)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             batch,
             seq as i64,
@@ -4274,6 +5014,8 @@ fn journal_undo_row(
             pic.and_then(|p| p.mime.as_deref()),
             pic.and_then(|p| p.description.as_deref()),
             pic.map(|p| i64::from(p.pic_type)),
+            version,
+            aliases,
         ],
     )?;
     if let Some(cost) = art_cost {
@@ -4285,12 +5027,9 @@ fn journal_undo_row(
 // One journal row, read back for a restore.
 struct UndoRow {
     path: String,
-    // The stat as it was immediately after this app wrote the file. See
-    // restorable_rows: it is how a restore tells a file it still owns from one
-    // something else has rewritten since.
-    mtime: i64,
-    size: i64,
+    aliases: Vec<String>,
     undo: TagUndo,
+    version: Option<SavedFileVersion>,
 }
 
 // Read a batch back, in the order it was written. A row whose JSON will not parse
@@ -4298,26 +5037,26 @@ struct UndoRow {
 // not a reason to refuse to restore the other 299.
 fn load_undo_batch(conn: &Connection, batch: i64) -> rusqlite::Result<Vec<UndoRow>> {
     let mut stmt = conn.prepare(
-        "SELECT path, mtime, size, fields, art, picture, picture_mime, picture_desc,
-                picture_type
+        "SELECT path, fields, art, picture, picture_mime, picture_desc,
+                picture_type, version, aliases
          FROM tag_undo WHERE batch = ?1 ORDER BY seq",
     )?;
     let rows = stmt.query_map(params![batch], |r| {
         Ok((
             r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
+            r.get::<_, String>(1)?,
             r.get::<_, i64>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, Option<Vec<u8>>>(5)?,
-            r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<Vec<u8>>>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, Option<i64>>(6)?,
             r.get::<_, Option<String>>(7)?,
-            r.get::<_, Option<i64>>(8)?,
+            r.get::<_, Option<String>>(8)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (path, mtime, size, fields, art, data, mime, description, pic_type) = row?;
+        let (path, fields, art, data, mime, description, pic_type, version, aliases) = row?;
         let fields: UndoFields = match serde_json::from_str(&fields) {
             Ok(f) => f,
             Err(e) => {
@@ -4343,10 +5082,19 @@ fn load_undo_batch(conn: &Connection, batch: i64) -> rusqlite::Result<Vec<UndoRo
             _ => UndoArt::Untouched,
         };
         out.push(UndoRow {
+            aliases: aliases
+                .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+                .filter(|aliases| !aliases.is_empty())
+                .unwrap_or_else(|| vec![path.clone()]),
             path,
-            mtime,
-            size,
             undo: TagUndo { fields, art },
+            version: version.and_then(|json| match serde_json::from_str(&json) {
+                Ok(version) => Some(version),
+                Err(e) => {
+                    log::error!("tag undo: journaled file version will not parse: {e}");
+                    None
+                }
+            }),
         });
     }
     Ok(out)
@@ -4373,41 +5121,24 @@ fn undo_offer(conn: &Connection) -> rusqlite::Result<Option<UndoOffer>> {
 // Split a loaded batch into the files a restore may still write and the ones it
 // must decline.
 //
-// A journal row describes a file this app wrote and then stat'd. If what is on
-// disk no longer matches that stat, something else has changed the file since —
-// another tagger, a re-rip, a sync client pulling a newer copy — and replaying the
-// inverse patch would revert that too, silently, as a side effect of a menu item
-// about *our* save. An undo that declines is a smaller wrong than an undo that
-// overwrites someone else's work, so the mismatch is reported instead. A file that
-// won't stat at all (moved, deleted, ejected) fails the same way and for the same
-// reason: there is nothing here we recognize.
+// Old journal rows have only a whole-second mtime and size, which cannot safely
+// authorize a write. Current rows carry a digest plus the full filesystem stamp;
+// direct_tag_write checks those against the durable backup it prepares, closing
+// both same-size/same-second changes and the old preflight-to-write race.
 fn restorable_rows(rows: Vec<UndoRow>) -> (Vec<UndoRow>, Vec<FailedWrite>) {
     let mut restorable = Vec::new();
     let mut declined = Vec::new();
     for row in rows {
-        let stat = std::fs::metadata(&row.path).ok().map(|m| {
-            let mtime = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            (mtime, m.len() as i64)
-        });
-        match stat {
-            Some((mtime, size)) if mtime == row.mtime && size == row.size => {
-                restorable.push(row)
-            }
-            Some(_) => declined.push(FailedWrite {
+        if row.version.is_some() {
+            restorable.push(row);
+        } else {
+            declined.push(FailedWrite {
                 path: row.path,
-                message: "Changed since the save; left as it is".to_string(),
+                message:
+                    "This update was recorded by an older version and can't be safely reverted"
+                        .to_string(),
                 stale: false,
-            }),
-            None => declined.push(FailedWrite {
-                path: row.path,
-                message: "Couldn't find that file".to_string(),
-                stale: false,
-            }),
+            });
         }
     }
     (restorable, declined)
@@ -4424,9 +5155,8 @@ fn restorable_rows(rows: Vec<UndoRow>) -> (Vec<UndoRow>, Vec<FailedWrite>) {
 // The file the audio engine holds open is refused here rather than trusted to the
 // frontend's gate: the decoder reads ahead across track boundaries, and a batch
 // takes long enough for playback to walk into a file the loop has not reached yet.
-// The check is per file and live, which narrows that window without closing it.
-// The save itself renames a staged copy over the track, so the worst a lost race
-// costs is a decoder reading from the replaced file — not a damaged one.
+// The check is per file and live for a useful immediate error; the reader lease
+// held by the decoder closes the race before in-place publication actually starts.
 #[tauri::command]
 async fn write_tags(
     paths: Vec<String>,
@@ -4469,6 +5199,7 @@ async fn write_tags(
         let batch = std::cell::Cell::new(None::<i64>);
         let seq = std::cell::Cell::new(0usize);
         let art_budget = std::cell::Cell::new(MAX_UNDO_ART_BYTES);
+        let journaled_paths = std::cell::Cell::new(0usize);
 
         let mut report = write_tags_to_files(
             &jobs,
@@ -4488,7 +5219,9 @@ async fn write_tags(
                 };
                 let n = seq.get();
                 seq.set(n + 1);
-                journal_undo_row(&conn, batch_id, n, entry, &art_budget)
+                journal_undo_row(&conn, batch_id, n, entry, &art_budget)?;
+                journaled_paths.set(journaled_paths.get() + entry.aliases.len());
+                Ok(())
             },
             &|| held.held_paths(),
             &|| cancel.generation.load(std::sync::atomic::Ordering::Relaxed) == generation,
@@ -4504,21 +5237,7 @@ async fn write_tags(
             },
         );
 
-        report.revert_tracks = match batch.get() {
-            Some(batch) => {
-                let conn = write_conn.lock().unwrap_or_else(|e| e.into_inner());
-                conn.query_row(
-                    "SELECT COUNT(*) FROM tag_undo WHERE batch = ?1",
-                    params![batch],
-                    |r| r.get(0),
-                )
-                .unwrap_or_else(|e| {
-                    log::error!("tag undo: count for batch {batch} failed: {e}");
-                    0
-                })
-            }
-            None => 0,
-        };
+        report.revert_tracks = journaled_paths.get();
 
         Ok(report)
     })
@@ -4566,7 +5285,17 @@ async fn undo_tag_write(
             .count();
         let jobs: Vec<(String, TagJob)> = rows
             .iter()
-            .map(|r| (r.path.clone(), TagJob::Restore(&r.undo)))
+            .flat_map(|r| {
+                r.aliases.iter().map(move |alias| {
+                    (
+                        alias.clone(),
+                        TagJob::Restore {
+                            undo: &r.undo,
+                            expected: r.version.as_ref().expect("filtered to versioned rows"),
+                        },
+                    )
+                })
+            })
             .collect();
 
         let mut report = write_tags_to_files(
@@ -4764,7 +5493,10 @@ fn set_recent_icons(
             .map_err(|e| e.to_string())
     };
     let (playlist, track) = (decode(&playlist)?, decode(&track)?);
-    let mut png = icons.png.lock().map_err(|_| "recent icons poisoned".to_string())?;
+    let mut png = icons
+        .png
+        .lock()
+        .map_err(|_| "recent icons poisoned".to_string())?;
     png.insert("playlist".to_string(), playlist);
     png.insert("track".to_string(), track);
     Ok(())
@@ -5098,10 +5830,7 @@ struct DiskFacts {
 
 fn read_disk_facts(path: &Path) -> DiskFacts {
     let meta = std::fs::metadata(path);
-    let not_downloaded = meta
-        .as_ref()
-        .map(dataless::is_dataless)
-        .unwrap_or(false);
+    let not_downloaded = meta.as_ref().map(dataless::is_dataless).unwrap_or(false);
     let (size, created, modified) = match &meta {
         Ok(m) => {
             let secs = |t: std::io::Result<std::time::SystemTime>| {
@@ -5267,12 +5996,7 @@ async fn dropped_tracks(
                     .file_name()
                     .map(|n| n.to_string_lossy().to_lowercase())
                     .unwrap_or_default();
-                (
-                    dir,
-                    r.disc.unwrap_or(1),
-                    r.track.unwrap_or(u32::MAX),
-                    name,
-                )
+                (dir, r.disc.unwrap_or(1), r.track.unwrap_or(u32::MAX), name)
             });
             out.extend(rows);
         }
@@ -5640,10 +6364,7 @@ async fn list_all_genres(db: State<'_, DbHandle>) -> Result<Vec<String>, String>
 // same lazily-resolved track provider those menus take for an artist or an album).
 // Reuses SearchResult.
 #[tauri::command]
-async fn genre_tracks(
-    genre: String,
-    db: State<'_, DbHandle>,
-) -> Result<Vec<SearchResult>, String> {
+async fn genre_tracks(genre: String, db: State<'_, DbHandle>) -> Result<Vec<SearchResult>, String> {
     db.read(move |conn| {
         let sql = format!(
             "SELECT {TRACK_COLUMNS} FROM tracks
@@ -5711,10 +6432,7 @@ async fn list_all_decades(db: State<'_, DbHandle>) -> Result<Vec<i64>, String> {
 // row's Play / Add to queue verbs. Year leads the sort because inside a decade
 // that is the axis the list is *about*. Reuses SearchResult.
 #[tauri::command]
-async fn decade_tracks(
-    decade: i64,
-    db: State<'_, DbHandle>,
-) -> Result<Vec<SearchResult>, String> {
+async fn decade_tracks(decade: i64, db: State<'_, DbHandle>) -> Result<Vec<SearchResult>, String> {
     db.read(move |conn| {
         let sql = format!(
             "SELECT {TRACK_COLUMNS} FROM tracks
@@ -6105,20 +6823,20 @@ pub fn run() {
 
             let app_data = app_data_dir(app.handle())?;
             std::fs::create_dir_all(&app_data)?;
+            let recovery_dir = app_data.join(METADATA_RECOVERY_DIR);
+            METADATA_RECOVERY_ROOT
+                .set(recovery_dir.clone())
+                .map_err(|_| "metadata recovery root was configured more than once")?;
+            if let Err(error) = recover_incomplete_metadata_writes(&recovery_dir) {
+                // A blocked library root must not prevent the player from
+                // starting. The manifest and backup stay intact and this is
+                // retried at the next launch, when the provider may be online.
+                log::error!("metadata recovery at startup failed: {error}");
+            }
             let db_path = app_data.join(DB_FILE);
             let conn = open_connection(&db_path)?;
             init_schema(&conn)?;
 
-            // Finish any tag save a crash caught mid-publish, before the scanner or
-            // the engine can read a track that is still half-overwritten. Both
-            // halves go here, in this order: recovery first, then arm the marker
-            // directory for this run's own saves.
-            let markers = app_data.join(INFLIGHT_DIR);
-            match recover_inflight_writes(&markers) {
-                0 => {}
-                n => log::info!("recovery: finished {n} interrupted tag save(s)"),
-            }
-            set_publish_marker_dir(markers);
             app.manage(DbHandle {
                 conn: Arc::new(Mutex::new(conn)),
                 readers: Arc::new(ReadPool::new(db_path.clone())),
@@ -6255,10 +6973,8 @@ pub fn run() {
             let repeat_off = CheckMenuItemBuilder::with_id("repeat-off", "Off")
                 .checked(true)
                 .build(app)?;
-            let repeat_all =
-                CheckMenuItemBuilder::with_id("repeat-all", "All").build(app)?;
-            let repeat_one =
-                CheckMenuItemBuilder::with_id("repeat-one", "One").build(app)?;
+            let repeat_all = CheckMenuItemBuilder::with_id("repeat-all", "All").build(app)?;
+            let repeat_one = CheckMenuItemBuilder::with_id("repeat-one", "One").build(app)?;
             let repeat_menu = SubmenuBuilder::new(app, "Repeat")
                 .item(&repeat_off)
                 .item(&repeat_all)
@@ -6286,10 +7002,8 @@ pub fn run() {
             let rg_off = CheckMenuItemBuilder::with_id("replaygain-off", "Off")
                 .checked(true)
                 .build(app)?;
-            let rg_track =
-                CheckMenuItemBuilder::with_id("replaygain-track", "Track").build(app)?;
-            let rg_album =
-                CheckMenuItemBuilder::with_id("replaygain-album", "Album").build(app)?;
+            let rg_track = CheckMenuItemBuilder::with_id("replaygain-track", "Track").build(app)?;
+            let rg_album = CheckMenuItemBuilder::with_id("replaygain-album", "Album").build(app)?;
             let replaygain_menu = SubmenuBuilder::new(app, "ReplayGain")
                 .item(&rg_off)
                 .item(&rg_track)
@@ -6452,8 +7166,7 @@ pub fn run() {
             // Licenses opens another right-pane panel in the Settings/About family
             // (same Back button): the open source software Pudding is built from,
             // generated from the real dependency graph at build time.
-            let licenses_item =
-                MenuItemBuilder::with_id("open-licenses", "Licenses").build(app)?;
+            let licenses_item = MenuItemBuilder::with_id("open-licenses", "Licenses").build(app)?;
             let help_menu = SubmenuBuilder::new(app, "Help")
                 .item(&website_item)
                 .item(&privacy_item)
@@ -7284,7 +7997,10 @@ mod tests {
             &|_, _| {},
         );
 
-        assert!(report.ok.is_empty(), "Lofty must reject the malformed fixture");
+        assert!(
+            report.ok.is_empty(),
+            "Lofty must reject the malformed fixture"
+        );
         assert_eq!(report.failed.len(), 1);
         assert!(
             report.failed[0].message.contains("Couldn't read that file"),
@@ -7300,16 +8016,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The write-side half of the same bug. Pudding passes a 16 MiB search window
-    // to Lofty's ID3v2 writer so it can find a genuinely stacked tag. Lofty scans
-    // that whole window for the literal bytes `ID3`; when it finds an incidental
-    // marker inside MPEG audio and the candidate header is invalid, it leaves the
-    // writer positioned at that marker. The subsequent write then drops every byte
-    // before it. This is the destructive path that shortened the affected track.
+    // The write-side half of the same historical bug. Pudding passes a 16 MiB
+    // search window to Lofty's ID3v2 writer so it can find a genuinely stacked
+    // tag. Older Lofty versions could mistake incidental `ID3` bytes in MPEG audio
+    // for a tag boundary and drop the preceding audio. Keep the fixture even after
+    // that parser bug is fixed: Pudding's payload guard must continue to make a
+    // successful save byte-exact, or reject it before publication.
     #[test]
-    fn an_incidental_id3_marker_in_mpeg_audio_fails_without_replacing_the_file() {
+    fn an_incidental_id3_marker_in_mpeg_audio_preserves_the_payload_and_inode() {
         let (dir, paths) = sample_copies("id3-marker-in-audio", 1);
         let path = &paths[0];
+        let before_inode = inode_of(path);
         let tagged = std::fs::read(path).expect("read tagged sample");
         let old_tag_size = tagged[6..10]
             .iter()
@@ -7332,25 +8049,30 @@ mod tests {
         std::fs::write(path, &fixture).expect("write untagged MPEG fixture");
 
         let report = write_tags_to_files(
-            &save_jobs(&paths, &album_patch("Safe second pass"), &ArtworkChange::Keep),
+            &save_jobs(
+                &paths,
+                &album_patch("Safe second pass"),
+                &ArtworkChange::Keep,
+            ),
             &cache_ok,
             &no_journal,
             &nothing_held,
             &|| false,
             &|_, _| {},
         );
-        assert!(report.ok.is_empty(), "the unsafe write must not be published");
-        assert_eq!(report.failed.len(), 1);
         assert!(
-            report.failed[0].message.contains("audio changed during the tag write"),
-            "the failure must explain why Pudding kept the original: {}",
-            report.failed[0].message
+            report.failed.is_empty(),
+            "the corrected writer must succeed"
         );
+        assert_eq!(report.ok.len(), 1);
+        assert_eq!(inode_of(path), before_inode);
+        let after = std::fs::read(path).expect("read saved fixture");
         assert_eq!(
-            std::fs::read(path).expect("read original fixture"),
-            fixture,
-            "the failed write must leave the original MPEG bytes untouched"
+            mpeg_payload_after_id3v2(&after),
+            Some(fixture.as_slice()),
+            "the tag write must leave every MPEG payload byte untouched"
         );
+        assert_eq!(album_of(path).as_deref(), Some("Safe second pass"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -7411,6 +8133,79 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Lofty does not serialize an empty ID3v2 header: removing the final frame
+    // removes the tag itself. That is a successful clear, not a failed write, and
+    // the verifier must still check that the MPEG payload and inode survived.
+    #[test]
+    fn clearing_the_only_tag_item_removes_the_tag() {
+        let (dir, paths) = sample_copies("clear-last-tag-item", 1);
+        let path = PathBuf::from(&paths[0]);
+        let tagged = std::fs::read(&path).expect("read tagged sample");
+        let audio = mpeg_payload_after_id3v2(&tagged)
+            .expect("sample has a valid ID3v2 boundary")
+            .to_vec();
+        std::fs::write(&path, &audio).expect("strip the sample tag");
+
+        let mut title_only = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        title_only.set_title("Only title".into());
+        title_only
+            .save_to_path(&path, lofty::config::WriteOptions::default())
+            .expect("seed a title-only tag");
+        let before_inode = inode_of(&path);
+        let seeded = open_tagged(&path, TAGS_ONLY).expect("read seeded file");
+        assert_eq!(seeded.tags().len(), 1, "fixture has exactly one tag");
+        assert_eq!(seeded.tags()[0].len(), 1, "title is its only item");
+
+        let edits = TagEdits {
+            title: clear(),
+            ..Default::default()
+        }
+        .normalized();
+        let (cached, _, _, _, _) =
+            write_one_file(&path, &edits, &ArtworkChange::Keep).expect("clear succeeds");
+
+        let after = open_tagged(&path, TAGS_ONLY).expect("read cleared file");
+        assert!(after.tags().is_empty(), "an empty ID3v2 tag is removed");
+        assert_eq!(cached.title, None, "the cache reports the cleared title");
+        assert_eq!(
+            inode_of(&path),
+            before_inode,
+            "the edited file keeps its inode"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read cleared file"),
+            audio,
+            "removing the tag leaves the MPEG stream byte-exact"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The empty-tag exception is deliberately keyed to the whole mutated tag,
+    // not to the editor's visible-field fingerprint. A vanished tag must remain a
+    // verification failure whenever anything was expected to be written.
+    #[test]
+    fn a_missing_saved_tag_is_rejected_when_unfingerprinted_metadata_was_expected() {
+        let mut expected = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        expected.insert_text(lofty::tag::ItemKey::Composer, "Must survive".into());
+        let fingerprint = tag_write_fingerprint(&expected);
+        assert_eq!(
+            fingerprint,
+            tag_write_fingerprint(&lofty::tag::Tag::new(lofty::tag::TagType::Id3v2)),
+            "Composer is deliberately outside the editor's write fingerprint"
+        );
+
+        let failure = verified_cached_fields(None, &fingerprint, expected.is_empty())
+            .err()
+            .expect("a nonempty expected tag cannot disappear");
+
+        assert_eq!(
+            failure.message,
+            "Couldn't validate the edited file: the saved tag is missing"
+        );
+        assert!(!failure.fatal);
     }
 
     // The behaviour change the mode collapse brings, and the one a user could
@@ -8019,9 +8814,10 @@ mod tests {
     // lofty rewrites a file where it stands: for ID3v2 it reads the audio into
     // memory, truncates the file to zero and writes it all back. Every test here
     // exists because a save that dies between that truncate and the last byte used
-    // to leave an empty file where a song was. staged_tag_write stages on a copy and
-    // renames, so the assertions are all the same shape: after a failure, the track
-    // is byte-for-byte what it was.
+    // to leave an empty file where a song was. The direct writer now restores its
+    // one durable backup through the original descriptor, so the assertions are all
+    // the same shape: after a recoverable failure, the track is byte-for-byte what
+    // it was.
 
     // A small APFS volume that can actually be filled. There is no way to fake
     // ENOSPC through std, and ENOSPC is precisely the failure that lands after the
@@ -8147,20 +8943,29 @@ mod tests {
             .expect("read dir")
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with(".pudding-save-"))
+            .filter(|n| n.starts_with(".pudding-save-") || n.starts_with(".pudding-backup-"))
             .collect()
     }
 
     #[test]
     fn deleting_a_station_preserves_the_preceding_local_track() {
-        let path = std::env::temp_dir().join(format!("pudding-mixed-delete-{}.m3u8", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("pudding-mixed-delete-{}.m3u8", std::process::id()));
         let local = "#EXTM3U\n#EXTINF:123 tvg-logo=\"local.jpg\",Local song\na.mp3\n";
         let original = format!("{local}https://example.test/radio\n");
         std::fs::write(&path, &original).unwrap();
         let stations = parse_m3u_stream_list(&original).unwrap();
         assert_ne!(stations[0].name, "Local song");
         assert_eq!(stations[0].image, None);
-        update_stream(path.to_str().unwrap().into(), 0, "Radio".into(), "https://example.test/new".into(), None, None).unwrap();
+        update_stream(
+            path.to_str().unwrap().into(),
+            0,
+            "Radio".into(),
+            "https://example.test/new".into(),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().starts_with(local));
         // Repeat with the bare URL: this used to consume the local track's EXTINF.
         std::fs::write(&path, &original).unwrap();
@@ -8175,8 +8980,14 @@ mod tests {
         const CHILD: &str = "PUDDING_TEST_FAILED_PLAYLIST_WRITE";
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tests::failed_playlist_writes_keep_originals", "--nocapture"])
-                .env(CHILD, "1").status().unwrap();
+                .args([
+                    "--exact",
+                    "tests::failed_playlist_writes_keep_originals",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
             assert!(status.success());
             return;
         }
@@ -8189,12 +9000,17 @@ mod tests {
         unsafe {
             assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut prior), 0);
             libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
-            let limit = libc::rlimit { rlim_cur: 1024, rlim_max: prior.rlim_max };
+            let limit = libc::rlimit {
+                rlim_cur: 1024,
+                rlim_max: prior.rlim_max,
+            };
             assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
         }
         let stream_result = write_stream_file(path.to_str().unwrap(), &"x".repeat(4096));
         let playlist_result = write_durably(&path, &vec![b'x'; 4096]);
-        unsafe { assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &prior), 0); }
+        unsafe {
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &prior), 0);
+        }
         assert!(stream_result.is_err());
         assert!(playlist_result.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), original);
@@ -8204,7 +9020,8 @@ mod tests {
 
     #[test]
     fn an_edit_during_staging_is_preserved() {
-        let dir = std::env::temp_dir().join(format!("pudding-before-replace-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pudding-before-replace-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mix.m3u8");
         std::fs::write(&path, b"old").unwrap();
@@ -8795,7 +9612,7 @@ mod tests {
             ..Default::default()
         }
         .normalized();
-        let (cached, _, _, _) =
+        let (cached, _, _, _, _) =
             write_one_file(&track, &edits, &ArtworkChange::Keep).expect("write succeeds");
 
         let after = file_tags(&paths[0], ArtworkRead::DataUrl);
@@ -8917,10 +9734,9 @@ mod tests {
         );
     }
 
-    // Saving through a symlink must tag the track, not replace the link with a
-    // copy of it. It matters most to the rename publish_staged falls back to, which
-    // swaps a directory entry — so without canonicalizing first, editing a symlinked
-    // track would leave a regular file where the link was and strand the original.
+    // Saving through a symlink must tag the real track while leaving the link in
+    // place. Canonicalization also makes the write's identity checks and sibling
+    // backup refer to the file actually being edited.
     #[test]
     fn saving_through_a_symlink_keeps_the_symlink() {
         let (dir, paths) = sample_copies("symlink", 1);
@@ -8943,9 +9759,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The staged copy is what carries a file's metadata into the published track.
-    // Finder tags and comments live in xattrs, and losing them on every tag edit
-    // would be its own quiet data loss.
+    // Publishing into the existing inode naturally keeps Finder tags, comments,
+    // ACLs and other inode metadata.
     #[test]
     fn extended_attributes_survive_a_save() {
         let (dir, paths) = sample_copies("xattr", 1);
@@ -8976,7 +9791,7 @@ mod tests {
             .expect("read xattr");
         assert!(
             String::from_utf8_lossy(&read.stdout).contains("keep me"),
-            "the staged copy carries the file's metadata into the published track"
+            "in-place publication preserves the file's extended attributes"
         );
         assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
 
@@ -8990,24 +9805,6 @@ mod tests {
         std::fs::metadata(path.as_ref()).expect("stat").ino()
     }
 
-    fn marker_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("pudding-inflight-{}-{}", std::process::id(), name));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("marker dir");
-        dir
-    }
-
-    fn markers_in(dir: &Path) -> Vec<PathBuf> {
-        std::fs::read_dir(dir)
-            .map(|rd| {
-                rd.flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|e| e == "inflight"))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
     // The whole point of the exercise. A rename publishes a different inode under
     // the same name, so anything keyed on file identity rather than on the path —
     // file aliases other apps hold, sync and backup clients — reads a track the user
@@ -9035,174 +9832,294 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Losing the ability to record an in-flight publish is not a reason to publish
-    // unsafely — it is a reason to publish the way that needs no recovery. The
-    // inode changes, and that is the price of staying atomic.
     #[test]
-    fn with_nowhere_to_record_it_a_publish_falls_back_to_rename() {
-        let (dir, paths) = sample_copies("no-marker", 1);
+    fn a_save_updates_existing_hard_links_instead_of_stranding_them() {
+        let (dir, paths) = sample_copies("hard-link", 1);
         let target = PathBuf::from(&paths[0]);
-        let before = inode_of(&target);
+        let alias = dir.join("alias.mp3");
+        std::fs::hard_link(&target, &alias).expect("hard link");
 
-        let staged = StagedFile(temp_sibling(&target).expect("temp"));
-        std::fs::copy(&target, &staged.0).expect("stage");
-        std::fs::write(&staged.0, b"published bytes").expect("write staged");
+        write_one_file(&target, &album_patch("Night Bus"), &ArtworkChange::Keep).expect("write");
 
-        publish_staged(&target, staged, None).expect("publish");
+        assert_eq!(inode_of(&target), inode_of(&alias));
+        assert_eq!(
+            album_of(alias.to_str().unwrap()).as_deref(),
+            Some("Night Bus")
+        );
 
-        assert_eq!(std::fs::read(&target).expect("read"), b"published bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn prepared_backup(target: &Path) -> (std::fs::File, FileStamp, String, BackupFile) {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(target)
+            .unwrap();
+        let stamp = file_stamp_from_metadata(&file.metadata().unwrap());
+        let backup = BackupFile::new(backup_sibling(target).unwrap());
+        durable_copy(target, &backup.path).unwrap();
+        let digest = sha256_open_file(&mut file).unwrap();
+        assert_eq!(digest, sha256_file(&backup.path).unwrap());
+        (file, stamp, digest, backup)
+    }
+
+    #[test]
+    fn metadata_recovery_copy_is_not_created_in_the_track_folder() {
+        let (dir, paths) = sample_copies("backup-outside-library", 1);
+        let backup = backup_sibling(Path::new(&paths[0])).expect("reserve backup");
         assert_ne!(
-            inode_of(&target),
-            before,
-            "a rename publish swaps the inode; that is what it costs"
+            backup.parent(),
+            Some(dir.as_path()),
+            "a cloud provider must not see Pudding's rollback copy beside the track"
         );
+        std::fs::remove_file(&backup).expect("remove empty reservation");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn prepared_recovery_manifest(
+        target: &Path,
+        recovery_dir: &Path,
+    ) -> (PathBuf, PathBuf, RecoveryManifest) {
+        std::fs::create_dir_all(recovery_dir).unwrap();
+        let backup = recovery_dir.join(".pudding-backup-test");
+        durable_copy(target, &backup).unwrap();
+        let stamp = file_stamp(target).unwrap();
+        let hash = sha256_file(&backup).unwrap();
+        let (manifest, manifest_path) =
+            RecoveryManifest::prepare(target, &backup, stamp, hash).unwrap();
+        (backup, manifest_path, manifest)
+    }
+
+    #[test]
+    fn startup_recovery_restores_a_prepared_working_copy() {
+        let (dir, paths) = sample_copies("startup-recovery", 1);
+        let target = PathBuf::from(&paths[0]);
+        let original = std::fs::read(&target).unwrap();
+        let recovery_dir = dir.join("recovery");
+        let (backup, manifest, _) = prepared_recovery_manifest(&target, &recovery_dir);
+
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&target)
+                .unwrap();
+            write_test_bytes(&mut file, b"interrupted metadata write").unwrap();
+            sync_durable(&file).unwrap();
+        }
+        recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        assert!(
+            !backup.exists(),
+            "recovery backup is consumed after restoration"
+        );
+        assert!(
+            !manifest.exists(),
+            "recovery manifest is consumed after restoration"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn startup_recovery_keeps_a_committed_working_copy() {
+        let (dir, paths) = sample_copies("startup-committed", 1);
+        let target = PathBuf::from(&paths[0]);
+        let recovery_dir = dir.join("recovery");
+        let (backup, manifest_path, mut manifest) =
+            prepared_recovery_manifest(&target, &recovery_dir);
+
+        let saved = b"verified metadata write";
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&target)
+                .unwrap();
+            write_test_bytes(&mut file, saved).unwrap();
+            sync_durable(&file).unwrap();
+        }
+        manifest.mark_committed(&manifest_path).unwrap();
+        recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), saved);
+        assert!(!backup.exists(), "completed-save backup is only cleanup");
+        assert!(
+            !manifest_path.exists(),
+            "completed-save manifest is only cleanup"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_test_bytes(file: &mut std::fs::File, bytes: &[u8]) -> Result<(), std::io::Error> {
+        file.seek(SeekFrom::Start(0))?;
+        std::io::Write::write_all(file, bytes)?;
+        file.set_len(bytes.len() as u64)
+    }
+
+    fn write_protocol_bytes(target: &Path, bytes: &[u8]) -> Result<SavedFileVersion, WriteFailure> {
+        let (mut file, stamp, digest, backup) = prepared_backup(target);
+        perform_direct_write(
+            target,
+            &mut file,
+            stamp,
+            digest,
+            backup,
+            |file| write_test_bytes(file, bytes).map_err(|e| WriteFailure::io("test write", &e)),
+            |file| sha256_open_file(file).map_err(|e| WriteFailure::io("test verification", &e)),
+            overwrite_open_file,
+        )
+    }
+
+    #[test]
+    fn a_direct_write_failure_restores_exact_bytes_and_inode() {
+        let (dir, paths) = sample_copies("direct-failure", 1);
+        let target = PathBuf::from(&paths[0]);
+        let before = std::fs::read(&target).unwrap();
+        let inode = inode_of(&target);
+        let (mut file, stamp, digest, backup) = prepared_backup(&target);
+
+        let error = perform_direct_write(
+            &target,
+            &mut file,
+            stamp,
+            digest,
+            backup,
+            |file| {
+                write_test_bytes(file, b"partial")
+                    .map_err(|e| WriteFailure::io("test write", &e))?;
+                Err(WriteFailure {
+                    message: "simulated write failure".into(),
+                    fatal: false,
+                })
+            },
+            |_| unreachable!("a failed write is not verified"),
+            overwrite_open_file,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("original file was restored"));
+        assert!(!error.fatal);
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(inode_of(&target), inode);
         assert!(staged_leftovers(&dir).is_empty());
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A crash between the first overwritten byte and the last leaves the track
-    // torn. That state is indistinguishable from another app replacing the target
-    // while Pudding was down, so recovery preserves both versions instead of
-    // silently choosing the staged one and overwriting a possible external edit.
     #[test]
-    fn recovery_preserves_an_ambiguous_interrupted_publish() {
-        let (dir, paths) = sample_copies("recover-torn", 1);
-        let markers = marker_dir("recover-torn");
+    fn a_restore_failure_keeps_the_backup_and_reports_its_path() {
+        let (dir, paths) = sample_copies("restore-failure", 1);
         let target = PathBuf::from(&paths[0]);
-        let before = inode_of(&target);
+        let (mut file, stamp, digest, backup) = prepared_backup(&target);
+        let backup_path = backup.path.clone();
 
-        // Stage a complete new version, record it, then tear the target the way a
-        // power cut during the copy would.
-        let staged = temp_sibling(&target).expect("temp");
-        std::fs::write(&staged, b"the complete new track").expect("stage");
-        let marker = InflightMarker::create(&markers, &target, &staged).expect("marker");
-        marker.keep();
-        std::fs::write(&target, b"the complete ne").expect("tear");
+        let error = perform_direct_write(
+            &target,
+            &mut file,
+            stamp,
+            digest,
+            backup,
+            |file| {
+                write_test_bytes(file, b"damaged")
+                    .map_err(|e| WriteFailure::io("test write", &e))?;
+                Err(WriteFailure {
+                    message: "simulated write failure".into(),
+                    fatal: false,
+                })
+            },
+            |_| unreachable!("a failed write is not verified"),
+            |_, _| Err(std::io::Error::other("simulated restore failure")),
+        )
+        .unwrap_err();
 
-        assert_eq!(recover_inflight_writes(&markers), 0);
-
-        assert_eq!(
-            std::fs::read(&target).expect("read"),
-            b"the complete ne",
-            "recovery must not overwrite a target that changed after marking"
-        );
-        assert_eq!(inode_of(&target), before, "recovery does not replace the target");
-        assert_eq!(markers_in(&markers).len(), 1, "the marker remains for manual recovery");
-        assert!(staged.exists(), "the complete staged copy is retained");
-
+        assert!(error.fatal);
+        assert!(error.message.contains(target.to_string_lossy().as_ref()));
+        assert!(error
+            .message
+            .contains(backup_path.to_string_lossy().as_ref()));
+        assert!(backup_path.exists());
+        std::fs::remove_file(&backup_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&markers);
     }
 
-    // The staged file is deleted only after the target has been fsynced, so a
-    // marker without one is a publish that finished. There is nothing to redo, and
-    // redoing it is not an option anyway — the bytes are gone.
     #[test]
-    fn recovery_leaves_a_finished_publish_alone() {
-        let (dir, paths) = sample_copies("recover-done", 1);
-        let markers = marker_dir("recover-done");
+    fn a_verification_failure_restores_the_original() {
+        let (dir, paths) = sample_copies("verify-failure", 1);
         let target = PathBuf::from(&paths[0]);
-        let staged = temp_sibling(&target).expect("temp");
+        let before = std::fs::read(&target).unwrap();
+        let inode = inode_of(&target);
+        let (mut file, stamp, digest, backup) = prepared_backup(&target);
 
-        InflightMarker::create(&markers, &target, &staged)
-            .expect("marker")
-            .keep();
-        let settled = std::fs::read(&target).expect("read");
+        let error = perform_direct_write(
+            &target,
+            &mut file,
+            stamp,
+            digest,
+            backup,
+            |file| {
+                write_test_bytes(file, b"apparently written")
+                    .map_err(|e| WriteFailure::io("test write", &e))
+            },
+            |_| {
+                Err(WriteFailure {
+                    message: "simulated verification failure".into(),
+                    fatal: false,
+                })
+            },
+            overwrite_open_file,
+        )
+        .unwrap_err();
 
-        assert_eq!(recover_inflight_writes(&markers), 0);
-
-        assert_eq!(std::fs::read(&target).expect("read"), settled);
-        assert!(markers_in(&markers).is_empty(), "the marker is cleared anyway");
-
+        assert!(error.message.contains("original file was restored"));
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(inode_of(&target), inode);
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&markers);
     }
 
-    // A track deleted after the save was interrupted must stay deleted. Retrying
-    // the copy would put it back, and the marker would otherwise be retried on
-    // every launch from then on.
     #[test]
-    fn recovery_drops_a_save_whose_track_is_gone() {
-        let (dir, paths) = sample_copies("recover-deleted", 1);
-        let markers = marker_dir("recover-deleted");
+    fn mpeg_payload_corruption_is_rejected_and_restored() {
+        let (dir, paths) = sample_copies("mpeg-corruption", 1);
         let target = PathBuf::from(&paths[0]);
-        let staged = temp_sibling(&target).expect("temp");
-        std::fs::write(&staged, b"the complete new track").expect("stage");
-        InflightMarker::create(&markers, &target, &staged)
-            .expect("marker")
-            .keep();
-        std::fs::remove_file(&target).expect("delete the track");
+        let before = std::fs::read(&target).unwrap();
+        let inode = inode_of(&target);
+        let (mut file, stamp, digest, backup) = prepared_backup(&target);
+        let backup_path = backup.path.clone();
 
-        assert_eq!(recover_inflight_writes(&markers), 0);
+        let error = perform_direct_write(
+            &target,
+            &mut file,
+            stamp,
+            digest,
+            backup,
+            |file| {
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|e| WriteFailure::io("test write", &e))?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|e| WriteFailure::io("test write", &e))?;
+                let payload = mpeg_payload_after_id3v2(&bytes).expect("valid MPEG boundary");
+                let payload_start = bytes.len() - payload.len();
+                bytes[payload_start] ^= 0x01;
+                write_test_bytes(file, &bytes).map_err(|e| WriteFailure::io("test write", &e))
+            },
+            |_| {
+                if mpeg_payload_matches(&backup_path, &target).unwrap() {
+                    Ok(sha256_file(&target).unwrap())
+                } else {
+                    Err(WriteFailure {
+                        message: "the audio changed during the tag write".into(),
+                        fatal: false,
+                    })
+                }
+            },
+            overwrite_open_file,
+        )
+        .unwrap_err();
 
-        assert!(!target.exists(), "the deleted track stays deleted");
-        assert!(!staged.exists(), "and its staged copy is cleaned up");
-        assert!(markers_in(&markers).is_empty(), "so the marker is not retried forever");
-
+        assert!(error.message.contains("original file was restored"));
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        assert_eq!(inode_of(&target), inode);
+        assert!(staged_leftovers(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&markers);
-    }
-
-    // A marker is written and fsynced before the publish starts, but a power cut
-    // can still catch it mid-write on a filesystem that does not order the two.
-    // An unparseable record must not wedge every future launch.
-    #[test]
-    fn recovery_discards_a_marker_it_cannot_read() {
-        let markers = marker_dir("recover-garbage");
-        std::fs::write(markers.join("99-0.inflight"), b"{ truncated").expect("write");
-        std::fs::write(markers.join("not-a-marker.txt"), b"leave me").expect("write");
-
-        assert_eq!(recover_inflight_writes(&markers), 0);
-
-        assert!(markers_in(&markers).is_empty(), "the bad marker is dropped");
-        assert!(
-            markers.join("not-a-marker.txt").exists(),
-            "recovery only claims its own files"
-        );
-
-        let _ = std::fs::remove_dir_all(&markers);
-    }
-
-    // When the copy back cannot be completed even on the retry, the staged file is
-    // the only whole copy of the track in existence. Tidying it away with the
-    // guards would turn a repairable file into a lost one.
-    #[test]
-    fn a_publish_that_cannot_finish_keeps_what_recovery_needs() {
-        use std::os::unix::fs::PermissionsExt;
-        let (dir, paths) = sample_copies("publish-denied", 1);
-        let markers = marker_dir("publish-denied");
-        let target = PathBuf::from(&paths[0]);
-
-        let staged = StagedFile(temp_sibling(&target).expect("temp"));
-        std::fs::write(&staged.0, b"the complete new track").expect("stage");
-        let staged_path = staged.0.clone();
-
-        // Unwritable target: open(2) for write fails, so the copy back cannot start.
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))
-            .expect("chmod");
-        let failed = publish_staged(&target, staged, Some(&markers));
-        assert!(failed.is_err(), "the publish reports the failure");
-        assert!(
-            failed.unwrap_err().to_string().contains("repaired"),
-            "and says the file needs repairing, not that nothing happened"
-        );
-        assert!(staged_path.exists(), "the staged copy is kept");
-        assert_eq!(markers_in(&markers).len(), 1, "and so is its marker");
-
-        // Whatever was wrong is fixed by the time the app next starts.
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
-            .expect("chmod back");
-        assert_eq!(recover_inflight_writes(&markers), 1);
-        assert_eq!(
-            std::fs::read(&target).expect("read"),
-            b"the complete new track"
-        );
-        assert!(markers_in(&markers).is_empty());
-        assert!(!staged_path.exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&markers);
     }
 
     // A tag that shrinks — clearing a comment, dropping a cover — leaves the new
@@ -9212,12 +10129,100 @@ mod tests {
     fn a_shorter_save_does_not_leave_the_old_tail_behind() {
         let (dir, paths) = sample_copies("shorter", 1);
         let target = PathBuf::from(&paths[0]);
-        let staged = StagedFile(temp_sibling(&target).expect("temp"));
-        std::fs::write(&staged.0, b"short").expect("stage");
 
-        publish_staged(&target, staged, Some(&marker_dir("shorter"))).expect("publish");
+        write_protocol_bytes(&target, b"short").expect("write");
 
         assert_eq!(std::fs::read(&target).expect("read"), b"short");
+        assert!(staged_leftovers(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publication_waits_until_pudding_readers_release_the_track() {
+        let (dir, paths) = sample_copies("reader-gate", 1);
+        let target = PathBuf::from(&paths[0]);
+        let alias = dir.join("reader-alias.mp3");
+        std::fs::hard_link(&target, &alias).unwrap();
+        let lease = begin_file_read(&alias).expect("reader lease through a hard link");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                started_tx.send(()).unwrap();
+                let result = write_protocol_bytes(&target, b"new bytes");
+                done_tx.send(result).unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(
+                done_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .is_err(),
+                "publication must wait while a Pudding reader can observe the file"
+            );
+            drop(lease);
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("publisher wakes")
+                .expect("publish");
+        });
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_external_replacement_before_mutation_is_never_overwritten() {
+        let (dir, paths) = sample_copies("external-replace", 1);
+        let target = PathBuf::from(&paths[0]);
+        let old_inode = inode_of(&target);
+        let (mut target_file, stamp, digest, backup) = prepared_backup(&target);
+
+        let replacement = dir.join("replacement");
+        std::fs::write(&replacement, b"external replacement").unwrap();
+        std::fs::rename(&replacement, &target).unwrap();
+        assert_ne!(inode_of(&target), old_inode);
+
+        assert!(perform_direct_write(
+            &target,
+            &mut target_file,
+            stamp,
+            digest,
+            backup,
+            |_| panic!("a replaced path must be rejected before mutation"),
+            |_| unreachable!(),
+            overwrite_open_file,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"external replacement");
+        assert!(staged_leftovers(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_external_in_place_edit_before_mutation_is_rejected() {
+        let (dir, paths) = sample_copies("external-modify", 1);
+        let target = PathBuf::from(&paths[0]);
+        let before_inode = inode_of(&target);
+        let (mut target_file, stamp, digest, backup) = prepared_backup(&target);
+
+        std::fs::write(&target, b"external in-place edit").unwrap();
+        assert_eq!(inode_of(&target), before_inode);
+        assert!(perform_direct_write(
+            &target,
+            &mut target_file,
+            stamp,
+            digest,
+            backup,
+            |_| panic!("an in-place change must be rejected before mutation"),
+            |_| unreachable!(),
+            overwrite_open_file,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"external in-place edit");
+        assert!(staged_leftovers(&dir).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9262,6 +10267,50 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open");
         init_schema(&conn).expect("schema");
         conn
+    }
+
+    fn fake_saved_version() -> SavedFileVersion {
+        SavedFileVersion {
+            stamp: FileStamp {
+                size: 1,
+                modified_ns: Some(1),
+                #[cfg(unix)]
+                device: 1,
+                #[cfg(unix)]
+                inode: 1,
+            },
+            sha256: "test".into(),
+        }
+    }
+
+    #[test]
+    fn undo_schema_migrates_existing_journals_in_place() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tag_undo (
+                batch INTEGER NOT NULL, seq INTEGER NOT NULL, path TEXT NOT NULL,
+                mtime INTEGER NOT NULL, size INTEGER NOT NULL, fields TEXT NOT NULL,
+                art INTEGER NOT NULL DEFAULT 0, picture BLOB, picture_mime TEXT,
+                picture_desc TEXT, picture_type INTEGER, PRIMARY KEY (batch, seq)
+            );
+            INSERT INTO tag_undo (batch, seq, path, mtime, size, fields)
+            VALUES (1, 0, '/old.mp3', 1, 1, '{}');",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(tag_undo)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "version"));
+        assert!(columns.iter().any(|column| column == "aliases"));
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tag_undo", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "migration does not discard the prior inverse");
     }
 
     // A save that journals, as write_tags does it: one batch id taken by the first
@@ -9310,7 +10359,17 @@ mod tests {
             .count();
         let jobs: Vec<(String, TagJob)> = rows
             .iter()
-            .map(|r| (r.path.clone(), TagJob::Restore(&r.undo)))
+            .flat_map(|r| {
+                r.aliases.iter().map(move |alias| {
+                    (
+                        alias.clone(),
+                        TagJob::Restore {
+                            undo: &r.undo,
+                            expected: r.version.as_ref().expect("filtered to versioned rows"),
+                        },
+                    )
+                })
+            })
             .collect();
         let mut report = write_tags_to_files(
             &jobs,
@@ -9381,6 +10440,47 @@ mod tests {
         }
         // One undo per save. The offer is spent, and the menu goes with it.
         assert!(undo_offer(&conn).expect("offer").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hard_link_aliases_are_written_and_journaled_once() {
+        let (dir, paths) = sample_copies("undo-hard-links", 1);
+        let conn = undo_db();
+        let target = PathBuf::from(&paths[0]);
+        let alias = dir.join("alias.mp3");
+        std::fs::hard_link(&target, &alias).expect("hard link");
+        seed(
+            &paths[0],
+            TagEdits {
+                album: set("Old Album"),
+                ..Default::default()
+            },
+            &ArtworkChange::Keep,
+        );
+        let both = vec![paths[0].clone(), alias.to_string_lossy().to_string()];
+
+        let saved = save_journaling(
+            &conn,
+            &both,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            MAX_UNDO_ART_BYTES,
+        );
+        assert_eq!(saved.ok.len(), 2, "both selected paths are reported");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tag_undo", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "one inode produces one inverse patch");
+        assert_eq!(album_of(&both[0]).as_deref(), Some("Night Bus"));
+        assert_eq!(album_of(&both[1]).as_deref(), Some("Night Bus"));
+
+        let restored = undo_journaled(&conn);
+        assert_eq!(restored.ok.len(), 2, "both alias paths are refreshed");
+        assert!(restored.failed.is_empty());
+        assert_eq!(album_of(&both[0]).as_deref(), Some("Old Album"));
+        assert_eq!(album_of(&both[1]).as_deref(), Some("Old Album"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9518,7 +10618,10 @@ mod tests {
             }
             let tag = tagged.primary_tag_mut().expect("tag");
             tag.set_album("Old Album".to_string());
-            tag.insert_text(lofty::tag::ItemKey::Composer, "Delia Derbyshire".to_string());
+            tag.insert_text(
+                lofty::tag::ItemKey::Composer,
+                "Delia Derbyshire".to_string(),
+            );
             tagged
                 .save_to_path(&track, lofty::config::WriteOptions::default())
                 .expect("seed a composer");
@@ -9605,7 +10708,10 @@ mod tests {
         let stored: Option<Vec<u8>> = conn
             .query_row("SELECT picture FROM tag_undo", [], |r| r.get(0))
             .expect("the row");
-        assert!(stored.is_none(), "no cover is kept for a save that keeps it");
+        assert!(
+            stored.is_none(),
+            "no cover is kept for a save that keeps it"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9712,6 +10818,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn undo_digest_rejects_a_same_stamp_external_change() {
+        let (dir, paths) = sample_copies("undo-same-stamp", 1);
+        let conn = undo_db();
+        seed(
+            &paths[0],
+            TagEdits {
+                album: set("Old Album"),
+                ..Default::default()
+            },
+            &ArtworkChange::Keep,
+        );
+        save_journaling(
+            &conn,
+            &paths,
+            &album_patch("Night Bus"),
+            &ArtworkChange::Keep,
+            MAX_UNDO_ART_BYTES,
+        );
+        let offer = undo_offer(&conn).unwrap().unwrap();
+        let mut rows = load_undo_batch(&conn, offer.batch).unwrap();
+        let row = rows.pop().unwrap();
+        let mut expected = row.version.unwrap();
+
+        // Simulate an external writer that leaves size and timestamps looking
+        // current. The test substitutes the live stamp into the expectation so
+        // only the persisted digest can distinguish the changed bytes.
+        let mut bytes = std::fs::read(&paths[0]).unwrap();
+        let last = bytes.last_mut().expect("non-empty track");
+        *last ^= 1;
+        std::fs::write(&paths[0], &bytes).unwrap();
+        expected.stamp = file_stamp(Path::new(&paths[0])).unwrap();
+        let before = std::fs::read(&paths[0]).unwrap();
+
+        let failure = match restore_one_file(Path::new(&paths[0]), &row.undo, &expected) {
+            Ok(_) => panic!("digest mismatch must decline the undo"),
+            Err(failure) => failure,
+        };
+        assert!(failure.message.contains("Changed since the save"));
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // A journal that will not write costs the batch its undo and nothing else. The
     // tags are on disk exactly as asked, and reporting a failure here would tell
     // someone their save didn't take when it did — the one report worse than none.
@@ -9732,7 +10882,10 @@ mod tests {
         );
 
         assert_eq!(report.ok.len(), 2);
-        assert!(report.failed.is_empty(), "a save that saved is not a failure");
+        assert!(
+            report.failed.is_empty(),
+            "a save that saved is not a failure"
+        );
         assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
         assert_eq!(album_of(&paths[1]).as_deref(), Some("Night Bus"));
         assert_eq!(
@@ -9761,11 +10914,15 @@ mod tests {
                 data: vec![7; 40],
             }),
         };
+        let version = fake_saved_version();
+        let first_aliases = vec!["first.mp3".to_string()];
         let first = UndoEntry {
             path: "first.mp3",
             mtime: 1,
             size: 1,
             undo: &undo,
+            version: &version,
+            aliases: &first_aliases,
         };
         conn.execute_batch(
             "CREATE TRIGGER reject_undo BEFORE INSERT ON tag_undo
@@ -9777,11 +10934,14 @@ mod tests {
         conn.execute_batch("DROP TRIGGER reject_undo")
             .expect("remove trigger");
 
+        let second_aliases = vec!["second.mp3".to_string()];
         let second = UndoEntry {
             path: "second.mp3",
             mtime: 1,
             size: 1,
             undo: &undo,
+            version: &version,
+            aliases: &second_aliases,
         };
         journal_undo_row(&conn, batch, 1, &second, &budget).expect("journal second row");
         assert_eq!(budget.get(), 24);
@@ -9897,7 +11057,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
     // The number/total pair is the one place a save could quietly take a neighbor
     // with it: ID3 stores both halves in a single TRCK frame ("3/12"), so an edit
     // to the number that rewrote the frame wholesale would drop the total — and an
@@ -9946,5 +11105,4 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

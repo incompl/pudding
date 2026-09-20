@@ -932,13 +932,13 @@ function openMetadataEditor(paths: string[], note?: string): Promise<void> {
     }
     if (report.aborted) {
       // The storage gave out — a full disk, a drive pulled out — and the batch
-      // stopped rather than attempting the hundreds behind it. Saying the rest are
-      // unchanged is the whole point of the sentence: every write is staged on a
-      // copy and renamed into place, so a save that fails leaves the track exactly
-      // as it was, and a half-finished bulk edit costs nothing but the redo.
+      // stopped rather than attempting the hundreds behind it. A direct metadata
+      // write can also reach this path after its rollback could not be verified;
+      // its error names a retained recovery backup, so never assure the user that
+      // the affected file is unchanged.
       return saved === 0
-        ? `${report.aborted}. Nothing was changed.`
-        : `Saved ${saved} of ${paths.length}. ${report.aborted}. The rest are unchanged.`;
+        ? `${report.aborted}. Check the recovery details before using the affected track.`
+        : `Saved ${saved} of ${paths.length}. ${report.aborted}. Tracks not reached were unchanged; check the recovery details before using the affected track.`;
     }
     if (saved === 0) return failed[0]?.message ?? "Couldn't save the tags.";
     if (failed.length > 0) {

@@ -42,7 +42,7 @@ tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 log = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
-lofty = "0.25.2"
+lofty = "0.25.3"
 base64 = "0.22"
 notify = "6"
 notify-debouncer-full = "0.3"
@@ -61,7 +61,7 @@ url = "2"
 coreaudio-sys = { version = "0.2", default-features = false, features = ["core_audio"] }
 libc = "0.2"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSDictionary", "NSValue", "NSObject", "NSData", "NSURL", "NSError"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSDictionary", "NSValue", "NSObject", "NSData", "NSURL", "NSError", "NSFileCoordinator"] }
 # NSWindow is here for `window_number` (lib.rs), which hands scripts/caliper.mjs
 # this window's CGWindowID so it can screencapture the real pixels.
 objc2-app-kit = { version = "0.3", features = ["NSImage", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder", "NSWindow"] }
