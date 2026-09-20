@@ -39,7 +39,7 @@ Search using the search box in the upper right (⌘F is the shortcut to open it)
 
 ## Streams
 
-The Streams tab shows a list of internet radio stations to play. You can add, edit, reorder, or delete streams right from this list. This list is backed by a playlist file which you can specify in the app settings. You can also use a stream list URL, which of course is read-only.
+The Streams tab shows a list of internet radio stations to play. New installs start with a writable list seeded from the built-in station template. You can add, edit, reorder, or delete streams right from this list. This list is backed by a playlist file which you can specify in the app settings. You can also use a stream list URL, which of course is read-only.
 
 Some more cool things about streams:
 

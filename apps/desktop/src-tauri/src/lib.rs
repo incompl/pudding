@@ -46,10 +46,12 @@ const METADATA_RECOVERY_DIR: &str = "metadata-recovery";
 static METADATA_RECOVERY_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 // Default stream list seeded on first run, alongside the library DB in the app
-// data dir. Created empty (header only) so the Streams panel starts as a valid,
-// empty list rather than an unconfigured dead-end; the path stays an editable
-// setting so the user can repoint it at a curated file elsewhere.
+// data dir. The editable M3U template lives beside the Tauri crate, so adding a
+// station does not require changing Rust. Its contents are copied only when the
+// user's list does not exist; the path remains an editable setting and existing
+// personal lists are never replaced.
 const DEFAULT_STREAM_LIST_FILE: &str = "streams.m3u8";
+const DEFAULT_STREAM_LIST: &str = include_str!("../default-streams.m3u8");
 
 // Identifies the app on every outbound HTTP request: stream list and station-art
 // fetches here, plus the ICY stream connection in the icy module. Public
@@ -1567,16 +1569,16 @@ async fn read_stream_list(path: String) -> Result<StreamList, String> {
     .map_err(|e| e.to_string())?
 }
 
-// Resolve the default stream list path, creating an empty (header-only) file on
-// first run if it is missing. The frontend seeds this as the stream list setting
-// when none has ever been configured, so a fresh install has a valid, writable
-// list instead of the "not configured" prompt.
+// Resolve the default stream list path, copying the bundled editable M3U template
+// on first run if it is missing. The frontend seeds this as the stream list
+// setting when none has ever been configured, so a fresh install has a valid,
+// writable list instead of the "not configured" prompt.
 fn ensure_default_stream_list(app: &AppHandle) -> Result<PathBuf, String> {
     let app_data = app_data_dir(app)?;
     std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
     let path = app_data.join(DEFAULT_STREAM_LIST_FILE);
     if !path.exists() {
-        std::fs::write(&path, "#EXTM3U\n").map_err(|e| e.to_string())?;
+        std::fs::write(&path, DEFAULT_STREAM_LIST).map_err(|e| e.to_string())?;
     }
     Ok(path)
 }
@@ -6847,8 +6849,8 @@ pub fn run() {
             });
 
             // Seed the default stream list file so a fresh install has a valid,
-            // empty list to point at. The frontend adopts this path only when no
-            // stream list has ever been configured.
+            // writable set of stations. The frontend adopts this path only when
+            // no stream list has ever been configured.
             if let Err(e) = ensure_default_stream_list(&app.handle()) {
                 log::warn!("could not create default stream list: {e}");
             }
@@ -7370,6 +7372,14 @@ mod tests {
         );
         // No #EXTINF: hostname stands in for the name.
         assert_eq!(streams[1].name, "stream.nightride.fm");
+    }
+
+    #[test]
+    fn default_stream_list_contains_the_approved_somafm_station() {
+        let streams = parse_m3u_stream_list(DEFAULT_STREAM_LIST).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].name, "SomaFM: Seventies");
+        assert_eq!(streams[0].url, "https://somafm.com/seventies320.pls");
     }
 
     #[test]

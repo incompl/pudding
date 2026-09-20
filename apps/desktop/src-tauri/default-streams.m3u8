@@ -1,0 +1,19 @@
+#EXTM3U
+#
+# Default stations for new Pudding installs. Keep this as an extended M3U so it
+# is easy to edit by hand and remains usable in other media players. This file
+# is copied to the user's writable streams.m3u8 only when that file is first
+# created; changes here never replace an existing personal station list.
+#
+# Stations are included only with permission from their operators.
+
+#EXTINF:-1 tvg-logo="https://somafm.com/logos/400/seventies400.jpg",SomaFM Left Coast 70s
+https://somafm.com/seventies320.pls
+#EXTINF:-1 tvg-logo="https://somafm.com/logos/400/lush400.jpg",SomaFM Lush
+https://somafm.com/lush.pls
+#EXTINF:-1 tvg-logo="https://somafm.com/logos/400/poptron400.png",SomaFM PopTron
+https://somafm.com/poptron.pls
+#EXTINF:-1 tvg-logo="https://somafm.com/logos/400/suburbsofgoa400.png",SomaFM Suburbs of Goa
+https://somafm.com/suburbsofgoa.pls
+#EXTINF:-1 tvg-logo="https://somafm.com/logos/400/thistle400.jpg",SomaFM ThistleRadio
+https://somafm.com/thistle.pls

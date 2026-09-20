@@ -134,7 +134,7 @@ unnecessarily keep a second copy of every edited file's data.
 
 - Icecast / SHOUTcast streams with in-band ICY now-playing metadata
 - Manage your stations right in the Streams tab: add, edit, reorder, and delete, with optional per-station art. Saved to a plain `.m3u8` you can also hand-edit or share
-- Starts with a writable list on first run; point it at any existing `.m3u` / `.m3u8`, or a remote `http(s)` URL (read-only)
+- Starts with a writable list seeded from [`default-streams.m3u8`](src-tauri/default-streams.m3u8); point it at any existing `.m3u` / `.m3u8`, or a remote `http(s)` URL (read-only)
 - Automatic reconnect with backoff; pausing disconnects, resuming rejoins the live edge
 - `.pls` / `.m3u` playlist URLs resolve automatically
 
