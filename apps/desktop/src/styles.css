@@ -782,15 +782,26 @@ html[data-mode="light"] #search-results {
   flex: 1;
   display: flex;
   flex-direction: column;
-  /* Sides + bottom are 0.75em so the flanking play/volume buttons sit the same
+  /* Sides are 0.75em so the flanking play/volume buttons sit about the same
      distance from the window's side edges as from its bottom edge (they're flush
      to this content box). The left side is trimmed by the splitter's width: that
      transparent resize strip sits just left of this panel and would otherwise
      push the play button in that much further than the volume button on the
      right. The top is a smaller 0.2em — matching #left's top margin — so this
      pane's card shares a top edge with the left panel's card, which also makes
-     the gap below the search/mode controls equal the gap below the tabs. */
-  padding: 0 0.75em 0.75em calc(0.75em - var(--splitter-width));
+     the gap below the search/mode controls equal the gap below the tabs.
+
+     The bottom is a flat 10px rather than the sides' 0.75em, and that is NOT
+     10.5px rounded off for tidiness — it has to stay a whole CSS pixel. The tag
+     editor's actions row (#pane-editor-view .inline-editor-actions) is sticky at
+     bottom: 0 inside this scroll box, and sticky bottom resolves against the
+     scrollport's bottom CONTENT edge — i.e. offset by this padding. At 10.5px
+     that edge lands on a half CSS pixel and the opaque row's painted bottom
+     can't quite reach it, so the fields scrolling underneath show through as a
+     hairline just above the transport controls. An integer closes the seam;
+     confirmed by testing. Don't restore the em here for symmetry with the sides
+     — the half pixel of asymmetry is invisible, the hairline is not. */
+  padding: 0 0.75em 10px calc(0.75em - var(--splitter-width));
   overflow: auto;
   min-width: 200px;
 }
