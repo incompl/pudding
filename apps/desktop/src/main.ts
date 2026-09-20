@@ -3400,11 +3400,16 @@ function setupEffects(): void {
   });
 
   effect(() => {
-    playPauseGlyph.textContent = isPlaying.value ? "⏸" : "▶";
-    playPauseBtn.setAttribute("aria-label", isPlaying.value ? "Pause" : "Play");
+    const playing = isPlaying.value;
+    playPauseGlyph.textContent = playing ? "⏸" : "▶";
+    playPauseBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
+    // These describe the action/glyph shown by the button, making the two
+    // shapes independently styleable (for example, #play-pause-btn.play).
+    playPauseBtn.classList.toggle("play", !playing);
+    playPauseBtn.classList.toggle("pause", playing);
     // Freeze the playing-row equalizer bars while paused (CSS pins their animation
     // off body.playback-paused), matching the paused transport state.
-    document.body.classList.toggle("playback-paused", !isPlaying.value);
+    document.body.classList.toggle("playback-paused", !playing);
   });
   effect(() => {
     // Idle play starts the first library entry, or the bundled welcome track on a

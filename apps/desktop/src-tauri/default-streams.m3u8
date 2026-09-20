@@ -6,6 +6,8 @@
 # created; changes here never replace an existing personal station list.
 #
 # Stations are included only with permission from their operators.
+# Permission from SomaFM received 9/17/26 for specific stations, a few of which
+# I chose to include.
 
 #EXTINF:-1 tvg-logo="https://somafm.com/logos/400/seventies400.jpg",SomaFM Left Coast 70s
 https://somafm.com/seventies320.pls

@@ -21,6 +21,10 @@ test("transport label always reflects the isPlaying signal", async () => {
     await d.attr("#play-pause-btn", "aria-label"),
     s.isPlaying ? "Pause" : "Play",
   );
+  assert.equal(
+    await d.attr("#play-pause-btn", "class"),
+    s.isPlaying ? "pause" : "play",
+  );
 });
 
 test("play -> pause: real engine and UI stay in agreement", async () => {
@@ -36,6 +40,7 @@ test("play -> pause: real engine and UI stay in agreement", async () => {
     message: "engine never reported playing",
   });
   assert.equal(await d.attr("#play-pause-btn", "aria-label"), "Pause");
+  assert.equal(await d.attr("#play-pause-btn", "class"), "pause");
   assert.equal(await d.prop("#play-pause-btn", "disabled"), false);
   assert.equal((await d.probe()).hasTrack, true);
 
@@ -51,4 +56,5 @@ test("play -> pause: real engine and UI stay in agreement", async () => {
     message: "engine never reported paused",
   });
   assert.equal(await d.attr("#play-pause-btn", "aria-label"), "Play");
+  assert.equal(await d.attr("#play-pause-btn", "class"), "play");
 });
