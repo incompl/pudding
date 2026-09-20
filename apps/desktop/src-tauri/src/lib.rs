@@ -2073,7 +2073,9 @@ fn get_art(path: String) -> Option<String> {
     if dataless::path_is_dataless(path) {
         return None;
     }
-    art_data_url(path)
+    // A track's own picture is authoritative: a folder cover is only the
+    // convention for files whose tags do not carry one.
+    art_data_url(path).or_else(|| directory_cover_data_url(path))
 }
 
 // One file's embedded cover as a data URL, opened for the picture alone. The hero
@@ -2086,6 +2088,54 @@ fn art_data_url(path: &Path) -> Option<String> {
     picture_data_url(tag)
 }
 
+// Names used by common music-library exporters for a folder's shared cover.
+// Keep this list explicit instead of accepting every image in the directory:
+// picking an artist photo or booklet scan as the album cover would be surprising.
+// The order also makes a directory containing more than one convention
+// deterministic.
+const DIRECTORY_COVER_FILENAMES: &[&str] = &[
+    "cover.jpg",
+    "cover.jpeg",
+    "cover.png",
+    "cover.gif",
+    "cover.bmp",
+    "cover.tiff",
+    "folder.jpg",
+    "folder.jpeg",
+    "folder.png",
+    "folder.gif",
+    "folder.bmp",
+    "folder.tiff",
+];
+
+// A conventional cover image beside a track, encoded in the same CSP-safe form
+// as embedded art. Filenames are case-insensitive so `Cover.JPG` works on every
+// filesystem, not only the case-insensitive ones common on macOS.
+fn directory_cover_data_url(track: &Path) -> Option<String> {
+    let directory = track.parent()?;
+    let mut candidates: Vec<(usize, PathBuf)> = std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let order = DIRECTORY_COVER_FILENAMES
+                .iter()
+                .position(|candidate| name.eq_ignore_ascii_case(candidate))?;
+            Some((order, entry.path()))
+        })
+        .collect();
+    candidates.sort_by_key(|(order, _)| *order);
+
+    // A stale or malformed cover should not hide another valid conventional
+    // cover in the same folder. `read_picture` sniffs the bytes, so neither the
+    // extension nor the filename is trusted as an image type.
+    candidates.into_iter().find_map(|(_, path)| {
+        let picture = read_picture(&path).ok()?;
+        picture_data_url_from_picture(&picture)
+    })
+}
+
 // A tag's embedded cover as a data URL, or None when it carries no picture. The
 // webview's CSP allows only 'self' and data: image sources, so this is the only
 // shape art can reach an <img> in. Shared by the hero (get_art) and the metadata
@@ -2094,6 +2144,10 @@ fn art_data_url(path: &Path) -> Option<String> {
 // also the one write_tags replaces.
 fn picture_data_url(tag: &lofty::tag::Tag) -> Option<String> {
     let pic = tag.pictures().first()?;
+    picture_data_url_from_picture(pic)
+}
+
+fn picture_data_url_from_picture(pic: &lofty::picture::Picture) -> Option<String> {
     let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
     let encoded = base64::engine::general_purpose::STANDARD.encode(pic.data());
     Some(format!("data:{};base64,{}", mime, encoded))
@@ -7577,6 +7631,68 @@ mod tests {
         0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
         0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
+
+    // A different valid image format from PNG_1PX, so the precedence test can
+    // tell a directory cover apart from an embedded cover by its data URL.
+    const GIF_1PX: &[u8] = &[
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0xFF, 0xFF, 0xFF, 0x21, 0xF9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B,
+    ];
+
+    #[test]
+    fn get_art_falls_back_to_a_conventional_directory_cover() {
+        let dir =
+            std::env::temp_dir().join(format!("pudding-directory-cover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let track = dir.join("track.mp3");
+        // The fallback belongs to the directory, so it does not need a readable
+        // tag to be useful. An empty track keeps this fixture focused on that.
+        std::fs::write(&track, b"not an audio file").expect("write track");
+        std::fs::write(dir.join("Cover.PNG"), PNG_1PX).expect("write cover");
+
+        let art = get_art(track.to_string_lossy().into_owned()).expect("directory art");
+        assert!(
+            art.starts_with("data:image/png;base64,"),
+            "the conventional cover is returned as a CSP-safe image URL"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_art_prefers_a_track_picture_over_a_directory_cover() {
+        let (dir, paths) = sample_copies("directory-cover-precedence", 1);
+        let track = PathBuf::from(&paths[0]);
+        let embedded = dir.join("embedded.png");
+        std::fs::write(&embedded, PNG_1PX).expect("write embedded art");
+        std::fs::write(dir.join("cover.gif"), GIF_1PX).expect("write directory cover");
+
+        let mut tagged = open_tagged(&track, TAGS_ONLY).expect("read sample");
+        if tagged.primary_tag_mut().is_none() {
+            tagged.insert_tag(lofty::tag::Tag::new(tagged.primary_tag_type()));
+        }
+        tagged
+            .primary_tag_mut()
+            .expect("primary tag")
+            .set_picture(0, read_picture(&embedded).expect("read embedded art"));
+        tagged
+            .save_to_path(&track, lofty::config::WriteOptions::default())
+            .expect("save embedded art");
+
+        let embedded_art = art_data_url(&track).expect("embedded art");
+        let directory_art = directory_cover_data_url(&track).expect("directory art");
+        assert!(embedded_art.starts_with("data:image/png;base64,"));
+        assert!(directory_art.starts_with("data:image/gif;base64,"));
+        assert_eq!(
+            get_art(paths[0].clone()),
+            Some(embedded_art),
+            "the track's own picture must win over the folder cover"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // Shorthands for the two loud halves of a patch literal, so the tests below
     // read as the instructions they are rather than as nested Options.
