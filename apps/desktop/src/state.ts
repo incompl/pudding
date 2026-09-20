@@ -242,13 +242,8 @@ export const fetchingPath = signal<string | null>(null);
 // repainted by the patch that fills in the rest of its fields, and every row built
 // after that reads this as it is built.
 //
-// Known limitation: add-only, for the life of the session. A file the OS evicts
-// back to the cloud *after* we downloaded it keeps its downloaded status until
-// relaunch — the scan notices the re-eviction and corrects the cache row (see the
-// `was_dataless != dataless` refresh), but this set is read last and wins, so the
-// "(Not downloaded)" marker cannot come back. Accepted: eviction of a file played
-// this session is rare, and the cost is a missing marker on a file that still
-// plays, after a wait. The fix would be to drop the path here on that refresh.
+// Cleared after each successful scan: the scan has refreshed the cache rows, so
+// this session-only override must not hide a file the provider has re-evicted.
 export const downloadedPaths = new Set<string>();
 
 // Whether a track is still cloud-only *right now*: the row's own flag, corrected

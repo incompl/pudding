@@ -291,7 +291,7 @@ import {
   startNavPlaylistRename,
   reloadChangedPlaylists,
 } from "./playlists";
-import { app } from "./state";
+import { app, downloadedPaths } from "./state";
 import {
   type ThemeMode,
   MODE_BG,
@@ -4453,6 +4453,7 @@ async function init(): Promise<void> {
       console.error("library scan failed:", event.payload.error);
       return;
     }
+    downloadedPaths.clear();
     void refreshLibrary();
     // The scan changed what's on disk, so the memoized view lists are stale. Drop
     // them unconditionally — even while an inline edit blocks the pane refresh below,

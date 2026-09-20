@@ -103,7 +103,7 @@ Sandbox, entitlements, and bookmarked roots are done
 Decided: files and folders opened from outside the library are not restored
 across launches, so nothing outside a library root ever mints a bookmark.
 
-- [ ] Re-eviction never restores “(Not downloaded)”: `downloadedPaths`
+- [x] Re-eviction never restores “(Not downloaded)”: `downloadedPaths`
       (`apps/desktop/src/state.ts`) is add-only for the session, so a file the OS
       evicts back to the cloud after we downloaded it keeps its downloaded look
       until relaunch. Clear the whole set when a full scan completes rather than
