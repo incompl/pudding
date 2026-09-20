@@ -268,9 +268,9 @@ import {
 import {
   KEY_RECENT_ITEMS,
   hydrateRecentItems,
+  accessRecentItem,
   primeRecentIcons,
   addRecentItem,
-  removeRecentItem,
   persistRecentItems,
   syncRecentItemsMenu,
 } from "./recents";
@@ -1835,23 +1835,32 @@ export function playQueueTrack(poolIndex: number): void {
 // opens for browsing, audio plays — and both branches record the open in the
 // recents list (the only thing that does).
 export function openAssociatedFile(path: string): void {
+  void openAssociatedFileWithAccess(path);
+}
+
+async function openAssociatedFileWithAccess(path: string): Promise<void> {
+  let access;
+  try {
+    access = await accessRecentItem(path);
+  } catch (e) {
+    console.error("could not access recent file", path, e);
+    toast("Couldn't open this file. It may have moved, be unavailable, or need permission.");
+    return;
+  }
   if (/\.m3u8?$/i.test(path)) {
-    void browsePlaylistPath(path, { recent: true });
+    await browsePlaylistPath(access.path, { recent: true, bookmark: access.bookmark });
   } else {
-    void openExternalFile(path);
+    await openExternalFile(access.path, access.bookmark);
   }
 }
 
-async function openExternalFile(path: string): Promise<void> {
+async function openExternalFile(path: string, bookmark: string | null = null): Promise<void> {
   let meta: TrackMeta;
   try {
     meta = await invoke<TrackMeta>("prepare_external_file", { path });
   } catch (e) {
-    // Unreadable or gone (moved/deleted outside the app). Self-heal the same way
-    // browsePlaylistPath does for a dead playlist: drop it from the recents so a
-    // stale row doesn't sit there forever.
     console.error("prepare_external_file failed", path, e);
-    removeRecentItem(path);
+    toast("Couldn't open this file. It may have moved, be unavailable, or need permission.");
     return;
   }
   // Leaves currentParent null so the tree is untouched, no row is highlighted,
@@ -1873,7 +1882,7 @@ async function openExternalFile(path: string): Promise<void> {
   const fallback = path.split(/[\\/]/).pop() ?? path;
   // The read above is the proof the file is really there, so record the open now
   // — under the same title the transport is about to show.
-  addRecentItem(path, meta.title ?? fallback, "track");
+  addRecentItem(path, meta.title ?? fallback, "track", bookmark ?? undefined);
   setNowPlaying(meta.title ?? fallback, meta.artist, meta.album);
   void loadArt(path);
   void engine.play([path], 0);

@@ -3,6 +3,7 @@ mod audio;
 // security-scoped bookmark runs inside a signed, sandboxed .app, which means a
 // separate binary. See tools/sandbox-check.sh.
 pub mod bookmarks;
+mod recent_access;
 // Cloud files that are not on disk yet, and which threads are allowed to wait
 // for one. Read it before touching the scanner's or the decode thread's I/O.
 mod dataless;
@@ -6588,6 +6589,7 @@ pub fn run() {
         // so the guards outlive every scan, watcher and tag write that depends on
         // them; see root_access.rs.
         .manage(root_access::RootAccess::default())
+        .manage(recent_access::RecentAccess::default())
         // Single-instance must be the first plugin. When a second launch happens
         // (e.g. user double-clicks another mp3 on Windows/Linux), this callback
         // fires in the running instance with the new process's argv.
@@ -7278,6 +7280,8 @@ pub fn run() {
             playlist::list_all_playlists,
             root_access::bookmark_root,
             root_access::hold_library_roots,
+            recent_access::bookmark_recent_item,
+            recent_access::resolve_recent_item,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

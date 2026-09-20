@@ -692,6 +692,10 @@ export interface RecentItem {
   path: string;
   name: string;
   kind?: RecentKind;
+  // Security-scoped bookmark for a user-selected file. Optional so recents
+  // written before persistent access was added still load; they upgrade after a
+  // successful reopen, or remain visible with an explanatory failure.
+  bookmark?: string;
 }
 
 export interface PlaylistRef {

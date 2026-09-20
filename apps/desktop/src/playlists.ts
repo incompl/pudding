@@ -12,7 +12,7 @@ import type {
   PlaylistRef,
   TrackProvider,
 } from "./types";
-import { addRecentItem, removeRecentItem, updateRecentItem } from "./recents";
+import { accessRecentItem, addRecentItem, removeRecentItem, updateRecentItem } from "./recents";
 import {
   activeQueue,
   currentNodePath,
@@ -119,21 +119,13 @@ export function playlistViewTracks(data: PlaylistData): SearchTrack[] {
   }));
 }
 
-// What to say, and what to clean up, when a playlist won't open. The two cases
-// need different answers: a file that is *gone* should stop haunting Open Recent,
-// while one that is merely unreadable — something else wearing the extension, or
-// past the ceilings read_playlist enforces — keeps its place, because it is still
-// there and the user may well fix it. Asks the filesystem rather than reading the
-// error text: playlist_mtime is a single stat and answers exactly that question.
+// A failed recent remains history. In particular, removing it here used to make
+// the row vanish beneath the pointer; it also conflated an unplugged volume, a
+// revoked permission, and a genuinely deleted file. The message is actionable;
+// silently editing the user's list is not.
 async function reportPlaylistOpenFailure(path: string, e: unknown): Promise<void> {
   console.error("read_playlist failed", path, e);
-  const mtime = await invoke<number | null>("playlist_mtime", { path }).catch(() => null);
-  if (mtime === null) {
-    removeRecentItem(path);
-    toast("Playlist no longer available");
-    return;
-  }
-  toast("Couldn't open playlist");
+  toast("Couldn't open playlist. It may have moved, be unavailable, or need permission.");
 }
 
 // Playlist rows use single-click = browse, double-click = play. A short timer
@@ -241,8 +233,22 @@ function flashPlaylistHeader(): void {
 
 export async function browsePlaylistPath(
   path: string,
-  opts?: { flash?: boolean; recent?: boolean },
+  opts?: { flash?: boolean; recent?: boolean; bookmark?: string | null },
 ): Promise<void> {
+  // New/save flows enter here directly rather than through openAssociatedFile.
+  // Capture their picker grant before reading so every recent playlist has the
+  // same durable reopen behavior as an audio file or Finder Open With event.
+  if (opts?.recent && opts.bookmark === undefined) {
+    try {
+      const access = await accessRecentItem(path);
+      path = access.path;
+      opts = { ...opts, bookmark: access.bookmark };
+    } catch (e) {
+      console.error("could not retain playlist access", path, e);
+      toast("Couldn't open this playlist. It may have moved, be unavailable, or need permission.");
+      return;
+    }
+  }
   let data: PlaylistData;
   try {
     data = await readPlaylist(path);
@@ -258,7 +264,7 @@ export async function browsePlaylistPath(
 // second read of the same file.
 function showPlaylistBrowse(
   data: PlaylistData,
-  opts?: { flash?: boolean; recent?: boolean },
+  opts?: { flash?: boolean; recent?: boolean; bookmark?: string | null },
 ): void {
   // Browse shows every row, missing files and stations included (marked,
   // unplayable-in-place) — so a playlist whose files can't be resolved doesn't
@@ -283,7 +289,7 @@ function showPlaylistBrowse(
   listFaceOpen.value = true;
   // Only an *opening* is recorded (Open..., Finder, an Open Recent row, or a
   // playlist we just created). A tree click browsing the library is not.
-  if (opts?.recent) addRecentItem(data.path, data.name, "playlist");
+  if (opts?.recent) addRecentItem(data.path, data.name, "playlist", opts.bookmark ?? undefined);
   if (opts?.flash) flashPlaylistHeader();
 }
 
@@ -738,4 +744,3 @@ export async function addTracksToPlaylist(path: string, getTracks: TrackProvider
   await refreshLibrary();
   toast("Added to playlist");
 }
-

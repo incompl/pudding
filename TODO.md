@@ -100,8 +100,8 @@ Sandbox, entitlements, and bookmarked roots are done
 
 ## Desktop app fixes
 
-Decided: files and folders opened from outside the library are not restored
-across launches, so nothing outside a library root ever mints a bookmark.
+Resolved: files opened from outside the library mint a security-scoped bookmark
+when opened, so Open Recent can restore their access across launches.
 
 - [x] Re-eviction never restores “(Not downloaded)”: `downloadedPaths`
       (`apps/desktop/src/state.ts`) is add-only for the session, so a file the OS
@@ -111,7 +111,7 @@ across launches, so nothing outside a library root ever mints a bookmark.
       refresh — the set exists only to override stale rows within a session, and
       after a scan the rows aren't stale. One line. The remaining race (a download
       completing mid-scan) is narrow and self-corrects on the next scan.
-- [ ] Open Recent rows vanish under the cursor: `removeRecentItem` is called from
+- [x] Open Recent rows vanish under the cursor: `removeRecentItem` is called from
       every read-failure branch, so a row the user just clicked silently deletes
       itself with no explanation. The silence is the bug; the fix is a message,
       not a prune.
@@ -124,7 +124,7 @@ across launches, so nothing outside a library root ever mints a bookmark.
       launch, which can block on a sleeping network volume or spin up an external
       drive. It would also need error-kind plumbing that doesn't exist — the
       backend hands the frontend `e.to_string()`, so the kinds can't be told apart.
-- [ ] Decide the question underneath that one: if out-of-library recents can never
+- [x] Decide the question underneath that one: if out-of-library recents can never
       be reopened after relaunch, either opening a file should mint a bookmark
       (which contradicts the decision above) or those rows should draw as
       unreachable instead of pretending to be clickable.

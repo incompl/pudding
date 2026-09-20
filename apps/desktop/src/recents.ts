@@ -14,9 +14,14 @@ const RECENT_ITEMS_MAX = 12;
 // end up with that document open). Browsing or playing something already in the
 // library deliberately does not — the library is how you reach those, and
 // letting it write here would push real openings off the bottom of a short list.
-export function addRecentItem(path: string, name: string, kind: RecentKind): void {
+export function addRecentItem(
+  path: string,
+  name: string,
+  kind: RecentKind,
+  bookmark?: string,
+): void {
   app.recentItems = [
-    { path, name, kind },
+    { path, name, kind, ...(bookmark ? { bookmark } : {}) },
     ...app.recentItems.filter((r) => r.path !== path),
   ].slice(0, RECENT_ITEMS_MAX);
   void persistRecentItems();
@@ -55,6 +60,34 @@ export function syncRecentItemsMenu(): void {
 // `kind`; they were all playlists, so default them rather than dropping them.
 export function hydrateRecentItems(stored: RecentItem[] | null | undefined): void {
   app.recentItems = (stored ?? []).map((r) => ({ ...r, kind: r.kind ?? "playlist" }));
+}
+
+export interface RecentAccess {
+  path: string;
+  // Null means this platform has no security-scoped bookmarks; ordinary paths
+  // remain the right representation there.
+  bookmark: string | null;
+}
+
+// Prepare an item for opening without ever touching it at hydrate time. New
+// opens freeze the picker/Finder grant first; old rows resolve their stored grant.
+// Both commands run before filesystem reads, so the backend and the audio thread
+// receive the same live authorization rather than a path that only looks valid.
+export async function accessRecentItem(path: string): Promise<RecentAccess> {
+  const existing = app.recentItems.find((item) => item.path === path);
+  let bookmark: string | null | undefined = existing?.bookmark;
+  if (!bookmark) {
+    bookmark = await invoke<string | null>("bookmark_recent_item", { path });
+    if (!bookmark) return { path, bookmark: null };
+  }
+
+  const resolved = await invoke<{ path: string; bookmark: string }>("resolve_recent_item", {
+    bookmark,
+  });
+  if (existing && (resolved.path !== existing.path || resolved.bookmark !== existing.bookmark)) {
+    updateRecentItem(existing.path, { path: resolved.path, bookmark: resolved.bookmark });
+  }
+  return resolved;
 }
 
 // --- Native row glyphs ---
