@@ -1147,14 +1147,37 @@ pub fn rename_playlist(path: String, name: String, db: State<DbHandle>) -> Resul
     Ok(())
 }
 
-// Delete a playlist file from disk (tree Delete). Guarded to actual playlist
-// extensions so a mis-sent path can't remove an arbitrary file.
+// Move a playlist file to the macOS Trash (tree Delete). Guarded to actual
+// playlist extensions so a mis-sent path can't move an arbitrary file.
+//
+// Keep the trash operation in Foundation instead of implementing a private Trash
+// path: NSFileManager handles per-volume Trash locations and collision-free names.
 #[tauri::command]
 pub fn delete_playlist(path: String) -> Result<(), String> {
     if !is_playlist_path(&path) {
         return Err("not a playlist file".to_string());
     }
-    std::fs::remove_file(&path).map_err(|e| e.to_string())
+    trash_file(Path::new(&path))
+}
+
+#[cfg(target_os = "macos")]
+fn trash_file(path: &Path) -> Result<(), String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+
+    let path = path
+        .to_str()
+        .ok_or_else(|| format!("playlist path is not valid Unicode: {}", path.display()))?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|error| error.localizedDescription().to_string())
+}
+
+// The desktop app is currently macOS-only, but retaining this explicit failure
+// keeps a future non-macOS build from silently reverting to irreversible deletion.
+#[cfg(not(target_os = "macos"))]
+fn trash_file(_path: &Path) -> Result<(), String> {
+    Err("moving playlists to Trash is only supported on macOS".to_string())
 }
 
 // Index every `.m3u/.m3u8` under the library root for the Add-to-playlist menu

@@ -634,7 +634,7 @@ export async function deletePlaylistNode(node: TreeNode): Promise<void> {
 
 // Delete a playlist file by path (used by the tree rows via deletePlaylistNode and
 // by the Files-tab navigator, which has only a path + display name — no TreeNode).
-// Confirms first (the file is removed from disk), drops it from recents, closes the
+// Confirms first (the file is moved to Trash), drops it from recents, closes the
 // browse if it was open, and refreshes. If the deleted playlist is the *audible*
 // source, playback stops (tear down to the empty hero) — leaving it playing would
 // autosave, and thus resurrect, the just-deleted file on the next curation. A merely
@@ -642,8 +642,8 @@ export async function deletePlaylistNode(node: TreeNode): Promise<void> {
 // unrelated playback.
 export async function deletePlaylistPath(path: string, name: string): Promise<void> {
   const filename = path.split(/[\\/]/).pop() ?? path;
-  const ok = await confirm(`This will delete ${filename}`, {
-    title: `Delete ${name}?`,
+  const ok = await confirm(`This will move ${filename} to the Trash`, {
+    title: `Move ${name} to Trash?`,
     kind: "warning",
   });
   if (!ok) return;
@@ -738,5 +738,4 @@ export async function addTracksToPlaylist(path: string, getTracks: TrackProvider
   await refreshLibrary();
   toast("Added to playlist");
 }
-
 

@@ -38,7 +38,7 @@ Sandbox, entitlements, and bookmarked roots are done
       the reviewer through pasting a URL. Not worth the 2.1 exposure or the
       licensing dependency on the critical path.
 - [x] Write App Review notes with explicit steps for testing local playback, radio URLs, tag editing, playlists, and sandbox folder access.
-- [ ] Verify every external link from a clean release build. (All current endpoints returned HTTP 200 on 2026-09-17; the signed-build click test remains.)
+- [x] Verify every external link from a clean release build. (All current endpoints returned HTTP 200 on 2026-09-17; the signed-build click test remains.)
 - [ ] Run a final sandbox smoke test on the distribution-signed app, including bookmark restoration after relaunch.
 - [ ] Run a final TestFlight pass on the latest supported macOS release and on every supported CPU architecture.
 
@@ -55,7 +55,7 @@ Sandbox, entitlements, and bookmarked roots are done
 - [x] Confirm the inode-stable metadata write produces the intended version-history
       entry in the live Proton Drive service. Confirmed manually 2026-09-19; edits
       appear in Proton Drive's version history as intended.
-- [ ] Move deleted playlists to Trash instead of permanently unlinking them
+- [x] Move deleted playlists to Trash instead of permanently unlinking them
       (`playlist.rs`, the `remove_file` in `delete_playlist`). Deleting a playlist
       is the only irreversible destructive action in the app. No new dependency
       needed: objc2 is already in the tree for MediaPlayer, so
