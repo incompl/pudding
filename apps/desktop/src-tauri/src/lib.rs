@@ -1973,11 +1973,41 @@ fn prune_library_roots(roots: &[String], db_path: &Path) {
     let _ = conn.execute(&sql, params_from_iter(keys));
 }
 
+// Return the playlist paths from a watcher batch when *every* path in it is either
+// a playlist or one of our own atomic-save staging files. Playlist rows are not in
+// the audio index, so rewriting one must not walk every audio file under its root.
+//
+// Be deliberately conservative: an unrecognised path (including a directory) can
+// conceal an audio add/move, so it falls back to the normal root scan. The staging
+// exception matters because one playlist save creates `.pudding-save-*`, writes it,
+// then renames it over the playlist.
+fn playlist_only_batch(events: &[notify_debouncer_full::DebouncedEvent]) -> Option<Vec<String>> {
+    let mut playlists = HashSet::new();
+    for event in events {
+        for path in &event.paths {
+            let text = path.to_string_lossy();
+            if playlist::is_playlist_path(&text) {
+                playlists.insert(text.into_owned());
+                continue;
+            }
+            let is_staging_file = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".pudding-save-"));
+            if !is_staging_file {
+                return None;
+            }
+        }
+    }
+    (!playlists.is_empty()).then(|| playlists.into_iter().collect())
+}
+
 // Starts (or replaces) recursive watchers on the library roots — one debouncer
-// per root. Any filesystem change under a root triggers a debounced incremental
-// rescan of that root, which emits "library-scanned" exactly like an explicit
-// rescan so the frontend refreshes uniformly. An empty list just tears every
-// watcher down.
+// per root. Audio and directory changes trigger a debounced incremental rescan of
+// that root. A batch containing only playlist files takes the lighter
+// `playlists-changed` path instead: the frontend can re-stat open playlists and
+// rebuild its playlist index without rebuilding the Files tree. An empty list just
+// tears every watcher down.
 #[tauri::command]
 fn watch_libraries(
     paths: Vec<String>,
@@ -2006,8 +2036,12 @@ fn watch_libraries(
                 // — the next event re-syncs. request_scan coalesces: a burst of
                 // flushes during an in-flight scan collapses into one follow-up
                 // pass rather than a thread + full walk per flush.
-                if res.is_ok() {
-                    request_scan(scan_root.clone(), db_path.clone(), app_handle.clone());
+                if let Ok(events) = res {
+                    if let Some(paths) = playlist_only_batch(&events) {
+                        let _ = app_handle.emit("playlists-changed", paths);
+                    } else {
+                        request_scan(scan_root.clone(), db_path.clone(), app_handle.clone());
+                    }
                 }
             },
         )
@@ -7313,6 +7347,39 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn debounced_path(path: &str) -> notify_debouncer_full::DebouncedEvent {
+        notify_debouncer_full::DebouncedEvent::from(
+            notify::Event::new(notify::EventKind::Any).add_path(PathBuf::from(path)),
+        )
+    }
+
+    #[test]
+    fn playlist_only_watcher_batch_accepts_atomic_playlist_save() {
+        let events = [
+            debounced_path("/music/.pudding-save-123-0"),
+            debounced_path("/music/Mix.m3u8"),
+        ];
+        assert_eq!(
+            playlist_only_batch(&events),
+            Some(vec!["/music/Mix.m3u8".into()])
+        );
+    }
+
+    #[test]
+    fn playlist_only_watcher_batch_keeps_audio_and_unknown_changes_on_scan_path() {
+        assert_eq!(
+            playlist_only_batch(&[
+                debounced_path("/music/Mix.m3u8"),
+                debounced_path("/music/Track.flac"),
+            ]),
+            None,
+        );
+        assert_eq!(
+            playlist_only_batch(&[debounced_path("/music/cover.jpg")]),
+            None,
+        );
+    }
 
     #[test]
     fn track_columns_match_the_schema_and_the_row_reader() {

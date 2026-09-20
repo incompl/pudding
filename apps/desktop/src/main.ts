@@ -4480,6 +4480,16 @@ async function init(): Promise<void> {
     void reloadChangedPlaylists();
   });
 
+  // Playlist files do not contribute rows to the audio scan cache. Their watcher
+  // batches therefore bypass `library-scanned`: re-check an open playlist for an
+  // external edit and rebuild the menu/search index, but leave the Files tree and
+  // its selection alone. Pudding's own autosaves have already advanced their mtime
+  // stamp, so reloadChangedPlaylists reduces to cheap stats in that common case.
+  await listen<string[]>("playlists-changed", () => {
+    void refreshPlaylistIndex();
+    void reloadChangedPlaylists();
+  });
+
   // The watcher only reaches playlists under a library root, and only fires while
   // we're frontmost enough to act on it. Re-activation covers the rest: a playlist
   // opened from anywhere, and every edit made in another app while Pudding sat in
