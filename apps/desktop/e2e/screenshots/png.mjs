@@ -65,12 +65,30 @@ function crc32(buf) {
   for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return ~c;
 }
-export function encodePNG(w, h, rgba) {
-  const stride = w * 4;
+// `extra` carries raw chunks (a capture's colour profile) straight through, placed
+// after IHDR where the specification requires them.
+//
+// `rgb` writes colour type 2 — three bytes per pixel, no alpha — from the same
+// RGBA input. Apple's screenshot specification says an App Store screenshot
+// "can't include alpha channels or transparencies", and that is about the
+// channel, not its contents: a fully opaque RGBA image still carries one. Only
+// the store posters need it; every other consumer here compares decoded pixels,
+// which are unchanged either way.
+export function encodePNG(w, h, rgba, extra = [], { rgb = false } = {}) {
+  const channels = rgb ? 3 : 4;
+  const stride = w * channels;
   const raw = Buffer.alloc(h * (stride + 1));
   for (let y = 0; y < h; y++) {
-    raw[y * (stride + 1)] = 0;
-    rgba.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
+    const line = y * (stride + 1) + 1;
+    raw[line - 1] = 0;
+    if (!rgb) {
+      rgba.copy(raw, line, y * stride, (y + 1) * stride);
+      continue;
+    }
+    for (let x = 0; x < w; x++) {
+      const from = (y * w + x) * 4;
+      rgba.copy(raw, line + x * 3, from, from + 3);
+    }
   }
   const chunk = (type, data) => {
     const len = Buffer.alloc(4);
@@ -84,10 +102,11 @@ export function encodePNG(w, h, rgba) {
   ihdr.writeUInt32BE(w, 0);
   ihdr.writeUInt32BE(h, 4);
   ihdr[8] = 8;
-  ihdr[9] = 6;
+  ihdr[9] = rgb ? 2 : 6;
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk("IHDR", ihdr),
+    ...extra,
     chunk("IDAT", zlib.deflateSync(raw, { level: 6 })),
     chunk("IEND", Buffer.alloc(0)),
   ]);

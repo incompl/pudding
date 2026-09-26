@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { STORE_WINDOW } from './poster.mjs';
 
 // Exercise the app's normal session restoration: it restores paused at an exact
 // playhead without racing audio callbacks (seeking a live track resumes playback).
@@ -321,6 +322,86 @@ async function visualizerStill(d, library, manifest) {
   await d.action('visualizerStill');
 }
 
+// Zen Mode (⌘⇧F) on a square window, where the visualizer is the whole picture:
+// the hero covers the window — topbar, Files panel and splitter included — so the
+// app stops being a two-pane browser and becomes the canvas. This is the one
+// recipe that enters Zen, and it resizes before entering rather than leaving it
+// to the runner, because the canvas sizes itself to whatever box it lands in:
+// captureStill picks the pane's size up on the way in, and a resize afterwards
+// would clear the frame it just composed.
+const zenVisualizer = (size) => async function zenVisualizer(d, library, manifest) {
+  await nowPlaying(d, library, manifest, { clearQueue: true });
+  await d.action('setWindowSize', size);
+  await d.waitFor(async () => {
+    const view = await d.settle();
+    return view.width === size.width && view.height === size.height;
+  }, { message: `The Zen window never reached ${size.width}×${size.height}` });
+  await d.action('zenMode');
+  await d.waitFor(() => d.exists('body.np-zen'),
+    { message: 'Zen Mode did not take over the window' });
+  // The transport's idle auto-hide is pinned by the action above (zenIdlePinned
+  // in main.ts). Assert it rather than trust it: these captures are taken with
+  // the pointer outside the window, and nothing but a real mouse move brings the
+  // controls back — a Zen image without them is a picture of a record sleeve.
+  await d.waitFor(async () => !(await d.exists('body.np-idle')),
+    { message: 'Zen Mode faded its transport out before the shutter' });
+  await d.waitFor(async () =>
+    Number(await d.prop('#now-playing-visualizer', 'clientWidth')) === size.width &&
+    Number(await d.prop('#now-playing-visualizer', 'clientHeight')) === size.height,
+    { message: 'The visualizer did not go full-bleed at the Zen window size' });
+  // A new track flashes its title over the scene and fades it back out. Let
+  // that finish rather than capturing a banner mid-life.
+  await d.waitFor(async () => !(await d.exists('.viz-track-banner.show')),
+    { timeout: 10_000, message: 'The track banner never finished its hold' });
+  await d.action('visualizerStill');
+};
+
+// One face of the themes poster: the ordinary paused now-playing window, wearing
+// one appearance. Everything a capture could differ by other than colour is held
+// still on purpose — same album, same playhead, same window — so four of these
+// side by side make one claim and only one.
+//
+// It resizes itself rather than leaving that to the runner because the
+// assertions below are about the layout the size produces: under 601 × 361 the
+// Files panel and topbar go and the hero becomes the card this poster shows.
+const themeFace = (face, size) => async function themeFace(d, library, manifest) {
+  await nowPlaying(d, library, manifest);
+  await d.action('setWindowSize', size);
+  await d.waitFor(async () => {
+    const view = await d.settle();
+    return view.width === size.width && view.height === size.height;
+  }, { message: `The ${face.id} window never reached ${size.width}×${size.height}` });
+  // The appearance arrives through stored settings, so what is asserted is what
+  // actually reached <html>: applyTheme (theme.ts) writes the mode to data-mode
+  // and the accent pair to inline custom properties, which is the single place
+  // every `var(--accent)` rule in the app reads its colour from.
+  const mode = await d.attr('html', 'data-mode');
+  if (mode !== face.mode) throw new Error(`${face.id} came up in ${mode} mode, not ${face.mode}`);
+  const painted = String(await d.attr('html', 'style') ?? '');
+  if (!painted.includes(face.accent)) {
+    throw new Error(`${face.id} is painted "${painted}" rather than ${face.accent}. ` +
+      `If ${face.theme} was recoloured in theme.ts, update THEME_FACES to match: ` +
+      'four distinguishable colours is the whole of what this poster claims.');
+  }
+  // Below the breakpoint the hero is a card: art stretched to the row's height,
+  // title beside it. Both ways a hand-picked window size can break that are
+  // measurable, so neither is left to the eye — the art can overflow a window too
+  // narrow to hold it beside the text, and a title too long for what is left
+  // starts a marquee, which freezes mid-travel with the text half gone.
+  await d.waitFor(async () => Number(await d.prop('#left', 'offsetWidth')) === 0,
+    { message: 'The Files panel is still laid out: this window is above the compact breakpoint' });
+  await d.waitFor(async () => Number(await d.prop('#now-playing-art', 'clientWidth')) > 0,
+    { message: 'The theme card rendered no artwork' });
+  const overflow = Number(await d.prop('#now-playing-main', 'scrollWidth')) -
+    Number(await d.prop('#now-playing-main', 'clientWidth'));
+  if (overflow > 1) {
+    throw new Error(`The theme card overflows its ${size.width}px window by ${overflow}px. Widen the window or shorten it.`);
+  }
+  if (await d.exists('#now-playing-title.marquee')) {
+    throw new Error(`The title does not fit beside the art at ${size.width}×${size.height} and has started to scroll.`);
+  }
+};
+
 // Settings, on the theme picker. The panel's library-folder and stream-list rows
 // show absolute paths, so this scene takes the fixture stream list rather than
 // the per-profile default and asserts every path on screen is a fixture path
@@ -334,6 +415,12 @@ async function themePicker(d, library, manifest) {
   }, { message: 'The theme picker did not render both the dark and light groups' });
   await publishablePaths(d, library);
 }
+
+// The curve both equalizer scenes are seeded with. `initialSettings` leaves the
+// equalizer off, so a scene that runs the recipe below without these settings
+// fails on its own assertion rather than publishing a flat, switched-off panel —
+// which is what makes this a named factory and not a literal in one scene.
+const eqCurve = () => ({ equalizer: { enabled: true, preamp: 0, gains: [6, 4, 2, 0, -2, -2, 0, 3, 5, 6] } });
 
 // The equalizer with a curve dialled in. The bars themselves only move to a live
 // signal, and every capture is paused, so the sliders carry the picture.
@@ -407,6 +494,24 @@ async function wideColumns(d, library, manifest) {
   }
 }
 
+// What `wideColumns` is seeded with, at whatever divider the window it is being
+// captured in can spare: the Songs view, the header up, and the five fields the
+// recipe asserts on. Two scenes ship this layout at two window widths — the
+// documentation image and the tall left-hand window of the size poster — and
+// they have to seed the same column set, because the recipe's assertions name
+// it. The width is the only part a window gets to choose, and it
+// has to clear the pane's 28rem column gate; fall short and `wideColumns` fails
+// the run rather than publishing an ordinary folded list.
+const songsTable = (splitterWidth) => () => ({
+  navLocation: [{ t: 'view', view: 'songs' }],
+  splitterWidth,
+  columnPrefs: {
+    library: ['title', 'artist', 'album', 'year', 'duration'],
+    libraryHeaders: true,
+    librarySort: { id: 'artist', dir: 1 },
+  },
+});
+
 // --- What the probe must show at the shutter ---------------------------------
 // A recipe has to reach its state without disturbing playback, so the runner
 // re-asserts the expected state just before the shutter: a scene that started
@@ -424,6 +529,84 @@ function liveStream(state) {
   return state.isStream && state.isPlaying && Number(state.duration) === 0
     ? null : 'a station playing live, with no timeline';
 }
+
+// --- Mac App Store posters ---------------------------------------------------
+// These are the only scenes whose published image is not a capture itself: the
+// captures are laid into a captioned 2560 × 1600 poster (poster.mjs), because an
+// App Store screenshot has to be an accepted 16:10 size and has to say what the
+// app is — Apple reads the screenshots, not the README, for 4.3 differentiation.
+//
+// A store scene declares its windows as `panels` rather than a recipe of its
+// own, because a window is a whole app launch: the runner captures each panel
+// the way it captures any scene, and the poster claims them afterwards. Most
+// posters have one panel and reuse a documentation recipe at the poster's own
+// window size, so no scene is captured twice for one image and the app's pixels
+// are never scaled.
+const storeScene = (file, headline, scene) => ({
+  id: `store-${file.replace(/^\d+-/, '')}`,
+  destinations: [`apps/desktop/app-store/posters/${file}.png`],
+  poster: { headline },
+  panels: [{ ...scene, id: 'app', size: scene.size ?? STORE_WINDOW }],
+});
+
+// The three windows of the size poster. Each is a real configuration of the app,
+// not a scaled copy of one window, and the sizes are chosen against the app's
+// own breakpoint (MINI_MAX_WIDTH 600 × MINI_MAX_HEIGHT 360 in main.ts):
+// `library` clears it and keeps both panes, and the other two sit under it,
+// where the topbar and Files panel go and the hero becomes a bar. Change one and
+// check its placement in the poster layout below — the two are fitted to each
+// other, and together they tile the frame with no empty row.
+//
+// `library` is a portrait window running the poster's whole height, which is the
+// shape that makes the table say what it is: 800 × 602 fits about twenty rows,
+// where the landscape window it replaced fit eight. Its divider (SIZE_SPLITTER)
+// is the one number the shape costs — the Files panel still has to clear the
+// 28rem column gate, so what is left for Now Playing beside it is narrower than
+// any other scene gives it. The two small windows share one width because they
+// stack in one column beside it; their two heights plus the 32px gutter are the
+// tall window's height exactly.
+const SIZE_WINDOWS = {
+  library: { width: 800, height: 602 },
+  visualizer: { width: 320, height: 402 },
+  mini: { width: 320, height: 168 },
+};
+
+// The divider inside the tall window, and the one number this shape is actually
+// tight on: both sides of it want the width. 480px clears the pane's 28rem
+// (448px) column gate with the table's insets to spare, and leaves Now Playing
+// 315px — the narrowest the two-pane layout is shown anywhere in the suite, and
+// measured, not guessed: at 263px the seek bar is the part that goes. It has
+// `flex: 1; min-width: 0`, so a transport with no room for it keeps both time
+// labels and quietly draws a playhead of zero width. Lower this and the table
+// folds (which `wideColumns` fails on); raise it and the hero loses its seek bar
+// (which nothing fails on — look at the poster).
+const SIZE_SPLITTER = '480px';
+
+// The four windows of the themes poster are one window size, because that poster
+// varies nothing but colour. It sits under the same breakpoint as the small
+// windows above — the compact card: cover art, the three metadata lines, and a
+// transport whose seek fill is the accent doing its most visible work. Four of
+// them tile the frame at 1:1 with a 32px gap on both axes, which is what decides
+// these numbers: a two-pane window (over 600 × 360) would need 722px of height
+// for two rows, and the caption leaves 650.
+const THEME_WINDOW = { width: 560, height: 292 };
+
+// The four appearances, laid out one mode per column (the layout below stacks
+// the two dark faces on the left and the two light ones on the right), so the
+// poster reads as the mode switch it is: same window, same album, one side black
+// and one side white. Two per mode is the point within a column: a theme in this
+// app is an accent pair layered on the mode's neutrals, so each ground gets to
+// show two different accent choices standing on it.
+//
+// The hex is the assertion, not decoration: it is the value theme.ts gives each
+// accent, and a face whose window comes up painted anything else fails the run
+// rather than publishing two colours that look alike.
+const THEME_FACES = [
+  { id: 'dark-pistachio', mode: 'dark', theme: 'pistachio', accent: '#b5d17a' },
+  { id: 'dark-blackberry', mode: 'dark', theme: 'blackberry', accent: '#db6bf4' },
+  { id: 'light-fruitpunch', mode: 'light', theme: 'fruitpunch', accent: '#f61d52' },
+  { id: 'light-raspberry', mode: 'light', theme: 'raspberry', accent: '#0a3dff' },
+];
 
 export const scenes = [
   {
@@ -473,24 +656,167 @@ export const scenes = [
   },
   {
     id: 'equalizer', size: WINDOW, destinations: asset('equalizer'),
-    settings: () => ({ equalizer: { enabled: true, preamp: 0, gains: [6, 4, 2, 0, -2, -2, 0, 3, 5, 6] } }),
-    prepare: equalizer,
+    settings: eqCurve, prepare: equalizer,
   },
   {
     // The wide Files panel with column headers, a sort, and fields the automatic
     // set leaves out. Songs (a flat list spanning every album) is the view where
     // Year and Genre actually vary row to row.
     id: 'columns', size: WINDOW, destinations: asset('columns'),
-    settings: () => ({
-      navLocation: [{ t: 'view', view: 'songs' }],
-      splitterWidth: '600px',
-      columnPrefs: {
-        library: ['title', 'artist', 'album', 'year', 'duration'],
-        libraryHeaders: true,
-        librarySort: { id: 'artist', dir: 1 },
-      },
-    }),
+    settings: songsTable('600px'),
     prepare: wideColumns,
   },
   { id: 'editor', size: WINDOW, destinations: asset('metadata-editor'), prepare: metadataEditor },
+
+  // The poster set, in the order the store shows it. The first two are a pair,
+  // and the order is the argument: 01 is the whole app at rest, so a reader's
+  // first glance answers "what is this", and 02 answers the question that
+  // provokes — no, the simple view is not all of it. The five after them are one
+  // feature apiece.
+
+  // The app as it opens: the Files panel on its index (the six library views,
+  // then the playlists) beside Now Playing, with no queue, no drill, and every
+  // optional playback feature off. It runs the same recipe as the homepage hero
+  // and the light-theme image, on the album the rest of the poster set arrives
+  // on — so the first thing a reader sees here is the first thing they will see
+  // in the app rather than a configuration of it. The dense Songs table this
+  // used to lead with has not left the set: it is the tall window of 02.
+  storeScene('01-library', 'Simple Yet Powerful.', {
+    prepare: basicLayout(),
+  }),
+
+  // A poster made of several windows, and the one that has to follow 01: that
+  // poster shows the app at rest and this one shows how far it moves. A single
+  // mini-player capture left most of a 2560 × 1600 frame empty, and the thing
+  // that filled it is also the better claim: three real windows, each captured
+  // from its own launch, showing that the app has a shape for the space you give
+  // it rather than one layout it shrinks. The positions are CSS px in the
+  // poster's own 1280 × 800 frame, painted in the order listed, and they are
+  // fitted to SIZE_WINDOWS above — the caption's clearance over the top row is
+  // measured at compose time.
+  //
+  // Two columns inside the 64px margins the other posters keep, with a 32px
+  // gutter: the stacked pair at the left in x 64, smallest window first, and the
+  // tall one beside them at x 416 running the full height (158…760). The pair's
+  // own gutter lands the visualizer's bottom edge on the tall window's, so the
+  // three windows close on one baseline. Every window is whole, nothing overlaps,
+  // and no part of the frame is left empty for a fourth that does not exist.
+  {
+    id: 'store-sizes',
+    destinations: ['apps/desktop/app-store/posters/02-sizes.png'],
+    poster: {
+      headline: 'Big or small. Make it yours.',
+      layout: [
+        { panel: 'mini', x: 64, y: 158 },
+        { panel: 'visualizer', x: 64, y: 358 },
+        { panel: 'library', x: 416, y: 158 },
+      ],
+    },
+    panels: [
+      // The whole app in a tall window: both panes, and the Files panel on the
+      // dense Songs table — the same recipe and seeded columns as the `columns`
+      // documentation image, at a divider fitted to this window (SIZE_SPLITTER).
+      // The table is what carries the claim here, and not only the one about
+      // size: this is where a reader who has just seen 01 finds out that the
+      // same pane does headers, sorting and twenty rows at once.
+      {
+        id: 'library', size: SIZE_WINDOWS.library,
+        settings: songsTable(SIZE_SPLITTER), prepare: wideColumns,
+      },
+      // Zen, where the visualizer is the entire picture — the one place in the
+      // whole suite that enters Zen Mode. The visualizer is also the only face
+      // with no layout of its own to break at an unusual aspect ratio: it is a
+      // canvas pinned to the window's edges, so it takes whatever box the column
+      // beside the tall window has left rather than dictating one.
+      {
+        id: 'visualizer', size: SIZE_WINDOWS.visualizer,
+        settings: () => ({ nowPlayingView: 'visualizer' }),
+        prepare: zenVisualizer(SIZE_WINDOWS.visualizer),
+      },
+      // The mini player — the app's own smallest mode, not just a small window.
+      // It runs the documentation scene's recipe at this column's width instead
+      // of its own 367px: the mode is a layout, not a fixed size, and the two
+      // windows stacked here have to agree on one edge.
+      { id: 'mini', size: SIZE_WINDOWS.mini, prepare: nowPlaying },
+    ],
+  },
+
+  storeScene('03-tags', 'Bulk edit file metadata.', {
+    prepare: metadataEditor,
+  }),
+
+  // Playlists, and the one pane in the app that is two features at once: the
+  // right-hand list is the queue, and a playlist is that queue saved to a file.
+  // So the poster shows it opened on a playlist — named in the Playlists section
+  // of the Files panel and again over the table, with its track count and
+  // running time — and the caption says what the file is. Nothing else in the
+  // set puts a track table beside a sidebar: 01 has the Files index with Now
+  // Playing, and the table of 02 is a library view with no playlist in it.
+  //
+  // It runs the `playlist` documentation recipe unchanged at the poster's window
+  // size, which is the documentation set's size, so this is that image composed
+  // rather than a second arrangement of it. That recipe clears the restored
+  // queue first, which is what leaves the pane showing the playlist by name
+  // rather than the album the session arrived on.
+  storeScene('04-playlists', 'Playlists are files.', {
+    prepare: playlistView,
+  }),
+
+  // The other multi-window poster, and the opposite of 02: there, three window
+  // shapes of one appearance; here, one window shape wearing four appearances.
+  // Every panel arrives on the same album, paused at the same 0:42, at the same
+  // THEME_WINDOW size, so the four captures are identical raster except where a
+  // colour decision shows — which is the only way a reader can tell that what
+  // changed is a setting and not a different screen.
+  //
+  // The grid is two 560-wide columns at x 64 and 656 and two 292-tall rows at
+  // y 150 and 474: a 32px gutter on both axes inside the 64px margins the other
+  // posters keep, with every window whole and nothing overlapping. The left
+  // column is the dark mode and the right column the light one, so the split
+  // down the middle of the poster is the setting the caption names.
+  {
+    id: 'store-themes',
+    destinations: ['apps/desktop/app-store/posters/05-themes.png'],
+    poster: {
+      headline: 'Light or dark mode.',
+      layout: [
+        { panel: 'dark-pistachio', x: 64, y: 150 },
+        { panel: 'dark-blackberry', x: 64, y: 474 },
+        { panel: 'light-fruitpunch', x: 656, y: 150 },
+        { panel: 'light-raspberry', x: 656, y: 474 },
+      ],
+    },
+    // One launch per appearance, because a window is a whole app launch and the
+    // theme is read from the store before the first paint. Each face writes only
+    // its own mode's accent key, because that is how the app stores one: the
+    // accent is kept per mode (KEY_DARK_ACCENT / KEY_LIGHT_ACCENT in theme.ts)
+    // and the mode preference picks which of the two is in force.
+    panels: THEME_FACES.map((face) => ({
+      id: face.id, size: THEME_WINDOW,
+      settings: () => ({
+        themeMode: face.mode,
+        [face.mode === 'dark' ? 'darkAccent' : 'lightAccent']: face.theme,
+      }),
+      prepare: themeFace(face, THEME_WINDOW),
+    })),
+  },
+
+  // Search, and the claim no other poster in the set makes: this app has no
+  // import step, so finding something is the whole of managing a library. The
+  // documentation recipe's query is what earns the poster — the fixture answers
+  // "light" in four categories at once (an album, its folder, a station and the
+  // tracks), so one dropdown shows that search spans all of them. The station
+  // hit is why this needs the fixture stream list.
+  storeScene('06-search', 'Fast search. No manual rescan.', {
+    ...withStreams, prepare: searchResults,
+  }),
+
+  // The equalizer, and the only poster that says anything about the audio path.
+  // Its bars glow to a live signal and every capture is paused, so the curve the
+  // sliders hold is the whole picture — eleven of them at the window's full
+  // height, which is also the only image here that still reads at the size the
+  // store shows a search result.
+  storeScene('07-equalizer', '10 Band EQ.', {
+    settings: eqCurve, prepare: equalizer,
+  }),
 ];

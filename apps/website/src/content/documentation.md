@@ -154,6 +154,7 @@ This app takes precautions to avoid data loss when editing your files. Nonethele
 
 ## More cool features
 
+* Gapless playback
 * Drag and drop files or folders from Finder to play them
 * Recent file list in File menu
 * macOS integration including Control Center and hardware media keys

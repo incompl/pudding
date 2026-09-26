@@ -62,8 +62,9 @@ Settings is allowed to show (see below).
 
 The desktop image serves the homepage, README, and the documentation's Layout
 section. The mini image serves the README, the documentation's Mini player
-section, and the website asset collection. Every other scene is a documentation
-image and writes only to `apps/website/src/assets`. All of them share one
+section, and the website asset collection. Every other scene is either a
+documentation image, writing only to `apps/website/src/assets`, or one of the
+`store-*` App Store posters below. The documentation images share one
 960 × 640 window so the images sit together on a page without one reading as a
 different app; the mini player is the sole exception.
 
@@ -89,6 +90,94 @@ against the pane's 28rem column gate, since a width that fell short would captur
 an ordinary narrow list with no header and say so nowhere.
 The screenshot gallery page is still its existing placeholder.
 
+## Mac App Store posters
+
+The `store-*` scenes are the only ones whose published image is not a capture.
+An App Store screenshot has to be one of Apple's accepted 16:10 sizes and has to
+say what the app is — Apple reads the screenshots, not the README, when it judges
+differentiation — so `poster.mjs` composes each one: a captioned 2560 × 1600
+frame it renders in WebKit, with the scene's own native capture laid into it at
+1:1 device pixels. Nothing here resizes the app. The chrome is rendered in sRGB
+and converted into Display P3 to meet the capture, which keeps its own profile
+chunks, so the app's raster reaches the store exactly as macOS drew it.
+
+Two things Apple's specification insists on are asserted before a poster is
+written, because App Store Connect would otherwise reject the upload long after
+this run reported success: the image is exactly 2560 × 1600, and it carries **no
+alpha channel** (`encodePNG`'s `rgb` option writes colour type 2). Every pixel is
+opaque by construction; the rule is about the channel existing at all.
+
+The set is ordered, and the numbers in the destination filenames are that order:
+`01-library` is the app at rest — the Files index beside Now Playing, nothing
+switched on — because it answers "what is this", and `02-sizes` follows it to
+answer what that one provokes. `03-tags`, `04-playlists`, `05-themes`,
+`06-search` and `07-equalizer` are one feature apiece. Renumbering a poster means renaming
+its file only: a scene's id strips the number prefix, so `store-sizes` is
+`store-sizes` wherever it sits in the set.
+
+A poster is made of one window or several. A window is a whole app launch —
+that's what a scene is — so a store scene declares its windows as `panels`, each
+a complete recipe with its own size, settings and fixtures, and the runner
+captures them the way it captures anything else. `poster.layout` then places them
+by their panel id, in CSS px of the poster's own 1280 × 800 frame, painted in the
+order listed. A poster with one panel and no layout centres it instead.
+
+Two posters are multi-window, and they are opposites. `store-sizes` holds the
+appearance still and varies the window: the mini player over Zen Mode with the
+visualizer in a narrow left column, and beside them a tall two-pane window with
+the Songs table in it, running the poster's whole height. Its three sizes
+(`SIZE_WINDOWS` in `scenes.mjs`) are chosen against the app's own breakpoint —
+over 600 × 360 the window keeps both panes, under it the topbar and Files panel
+go and the hero folds into a bar — and they are fitted to the layout beside them,
+so moving one means checking the other: the two stacked windows share a width
+because they share a column, and their heights plus the gutter are the tall
+window's height. The tall window seeds the same column set as the `columns`
+documentation image (`songsTable` is what both column scenes are built from) at a
+divider fitted to its own width, which still has to clear the pane's 28rem column
+gate. The headline is the one part
+of a poster a browser lays out, so what it does with the band above the topmost
+window is measured at compose time rather than assumed. Every poster centres its
+headline's line box in that band — 120px tall where a single window sits in
+`BOX`, taller where a layout raises the top row — which is what gives the same
+margin above the headline as below it whichever poster it is, and centres the
+line box rather than the ink so copy with a descender sits where copy without one
+does. A headline one word too long grows a line, eating that band from both ends;
+the compose step fails when either margin drops under `CAPTION_CLEARANCE`.
+
+`store-themes` does the reverse: one window size, four appearances, and every
+other thing a capture could differ by held still — same album, same playhead,
+same 560 × 292 window — so the only thing four captures disagree about is colour.
+`THEME_FACES` names them, two dark and two light, laid out as a checkerboard so
+neither mode owns a row or a column. A theme in this app is an accent pair
+layered on the mode's neutrals (see `theme.ts`), which is why the poster shows
+two accents against each ground rather than one of each. Each face asserts what
+reached `<html>` rather than what was asked for: `applyTheme` writes the mode to
+`data-mode` and the accent pair to inline custom properties, so the recipe reads
+those back and fails on a window painted anything but its own hex — the whole
+claim of the image is four distinguishable colours, and two that drifted together
+would say the opposite.
+
+That window sits under the breakpoint because four two-pane windows cannot fit
+the frame at 1:1: over 600 × 360 two rows need 722px of height before any gap,
+and the caption leaves 657. Nothing here is ever scaled to make an arrangement
+work, so the arrangement gives way instead.
+
+Zen Mode fades its transport out after a couple of idle seconds and only a real
+mouse move brings it back — and captures are taken with the pointer outside the
+window. So the `zenMode` bridge action pins that auto-hide open (`zenIdlePinned`
+in main.ts) for the rest of the session, the way `captureStill` stops the
+visualizer's loop for good, and the recipe asserts the controls are still there.
+The visualizer panel of `store-sizes` is the only place in the suite that enters
+Zen Mode at all; the documentation visualizer scene shows it inside the ordinary
+window.
+
+A window sized by hand can break its hero in two measurable ways, so neither is
+left to the eye: the art can overflow a window too narrow to hold it beside the
+text, and a title too long for what is left starts a marquee, which freezes
+mid-travel with the text half gone. The `store-themes` faces check both, plus
+that the Files panel really is gone — a window that crept back over the
+breakpoint would capture a layout the grid has no room for.
+
 ## Two things every scene has to respect
 
 **No machine-specific paths.** These images ship on a public website. Settings is
@@ -97,7 +186,8 @@ stream list — and the panel is shorter than the pane it sits in, so no framing
 scrolling can leave those rows out. The fixtures they name therefore live in
 `/Users/Shared/Pudding Screenshots` instead of under the run directory: a
 location that reads the same on every Mac, with no home directory or checkout in
-it. The `themes` scene reads the panel's input values back through the
+it. The `themes` scene (the Settings picker, not the `store-themes` poster)
+reads the panel's input values back through the
 `panelPaths` bridge action and fails unless every path on screen is under that
 directory — including the stream list, which otherwise defaults to a file inside
 the scene's own profile. Any new scene that opens Settings needs the same check
@@ -225,7 +315,11 @@ Add a recipe to `scenes.mjs` with a unique ID and explicit destinations, then
 reference one of those assets from the relevant Markdown or Astro page. Each
 recipe starts fresh: set up all of its own state rather than depending on the
 previous scene. Prefer existing UI entry points; add a narrow named action to
-the e2e bridge when needed. Use readiness predicates rather than long sleeps.
+the e2e bridge when needed.
+
+A scene captures one window, because it launches one app. A published image that
+needs more than one window is a poster with several `panels` — see Mac App Store
+posters above — not a scene that resizes itself between shutters. Use readiness predicates rather than long sleeps.
 
 Anything else that animates on a canvas needs the same treatment as the
 visualizer above: a hook that composes a fixed frame and leaves the loop stopped.

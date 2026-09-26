@@ -3311,6 +3311,14 @@ function setLiveIndicatorPaused(paused: boolean): void {
   pulse.onfinish = () => liveIndicatorEl.classList.add("paused");
 }
 
+// Zen Mode fades its transport out after a couple of idle seconds, and only a
+// real mouse move brings it back. The screenshot suite shoots with the pointer
+// parked outside the window, so every Zen image would otherwise be a bare hero —
+// the controls being half of what a still of Zen has to show. Set through the
+// e2e bridge's `zenMode` action, honoured by armIdle below, and terminal for the
+// session like the visualizer's captureStill: nothing clears it.
+let zenIdlePinned = false;
+
 function setupEffects(): void {
   effect(() => {
     const samplePreview = welcomeSamplePreview.value;
@@ -3776,7 +3784,7 @@ function setupEffects(): void {
   const armIdle = (): void => {
     document.body.classList.remove("np-idle");
     window.clearTimeout(idleTimer);
-    if (zenMode.value) {
+    if (zenMode.value && !zenIdlePinned) {
       idleTimer = window.setTimeout(
         () => document.body.classList.add("np-idle"),
         2500,
@@ -4784,6 +4792,17 @@ async function init(): Promise<void> {
         if (!panel) throw new Error(`panelPaths: no element for ${selector}`);
         return [...panel.querySelectorAll<HTMLInputElement>("input[type='text']")]
           .map((input) => input.value);
+      },
+      // Enter Zen Mode with its transport pinned open (see zenIdlePinned). The
+      // hero has to own the pane first, exactly as ⌘⇧F requires — a recipe that
+      // forgot to close the queue would otherwise capture an ordinary window and
+      // say nothing about why.
+      zenMode: () => {
+        if (!heroVisible.value) {
+          throw new Error("Zen Mode needs the now-playing hero in the pane");
+        }
+        zenIdlePinned = true;
+        zenMode.value = true;
       },
       // Freeze the visualizer on one reproducible frame. Terminal for the
       // session: the rAF loop does not resume, which is what lets two native

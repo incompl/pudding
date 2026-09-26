@@ -138,7 +138,8 @@ A few things that aren't obvious:
 
 ## Updating screenshots
 
-Regenerate the website, documentation, and README images from the real macOS app:
+Regenerate the website, documentation, and README images from the real macOS app,
+and compose the Mac App Store posters in `app-store/posters`:
 
 ```sh
 pnpm screenshots:update

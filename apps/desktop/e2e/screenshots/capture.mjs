@@ -104,14 +104,19 @@ export async function captureStable(windowId, file, beforeCapture, opts = {}) {
 }
 
 // A diagnostic image only; captures themselves retain their native color profile.
+//
+// Colour, not channel count: the store posters dropped their (fully opaque)
+// alpha channel, and an RGB image compared against the RGBA one it replaces
+// would otherwise come back pink in every pixel and name nothing.
 export function differencePNG(a, b) {
   const width = Math.max(a.width, b.width), height = Math.max(a.height, b.height);
   const rgba = Buffer.alloc(width * height * 4);
+  const colour = Math.min(a.channels, b.channels, 3);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
     const inside = x < a.width && x < b.width && y < a.height && y < b.height;
     const ai = (y * a.width + x) * a.channels, bi = (y * b.width + x) * b.channels;
-    const equal = inside && a.channels === b.channels &&
-      a.data.subarray(ai, ai + a.channels).equals(b.data.subarray(bi, bi + b.channels));
+    const equal = inside &&
+      a.data.subarray(ai, ai + colour).equals(b.data.subarray(bi, bi + colour));
     const i = (y * width + x) * 4;
     rgba.set(equal ? [24, 24, 24, 255] : [255, 64, 150, 255], i);
   }

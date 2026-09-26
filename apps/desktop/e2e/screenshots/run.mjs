@@ -7,6 +7,7 @@ import { startHarness } from '../harness.ts';
 import { captureStable, samePixels, differencePNG, FREEZE_CSS } from './capture.mjs';
 import { decodePNG } from './png.mjs';
 import { scenes, initialSettings, restoredSession, LIVE_STATION } from './scenes.mjs';
+import { renderPosters } from './poster.mjs';
 import { startStation } from './station.mjs';
 
 const desktop = fileURLToPath(new URL('../../', import.meta.url));
@@ -50,9 +51,13 @@ function options(argv) {
     if (arg === '--check') result.check = true;
     else if (arg === '--skip-build') result.skipBuild = true;
     else if (arg === '--only') {
-      result.only = argv[++i];
-      if (!scenes.some((scene) => scene.id === result.only)) {
-        throw new Error(`Unknown --only scene. Known scenes: ${scenes.map((scene) => scene.id).join(', ')}`);
+      // A list, because the App Store set is several scenes that are reviewed
+      // together: --only store-library,store-tags.
+      result.only = (argv[++i] ?? '').split(',').filter(Boolean);
+      const unknown = result.only.filter((id) => !scenes.some((scene) => scene.id === id));
+      if (!result.only.length || unknown.length) {
+        throw new Error(`Unknown --only scene${unknown.length > 1 ? 's' : ''} ${unknown.join(', ')}. ` +
+          `Known scenes: ${scenes.map((scene) => scene.id).join(', ')}`);
       }
     } else if (arg === '--help' || arg === '-h') {
       console.log('Usage: pnpm screenshots:update [--only SCENE] [--skip-build]\n' +
@@ -112,23 +117,33 @@ async function main() {
     // an imitation of it. Its loopback URLs go into the stream list each scene's
     // fixture writes; only that scene ever dials them.
     station = await startStation({ ...LIVE_STATION, audioFile: path.join(desktop, 'pudding sample.mp3') });
+    const selected = scenes.filter((scene) => !opts.only || opts.only.includes(scene.id));
+    // What the loop below actually captures. A window is a whole app launch, so
+    // a store poster composed of several windows (see `store-sizes`) declares
+    // them as panels, and each one is expanded here into an ordinary capture of
+    // its own — fresh profile, fresh instance, its own recipe. Nothing else in
+    // the loop has to know: a panel simply publishes nothing by itself, and its
+    // poster claims the capture afterwards.
+    const units = selected.flatMap((scene) => scene.panels
+      ? scene.panels.map((panel) => ({ ...panel, id: `${scene.id}-${panel.id}`, panel: panel.id, of: scene }))
+      : [scene]);
     const captured = [];
-    for (const scene of scenes.filter((scene) => !opts.only || scene.id === opts.only)) {
+    for (const unit of units) {
       abort.signal.throwIfAborted();
-      console.log(`Preparing ${scene.id}…`);
-      const profile = path.join(runDir, `${scene.id}-profile`);
+      console.log(`Preparing ${unit.id}…`);
+      const profile = path.join(runDir, `${unit.id}-profile`);
       await mkdir(profile);
       // Fixtures a scene needs beyond the shared music library (the stream list)
       // sit beside it in the fixture directory, never inside the library folder
       // itself: a .m3u8 under a library root would show up as a third playlist in
       // every other scene's Files panel.
-      await scene.fixture?.(profile, library, station);
+      await unit.fixture?.(profile, library, station);
       // Per-scene settings layer over the shared restored session, so a scene can
       // choose a theme, a hero view, or where the Files panel is drilled to
       // without restating the whole thing.
-      const settings = { ...initialSettings(library, manifest), ...scene.settings?.(library, manifest, profile) };
+      const settings = { ...initialSettings(library, manifest), ...unit.settings?.(library, manifest, profile) };
       await writeFile(path.join(profile, 'settings.json'), JSON.stringify(settings));
-      const log = await open(path.join(runDir, `${scene.id}.log`), 'w');
+      const log = await open(path.join(runDir, `${unit.id}.log`), 'w');
       try {
         harness = await startHarness({ appBin: path.join(bundle, 'Contents/MacOS/pudding'),
           port: 0, noSpawn: false, env: { PUDDING_E2E_DATA_DIR: profile }, log: log.fd });
@@ -138,8 +153,8 @@ async function main() {
           throw new Error('Screenshot bundle did not use the isolated profile. Rebuild it.');
         }
         await d.css('screenshots-freeze', FREEZE_CSS);
-        await scene.prepare(d, library, manifest, station);
-        await d.action('setWindowSize', scene.size);
+        await unit.prepare(d, library, manifest, station);
+        await d.action('setWindowSize', unit.size);
         // Focus before waiting on any paint. macOS stops a fully occluded
         // window's requestAnimationFrame, and settle waits on two frames — so a
         // window that came up behind another app hangs settle until the bridge's
@@ -150,13 +165,13 @@ async function main() {
         });
         const view = await d.waitFor(async () => {
           const view = await d.settle();
-          return view.width === scene.size.width && view.height === scene.size.height && view;
-        }, { message: `Window did not resize to ${scene.size.width}×${scene.size.height}` });
+          return view.width === unit.size.width && view.height === unit.size.height && view;
+        }, { message: `Window did not resize to ${unit.size.width}×${unit.size.height}` });
         if (view.dpr !== 2) throw new Error(`Expected a 2x display, got ${view.dpr}x. Move the capture app to a Retina display at native scale.`);
         const state = await d.probe();
-        const expected = (scene.playback ?? restoredSession)(state);
+        const expected = (unit.playback ?? restoredSession)(state);
         if (expected) throw new Error(`Expected ${expected} before capture, got: ${JSON.stringify(state)}`);
-        const file = path.join(runDir, `${scene.id}.png`);
+        const file = path.join(runDir, `${unit.id}.png`);
         // Re-run before every shutter, not once: cancelling an animation does
         // not stop the cascade from starting it again, and a scene can reach
         // the shutter with one still in flight.
@@ -175,7 +190,7 @@ async function main() {
           }
           await d.settle();
         }, {
-          diagnostics: path.join(runDir, `${scene.id}-unsettled`),
+          diagnostics: path.join(runDir, `${unit.id}-unsettled`),
           // Whatever was still live on the final attempt, named. An animation
           // that keeps reappearing here is one the cascade keeps restarting.
           stillRunning: () => running.map((a) => `${a.kind} on ${a.target ?? '?'} (${a.playState})`),
@@ -183,8 +198,8 @@ async function main() {
         if (pixels.width !== view.width * 2 || pixels.height !== view.height * 2) {
           throw new Error(`Native capture dimensions ${pixels.width}×${pixels.height} disagree with the viewport at 2x`);
         }
-        captured.push({ scene, file, pixels, state, view });
-        console.log(`Captured ${scene.id}: ${pixels.width}×${pixels.height}`);
+        captured.push({ unit, file, pixels, state, view });
+        console.log(`Captured ${unit.id}: ${pixels.width}×${pixels.height}`);
       } finally {
         await harness?.close();
         harness = undefined;
@@ -192,9 +207,28 @@ async function main() {
       }
     }
     abort.signal.throwIfAborted();
+    // Composition runs after every recipe succeeded, and what a store scene
+    // publishes is the composed poster rather than any bare capture. The
+    // captures stay in the run directory beside it.
+    const shots = (scene) => captured.filter((item) => item.unit === scene || item.unit.of === scene);
+    const posters = selected.filter((scene) => scene.poster)
+      .map((scene) => ({ scene, parts: shots(scene).map(({ unit, file, pixels }) => ({ panel: unit.panel ?? 'app', file, pixels })) }));
+    let composed = new Map();
+    if (posters.length) {
+      const windows = posters.reduce((total, poster) => total + poster.parts.length, 0);
+      console.log(`Composing ${posters.length} App Store poster${posters.length > 1 ? 's' : ''} from ${windows} window${windows > 1 ? 's' : ''}…`);
+      composed = await renderPosters(posters, runDir);
+    }
+    // One published image per selected scene, in scene order: a poster's own
+    // composed file, or the single capture of an ordinary scene.
+    const published = selected.map((scene) => ({
+      scene,
+      ...(scene.poster ? composed.get(scene.id) : shots(scene)[0]),
+      windows: shots(scene).map(({ unit, view, state }) => ({ window: unit.panel ?? 'app', view, state })),
+    }));
     // All recipes succeeded before any tracked assets are replaced.
     const report = [];
-    for (const { scene, file, pixels, state, view } of captured) {
+    for (const { scene, file, pixels, windows } of published) {
       for (const destination of scene.destinations) {
         const target = path.join(root, destination);
         let previous;
@@ -207,7 +241,7 @@ async function main() {
           await writeFile(path.join(runDir, `before-${index}.png`), previous);
           await writeFile(path.join(runDir, `diff-${index}.png`), differencePNG(oldPixels, pixels));
         }
-        report.push({ scene: scene.id, destination, changed, view, state });
+        report.push({ scene: scene.id, image: path.basename(file), destination, changed, windows });
         if (changed && !opts.check) {
           await mkdir(path.dirname(target), { recursive: true });
           await copyFile(file, target);
@@ -221,7 +255,7 @@ async function main() {
     }, null, 2) + '\n');
     const rows = report.map((item, index) => `<section><h2>${item.destination}</h2><p>${item.changed ? 'Changed' : 'Unchanged'}</p><div>` +
       (item.changed ? `<img alt="Previous" src="before-${index}.png" onerror="this.remove()">` : '') +
-      `<img alt="Captured" src="${item.scene}.png">` +
+      `<img alt="Captured" src="${item.image}">` +
       (item.changed ? `<img alt="Pixel differences" src="diff-${index}.png" onerror="this.remove()">` : '') + '</div></section>').join('\n');
     await writeFile(path.join(runDir, 'review.html'), '<!doctype html><meta charset="utf-8"><title>Pudding screenshot review</title>' +
       '<style>body{font:14px system-ui;background:#202020;color:white;margin:24px}h2{font-size:16px}section{margin-bottom:32px}section div{display:flex;gap:16px;align-items:start}img{max-width:31%;height:auto}</style>' +
@@ -230,7 +264,7 @@ async function main() {
     if (opts.check && report.some((item) => item.changed)) process.exitCode = 1;
     // Keep images, logs and report, but remove generated audio/profile data after app exit.
     await clearFixtures();
-    for (const { scene } of captured) await rm(path.join(runDir, `${scene.id}-profile`), { recursive: true, force: true });
+    for (const { unit } of captured) await rm(path.join(runDir, `${unit.id}-profile`), { recursive: true, force: true });
   } finally {
     await station?.close();
     await lock.close();

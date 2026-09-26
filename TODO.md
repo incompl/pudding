@@ -76,15 +76,15 @@ Sandbox, entitlements, and bookmarked roots are done
 
 ### App Store product assets
 
-- [ ] Create at least one Mac App Store screenshot at an accepted 16:10 size: 1280x800, 1440x900, 2560x1600, or 2880x1800.
-- [ ] Prefer a complete 5-7 screenshot set covering the library, search/navigation, queue/playlists, tag editing, radio, equalizer/visualizer, and mini player.
-- [ ] Make the screenshots and description clearly communicate how Pudding differs from other music players (4.3) — not just the README.
+- [x] Create at least one Mac App Store screenshot at an accepted 16:10 size
+- [x] Shipped a seven-poster set: library (01), window sizes with the mini player
+- [x] Screenshots and description carry the 4.3 differentiators 
 - [ ] Confirm the final app icon renders correctly in the uploaded build and App Store Connect.
 
 ### App Store Connect
 
 - [ ] Create the macOS app record before uploading the first build.
-- [ ] Enter the app name, subtitle, description, keywords, copyright, SKU, primary language, and matching Music category.
+- [ ] Enter the app name, subtitle, description, keywords, copyright, SKU, primary language, and matching Music category. Draft copy for the text fields is in `apps/desktop/app-store/LISTING.md`.
 - [ ] Complete the content-rights declaration.
 - [ ] Complete Apple's current age-rating questionnaire.
 - [ ] Declare **No data collected** under App Privacy while the app's current data practices remain unchanged.
