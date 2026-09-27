@@ -2136,26 +2136,17 @@ body.dragging .colhead-grip.col-resizing::after {
 body:not(.playback-paused) .queue-row.playing .queue-num-text {
   visibility: hidden;
 }
-/* `display` keys off .playing alone — never off pause, hover, or anything else that
-   flips mid-session. `display: none` *cancels* a running animation outright, so any
-   state that toggles display has to recreate it, and a whole-document style
-   invalidation that lands in that window can eat the restart (WebKit), leaving three
-   static full-height bars. The drag arm does exactly that on every click: pointerdown
-   adds `body.dragging-noselect`, whose `*` rule invalidates every element, and
-   pointerup removes it — so a hover click *and* a resume click both sit in the danger
-   window. Instead the bounce runs for as long as the row owns the playhead, and the two
-   things that hide it leave the animation alone: visibility while paused, opacity under
-   the hover button. Two different properties, so neither has to outrank the other on
-   specificity. .eq-bars is pointer-events:none and absolutely positioned, so a hidden
-   glyph neither eats the click nor holds layout. */
-.queue-row.playing .eq-bars {
+/* The glyph itself: shown for exactly as long as the row owns the playhead and
+   playback is live, gone again on hover where the button takes the cell. Plain
+   `display` in both directions — the bounce lives on body, not on these spans, so a
+   gutter can flip its glyph off and on without any animation to lose (see .eq-bars).
+   .eq-bars is pointer-events:none and absolutely positioned, so it neither eats the
+   click nor holds layout either way. */
+body:not(.playback-paused) .queue-row.playing .eq-bars {
   display: flex;
 }
-body.playback-paused .queue-row.playing .eq-bars {
-  visibility: hidden;
-}
-.queue-row.playing:hover .eq-bars {
-  opacity: 0;
+body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
+  display: none;
 }
 
 /* Multi-select background, matching the tree's .selected row. The .playing accent
@@ -4192,7 +4183,88 @@ body.playback-paused .playing .row-play::before {
    where the number and the hover play button do, so the three trade places in one
    spot. Hidden by default; each gutter reveals it on its own .playing row (and hides
    it again on hover, where the play button takes over). Three bars bounce on their
-   own staggered timers for an organic, non-synchronized wave. */
+   own staggered timers for an organic, non-synchronized wave.
+
+   The bounce itself does NOT live on the bars. Three registered custom properties
+   carry the heights, one animation each on body, and every bar span is a follower
+   that reads its number — so the whole app runs exactly three animations no matter
+   how many rows exist, on an element that is never re-rendered, never hidden and
+   never display-toggled. That is deliberate: `display: none` *cancels* a running CSS
+   animation outright, and a whole-document style invalidation landing in the window
+   where the cascade would restart it can eat the restart (WebKit), leaving three
+   static full-height bars — the drag arm does exactly that on every click, since
+   pointerdown adds `body.dragging-noselect`, whose `*` rule invalidates every
+   element. Rows owning no animation is what makes that unreachable: a gutter can
+   hide, show, re-render or be rebuilt by the row windower and there is nothing on it
+   to lose. The followers cost a style recalc per frame rather than a compositor
+   thread, which for a 1em glyph is free — and it keeps the glyph a themeable vector
+   instead of a raster asset, and keeps it cancellable by the E2E freeze (three named
+   animations that land on the static meter below) so screenshots still settle. */
+@property --eq-1 {
+  syntax: "<number>";
+  inherits: true;
+  /* The static level meter: what the bars show with the driver stopped — under
+     prefers-reduced-motion, and at the E2E shutter once freeze() has cancelled it. */
+  initial-value: 0.5;
+}
+@property --eq-2 {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 1;
+}
+@property --eq-3 {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.65;
+}
+/* The driver, on the one element that outlives everything: distinct durations +
+   offsets so the three bars never march in lockstep. Parked while playback is paused
+   — no row shows bars then, so there is nothing to drive, and a paused animation
+   costs no frames. Paused, never cancelled: play-state is a state change on the same
+   animation, so the thing that eats a *restart* has nothing to eat here. */
+body {
+  animation:
+    eq-bounce-1 0.72s ease-in-out infinite,
+    eq-bounce-2 1.04s ease-in-out -0.5s infinite,
+    eq-bounce-3 0.86s ease-in-out -0.2s infinite;
+}
+body.playback-paused {
+  animation-play-state: paused;
+}
+@keyframes eq-bounce-1 {
+  0%,
+  100% {
+    --eq-1: 0.22;
+  }
+  50% {
+    --eq-1: 1;
+  }
+}
+@keyframes eq-bounce-2 {
+  0%,
+  100% {
+    --eq-2: 0.22;
+  }
+  50% {
+    --eq-2: 1;
+  }
+}
+@keyframes eq-bounce-3 {
+  0%,
+  100% {
+    --eq-3: 0.22;
+  }
+  50% {
+    --eq-3: 1;
+  }
+}
+/* Users who ask for less motion get the static level meter (the registered initial
+   values) instead of the bounce. */
+@media (prefers-reduced-motion: reduce) {
+  body {
+    animation: none;
+  }
+}
 .eq-bars {
   display: none;
   position: absolute;
@@ -4213,10 +4285,9 @@ body.playback-paused .playing .row-play::before {
   height: 100%;
   background-color: var(--accent);
   border-radius: 1px;
-  /* Bottom-anchored scaleY so the bar grows up from the baseline (cheaper to
-     animate than height — stays on the compositor). */
+  /* Bottom-anchored scaleY so the bar grows up from the baseline (cheaper than
+     animating height, and the only thing a follower has to do per frame). */
   transform-origin: bottom;
-  animation: eq-bounce 0.85s ease-in-out infinite;
 }
 /* Reserve the accent for the "open" row (the one the right pane is showing). A left-
    panel row that's only playing — glyph, but no accent text — gets a text-colored
@@ -4228,46 +4299,14 @@ body.playback-paused .playing .row-play::before {
 .nav-row.playing:not(.open) .eq-bars > span {
   background-color: var(--text);
 }
-/* Distinct durations + offsets so the three bars never march in lockstep. */
 .eq-bars > span:nth-child(1) {
-  animation-duration: 0.72s;
+  transform: scaleY(var(--eq-1));
 }
 .eq-bars > span:nth-child(2) {
-  animation-duration: 1.04s;
-  animation-delay: -0.5s;
+  transform: scaleY(var(--eq-2));
 }
 .eq-bars > span:nth-child(3) {
-  animation-duration: 0.86s;
-  animation-delay: -0.2s;
-}
-@keyframes eq-bounce {
-  0%,
-  100% {
-    transform: scaleY(0.22);
-  }
-  50% {
-    transform: scaleY(1);
-  }
-}
-/* While paused the glyph is hidden and each gutter falls back to its track number (see
-   the body.playback-paused rules above), matching Apple Music / Spotify — the bars only
-   ever appear over audio that's actually playing. The bounce itself keeps running behind
-   the hidden glyph rather than stopping: it costs nothing on three off-screen spans, and
-   never touching the animation once it exists is what keeps it from getting lost. */
-/* Users who ask for less motion get a static level meter instead of the bounce. */
-@media (prefers-reduced-motion: reduce) {
-  .eq-bars > span {
-    animation: none;
-  }
-  .eq-bars > span:nth-child(1) {
-    transform: scaleY(0.5);
-  }
-  .eq-bars > span:nth-child(2) {
-    transform: scaleY(1);
-  }
-  .eq-bars > span:nth-child(3) {
-    transform: scaleY(0.65);
-  }
+  transform: scaleY(var(--eq-3));
 }
 
 /* On row hover the gutter number gives way to the play button. */
@@ -4405,17 +4444,11 @@ body.playback-paused .playing .row-play::before {
 body:not(.playback-paused) .node-label.playing .icon.track .track-num {
   visibility: hidden;
 }
-/* Display keyed off .playing alone; paused and hover hide it with visibility and
-   opacity instead, so the bounce survives both round-trips — see the queue's rules
-   for the full why. */
-.node-label.playing .icon.track .eq-bars {
+body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
   display: flex;
 }
-body.playback-paused .node-label.playing .icon.track .eq-bars {
-  visibility: hidden;
-}
-.node-label.playing:hover .icon.track .eq-bars {
-  opacity: 0;
+body:not(.playback-paused) .node-label.playing:hover .icon.track .eq-bars {
+  display: none;
 }
 
 /* An open playlist tints its glyph to match its accent row, the way an open track's
@@ -4437,15 +4470,13 @@ body:not(.playback-paused)
   .playlist-glyph {
   visibility: hidden;
 }
-/* Display keyed off .playing alone — opening the playlist is a click too, and a click
-   is exactly when a display flip loses its animation (see the queue's rules), so both
-   "paused" and "open" hide the glyph with visibility instead. */
-.node-label.playing .icon.playlist .eq-bars {
+/* The exact complement of the rule above: wherever the stack glyph steps aside, the
+   equalizer steps in. */
+body:not(.playback-paused)
+  .node-label.playing:not(.open)
+  .icon.playlist
+  .eq-bars {
   display: flex;
-}
-body.playback-paused .node-label.playing .icon.playlist .eq-bars,
-.node-label.playing.open .icon.playlist .eq-bars {
-  visibility: hidden;
 }
 
 /* The playing station's glyph takes the accent, matching the row highlight. */
@@ -5171,12 +5202,8 @@ body.playback-paused .node-label.playing .icon.playlist .eq-bars,
 body:not(.playback-paused) .nav-row.playing:not(.open) .nav-gutter .nav-glyph {
   visibility: hidden;
 }
-.nav-row.playing .nav-gutter .eq-bars {
+body:not(.playback-paused) .nav-row.playing:not(.open) .nav-gutter .eq-bars {
   display: flex;
-}
-body.playback-paused .nav-row.playing .nav-gutter .eq-bars,
-.nav-row.playing.open .nav-gutter .eq-bars {
-  visibility: hidden;
 }
 /* Music note (songs) — the navigator glyph. */
 .nav-songs {
@@ -5287,16 +5314,11 @@ body.playback-paused .nav-row.playing .nav-gutter .eq-bars,
 body:not(.playback-paused) .nav-track-row.playing .nav-num-text {
   visibility: hidden;
 }
-/* Display keyed off .playing alone; paused and hover hide it with visibility and
-   opacity instead — see the queue's rules for the full why. */
-.nav-track-row.playing .eq-bars {
+body:not(.playback-paused) .nav-track-row.playing .eq-bars {
   display: flex;
 }
-body.playback-paused .nav-track-row.playing .eq-bars {
-  visibility: hidden;
-}
-.nav-track-row.playing:hover .eq-bars {
-  opacity: 0;
+body:not(.playback-paused) .nav-track-row.playing:hover .eq-bars {
+  display: none;
 }
 
 /* Multi-select background, matching the queue's .selected row. */

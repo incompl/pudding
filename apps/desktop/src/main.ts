@@ -3424,8 +3424,10 @@ function setupEffects(): void {
     // shapes independently styleable (for example, #play-pause-btn.play).
     playPauseBtn.classList.toggle("play", !playing);
     playPauseBtn.classList.toggle("pause", playing);
-    // Freeze the playing-row equalizer bars while paused (CSS pins their animation
-    // off body.playback-paused), matching the paused transport state.
+    // Hide the playing-row equalizer bars while paused (each gutter falls back to its
+    // track number off body.playback-paused), matching the paused transport state. The
+    // shared bounce parks itself off the same class (see .eq-bars), so a paused app
+    // drives nothing.
     document.body.classList.toggle("playback-paused", !playing);
   });
   effect(() => {

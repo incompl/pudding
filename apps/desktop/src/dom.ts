@@ -65,6 +65,11 @@ export function h<K extends keyof HTMLElementTagNameMap>(
 // the motion (see .eq-bars) and hides it while playback is paused (body.playback
 // -paused). Every track gutter (tree, queue, nav leaf list) builds one, hidden
 // until its row is the playing one, so the glyph is a shared, uniform detail.
+//
+// These spans carry no animation of their own: the bounce is three animations on
+// body feeding inherited custom properties, and a bar just reads its number. So a
+// row is free to be created, hidden, shown or thrown away by the row windower
+// without any animation to lose — see .eq-bars in styles.css for why that matters.
 export function eqBars(): HTMLElement {
   return h(
     "span",
