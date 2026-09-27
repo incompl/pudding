@@ -35,6 +35,12 @@ type Pending = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+// What `waitFor` resolves to. It polls until the predicate returns something
+// truthy and hands that back, so the falsy half of the predicate's own type is
+// never a possible result — without this, every `waitFor(() => n > 0 && n)` site
+// has to re-narrow a `number | false` it can't actually receive.
+type Truthy<T> = Exclude<T, false | null | undefined | 0 | "">;
+
 export type Driver = {
   css(id: string, text: string | null): Promise<void>;
   /**
@@ -57,7 +63,7 @@ export type Driver = {
   waitFor<T>(
     pred: () => Promise<T> | T,
     opts?: { timeout?: number; interval?: number; message?: string },
-  ): Promise<T>;
+  ): Promise<Truthy<T>>;
 };
 
 export type Harness = {
@@ -118,13 +124,19 @@ function makeDriver(ws: WebSocket): Driver {
     probe: () => send("probe") as Promise<Record<string, unknown>>,
     invoke: (name, payload) => send("invoke", { name, payload }),
     action: (name, arg) => send("action", { name, arg }),
-    async waitFor(pred, opts) {
+    // Re-declares the generic the Driver type states, so the cast below can name it.
+    async waitFor<T>(
+      pred: () => Promise<T> | T,
+      opts?: { timeout?: number; interval?: number; message?: string },
+    ): Promise<Truthy<T>> {
       const timeout = opts?.timeout ?? 5_000;
       const interval = opts?.interval ?? 100;
       const deadline = Date.now() + timeout;
       for (;;) {
         const v = await pred();
-        if (v) return v;
+        // The truthiness check *is* the Truthy<T> narrowing; TS won't derive that
+        // for an unresolved T, so state it here rather than at every call site.
+        if (v) return v as Truthy<T>;
         if (Date.now() > deadline)
           throw new Error(opts?.message ?? "waitFor timed out");
         await new Promise((r) => setTimeout(r, interval));

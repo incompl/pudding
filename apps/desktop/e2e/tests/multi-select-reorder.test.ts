@@ -56,6 +56,12 @@ test("dragging a multi-selection reorders the whole block, not just the grabbed 
     await d.waitFor(async () => (await d.probe()).queueLength === 4, {
       message: "P never became the active 4-track pool",
     });
+    // The pool signal lands a render ahead of the rows it mounts, so waiting on
+    // the length alone raced listClick (which resolves a real `li.queue-row`) and
+    // failed ~1 run in 5 with "no queue row at index: 2". Wait for the row too.
+    await d.waitFor(async () => d.exists("#queue-list li.queue-row:nth-child(4)"), {
+      message: "P's rows never mounted",
+    });
 
     // Select rows 3 and 4 (indices 2 and 3) via Cmd-click.
     await d.action("listClick", { index: 2, meta: true });
@@ -68,10 +74,15 @@ test("dragging a multi-selection reorders the whole block, not just the grabbed 
     // index 1). The whole selection [C, D] must travel, not just C.
     await d.action("dragRow", { from: 2, to: 1 });
 
-    await d.waitFor(
-      async () => JSON.stringify(await filePaths(d, P)) === JSON.stringify([A, C, D, B]),
-      { message: "multi-selection reorder did not move both rows as a block" },
-    );
+    // Wait for the drag's autosave to land (one atomic write per edit), then
+    // compare: the single-row bug also changes the file, so this reports the order
+    // it actually wrote instead of a bare timeout.
+    const before = JSON.stringify([A, B, C, D]);
+    await d.waitFor(async () => JSON.stringify(await filePaths(d, P)) !== before, {
+      message: "the reorder never reached the file",
+    });
+    assert.deepEqual(await filePaths(d, P), [A, C, D, B],
+      "multi-selection reorder did not move both rows as a block");
   } finally {
     await fs.rm(P, { force: true });
   }

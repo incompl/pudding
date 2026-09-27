@@ -1,9 +1,12 @@
 {
-  // Same compiler settings as the app build, but widened to include test/ so the
-  // unit tests and the fake DOM are typechecked too. The base config only compiles
-  // src/, which is why injected-dep drift (a fixture missing a LibraryNavDeps field)
-  // slipped through to a runtime crash instead of a compile error. test:unit runs
-  // this before the node:test run so that class of drift fails fast.
+  // Same compiler settings as the app build, but widened to include test/ and e2e/
+  // so the unit tests, the fake DOM, and the e2e suite are typechecked too. The base
+  // config only compiles src/, which is why injected-dep drift (a fixture missing a
+  // LibraryNavDeps field) slipped through to a runtime crash instead of a compile
+  // error. test:unit runs this before the node:test run so that class of drift fails
+  // fast — and it covers e2e/tests too, which build the same kind of fixture but
+  // only fail at runtime, after a slow bundle build. (The .mjs drivers alongside
+  // them stay out: allowJs is off, so tsc skips them.)
   "extends": "./tsconfig.json",
-  "include": ["src", "test", "e2e/harness.ts", "e2e/tag-editing.ts"]
+  "include": ["src", "test", "e2e"]
 }
