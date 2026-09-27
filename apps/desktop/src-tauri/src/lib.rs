@@ -7500,11 +7500,39 @@ mod tests {
     }
 
     #[test]
-    fn default_stream_list_contains_the_approved_somafm_station() {
+    fn default_stream_list_holds_only_approved_stations() {
+        // A regression guard on permission, not on parsing: stations ship only
+        // with their operator's say-so, so every row in this hand-edited file is
+        // a deliberate addition. If this fails, either the list gained a station
+        // nobody cleared, or a cleared one was added without being listed here.
         let streams = parse_m3u_stream_list(DEFAULT_STREAM_LIST).unwrap();
-        assert_eq!(streams.len(), 1);
-        assert_eq!(streams[0].name, "SomaFM: Seventies");
-        assert_eq!(streams[0].url, "https://somafm.com/seventies320.pls");
+        let approved = [
+            (
+                "SomaFM Left Coast 70s",
+                "https://somafm.com/seventies320.pls",
+            ),
+            ("SomaFM Lush", "https://somafm.com/lush.pls"),
+            ("SomaFM PopTron", "https://somafm.com/poptron.pls"),
+            (
+                "SomaFM Suburbs of Goa",
+                "https://somafm.com/suburbsofgoa.pls",
+            ),
+            ("SomaFM ThistleRadio", "https://somafm.com/thistle.pls"),
+            (
+                "Vintage Obscura Radio",
+                "https://radio.vintageobscura.net/stream",
+            ),
+        ];
+        assert_eq!(
+            streams
+                .iter()
+                .map(|s| (s.name.as_str(), s.url.as_str()))
+                .collect::<Vec<_>>(),
+            approved.to_vec()
+        );
+        // Every default row carries its station art, which is easy to forget
+        // when adding one by hand.
+        assert!(streams.iter().all(|s| s.image.is_some()));
     }
 
     #[test]
