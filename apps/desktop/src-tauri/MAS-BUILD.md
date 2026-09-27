@@ -6,11 +6,19 @@ layered on only for MAS builds:
 - `tauri.mas.conf.json` enables the sandbox entitlements and produces an `.app`.
 - `tauri.mas.distribution.conf.json` embeds the local provisioning profile at
   `Contents/embedded.provisionprofile` using Tauri's supported
-  `bundle.macOS.files` mapping.
+  `bundle.macOS.files` mapping, and signs with `Entitlements.distribution.plist`
+  instead of `Entitlements.plist`.
 
-The provisioning profile is deliberately not committed. Save the downloaded
-Mac App Store Connect profile as `src-tauri/AppStore.provisionprofile`; that path
-is ignored by Git.
+Two files are deliberately not committed, because both are specific to one Apple
+Developer account:
+
+- `src-tauri/AppStore.provisionprofile` — save the downloaded Mac App Store
+  Connect profile there.
+- `src-tauri/Entitlements.distribution.plist` — generated on every distribution
+  build by `tools/gen-distribution-entitlements.sh` from `Entitlements.plist`
+  plus `$TEAM_ID`, which adds the two identifier entitlements below. Nothing
+  hand-edits `Entitlements.plist`, so the sandbox entitlements keep one source
+  and `tools/sandbox-check.sh` keeps testing the same list the store build signs.
 
 ## Local sandbox check
 
@@ -40,9 +48,15 @@ embedded distribution profile cannot be uploaded to App Store Connect.
    Application**) certificate and private key in the release keychain.
 4. Install a **Mac Installer Distribution** (or legacy **3rd Party Mac Developer
    Installer**) certificate and private key.
-5. Put the profile's App ID Prefix in `Entitlements.plist` as both:
-   `com.apple.developer.team-identifier = TEAM_ID` and
-   `com.apple.application-identifier = TEAM_ID.com.incompl.pudding`.
+5. Note the profile's App ID Prefix — the 10-character Team ID. Every
+   distribution build needs it in the environment as `TEAM_ID`; the generator
+   turns it into `com.apple.developer.team-identifier = TEAM_ID` and
+   `com.apple.application-identifier = TEAM_ID.com.incompl.pudding`. To inspect
+   the result without building:
+
+   ```sh
+   TEAM_ID=ABCDE12345 apps/desktop/tools/gen-distribution-entitlements.sh
+   ```
 6. Install both Rust macOS targets used by the universal build:
 
    ```sh
@@ -69,12 +83,14 @@ same marketing version. App Store Connect will reject a reused build number.
 From the repository root:
 
 ```sh
-APPLE_SIGNING_IDENTITY="Apple Distribution: YOUR NAME (TEAM_ID)" \
+TEAM_ID=ABCDE12345 \
+  APPLE_SIGNING_IDENTITY="Apple Distribution: YOUR NAME (ABCDE12345)" \
   pnpm build:mas:distribution
 ```
 
-The distribution script targets `universal-apple-darwin`, merges both MAS
-overlays, embeds the profile, signs with the distribution identity, and emits:
+The distribution script regenerates `Entitlements.distribution.plist` from
+`$TEAM_ID`, targets `universal-apple-darwin`, merges both MAS overlays, embeds
+the profile, signs with the distribution identity, and emits:
 
 ```text
 apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Pudding.app

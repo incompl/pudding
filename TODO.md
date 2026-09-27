@@ -12,7 +12,14 @@ Sandbox, entitlements, and bookmarked roots are done
 - [ ] Install a valid Mac App Distribution/Apple Distribution signing certificate on the release machine.
 - [ ] Install a valid Mac Installer Distribution certificate on the release machine.
 - [ ] Embed the provisioning profile as `Contents/embedded.provisionprofile` through the MAS Tauri configuration (`bundle.macOS.files`). (The distribution overlay is ready; add the account-specific profile.)
-- [ ] Add `com.apple.application-identifier` and `com.apple.developer.team-identifier` to the distribution entitlements, using the real Team ID.
+- [ ] Supply the real Team ID to the distribution entitlements. The plumbing is
+      done (2026-09-26): `tools/gen-distribution-entitlements.sh` derives
+      `Entitlements.distribution.plist` from `Entitlements.plist` plus `$TEAM_ID`,
+      adding `com.apple.application-identifier` and
+      `com.apple.developer.team-identifier`, and `pnpm build:mas:distribution`
+      runs it. `Entitlements.plist` is never hand-edited, so the sandbox list
+      keeps one source and `sandbox-check.sh` still tests what the store build
+      signs. All that is left is `TEAM_ID=` on the build command.
 - [x] Update `apps/desktop/src-tauri/MAS-BUILD.md` to reflect Tauri's current provisioning-profile support and the complete release procedure.
 - [ ] Produce a distribution-signed `.app`, package it as a signed `.pkg` with `productbuild`, and validate it before upload.
 - [ ] Confirm that App Store Connect accepts the hardened-runtime signature (`flags=0x10002`) on the first upload.
@@ -38,7 +45,9 @@ Sandbox, entitlements, and bookmarked roots are done
       the reviewer through pasting a URL. Not worth the 2.1 exposure or the
       licensing dependency on the critical path.
 - [x] Write App Review notes with explicit steps for testing local playback, radio URLs, tag editing, playlists, and sandbox folder access.
-- [x] Verify every external link from a clean release build. (All current endpoints returned HTTP 200 on 2026-09-17; the signed-build click test remains.)
+- [x] Verify every external link from a clean release build. All current endpoints
+      returned HTTP 200 on 2026-09-17, and the in-app click test (Help ▸ website,
+      Privacy Policy, Support — `lib.rs`) passed from a sandboxed build.
 - [ ] Run a final sandbox smoke test on the distribution-signed app, including bookmark restoration after relaunch.
 - [ ] Run a final TestFlight pass on the latest supported macOS release and on every supported CPU architecture.
 
@@ -72,7 +81,9 @@ Sandbox, entitlements, and bookmarked roots are done
 - [x] Audited user-facing copy for claims such as “completely safe” or “cannot
       damage your files” (2026-09-17: app strings, `index.html`, README, website
       content, review notes). No overclaim found; the metadata-editing section of
-      the documentation is already hedged correctly. Re-grep before submission.
+      the documentation is already hedged correctly. Re-grepped 2026-09-26: still
+      clean — the only user-facing hit is the correctly hedged README line.
+      Re-grep once more if copy changes before upload.
 
 ### App Store product assets
 
@@ -84,7 +95,11 @@ Sandbox, entitlements, and bookmarked roots are done
 ### App Store Connect
 
 - [ ] Create the macOS app record before uploading the first build.
-- [ ] Enter the app name, subtitle, description, keywords, copyright, SKU, primary language, and matching Music category. Draft copy for the text fields is in `apps/desktop/app-store/LISTING.md`.
+- [ ] Enter the app name, subtitle, description, keywords, copyright, SKU, primary
+      language, and matching Music category. Draft copy for the text fields is in
+      `apps/desktop/app-store/LISTING.md`; all fields were re-counted 2026-09-26
+      and fit (name 7/30, subtitle 30/30 — at the cap, promotional text 113/170,
+      keywords 93/100, description 3588/4000).
 - [ ] Complete the content-rights declaration.
 - [ ] Complete Apple's current age-rating questionnaire.
 - [ ] Declare **No data collected** under App Privacy while the app's current data practices remain unchanged.
@@ -96,7 +111,6 @@ Sandbox, entitlements, and bookmarked roots are done
 - [ ] Enter complete App Review contact information and the detailed review notes.
 - [ ] Upload the signed `.pkg`, resolve all processing warnings, and select the processed build for the version.
 - [ ] Complete any export-compliance questions or attach required documentation.
-- [ ] Optionally audit accessibility and publish accurate Accessibility Nutrition Labels.
 
 ## Desktop app fixes
 
