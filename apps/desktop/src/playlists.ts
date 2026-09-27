@@ -6,12 +6,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirm, save } from "@tauri-apps/plugin-dialog";
 import type {
   PlaylistData,
+  PlaylistFileSession,
   SearchTrack,
   TreeNode,
   Queue,
   PlaylistRef,
   TrackProvider,
 } from "./types";
+import type { RecentAccess } from "./recents";
 import { accessRecentItem, addRecentItem, removeRecentItem, updateRecentItem } from "./recents";
 import {
   activeQueue,
@@ -476,25 +478,49 @@ export function queueCanSaveAsPlaylist(): boolean {
 // Write the live queue to `path`, then repoint it at that file so it becomes an
 // autosaving playlist source: from here on curations flow to disk (saveOpenPlaylist
 // keys off sourcePath). kind is already "playlist"; we adopt the saved name too.
-// Guard against a queue swap during the write. The browse at the end opens with
-// the same sourcePath, so the two are recognised as one pool rather than diverging.
+// Guard against a queue swap during the write.
+//
+// The pool adopts the path the *grant* resolves to, not the one the picker
+// returned. Freezing the picker grant resolves the file's bookmark, and that comes
+// back spelled canonically — so saving into a symlinked or aliased folder yields
+// two strings for one file. Everything downstream keys off that string: curation
+// recognises the browsed list as the live pool by comparing sourcePath, and the
+// write-ordering, session and mtime registries in playlist-file.ts are path-keyed
+// maps. Adopt one spelling here and the pool, the recents entry and the browse
+// below all agree; let them diverge and a post-save curation writes the file while
+// the live pool and the engine keep the row that was just removed. The bookmark
+// can only be minted once the file exists, hence after the write rather than before.
 export async function saveQueueAsPlaylist(path: string): Promise<void> {
   const q = activeQueue.value;
   if (!q || isPlaylistSource(q) || !queueIsActivePool()) return;
   const name = playlistNameFromPath(path);
+  let fileSession: PlaylistFileSession;
   try {
-    const fileSession = await writePlaylist(path, name, q.tracks, undefined, true);
-    if (activeQueue.value === q) {
-      activeQueue.value = { ...q, title: name, sourcePath: path, fileSession };
-    }
+    fileSession = await writePlaylist(path, name, q.tracks, undefined, true);
   } catch (e) {
     console.error("write_playlist failed", path, e);
     toast(typeof e === "string" ? e : "Couldn't save playlist");
     return;
   }
+  // A grant we couldn't freeze leaves the file saved and the path as the picker
+  // spelled it — the browse below re-attempts the access and reports the failure,
+  // exactly as it did when it owned this step.
+  let access: RecentAccess | null = null;
+  try {
+    access = await accessRecentItem(path);
+  } catch (e) {
+    console.error("could not retain playlist access", path, e);
+  }
+  const saved = access?.path ?? path;
+  if (activeQueue.value === q) {
+    activeQueue.value = { ...q, title: name, sourcePath: saved, fileSession };
+  }
   toast(`Saved playlist "${name}"`);
   await refreshLibrary();
-  await browsePlaylistPath(path, { recent: true });
+  await browsePlaylistPath(
+    saved,
+    access ? { recent: true, bookmark: access.bookmark } : { recent: true },
+  );
 }
 
 // Move Playlist File...: relocate the open playlist on disk (rewriting relative
