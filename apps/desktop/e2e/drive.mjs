@@ -38,7 +38,7 @@ const appBin =
   process.env.PUDDING_E2E_APP ??
   path.join(
     projectRoot,
-    "src-tauri/target/debug/bundle/macos/Pudding.app/Contents/MacOS/pudding",
+    "src-tauri/target/debug/bundle/macos/Pudding E2E.app/Contents/MacOS/pudding",
   );
 
 // --- webview connection (most recent wins) --------------------------------

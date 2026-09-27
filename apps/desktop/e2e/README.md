@@ -37,6 +37,25 @@ loopback WebSocket, and we don't weaken it. `src-tauri/tauri.e2e.conf.json`
 overrides *only* the CSP to also allow `ws://127.0.0.1:*`, and `build:e2e`
 builds a debug bundle with it merged in. Production builds are untouched.
 
+`build:e2e` merges a second override, `src-tauri/tauri.e2e.bundle.conf.json`,
+which gives the bundle its own name and identity (`Pudding E2E` /
+`com.incompl.pudding.e2e`). That's not cosmetic: `tauri-plugin-single-instance`
+keys on the bundle identifier, so a test bundle sharing the shipping one hands
+its argv to whatever Pudding is already open and exits **0** without ever
+dialing in — every test then fails with "app exited before connecting", naming
+nothing. A separate identifier means the suite runs with your own Pudding open.
+The identity lives in its own file rather than in the CSP override because
+`drive.mjs --dev` merges that override too, and an identifier of its own would
+hand interactive driving (and `pnpm caliper`) a fresh, empty app-data profile
+instead of your configured library. The same split is why the screenshot runner
+has `tauri.screenshots.conf.json` — the bundle it builds is isolated the same
+way, one identifier further out.
+
+The flip side: the suite's app-data profile is its own, so tests set up whatever
+state they need (see the `PUDDING_E2E_DATA_DIR` env in `playlist-integrity`) and
+never read your library. `pnpm drive --dev` keeps the shipping identifier, so it
+still needs your own Pudding quit before it can launch.
+
 ## Running
 
 ```bash
@@ -49,7 +68,8 @@ The harness spawns the built binary directly (so `PUDDING_E2E_PORT` reaches it)
 and waits for the webview to connect. Overrides:
 
 - `PUDDING_E2E_APP=/path/to/Pudding.app/Contents/MacOS/pudding` — drive a
-  release bundle instead of the debug one.
+  release bundle instead of the debug one. A bundle built without the identity
+  override above is subject to the single-instance no-op described there.
 - `PUDDING_E2E_NO_SPAWN=1` — don't launch; attach to an app you started with the
   same `PUDDING_E2E_PORT` (handy with `pnpm tauri dev`).
 - `PUDDING_E2E_PORT` — WebSocket port (default 9010).

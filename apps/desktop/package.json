@@ -14,7 +14,7 @@
     "tauri": "tauri",
     "build:mas": "tauri build --config src-tauri/tauri.mas.conf.json",
     "build:mas:distribution": "tools/gen-distribution-entitlements.sh && tauri build --target universal-apple-darwin --config src-tauri/tauri.mas.conf.json --config src-tauri/tauri.mas.distribution.conf.json",
-    "build:e2e": "tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json",
+    "build:e2e": "tauri build --debug --bundles app --config src-tauri/tauri.e2e.conf.json --config src-tauri/tauri.e2e.bundle.conf.json",
     "test:unit": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test test/*.test.ts",
     "test:e2e": "node --import tsx --test --test-concurrency=1 e2e/tests/*.test.ts",
     "e2e": "pnpm build:e2e && pnpm test:e2e",

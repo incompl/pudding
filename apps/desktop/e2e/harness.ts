@@ -17,13 +17,14 @@ const PORT = Number(process.env.PUDDING_E2E_PORT ?? 9010);
 
 // The built binary inside the .app bundle. We spawn it directly (not `open`) so
 // the PUDDING_E2E_PORT env var reaches the process. Build it first with
-// `pnpm build:e2e` (a debug bundle whose CSP permits the loopback WebSocket).
+// `pnpm build:e2e` (a debug bundle whose CSP permits the loopback WebSocket, under
+// its own name and bundle identifier — see tauri.e2e.bundle.conf.json).
 // Override with PUDDING_E2E_APP for a release bundle / CI.
 const appBin =
   process.env.PUDDING_E2E_APP ??
   path.join(
     projectRoot,
-    "src-tauri/target/debug/bundle/macos/Pudding.app/Contents/MacOS/pudding",
+    "src-tauri/target/debug/bundle/macos/Pudding E2E.app/Contents/MacOS/pudding",
   );
 
 export const FIXTURE_TONE = path.join(dir, "fixtures/tone.m4a");
@@ -174,7 +175,20 @@ export function startHarness(options: {
           if (connected) return;
           clearTimeout(timer);
           wss.close();
-          reject(new Error(`app exited before connecting (code ${code}, signal ${signal})`));
+          // A clean, immediate exit(0) is the single-instance plugin handing its
+          // argv to an app that already owns this bundle identifier and standing
+          // down — so a bundle sharing the shipping identifier silently does
+          // nothing whenever Pudding is open. That's why the e2e bundle takes an
+          // identifier of its own; say so, because the symptom names nothing.
+          reject(new Error(
+            `app exited before connecting (code ${code}, signal ${signal})` +
+              (code === 0
+                ? `\n${options.appBin ?? appBin}\nexited cleanly without dialing in. If another app with the ` +
+                  `same bundle identifier is running (a copy of Pudding, or an earlier test app), ` +
+                  `single-instance made this launch a no-op: quit it, or build with ` +
+                  `\`pnpm build:e2e\`, which gives the e2e bundle its own identifier.`
+                : ""),
+          ));
         });
       }
     });
