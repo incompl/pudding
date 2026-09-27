@@ -143,12 +143,13 @@ and compose the Mac App Store posters in `app-store/posters`:
 
 ```sh
 pnpm screenshots:update
-pnpm screenshots:check
 ```
 
-The runner uses the library generator below and a fresh, isolated app profile.
-See [the screenshot workflow](e2e/screenshots/README.md) for requirements,
-selecting one screenshot, reviewing differences, and adding new recipes.
+The runner uses the library generator below and a fresh, isolated app profile,
+and rewrites only the images whose pixels actually changed — so `git diff` after
+a run is the list of what moved. See [the screenshot
+workflow](e2e/screenshots/README.md) for requirements, selecting one screenshot,
+reviewing differences, and adding new recipes.
 
 ## Screenshot library
 

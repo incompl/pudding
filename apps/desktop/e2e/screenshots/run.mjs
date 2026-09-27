@@ -44,12 +44,11 @@ async function run(command, args) {
 }
 
 function options(argv) {
-  const result = { check: false, skipBuild: false, only: null };
+  const result = { skipBuild: false, only: null };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--') continue;
-    if (arg === '--check') result.check = true;
-    else if (arg === '--skip-build') result.skipBuild = true;
+    if (arg === '--skip-build') result.skipBuild = true;
     else if (arg === '--only') {
       // A list, because the App Store set is several scenes that are reviewed
       // together: --only store-library,store-tags.
@@ -60,10 +59,10 @@ function options(argv) {
           `Known scenes: ${scenes.map((scene) => scene.id).join(', ')}`);
       }
     } else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: pnpm screenshots:update [--only SCENE] [--skip-build]\n' +
-        '       pnpm screenshots:check  [--only SCENE] [--skip-build]\n\n' +
+      console.log('Usage: pnpm screenshots:update [--only SCENE] [--skip-build]\n\n' +
         `Scenes: ${scenes.map((scene) => scene.id).join(', ')}\n` +
-        'Builds and captures the native macOS app at 2x display scale. Check mode never changes tracked images.\n' +
+        'Builds and captures the native macOS app at 2x display scale, then writes what changed.\n' +
+        'Review the run\'s review.html and `git diff` the images before committing.\n' +
         '--skip-build reuses the last screenshot bundle; omit it after any app source change.');
       return null;
     } else throw new Error(`Unknown argument: ${arg}`);
@@ -242,16 +241,16 @@ async function main() {
           await writeFile(path.join(runDir, `diff-${index}.png`), differencePNG(oldPixels, pixels));
         }
         report.push({ scene: scene.id, image: path.basename(file), destination, changed, windows });
-        if (changed && !opts.check) {
+        if (changed) {
           await mkdir(path.dirname(target), { recursive: true });
           await copyFile(file, target);
         }
-        console.log(`${changed ? opts.check ? 'DIFF' : 'UPDATED' : 'unchanged'} ${destination}`);
+        console.log(`${changed ? 'UPDATED' : 'unchanged'} ${destination}`);
       }
     }
     await writeFile(path.join(runDir, 'report.json'), JSON.stringify({
       macOS: execFileSync('/usr/bin/sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim(),
-      check: opts.check, images: report,
+      images: report,
     }, null, 2) + '\n');
     const rows = report.map((item, index) => `<section><h2>${item.destination}</h2><p>${item.changed ? 'Changed' : 'Unchanged'}</p><div>` +
       (item.changed ? `<img alt="Previous" src="before-${index}.png" onerror="this.remove()">` : '') +
@@ -261,7 +260,6 @@ async function main() {
       '<style>body{font:14px system-ui;background:#202020;color:white;margin:24px}h2{font-size:16px}section{margin-bottom:32px}section div{display:flex;gap:16px;align-items:start}img{max-width:31%;height:auto}</style>' +
       '<h1>Screenshot review</h1><p>Previous · Captured · Pixel differences (pink)</p>' + rows);
     console.log(`Review: ${path.join(runDir, 'review.html')}`);
-    if (opts.check && report.some((item) => item.changed)) process.exitCode = 1;
     // Keep images, logs and report, but remove generated audio/profile data after app exit.
     await clearFixtures();
     for (const { unit } of captured) await rm(path.join(runDir, `${unit.id}-profile`), { recursive: true, force: true });

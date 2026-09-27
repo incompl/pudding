@@ -5,8 +5,9 @@
 // that job. So this module composes, and nothing here resizes the app: the
 // chrome (background, headline, shadows) is rendered in WebKit at the poster's
 // size, and each scene's own native capture is laid into it at 1:1 device
-// pixels. The app's raster reaches the store exactly as macOS drew it, which is
-// also what keeps `screenshots:check` diffs meaningful.
+// pixels. The app's raster reaches the store exactly as macOS drew it, and a
+// re-run that changes nothing rewrites nothing, so `git diff` after a capture is
+// exactly the list of images that moved.
 //
 // A poster is composed from one window or from several. A window is a whole app
 // launch — that is what a scene is — so a multi-window poster is several

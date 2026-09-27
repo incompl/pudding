@@ -5,10 +5,9 @@ From the repository root:
 ```sh
 pnpm screenshots:update
 pnpm screenshots:update -- --only mini
-pnpm screenshots:check
 ```
 
-Both commands build the screenshot app by default, then run every selected recipe.
+The command builds the screenshot app by default, then runs every selected recipe.
 Use `--skip-build` to reuse the last **screenshot** bundle when iterating on recipes
 only. Rebuild after any frontend or Rust change. `--help` lists the options.
 
@@ -271,6 +270,19 @@ Reach for that report before reasoning about the pixels. Over a dark background 
 colour interpolating toward grey and a fading opacity are both multiplicative and
 look alike, which is exactly how this one stayed misdiagnosed.
 
+One thing neither freeze can reach: **the text caret in a focused input**. The
+`search` scene focuses the search field, so its caret blinks right through both,
+and a capture settles on whichever phase two consecutive shutters happen to
+share. `FREEZE_CSS` carries a `caret-color: transparent !important` rule that
+looks like it covers this and does not — measured against this WKWebView it is a
+silent no-op, applied universally, scoped to `#search-input`, as `rgba(0,0,0,0)`,
+and injected before the field takes focus. (A control rule on the same element in
+the same run does apply, so the stylesheet is reaching it; `caret-color`
+specifically is ignored.) Nothing depends on that phase today, since the capture
+is published rather than compared — but a scene that focuses a text field cannot
+be made pixel-reproducible, and that is worth knowing before anything is built on
+the assumption that it can.
+
 ## The visualizer scene
 
 The visualizer is a live canvas, so freezing CSS does not hold it still. It
@@ -296,13 +308,21 @@ state. Per-recipe app logs are alongside it. Successful runs remove the fixture
 directory and the per-scene profiles; a failed run leaves both for diagnosis, and
 the next run clears the fixture directory before generating it again.
 
-`pnpm screenshots:check` never updates tracked images. It exits with status 1
-for missing or changed images (or a capture failure), and status 0 when every
-selected destination matches. Use the same macOS version and display setup for
-exact comparisons; OS rasterization changes can legitimately change pixels.
-This command is intended for local use or a dedicated Mac with a graphical
-session, not the existing Ubuntu CI jobs. Review and commit image updates
-alongside the UI change, then run `pnpm website:check` and `pnpm website:build`.
+There is deliberately no check mode. A `--check` flag used to re-capture every
+scene and fail on any pixel difference, as a guard against publishing a stale
+image — a thing that never once happened, while the flag's own failures were
+routinely noise: the search field's caret blinks and no freeze stops it
+(see *Holding the window still*), and a red run meant "an image is stale **or**
+the caret blinked". It also could never run on the Ubuntu CI jobs, needing a
+Retina display, audio out, screen-capture permission and this machine's shared
+fixture directory — so it was a manual gate that only fired when you already had
+the screenshots in mind. Updating is cheap and deterministic, so run it and let
+`git diff` tell you what moved; that is the same signal, whenever you want it.
+
+Review and commit image updates alongside the UI change, then run
+`pnpm website:check` and `pnpm website:build`. Use the same macOS version and
+display setup between runs: OS rasterization changes can legitimately change
+pixels, and will show up as churn in `git diff`.
 
 A lock prevents overlapping capture runs. After an uncatchable crash, check the
 PID in `.screenshots/run.lock` and remove the lock only when that process has
