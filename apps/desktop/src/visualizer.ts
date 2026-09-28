@@ -267,9 +267,17 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
   resize();
   new ResizeObserver(() => resize()).observe(container);
 
+  // Whether the rAF loop is live. Declared up here so the waveform listener
+  // below can see it.
+  let running = false;
   // Latest waveform frame; the rAF loop consumes it (newest wins, no backlog).
   let latest: number[] = [];
   await listen<WaveformEvent>("audio:waveform", (e) => {
+    // The engine stops producing the feed while nothing is drawing it, but a
+    // tick already in flight can still land just after stop(). Dropping it
+    // keeps the frame stop() cleared from coming back, to be traced once on
+    // the next start().
+    if (!running) return;
     latest = e.payload.samples;
   });
 
@@ -304,7 +312,6 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
     g.shadowBlur = 0;
   };
 
-  let running = false;
   let rafId = 0;
   let lastT = 0; // timestamp (s) of the previous frame, for frame-rate-independent motion
   let energy = 0; // smoothed audio loudness (0..1) driving the starfield speed
@@ -472,6 +479,20 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
     },
     stop() {
       halt();
+      // Drop the last frame with the loop. The engine stops producing the feed
+      // while nothing is drawing it (see audio_set_viz_wanted), so the frame
+      // held here would otherwise be however loud the music was when the view
+      // went away — and start() would trace it once before the first live frame
+      // lands. An empty frame draws no line at all rather than the flat center
+      // line a silent tap would give (drawScope bails under two points), which
+      // is the quieter of the two to open on. It lasts a single tick: the engine
+      // emits silence as soon as the feed is wanted again.
+      latest = [];
+      // The starfield's loudness goes with it. It is only eased down by the
+      // loop that just stopped, so left alone it would hold however loud the
+      // music was and warp the stars for half a second on reopen — under a
+      // scope line that isn't even being drawn yet.
+      energy = 0;
     },
     captureStill({ seed = 1, frames = 150, dt = 1 / 60 } = {}) {
       // Stop first: a queued rAF would otherwise paint real-time motion over the

@@ -2555,6 +2555,26 @@ function pushEq(): void {
   persistEq();
 }
 
+// Which visualizer feeds the engine should actually produce. Both faces below
+// already stop their rAF loops when they aren't on screen, but the Rust side
+// emitted regardless — two serialized frames into the webview every 33ms with
+// both faces closed, forever, and while a track plays the Goertzel behind the
+// bands on top of them. Mirroring each face's own gate back to the producer
+// turns that into nothing. Off until a face opens, matching the engine's
+// defaults.
+// null until this window has said anything about a feed, so the first word on
+// either one pushes both — a reloaded webview (dev) meets an engine that
+// outlived it and may still be holding the old answer.
+const vizWanted: { scope: boolean | null; bands: boolean | null } = { scope: null, bands: null };
+function setVizWanted(feed: "scope" | "bands", wanted: boolean): void {
+  if (vizWanted[feed] === wanted) return;
+  vizWanted[feed] = wanted;
+  void invoke("audio_set_viz_wanted", {
+    scope: vizWanted.scope ?? false,
+    bands: vizWanted.bands ?? false,
+  });
+}
+
 // Live per-band energy (0..1) from the engine's audio:spectrum feed, smoothed on
 // screen with a fast attack / slow release so the bars punch on beats but ease
 // back down (mirrors the visualizer's energy easing).
@@ -2641,11 +2661,17 @@ function setupEqualizer(restored: EqState | null): void {
 // the visualizer). The preamp is wideband, not a frequency band, so it has no
 // energy and stays plain accent.
 function setupEqSpectrum(): void {
+  // Non-zero only while the loop below is running, so the listener can tell
+  // whether anything is drawing.
+  let rafId = 0;
   void listen<{ bands: number[] }>("audio:spectrum", (e) => {
+    // The engine stops producing the feed while the face is closed, but a tick
+    // already in flight can still land just after. Dropping it keeps the frame
+    // the close cleared from coming back and punching the bars up on reopen.
+    if (!rafId) return;
     eqLatestBands = e.payload.bands;
   });
 
-  let rafId = 0;
   const frame = () => {
     // When bypassed, let the bars settle back to accent (energy → 0) rather than
     // pulsing a chain that isn't actually shaping the sound.
@@ -2662,11 +2688,24 @@ function setupEqSpectrum(): void {
   };
 
   effect(() => {
+    setVizWanted("bands", equalizerOpen.value);
     if (equalizerOpen.value) {
       if (!rafId) rafId = requestAnimationFrame(frame);
     } else if (rafId) {
       cancelAnimationFrame(rafId);
       rafId = 0;
+      // Drop the last frame along with the loop, for the same reason the
+      // visualizer's stop() does: the engine stops producing the feed while the
+      // face is closed, so this would hold whatever was playing when it closed
+      // and the fast attack would punch the bars up on reopen — a loud frame
+      // from a track that may not even be playing any more, taking a few
+      // hundred ms to release back down. Reopening starts from silence instead,
+      // and the first live frame lands a tick later.
+      eqLatestBands = [];
+      eqEnergy.fill(0);
+      for (let b = 0; b < eqEnergy.length; b++) {
+        eqSliders[b + 1]?.style.removeProperty("--energy");
+      }
     }
   });
 }
@@ -2718,11 +2757,12 @@ function setupSettings(restoredEq: EqState | null): void {
   void createVisualizer(nowPlayingVisualizerEl).then((viz) => {
     visualizer = viz;
     effect(() => {
-      if (
+      const live =
         nowPlayingView.value === "visualizer" &&
         heroVisible.value &&
-        !welcomeSamplePreview.value
-      ) viz.start();
+        !welcomeSamplePreview.value;
+      setVizWanted("scope", live);
+      if (live) viz.start();
       else viz.stop();
     });
     // Announce each new track over the visualizer: flash its title/artist that

@@ -5734,6 +5734,17 @@ fn audio_set_eq(enabled: bool, preamp: f32, gains: Vec<f32>, engine: State<audio
     engine.set_eq(enabled, preamp, &gains);
 }
 
+// Tell the engine which visualizer feeds have something on screen drawing them:
+// `scope` is the oscilloscope hero face (audio:waveform), `bands` the equalizer
+// panel's bars (audio:spectrum). Both are off until a face opens. Each frame
+// costs a serialization and an IPC hop into the webview, and the bands cost a
+// Goertzel over a 4096-sample window on top, so an unwatched feed is not worth
+// producing — the frontend already stops drawing it.
+#[tauri::command]
+fn audio_set_viz_wanted(scope: bool, bands: bool, engine: State<audio::AudioEngine>) {
+    engine.set_viz_wanted(scope, bands);
+}
+
 // Set the ReplayGain (volume normalization) mode. The frontend owns the setting
 // (persisted in its store, menu radio items), and sends "off" / "track" / "album";
 // the engine reads it the next time it opens a track. See audio::open_track.
@@ -7354,6 +7365,7 @@ pub fn run() {
             audio_stop,
             audio_set_volume,
             audio_set_eq,
+            audio_set_viz_wanted,
             audio_set_replaygain,
             audio_set_follow_sample_rate,
             now_playing_set_metadata,

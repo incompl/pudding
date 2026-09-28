@@ -296,6 +296,19 @@ pub struct SharedState {
     // silence out of the underrun counters — the same role queue_exhausted and
     // post_flush play for the other two by-design silences.
     rate_switch_pending: AtomicBool,
+    // Does anything on screen actually want the visualizer feeds? The scope
+    // (audio:waveform) and the EQ bars (audio:spectrum) are separate faces that
+    // are each usually closed, and neither frame is cheap to deliver: a serde
+    // round trip and an eval_script into the webview per feed per tick, plus the
+    // Goertzel behind the bands. Both faces already gate their rAF loops on
+    // being visible; these mirror that gate onto the producer, so a closed face
+    // costs neither the Goertzel nor the trip into the webview. The thread still
+    // wakes on its interval and still drains the ring — it has to, both to keep
+    // the ring from backing up and to keep the windows warm for the next open.
+    // Set from the frontend (see audio_set_viz_wanted), read by
+    // waveform_emit_loop. Default false: nothing is open at launch.
+    viz_scope_wanted: AtomicBool,
+    viz_bands_wanted: AtomicBool,
 }
 
 impl SharedState {
@@ -323,6 +336,8 @@ impl SharedState {
             rate_follow: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             rate_switch_pending: AtomicBool::new(false),
+            viz_scope_wanted: AtomicBool::new(false),
+            viz_bands_wanted: AtomicBool::new(false),
         }
     }
 }
@@ -532,6 +547,14 @@ impl AudioEngine {
             slot.store(g.to_bits(), Ordering::Relaxed);
         }
         self.shared.eq_gen.fetch_add(1, Ordering::Release);
+    }
+
+    // Which visualizer feeds have something on screen drawing them. Read by the
+    // spectrum thread at the top of every tick: a feed nobody wants is neither
+    // computed nor emitted. See SharedState::viz_scope_wanted.
+    pub fn set_viz_wanted(&self, scope: bool, bands: bool) {
+        self.shared.viz_scope_wanted.store(scope, Ordering::Relaxed);
+        self.shared.viz_bands_wanted.store(bands, Ordering::Relaxed);
     }
 
     // Set the ReplayGain mode (0 = off, 1 = track, 2 = album). Read by the decode
@@ -918,10 +941,11 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     // viz_rx along with the new rate its Goertzel coefficients depend on.
     {
         let app = app.clone();
+        let shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("audio-spectrum".into())
             .spawn(move || {
-                waveform_emit_loop(viz_consumer, app, output_rate, viz_rx);
+                waveform_emit_loop(viz_consumer, app, output_rate, viz_rx, shared);
             })
             .map_err(|e| format!("spawn spectrum thread: {e}"))?;
     }
@@ -3764,6 +3788,7 @@ fn waveform_emit_loop(
     app: AppHandle,
     sample_rate: u32,
     swap_rx: Receiver<VizHandoff>,
+    shared: Arc<SharedState>,
 ) {
     // Sliding window of the most recent mono samples.
     let mut mono: VecDeque<f32> = VecDeque::with_capacity(WAVEFORM_WINDOW);
@@ -3777,11 +3802,31 @@ fn waveform_emit_loop(
     // const across the session: a rate switch rebuilds the output stream and
     // hands this thread a new ring at a new rate (see VizHandoff).
     let mut coeffs = goertzel_coeffs(sample_rate);
+    // The Hann window the spectrum is taken through: w[j] = 0.5 - 0.5*cos(2πj/(N-1)).
+    // Depends only on the window length, so unlike the coefficients above it is
+    // built once and survives a rate switch. Precomputed because the alternative
+    // is a cos() per sample per band inside the Goertzel below — SPECTRUM_WINDOW
+    // × EQ_BAND_COUNT of them every tick, which is most of what this thread costs.
+    let hann: Vec<f32> = (0..SPECTRUM_WINDOW)
+        .map(|j| {
+            0.5 - 0.5 * (std::f32::consts::TAU * j as f32 / (SPECTRUM_WINDOW - 1) as f32).cos()
+        })
+        .collect();
+    // The windowed samples, x[j] * hann[j]: filled once per tick and read by
+    // every band's recurrence. Reused across ticks so it allocates only once.
+    let mut windowed: Vec<f32> = Vec::with_capacity(SPECTRUM_WINDOW);
     // Decimation factor: average this many window samples per emitted point.
     let block = WAVEFORM_WINDOW / WAVEFORM_POINTS;
 
     loop {
         std::thread::sleep(Duration::from_millis(WAVEFORM_EMIT_INTERVAL_MS));
+
+        // Who is actually drawing. A feed with no face open is skipped entirely:
+        // no Goertzel, no serialization, no IPC. The ring is still drained below
+        // so the windows stay warm and a face that opens has a frame to show on
+        // its next tick.
+        let want_scope = shared.viz_scope_wanted.load(Ordering::Relaxed);
+        let want_bands = shared.viz_bands_wanted.load(Ordering::Relaxed);
 
         // A rate switch rebuilt the output stream, and with it the ring this
         // thread drains. Adopt the replacement and recompute the coefficients
@@ -3829,37 +3874,42 @@ fn waveform_emit_loop(
         // silent bands so the scope settles to center and the EQ bars ease back to
         // accent rather than freezing on the last frame.
         if !drained_any {
-            let _ = app.emit(
-                "audio:waveform",
-                WaveformEvent {
-                    samples: zeros.clone(),
-                },
-            );
-            let _ = app.emit(
-                "audio:spectrum",
-                SpectrumEvent {
-                    bands: band_zeros.clone(),
-                },
-            );
+            if want_scope {
+                let _ = app.emit(
+                    "audio:waveform",
+                    WaveformEvent {
+                        samples: zeros.clone(),
+                    },
+                );
+            }
+            if want_bands {
+                let _ = app.emit(
+                    "audio:spectrum",
+                    SpectrumEvent {
+                        bands: band_zeros.clone(),
+                    },
+                );
+            }
             continue;
         }
 
         // Per-band energy via Goertzel over the long window, once it has filled.
         // Hann-windowed to curb spectral leakage between the octave-spaced bands.
-        if spec.len() == SPECTRUM_WINDOW {
+        if want_bands && spec.len() == SPECTRUM_WINDOW {
             let win = spec.make_contiguous();
             let n = win.len();
+            // Hann window (precomputed above) applied once, ahead of the
+            // per-band recurrences that all read the same windowed samples.
+            windowed.clear();
+            windowed.extend(win.iter().zip(hann.iter()).map(|(&x, &w)| x * w));
             let norm = 2.0 / n as f32; // Hann halves the average amplitude; ×2 restores it
             let bands: Vec<f32> = coeffs
                 .iter()
                 .map(|&coeff| {
                     let mut s_prev = 0.0f32;
                     let mut s_prev2 = 0.0f32;
-                    for (j, &x) in win.iter().enumerate() {
-                        // Hann window w[j] = 0.5 - 0.5*cos(2πj/(N-1)).
-                        let w =
-                            0.5 - 0.5 * (std::f32::consts::TAU * j as f32 / (n - 1) as f32).cos();
-                        let s = x * w + coeff * s_prev - s_prev2;
+                    for &xw in &windowed {
+                        let s = xw + coeff * s_prev - s_prev2;
                         s_prev2 = s_prev;
                         s_prev = s;
                     }
@@ -3873,7 +3923,7 @@ fn waveform_emit_loop(
         }
 
         // Wait until we have a full window before the first real frame.
-        if mono.len() < WAVEFORM_WINDOW {
+        if !want_scope || mono.len() < WAVEFORM_WINDOW {
             continue;
         }
 
