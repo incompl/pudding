@@ -43,7 +43,6 @@ import {
   queueSel,
   playQueueTrack,
   commitBrowsedPlaylist,
-  heroVisible,
   shownPlaylistPath,
 } from "./main";
 import {
@@ -256,9 +255,9 @@ function renderTreeRow(row: TreeRow, index: number): HTMLElement {
   ) {
     label.classList.add("playing");
   }
-  // Accent: the playlist filling the list face (browsed or the playing source), or a
-  // track that owns the playhead while the now-playing hero is the visible face (the
-  // track mirror). Persistent so a re-render stays in step with the reactive effect.
+  // Accent: the playlist filling the list face (browsed or the playing source), or
+  // the track that owns the playhead. Persistent so a re-render stays in step with
+  // the reactive effect.
   if (node.isPlaylist && shownPlaylistPath.peek() === node.path) {
     label.classList.add("open");
   }
@@ -266,8 +265,7 @@ function renderTreeRow(row: TreeRow, index: number): HTMLElement {
     !node.isFolder &&
     !node.isPlaylist &&
     currentNodePath.value === node.path &&
-    !queueOwnsPlayhead &&
-    heroVisible.peek()
+    !queueOwnsPlayhead
   ) {
     label.classList.add("open");
   }

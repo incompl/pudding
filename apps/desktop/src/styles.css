@@ -3978,12 +3978,12 @@ ul {
   padding-bottom: 0.3em;
 }
 
-/* The accent row means "the right pane is showing this row": an open, browsed playlist
-   or the playing track while the now-playing hero is up (both .open). It is orthogonal
-   to the .playing equalizer glyph, which marks the active play context — a row can be
-   playing (glyph) without being open (accent), e.g. a playing track while you browse
-   elsewhere. A stream has no browse/hero split (playing IS showing it), so it keeps the
-   accent on .playing. */
+/* The accent row means "the right pane is about this row": an open, browsed playlist,
+   or the playing track (both .open). It is orthogonal to the .playing equalizer glyph,
+   which marks the active play context — a playlist can be playing (glyph) without being
+   open (accent) while you browse elsewhere. A track cannot: the hero only ever shows
+   the playing track, so a playing track row always takes the accent too, whatever face
+   the right pane is on. A stream likewise keeps the accent on .playing. */
 #folder-tree .node-label.open,
 #streams-list .node-label.playing {
   color: var(--accent);
@@ -4383,11 +4383,13 @@ body.playback-paused {
      animating height, and the only thing a follower has to do per frame). */
   transform-origin: bottom;
 }
-/* Reserve the accent for the "open" row (the one the right pane is showing). A left-
-   panel row that's only playing — glyph, but no accent text — gets a text-colored
-   equalizer instead, so the bars read as part of its normal-weight title rather than
-   borrowing the open row's accent. The right-pane queue is always "the shown list", so
-   its playing row keeps the accent bars (untouched here). */
+/* Reserve the accent for the "open" row. A left-panel row that's only playing — glyph,
+   but no accent text — gets a text-colored equalizer instead, so the bars read as part
+   of its normal-weight title rather than borrowing the open row's accent. In practice
+   that is a playlist playing while you browse elsewhere; a playing track always carries
+   both classes, so the .nav-track-row arm only holds the pattern together. The
+   right-pane queue is always "the shown list", so its playing row keeps the accent bars
+   (untouched here). */
 .node-label.playing:not(.open) .eq-bars > span,
 .nav-track-row.playing:not(.open) .eq-bars > span,
 .nav-row.playing:not(.open) .eq-bars > span {
@@ -4525,8 +4527,8 @@ body.playback-paused {
   background-color: var(--accent);
 }
 
-/* The open row's number takes the accent, matching the row highlight (a paused
-   playing-but-not-open row shows its plain number back). */
+/* The open row's number takes the accent, matching the row highlight — so a paused
+   playing track (which shows its number rather than the equalizer) stays accented. */
 .node-label.open .icon.track {
   color: var(--accent);
 }

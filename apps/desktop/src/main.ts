@@ -887,11 +887,13 @@ export const paneView = computed<PaneView>(() => {
 });
 
 // The now-playing hero is the visible right-pane face: the list face is down and no
-// settings/about/editor panel has taken the pane over. This is the track analog of a
-// playlist being "open" — a playing track lights its nav row with the accent only
-// while the hero (which is showing that track) is what the right pane displays, the
-// same way a browsed playlist's row is accented because its contents fill the pane.
-// A signal so the highlight effects repaint as you flip faces or open a panel.
+// settings/about/editor panel has taken the pane over. Used by the things that only
+// make sense while the hero is actually on screen — the visualizer feed, the track
+// announce, Zen Mode. It deliberately does NOT gate the left panel's track accent:
+// the hero only ever shows the playing track, so gating on it made the accent say
+// "a panel is open" rather than anything about the row, and draining the color out
+// of the playing row every time you opened Settings distinguished nothing (no other
+// row claims the accent while a panel is up).
 // The visualizer is a face OF the hero (art vs. visualizer), not a pane
 // takeover, so it doesn't gate this — the hero is "visible" under either view.
 export const heroVisible = computed(
@@ -1677,8 +1679,8 @@ export function renderLeafTrackList(
       currentNodePath.peek() === t.path
     ) {
       row.classList.add("playing");
-      // The accent (see the reactive effect) rides along only while the hero is up.
-      if (heroVisible.peek()) row.classList.add("open");
+      // The accent (see the reactive effect) always rides along on a track row.
+      row.classList.add("open");
     }
 
     return row;
@@ -3538,10 +3540,11 @@ function setupEffects(): void {
     const queueOwnsPlayhead = queuePlayingIndex.value !== null;
     // Two orthogonal channels light a tree row (see .node-label.playing/.open in the
     // CSS): .playing is the equalizer glyph — "this row IS the active play context";
-    // .open is the accent — "the right pane is currently showing this row". A playlist
-    // takes .playing when its pool plays and .open when it's browsed; a track takes
-    // .playing when it owns the playhead from the tree and .open when it does so while
-    // the now-playing hero is the visible face (the mirror of a browsed playlist).
+    // .open is the accent — "the right pane is about this row". A playlist takes
+    // .playing when its pool plays and .open when it's browsed, and those two really
+    // do come apart. A track takes both together whenever it owns the playhead from
+    // the tree: the hero only ever shows the playing track, so there is no third
+    // state for the accent to express.
     const openPlaylist = shownPlaylistPath.value;
     // The playing playlist: a queue owns the playhead and that queue is a real
     // playlist (a backing file). Its tree row takes the glyph, mirroring how a played
@@ -3550,7 +3553,6 @@ function setupEffects(): void {
       queueOwnsPlayhead && isPlaylistSource(activeQueue.value)
         ? (activeQueue.value!.sourcePath ?? null)
         : null;
-    const heroShowsTrack = heroVisible.value;
     document
       .querySelectorAll(
         "#folder-tree .node-label.playing, #folder-tree .node-label.open, #streams-list .node-label.playing",
@@ -3563,9 +3565,9 @@ function setupEffects(): void {
       const row = document.querySelector(
         `#folder-tree .node-label[data-path="${CSS.escape(path)}"]`,
       );
-      row?.classList.add("playing");
-      // ...and the accent when the hero (showing this track) is the visible face.
-      if (heroShowsTrack) row?.classList.add("open");
+      // Glyph and accent together: a playing track is always the row the right pane
+      // is about, whatever face the pane happens to be showing.
+      row?.classList.add("playing", "open");
     }
     if (playingPlaylist) {
       document
@@ -3712,18 +3714,16 @@ function setupEffects(): void {
   // already hearing from a different list leaves currentNodePath untouched.
   effect(() => {
     const path = currentNodePath.value;
-    const heroShows = heroVisible.value;
     const isLivePool = app.navLeafPoolPath === currentPoolPath.value;
     document
       .querySelectorAll<HTMLElement>("#library-nav .nav-track-row")
       .forEach((el) => {
         const t = app.navLeafTracks[Number(el.dataset.rowIndex)];
         const playing = !!t && isLivePool && t.path === path;
-        // .playing is the glyph; .open is the accent, shown only while the hero (which
-        // is displaying this track) is the visible face — the leaf-list mirror of the
-        // tree rule above.
+        // .playing is the glyph, .open the accent — on a track row the two always
+        // move together, the leaf-list mirror of the tree rule above.
         el.classList.toggle("playing", playing);
-        el.classList.toggle("open", playing && heroShows);
+        el.classList.toggle("open", playing);
       });
   });
 
