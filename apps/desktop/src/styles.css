@@ -288,8 +288,19 @@ body.platform-mac #tabs {
   background: none;
   border: none;
   border-radius: 6px;
-  width: 24px;
-  height: 24px;
+  /* The SAME 26px box as #miniplayer-btn, whose slot this takes over in mini.
+     That is the whole point: both buttons are centered in a 36px topbar's 33px
+     content box, so both land at y 5.5-31.5 with 12.5px of ink at y 12.25, and
+     toggling between the two views moves neither the glyph nor the hit area by a
+     pixel. It is also why mini no longer shortens the topbar (see the media
+     query) — a 26px box cannot sit centered in a 26px bar without hanging out of
+     it, and anything that hangs out of the topbar loses that part of its own hit
+     area to #main-view, the next sibling, which hit-tests above it.
+
+     So these two numbers are a pair with #miniplayer-btn's. Change one, change
+     both, and re-check that the box still fits inside the bar's content box. */
+  width: 26px;
+  height: 26px;
   padding: 0;
   align-items: center;
   justify-content: center;
@@ -309,11 +320,11 @@ body.platform-mac #tabs {
 }
 
 #expand-btn svg {
-  /* 12.5px ink, same as every other stroked topbar glyph. The button box stays
-     24px rather than the 26px the full-view buttons use: in mini the whole topbar
-     is only 26px tall. Mini hides the tabs and the search field, so there is no
-     type on that row and nothing for this to align to — it is pinned near the top
-     by the media query rather than centered. */
+  /* 12.5px ink, same as every other stroked topbar glyph — and in the same 26px
+     box, centered in the same 33px content box, so this glyph is pixel-identical
+     to #miniplayer-btn's. Mini hides the tabs and the search field, so there is no
+     type on that row for this to align to; matching the button it replaces is what
+     puts it in the right place. */
   width: 12.5px;
   height: 12.5px;
   display: block;
@@ -462,6 +473,36 @@ body.platform-mac #tabs {
 
 .mode-btn.active {
   color: var(--accent);
+}
+
+/* Pressed feedback for the topbar icon cluster — the same gesture the transport
+   cluster and the track-row play buttons use (see #play-pause-btn:active and
+   .row-play:active::before): the glyph dips inward, and only inward, with
+   whatever colour the button is wearing held steady through the press. Shuffle
+   and repeat keep their accent while pressed, so the push never reads as the
+   toggle flickering off.
+
+   The scale lands on the <svg> and never on the button: transforming the 26px box
+   would shrink its own hit area mid-press, so a mousedown near the edge would
+   leave the cursor outside the shrunken target and the mouseup — with it the
+   click — would be lost. The box, its background and its hover fill stay exactly
+   where they were pressed; only the ink moves.
+
+   This is transient and so does not disturb the cluster's alignment, which rests
+   on a 12.5px ink height landing on an odd number of device pixels (the recipe on
+   .mode-btn svg). The press scales that ink off the grid for 80ms and releases
+   back onto it; nothing here is a resting size, and nothing here should become a
+   position. */
+.mode-btn svg,
+#miniplayer-btn svg,
+#expand-btn svg {
+  transition: transform 80ms ease;
+}
+
+.mode-btn:active svg,
+#miniplayer-btn:active svg,
+#expand-btn:active svg {
+  transform: scale(0.82);
 }
 
 /* The "1" that turns the repeat glyph into repeat-one; only drawn in that
@@ -2776,25 +2817,57 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
     display: none;
   }
 
-  /* The expand button is the one topbar action left in mini. Pin it to the top
-     with roughly the same top gap the settings icon has in full view (~27px icon
-     centered in the 40px topbar), rather than centering it in the shorter
-     26px mini topbar. Shuffle/repeat are set-once mode toggles that belong to
-     the full view, so mini leaves only expand here — a calmer drag strip. */
+  /* The expand button is the one topbar action left in mini — shuffle/repeat are
+     set-once mode toggles that belong to the full view, so mini leaves only expand
+     here, a calmer drag strip. Revealing it is ALL this rule does, and that is the
+     point: it takes over #miniplayer-btn's slot, it is the same 26px box (see the
+     base rule), it is the last child of the same #topbar-actions, and the bar it
+     sits in is the same 36px — so it inherits that button's exact position and hit
+     area instead of restating it.
+
+     flex-start, not centered: mini trims the bar to 33px (below), so centering in
+     it would raise the button 1.5px. The bar's padding-top puts its content edge
+     at y 5.5 — the full-view button's exact top — so pinning to that edge lands
+     this one on it. The offset is the bar's, not the button's, which is the whole
+     difference from the version that broke: a 26px box 6px down a 26px bar ended
+     below the topbar, and #main-view — the topbar's next sibling — hit-tests above
+     anything that overflows into it, so the button silently lost the bottom fifth
+     of its click target and painted its hover pill outside the bar. Here the box
+     ends at y 31.5 with 1.5px of bar left under it. */
   #expand-btn {
     display: inline-flex;
     align-self: flex-start;
-    margin-top: 6px;
   }
 
-  /* A thin drag strip is all that's left of the topbar (macOS traffic lights
-     overlay it); everything else is the now-playing bar. */
+  /* Mini keeps only the drag strip and the expand button up here (macOS traffic
+     lights overlay it), so the bar is TRIMMED TO THE BUTTON rather than given a
+     height of its own: it is the full view's bar with everything below the
+     button's bottom edge cut away, plus 1.5px of breathing room.
+
+       full view   2px pad + 3.5 slack + 26 button + 3.5 slack + 1px pad = 36
+       mini        5.5px pad          + 26 button          + 1.5        = 33
+
+     5.5px is not a chosen number — it is where the full view's centered button
+     starts (2px padding + 3.5px of centering slack in the 33px content box), so
+     restating it as padding puts the button at the same y without centering it
+     (see #expand-btn above, which pins to this edge). If the full view's topbar
+     padding or button size changes, this is the number that has to be re-derived.
+
+     33 IS THE FLOOR, and it is set by the button, not by taste. The button's box
+     ends at y 31.5; a bar shorter than that pushes it out the bottom, where
+     #main-view hit-tests above it and eats that part of the click target — which
+     is exactly what a 26px bar did here before. Every pixel this bar gives up
+     below 33 has to come off the button too.
+
+     Why trim at all: this is the top margin above the album art. The art starts
+     at the bar's bottom edge (#right drops its top padding in mini, below), so
+     the bar's height IS the gap between the traffic lights and the art, and that
+     gap wants to equal the 0.7em below the art. Traffic lights end at y 23, so
+     the art wants to start at 32.8 and the bar wants to be 33 — 0.2px off, and
+     the closest a bar that can still hold the button gets. */
   #topbar {
-    height: 26px;
-    /* Drop the full view's 1px bottom breathing room (and its matching top
-       nudge) — mini has no tabs or centered controls to balance, just the
-       expand button pinned to the top of this strip. */
-    padding-top: 1px;
+    height: 33px;
+    padding-top: 5.5px;
     padding-bottom: 0;
   }
 
@@ -2814,7 +2887,7 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
     gap: 0.7em;
   }
 
-  /* The list and nav bar are unusable in the thin mini bar, so they never show
+  /* The list and nav bar are unusable in the short mini bar, so they never show
      here: the .show-list / .has-nav rules that reveal them are scoped to the
      full-view (min-height: 361px) and (min-width: 601px) media query, leaving the base
      `#queue-view { display: none }`, `#nav-bar { display: none }`, and
@@ -2823,11 +2896,17 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
      list back. The controls margin is scoped to the full-view query too, so it
      never reaches the mini card here. */
 
-  /* Top padding lifts the art/text off the thin topbar (traffic lights + expand
-     button) so it doesn't butt against them; bottom padding keeps the controls
-     off the window edge. */
+  /* NO TOP PADDING IN MINI, deliberately: the trimmed topbar above is already the
+     gap between the traffic lights and the album art (see #topbar), and padding
+     here would stack on top of it. Splitting that margin between the two was what
+     made it read wrong — 9.8px of padding under a 36px bar put the art 22.8px
+     below the traffic lights against 9.8px below the art, more than twice the gap
+     on the other side. One owner for the margin, and it is the bar.
+
+     Bottom padding stays: it keeps the controls off the window edge, and it is
+     what the 0.7em gap below the art is measured against. */
   #right {
-    padding: 0.7em 0.75em;
+    padding: 0 0.75em 0.7em;
   }
 
   #now-playing-main {
@@ -2860,13 +2939,24 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
 
   /* No art: the bar is only text, so center it (title/artist included). The
      text is shorter than this flex region and gets centered within it, but the
-     region is bounded by a thin topbar above and the taller controls row below.
+     region is bounded by the topbar above and the taller controls row below.
      Left raw that asymmetry makes the text sit high, so add a top padding
      (~gap + controls height minus the topbar) to pull it to the window's center.
-     Not needed when art is present: the art fills the region top-to-bottom. */
+     Not needed when art is present: the art fills the region top-to-bottom.
+
+     Both terms it is measured against moved, so it is re-derived rather than
+     nudged. Raising the region's top by 1px needs 1px more here; lowering it needs
+     1px less (the centering halves the padding, and the region's height changes by
+     the same amount — the two cancel to 1:1):
+
+       was  0.8em (11.2px)  under a 26px bar and 9.8px of #right top padding
+       now  topbar 26 -> 33 is 7px lower, #right 9.8 -> 0 is 9.8px higher
+            11.2 - 7 + 9.8 = 14px = 1em
+
+     Recompute it the same way if either number moves again. */
   #now-playing-main:has(#now-playing-art.hidden) {
     text-align: center;
-    padding-top: 0.8em;
+    padding-top: 1em;
   }
 
   /* Default (no track) state: the placeholder is the lone visible item, but the
@@ -2886,32 +2976,36 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   }
   /* --- Zen in mini ---
      In Zen the panel goes full-bleed (fixed inset:0, see the base zen rule) and
-     reclaims the 26px the mini topbar reserves above it in normal mode, so every
-     mini rule above owes that 26px back as top padding — and no more. The base
-     zen rule's calc(36px + 0.85em) is sized for the FULL view (its 36px topbar
-     plus the flow card's own downward bias) and outranks mini's `padding: 0`, so
-     without these overrides it lands in the mini bar too: the art/text drop ~50px
-     and the height-100% art shrinks by the same amount. Each rule below mirrors
-     its non-Zen counterpart with the 26px added, which keeps the bar identical to
-     non-Zen mini — the stretched art keeps its size and Y, and centered content
-     (whose centering halves the padding) cancels the ~13px it would otherwise
-     rise. */
+     reclaims the 33px the mini topbar reserves above it in normal mode, so every
+     mini rule above owes that 33px back as top padding — and no more. The base
+     zen rule's calc(36px + 0.85em) is sized for the FULL view: same 36px topbar
+     now, but it also carries the flow card's own 0.85em downward bias, which mini
+     drops with `padding: 0` on the card. It outranks that `padding: 0`, so without
+     these overrides the mini bar wears the em term too and the art/text sit low.
+     Each rule below mirrors its non-Zen counterpart with the topbar's 33px added,
+     which keeps the bar identical to non-Zen mini — the stretched art keeps its
+     size and Y, and centered content (whose centering halves the padding) cancels
+     the ~16px it would otherwise rise. */
   /* The full-bleed panel also swaps whose padding frames the bar: in normal mode
-     it's #right's 0.7em above and below, in Zen the panel's own 0.75em (from the
-     base zen rule). Match #right's value so the content box is identical, not
-     0.8px shorter at each end — the sides already agree at 0.75em. */
+     it's #right's, in Zen the panel's own 0.75em (from the base zen rule). Match
+     #right's values so the content box is identical — which since mini dropped
+     #right's top padding (see #right above) means ZERO at the top, with the 33px
+     on #now-playing-main below standing in for the topbar. The bottom matches
+     #right's 0.7em rather than the base 0.75em, and the sides already agree. */
   body.np-zen #now-playing-panel {
-    padding-top: 0.7em;
+    padding-top: 0;
     padding-bottom: 0.7em;
   }
   body.np-zen #now-playing-main {
-    padding-top: 26px;
+    padding-top: 33px;
   }
+  /* The topbar plus the non-Zen counterpart's compensation, kept in that shape so
+     the pairing stays legible: 33px + the 1em that rule carries. */
   body.np-zen #now-playing-main:has(#now-playing-art.hidden) {
-    padding-top: calc(26px + 0.8em);
+    padding-top: calc(33px + 1em);
   }
   body.np-zen #now-playing-main:has(#now-playing-empty:not(.hidden)) {
-    padding-top: 26px;
+    padding-top: 33px;
   }
 
   /* Album art fills the bar's height as a square, rather than the fixed
