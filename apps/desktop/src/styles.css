@@ -1243,7 +1243,8 @@ body.np-zen #now-playing-panel {
    normal mode. Going edge-to-edge drops two things that biased the card down in
    normal mode: the 36px topbar above the panel, and the card's own asymmetric
    padding (2.4em top / 1em, plus #right's 0.2em top / 0.75em bottom = +0.85em of
-   downward bias). Both net to a downward offset of 36px + 0.85em; halving that
+   downward bias). The reference is normal mode with no nav bar, since Zen hides
+   it too (below). Both net to a downward offset of 36px + 0.85em; halving that
    (justify-content:center splits added top padding above/below) means padding-top
    of the full 36px + 0.85em lands the art at its normal-mode Y. The visualizer
    ignores this — it's fixed inset:0 in zen. */
@@ -1251,17 +1252,25 @@ body.np-zen #now-playing-main {
   padding: calc(36px + 0.85em) 0 0;
 }
 /* The visualizer goes edge-to-edge over the whole window (fixed, so it escapes
-   both the panel padding and the transport row's flow) and the transport/nav bar
-   float above it rather than shrinking it. */
+   both the panel padding and the transport row's flow) and the transport floats
+   above it rather than shrinking it. */
 body.np-zen #now-playing-panel.view-visualizer #now-playing-visualizer {
   position: fixed;
   inset: 0;
   border-radius: 0;
 }
-body.np-zen #now-playing-controls,
+/* Zen drops the nav bar entirely: it's a navigation affordance for a pane that
+   has other faces, and Zen is the one mode with no pane to swap back to — the
+   hero owns the window. Hiding it also hands its strip of height back to the
+   card, so the art/text centre exactly where they do when no list is in play;
+   the margin .has-nav lifts the transport by is reset for the same reason. */
 body.np-zen #nav-bar {
+  display: none;
+}
+body.np-zen #now-playing-controls {
   position: relative;
   z-index: 3;
+  margin-top: 0;
 }
 /* The topbar (the window's only drag region) is hidden under the fixed panel in
    Zen, so a click-drag across the top edge — over the full-bleed visualizer —
@@ -1281,11 +1290,10 @@ body.np-zen #zen-drag-strip {
   height: 34px;
   z-index: 3;
 }
-/* Auto-hide on idle: after a couple still seconds the transport and nav bar
-   fade out and the cursor hides; any mouse move (which clears `.np-idle` in
-   main.ts) brings them straight back. */
-body.np-zen #now-playing-controls,
-body.np-zen #nav-bar {
+/* Auto-hide on idle: after a couple still seconds the transport fades out and
+   the cursor hides; any mouse move (which clears `.np-idle` in main.ts) brings
+   it straight back. */
+body.np-zen #now-playing-controls {
   /* visibility returns instantly on wake; opacity fades. */
   transition:
     opacity 300ms ease,
@@ -1298,8 +1306,7 @@ body.np-zen.np-idle {
    leave the paint tree. Opacity alone ghosts here: the transport sits beside the
    continuously-animating visualizer canvas, and WebKit doesn't re-composite the
    faded sibling, leaving stale pixels on screen. */
-body.np-zen.np-idle #now-playing-controls,
-body.np-zen.np-idle #nav-bar {
+body.np-zen.np-idle #now-playing-controls {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
