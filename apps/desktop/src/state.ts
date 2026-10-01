@@ -303,8 +303,12 @@ export const nowPlayingView = signal<NowPlayingView>("art");
 // panel, splitter, nav bar — hidden), controls auto-hide on idle. Named for
 // what you get (an immersive player) rather than the chrome it hides. Not a native window
 // fullscreen — it composes with one rather than replacing it. Transient (never
-// persisted); only meaningful while the hero face is up. Toggled from
-// View ▸ Zen Mode (⌘⇧F) or Escape.
+// persisted). A *preference*, not a pane state: it asks for the immersive hero, and
+// the pane grants it wherever it can — painting the hero over the list face without
+// flipping it (so leaving Zen hands the queue/playlist straight back), and waiting
+// armed under a panel until that panel closes. Nothing refuses the toggle, which is
+// what keeps the native checkmark honest. Toggled from View ▸ Zen Mode (⌘⇧F) or
+// Escape.
 export const zenMode = signal(false);
 
 // Dismiss the full-pane panels (Settings / About / Licenses) that take the whole pane over,

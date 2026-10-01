@@ -125,7 +125,8 @@ struct WindowMenu {
 // frontend owns the persisted preference and keeps the checkmark in sync
 // (set_now_playing_view_checked). zen_mode is the checkable View ▸ Zen Mode
 // toggle, kept in sync from the frontend (set_zen_mode_checked) since ⌘⇧F and
-// Escape also flip it.
+// Escape also flip it. Always live: Zen Mode is a preference the right pane obeys
+// when it can, so there is no state in which the item has nothing to toggle.
 struct ViewMenu {
     np_view_visualizer: CheckMenuItem<Wry>,
     zen_mode: CheckMenuItem<Wry>,
@@ -5539,7 +5540,10 @@ fn set_now_playing_view_checked(menu: State<ViewMenu>, view: String) {
 }
 
 // Reflect Zen Mode's on/off state in the View ▸ Zen Mode checkmark. Called
-// whenever the frontend signal changes (menu, ⌘⇧F, or Escape).
+// whenever the frontend signal changes (menu, ⌘⇧F, or Escape). The item is a
+// native CheckMenuItem, which draws its own check on click, so the frontend must
+// never *decline* a toggle: it would leave the menu claiming a Zen Mode that was
+// never entered. It doesn't — ⌘⇧F always flips the signal (see toggleZen).
 #[tauri::command]
 fn set_zen_mode_checked(menu: State<ViewMenu>, on: bool) {
     let _ = menu.zen_mode.set_checked(on);

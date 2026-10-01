@@ -886,24 +886,37 @@ export const paneView = computed<PaneView>(() => {
   return { list, isSource, showList, nav };
 });
 
-// The now-playing hero is the visible right-pane face: the list face is down and no
-// settings/about/editor panel has taken the pane over. Used by the things that only
-// make sense while the hero is actually on screen — the visualizer feed, the track
-// announce, Zen Mode. It deliberately does NOT gate the left panel's track accent:
-// the hero only ever shows the playing track, so gating on it made the accent say
-// "a panel is open" rather than anything about the row, and draining the color out
-// of the playing row every time you opened Settings distinguished nothing (no other
-// row claims the accent while a panel is up).
+// A full-pane *takeover* — Settings / About / Licenses, the Equalizer face, or a
+// pane editor — as opposed to the list face, which is just the hero's other side.
+// The distinction matters to Zen Mode, which wants the hero on screen: it can paint
+// straight over the list face (same content, other side), while a takeover holds a
+// mode you deliberately entered — and, for an editor, unsaved edits — so Zen waits
+// it out instead. This is the one thing the two cases don't share.
+export const paneTakeoverOpen = computed(
+  () =>
+    settingsOpen.value ||
+    aboutOpen.value ||
+    licensesOpen.value ||
+    equalizerOpen.value ||
+    paneEditor.value !== null,
+);
+
+// The now-playing hero is the face actually on screen. Two ways to get there: the
+// list face is down, or Zen Mode is painting the hero over it (Zen covers the pane
+// without flipping it, so listFaceOpen can be true while the hero is what you see —
+// and the visualizer feed below must follow the screen, not the pane state, or Zen
+// over a queue would show a live canvas nobody is feeding). Either way a pane
+// takeover wins: it covers the hero outright.
+// Used by the things that only make sense while the hero is actually on screen —
+// the visualizer feed, the track announce. It deliberately does NOT gate the left
+// panel's track accent: the hero only ever shows the playing track, so gating on it
+// made the accent say "a panel is open" rather than anything about the row, and
+// draining the color out of the playing row every time you opened Settings
+// distinguished nothing (no other row claims the accent while a panel is up).
 // The visualizer is a face OF the hero (art vs. visualizer), not a pane
 // takeover, so it doesn't gate this — the hero is "visible" under either view.
 export const heroVisible = computed(
-  () =>
-    !listFaceOpen.value &&
-    !settingsOpen.value &&
-    !aboutOpen.value &&
-    !licensesOpen.value &&
-    !equalizerOpen.value &&
-    paneEditor.value === null,
+  () => !paneTakeoverOpen.value && (zenMode.value || !listFaceOpen.value),
 );
 
 // A fresh install uses the normal hero as a preview of the bundled welcome track,
@@ -2712,16 +2725,18 @@ function setupEqSpectrum(): void {
   });
 }
 
-// The full-pane panels are mutually exclusive and each one takes the pane the
-// hero was covering, so opening any of them also leaves Zen Mode. Expressing that
-// once keeps the four menu handlers from drifting apart.
+// The full-pane panels are mutually exclusive and each one takes the pane the hero
+// was covering, which suspends Zen Mode on its own (the np-zen body class is gated
+// on paneTakeoverOpen). It deliberately does NOT clear zenMode: the preference outlives the
+// detour, so closing the panel drops you back into the immersive player you left
+// rather than making you ask for it again. Expressing the exclusivity once keeps
+// the four menu handlers from drifting apart.
 type Panel = "settings" | "about" | "licenses" | "equalizer";
 function openPanel(panel: Panel): void {
   settingsOpen.value = panel === "settings";
   aboutOpen.value = panel === "about";
   licensesOpen.value = panel === "licenses";
   equalizerOpen.value = panel === "equalizer";
-  zenMode.value = false;
   if (panel === "licenses") void loadLicenses();
 }
 
@@ -3846,7 +3861,10 @@ function setupEffects(): void {
     armIdle();
   });
   effect(() => {
-    const zen = zenMode.value && heroVisible.value;
+    // Spelled out rather than routed through heroVisible, which now counts Zen
+    // itself as a way for the hero to be on screen — true here, but circular to
+    // read as this rule's cause.
+    const zen = zenMode.value && !paneTakeoverOpen.value;
     document.body.classList.toggle("np-zen", zen);
     if (zen) {
       armIdle();
@@ -3855,22 +3873,33 @@ function setupEffects(): void {
       document.body.classList.remove("np-idle");
     }
   });
-  // Keep the View ▸ Zen Mode checkmark in sync (menu, ⌘⇧F, and Escape all flip
-  // the signal). Tracks the preference itself, not the hero-gated body class, so
-  // the mark reflects what ⌘⇧F will do even while a list face is up.
+  // Keep the View ▸ Zen Mode checkmark in sync (menu, ⌘⇧F, and Escape all flip the
+  // signal). Tracks the preference itself, not the hero-gated body class — which is
+  // sound only because the toggle below never declines: the native item draws its
+  // own check on click, so a toggle that changed the menu without changing the
+  // signal left the mark asserting a Zen Mode nobody was in, and the effect had
+  // nothing to re-fire on to take it back.
   effect(() => {
     void invoke("set_zen_mode_checked", { on: zenMode.value });
   });
 
-  // Entering Zen Mode only makes sense while the hero owns the pane; exiting
-  // always works. View ▸ Zen Mode (⌘⇧F) and Escape relay here.
+  // Zen Mode is a *preference*, not a pane state: it says "the hero should cover the
+  // window", and the pane obeys wherever it can — over the list face by painting the
+  // hero on top of it (the CSS override beside the Zen rules), and not at all under a
+  // takeover, where it waits armed until that panel closes. So the toggle navigates
+  // nothing and refuses nothing; it flips one flag from anywhere, and every question
+  // of what you actually see is settled by presentation. That's what makes leaving
+  // Zen non-destructive: the queue or playlist you entered from was never flipped
+  // away, so it's simply there again, with no stashed face to restore and nothing to
+  // go stale while Zen sits armed. View ▸ Zen Mode (⌘⇧F) and Escape relay here.
   const toggleZen = (on?: boolean): void => {
-    const next = on ?? !zenMode.value;
-    if (next && !heroVisible.value) return;
-    zenMode.value = next;
+    zenMode.value = on ?? !zenMode.value;
   };
+  // Escape backs out of the Zen you can *see*, so a latent Zen armed behind Settings
+  // doesn't swallow the key: there, Escape is the panel's to answer, and silently
+  // disarming a mode showing no sign of itself is not an escape of anything.
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && zenMode.value) {
+    if (e.key === "Escape" && zenMode.value && !paneTakeoverOpen.value) {
       toggleZen(false);
     }
   });
@@ -4835,13 +4864,13 @@ async function init(): Promise<void> {
         return [...panel.querySelectorAll<HTMLInputElement>("input[type='text']")]
           .map((input) => input.value);
       },
-      // Enter Zen Mode with its transport pinned open (see zenIdlePinned). The
-      // hero has to own the pane first, exactly as ⌘⇧F requires — a recipe that
-      // forgot to close the queue would otherwise capture an ordinary window and
-      // say nothing about why.
+      // Enter Zen Mode with its transport pinned open (see zenIdlePinned). Zen paints
+      // over a list face on its own, but a pane takeover suspends it, so that one
+      // throws rather than letting a recipe that forgot to close Settings capture an
+      // ordinary window and say nothing about why.
       zenMode: () => {
-        if (!heroVisible.value) {
-          throw new Error("Zen Mode needs the now-playing hero in the pane");
+        if (paneTakeoverOpen.value) {
+          throw new Error("Zen Mode cannot cover the pane while a panel owns it");
         }
         zenIdlePinned = true;
         zenMode.value = true;

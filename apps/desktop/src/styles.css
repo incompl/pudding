@@ -1230,7 +1230,8 @@ html[data-mode="light"] #search-results {
    (tabs/search/modes), left panel, and splitter all included — by pinning the
    panel over everything with an opaque backdrop. The OS traffic lights float
    above the webview, so the window is still closable; Escape or ⌘⇧F exits.
-   Set only while the hero face is up (see main.ts). */
+   Set whenever Zen is on and no panel owns the pane (see main.ts) — the list face
+   is no obstacle, since the rules below paint the hero over it. */
 body.np-zen #now-playing-panel {
   position: fixed;
   inset: 0;
@@ -1265,6 +1266,18 @@ body.np-zen #now-playing-panel.view-visualizer #now-playing-visualizer {
    card, so the art/text centre exactly where they do when no list is in play;
    the margin .has-nav lifts the transport by is reset for the same reason. */
 body.np-zen #nav-bar {
+  display: none;
+}
+/* Zen paints the hero OVER whichever face the pane was on rather than flipping the
+   pane to the hero first: entering Zen is presentation, not navigation, so leaving
+   it hands the queue/playlist back exactly as it was — no stashed "previous face"
+   to restore, and nothing to go stale while Zen sits armed behind a panel. Beats
+   the `.show-list` swap on specificity (the extra `body`), so it holds regardless
+   of source order with the full-view media query that carries that rule. */
+body.np-zen #now-playing-main {
+  display: flex;
+}
+body.np-zen #queue-view {
   display: none;
 }
 body.np-zen #now-playing-controls {
