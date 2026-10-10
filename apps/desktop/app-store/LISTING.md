@@ -15,17 +15,17 @@ differentiators come before the feature inventory, not after it.
 
 ## App name (30 max)
 
-Pudding
+Pudding Music Player
 
 ## Subtitle (30 max)
 
-Music player for files & radio
+Local files and internet radio
 
 ## Promotional text (170 max)
 
-A music player with the practicality of an oldschool player and the modern style and features of a streaming app.
+Inspired by the classic music players of yesteryear, Pudding has the ease-of-use and polish of a modern app.
 
-## Keywords (100 max, comma separated, no spaces)
+## Keywords (100 max, comma separated, no spaces)s
 
 mp3,flac,alac,m3u,id3,tag,editor,radio,icecast,shoutcast,gapless,equalizer,replaygain,library
 
@@ -38,34 +38,33 @@ mp3,flac,alac,m3u,id3,tag,editor,radio,icecast,shoutcast,gapless,equalizer,repla
 Own your music.
 Play it in Pudding.
 
-It is a player for the audio files already on your Mac — MP3, FLAC, ALAC, AAC, Ogg Vorbis, Opus, WAV, AIFF — and for the internet radio stations you add yourself. There is no catalog, no account, no subscription, and nothing to sign in to. Point it at your folders and it plays what is there.
+Pudding is an audio player for local files. There is no no account, no subscription, and nothing to sign in to.
 
 WHAT MAKES PUDDING DIFFERENT
 
-Most file players hand you a database to maintain. Most modern players hand you a service to join. Pudding takes the conveniences people expect from a streaming app and gives them to the files you own:
+Most file players make you a database maintainer. Most modern players require a paid service. Pudding takes the conveniences people expect from a streaming app and gives them to the files you own:
 
 • No import step. Choose your library folders once. Pudding watches them and picks up what you change on disk, with no manual rescan.
-• Search-first navigation. Press Command-F, type an album name, press Return, and you are in it.
+• Search-first navigation. Press Command-F, type an album name, press Return, and you're there.
 • Relational navigation. Right-click any track to jump to its artist or its album.
-• A first-class queue. Right-click anything to start one, then Play Next or Add to Queue, and drag rows to reorder.
-• Playlists are files, not rows in someone's database. Each one is an ordinary .m3u8 on your disk that autosaves as you edit it and opens in any other player.
-• Tag editing in the app. Fix one file or a whole selection at once, artwork included, then review the update and revert it from the same screen.
-• Six views of one library. Browse the real folder tree, or the same files as Songs, Artists, Albums, Genres, or Decades.
-• Album art is central in the presentation.
+• A first-class queue. Right-click anything to start a queue with drag-and-drop support.
+• Playlists are files. Each one is an ordinary .m3u8 on your disk that autosaves as you edit it and opens in other players.
+• Tag editing in the app. Fix one file or a whole selection at once, artwork included.
+• We love art. Album art is central in the presentation.
 
 PLAYBACK
 
 • Gapless playback from a custom audio engine: consecutive tracks are joined sample to sample in one continuous output stream
 • High-quality resampling, or Match Source Sample Rate to send a 44.1 kHz file to your output device at 44.1 kHz
-• A 10-band equalizer whose bars glow with the real energy in each band
+• A 10-band equalizer
 • ReplayGain volume normalization by track or album, with peak-based clip prevention; untagged files play unchanged
-• Shuffle, repeat off/all/one, and an autoadvance toggle for listening one track at a time
+• Shuffle, repeat off/all/one, and an autoadvance toggle
 
 LIBRARY
 
 • A fast local metadata cache, scanned in the background and tested up to 500,000 tracks
 • Use the default columns or choose your own, with sortable headers
-• Multiple selection, where every menu action — play, queue, add to playlist, edit tags — applies to everything selected
+• Multiple selection, where every menu action applies to everything selected
 • Cloud-friendly: a library in iCloud Drive, Proton Drive, or Dropbox scans without downloading anything, and files whose bytes are not on this Mac are marked "(Not downloaded)" until you play them
 • Drag music in from Finder, or open audio files you double-click there
 
@@ -73,7 +72,6 @@ INTERNET RADIO
 
 • Icecast and SHOUTcast streams with in-band ICY now-playing metadata
 • Your own station list, edited in the app with optional per-station art and saved as a plain .m3u8 you can share or hand-edit
-• Automatic reconnect; pausing disconnects, resuming rejoins the live edge
 
 MAC INTEGRATION
 

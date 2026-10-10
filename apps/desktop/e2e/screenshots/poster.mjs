@@ -164,22 +164,29 @@ function chromeHTML({ headline }, frames, band) {
   html, body { margin: 0; padding: 0; }
   body {
     width: ${FRAME.width}px; height: ${FRAME.height}px; overflow: hidden;
-    /* The same floor as the website's content band (the .site-content rule in
-       apps/website/src/styles/global.css): dark enough to read as the app's own
-       dark theme, light enough that a dark capture still separates from it.
+    /* The foot of the ramp below, and the colour that shows through a capture's
+       rounded-corner notches. Type is dark because this whole ground is light —
+       white on it is 2.1:1 at the top of the ramp.
        Note this whole style block is a template literal — no backticks. */
-    background: #0f1311; color: #f1f1f1;
+    background: #7e9152; color: #0f1311;
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  /* Two soft washes in the app's own pistachio accent (--accent #b5d17a,
-     --accent-dim #7e9152), so the poster reads as the same product as the
-     windows sitting on it. */
+  /* The app's own accent pair, top to bottom: --accent #b5d17a down to
+     --accent-dim #7e9152. A theme in this app is nothing more than an accent
+     pair layered on a mode's neutrals (see theme.ts), so the poster's ground is
+     the product's own two colours and nothing else — both undiluted, rather
+     than washes of them over a neutral.
+
+     Vertical rather than diagonal, because the headline spans the band's whole
+     width and one ink colour has to work along all of it. Dark type holds
+     across the entire ramp here, so the direction is a composition choice and
+     not a legibility one — but a horizontal component would put the end of a
+     long headline on a different value than its start, which reads as a mistake
+     at this size. */
   .wash {
     position: absolute; inset: 0;
-    background:
-      radial-gradient(1100px 520px at 10% -12%, rgba(181, 209, 122, 0.20), transparent 70%),
-      radial-gradient(900px 620px at 108% 118%, rgba(126, 145, 82, 0.20), transparent 70%);
+    background: linear-gradient(180deg, #b5d17a 0%, #7e9152 100%);
   }
   /* The caption owns the whole band above the topmost window and centres its
      line box in it, rather than hanging from a fixed top. That is what keeps the
@@ -194,16 +201,22 @@ function chromeHTML({ headline }, frames, band) {
     width: ${FRAME.width - BOX.x * 2}px;
     display: flex; align-items: center;
   }
-  /* Keep new copy near the length of what is there: a line more shrinks both of
-     the band's margins, and the measurement below rules on them. */
-  h1 { margin: 0; font-size: 38px; line-height: 1.1; font-weight: 640; letter-spacing: -0.015em; max-width: 1000px; }
+  /* Display type: every headline in the set is one short line, and at 38px it
+     read as a label on a 2560px image rather than the poster's own voice. Keep
+     new copy near the length of what is there — at this size a second line
+     shrinks both of the band's margins fast, and the measurement below rules on
+     them. */
+  h1 { margin: 0; font-size: 54px; line-height: 1.05; font-weight: 780; letter-spacing: -0.032em; max-width: 1000px; }
   /* Transparent: an outer box-shadow is painted only outside the border box's
      rounded rectangle, so this contributes the shadow and nothing else — the
      captures supply every pixel of the windows themselves. */
   .frame {
     position: absolute; background: transparent;
     border-radius: ${CORNER_RADIUS}px;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.62), 0 3px 10px rgba(0, 0, 0, 0.45);
+    /* Lighter than the pair this carried over the old near-black background: the
+       same 0.62 black over a pistachio ground reads as a smudge rather than a
+       lift, and a light ground needs less of it to separate a dark window. */
+    box-shadow: 0 24px 64px rgba(26, 32, 20, 0.42), 0 3px 10px rgba(26, 32, 20, 0.30);
   }
 </style>
 <div class="wash"></div>

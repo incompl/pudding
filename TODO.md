@@ -7,11 +7,11 @@ Sandbox, entitlements, and bookmarked roots are done
 
 ### Distribution signing and packaging
 
-- [ ] Register the explicit App ID `com.incompl.pudding` in the Apple Developer portal.
-- [ ] Create a Mac App Store Connect provisioning profile for that App ID.
-- [ ] Install a valid Mac App Distribution/Apple Distribution signing certificate on the release machine.
-- [ ] Install a valid Mac Installer Distribution certificate on the release machine.
-- [ ] Embed the provisioning profile as `Contents/embedded.provisionprofile` through the MAS Tauri configuration (`bundle.macOS.files`). (The distribution overlay is ready; add the account-specific profile.)
+- [x] Register the explicit App ID `com.incompl.pudding` in the Apple Developer portal.
+- [x] Create a Mac App Store Connect provisioning profile for that App ID.
+- [x] Install a valid Mac App Distribution/Apple Distribution signing certificate on the release machine.
+- [x] Install a valid Mac Installer Distribution certificate on the release machine.
+- [x] Embed the provisioning profile as `Contents/embedded.provisionprofile` through the MAS Tauri configuration (`bundle.macOS.files`). Profile saved at `src-tauri/AppStore.provisionprofile` (gitignored) 2026-10-10; verify it lands in the bundle on the first distribution build.
 - [ ] Supply the real Team ID to the distribution entitlements. The plumbing is
       done (2026-09-26): `tools/gen-distribution-entitlements.sh` derives
       `Entitlements.distribution.plist` from `Entitlements.plist` plus `$TEAM_ID`,
@@ -94,8 +94,8 @@ Sandbox, entitlements, and bookmarked roots are done
 
 ### App Store Connect
 
-- [ ] Create the macOS app record before uploading the first build.
-- [ ] Enter the app name, subtitle, description, keywords, copyright, SKU, primary
+- [x] Create the macOS app record before uploading the first build.
+- [x] Enter the app name, subtitle, description, keywords, copyright, SKU, primary
       language, and matching Music category. Draft copy for the text fields is in
       `apps/desktop/app-store/LISTING.md`; all fields were re-counted 2026-09-26
       and fit (name 7/30, subtitle 30/30 — at the cap, promotional text 113/170,
@@ -104,8 +104,8 @@ Sandbox, entitlements, and bookmarked roots are done
 - [ ] Complete Apple's current age-rating questionnaire.
 - [ ] Declare **No data collected** under App Privacy while the app's current data practices remain unchanged.
 - [ ] Enter the privacy policy URL: <https://puddingisgood.com/privacy/>.
-- [ ] Enter the support URL and support email: <https://puddingisgood.com/support/> and `pudding@incompl.com`.
-- [ ] Enter the marketing URL: <https://puddingisgood.com/>.
+- [x] Enter the support URL and support email: <https://puddingisgood.com/support/> and `pudding@incompl.com`.
+- [x] Enter the marketing URL: <https://puddingisgood.com/>.
 - [ ] Set pricing, tax category, storefront availability (exclude France initially), and release method.
 - [ ] Complete and verify DSA trader status if distributing in the European Union.
 - [ ] Enter complete App Review contact information and the detailed review notes.

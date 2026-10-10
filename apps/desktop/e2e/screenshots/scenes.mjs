@@ -435,6 +435,14 @@ async function equalizer(d, library, manifest) {
 // while the engine holds the file open, and a greyed-out button with a warning
 // is the wrong thing to document.
 //
+// It gets there the way a user does — the file found in Browse and selected, then
+// its tags asked for — because the editor is a right-pane face with no door of its
+// own: every way in starts from a file picked out of a list (editMetadataItem).
+// With the Files panel left on its root menu, this image showed the form beside a
+// springboard of library views, which says nothing about how the form was reached;
+// with the folder open and the row selected, the left panel *is* the gesture that
+// opened it.
+//
 // Save is also disabled until the form has been edited, because an untouched save
 // would rewrite every selected file to no effect (see buildInlineEditor's `armed`).
 // So the capture touches the field the form has already focused, by typing a
@@ -445,6 +453,21 @@ async function equalizer(d, library, manifest) {
 async function metadataEditor(d, library, manifest) {
   await nowPlaying(d, library, manifest, { clearQueue: true });
   const [track] = albumPaths(library, manifest, 'Borrowed Light');
+  const row = `#folder-tree .node-label[data-path="${track}"]`;
+  // Browse, expanded down to the folder the track lives in and scrolled to it:
+  // the same entry point "Show in Browse" and a folder search hit take
+  // (goToFolder). The fixture library is shallow enough that nothing of it
+  // scrolls away — the capture gets the artist folders, the open album inside one
+  // of them, and the five tracks in it.
+  await d.action('browseFolder', { path: path.dirname(track) });
+  await d.waitFor(() => d.exists(row),
+    { message: 'Browse did not expand the folder the edited track lives in' });
+  // Then select it, which is both what a user does before asking for a file's
+  // tags and the only lasting mark the tree has for this row: the reveal's own
+  // flash fades out, and the playing glyph is on another album by design.
+  await d.action('treeClick', { selector: row });
+  await d.waitFor(() => d.exists(`${row}.selected`),
+    { message: 'The clicked tree row did not take the selection' });
   await d.action('editMetadata', { path: track });
   await d.waitFor(async () => (await d.text('#pane-editor-view')).includes('Editing'),
     { message: 'The metadata editor did not open' });
@@ -456,6 +479,11 @@ async function metadataEditor(d, library, manifest) {
   await d.action('editorType', { label: 'Title', value: title });
   await d.waitFor(async () => (await d.action('editorFields')).submitDisabled === false,
     { message: 'Save stayed disabled, so the capture would document a dead button' });
+  // The reveal washes the folder row in accent for 900ms (row-flash.ts), and the
+  // shutter's freeze cancels animations rather than finishing them — so a capture
+  // taken mid-fade would publish a highlighted row with nothing to explain it.
+  await d.waitFor(async () => !(await d.exists('#folder-tree .node-label.flash')),
+    { message: 'The revealed folder row never finished its flash' });
 }
 
 // The wide Files panel: the divider moved right until the leaf list is past its
