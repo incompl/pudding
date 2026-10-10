@@ -73,11 +73,12 @@ that no queue navigation remains. The Files panel sits on its index — the libr
 views plus the Playlists section, where the fixture library's Favorites and
 Synthwave playlists appear. Shuffle, repeat, autoadvance, ReplayGain,
 sample-rate matching, the equalizer, and the visualizer are disabled explicitly.
-It is also the one scene that arrives on a different album (`HERO_ALBUM`), so the
-homepage's artwork is not the cover every documentation image already carries:
-the fixture library gives that one album its own photograph, and no other scene
-features it. The `light` scene reuses the recipe under a light theme, on the
-album the rest of the documentation shows.
+It is also one of the two scenes that arrive on a different album (`HERO_ALBUM`),
+so the homepage's artwork is not the cover every documentation image already
+carries: the fixture library gives that one album its own photograph, and the
+only other scene that features it is the `01-library` poster, which is meant to
+be recognisable as this image. The `light` scene reuses the recipe under a light
+theme, on the album the rest of the documentation shows.
 Documentation references the website asset directly; it needs no extra copy.
 
 The `columns` scene is the one that ships a layout rather than a view: a stored
@@ -109,7 +110,10 @@ opaque by construction; the rule is about the channel existing at all.
 The set is ordered, and the numbers in the destination filenames are that order:
 `01-library` is the app at rest — the Files index beside Now Playing, nothing
 switched on — because it answers "what is this", and `02-sizes` follows it to
-answer what that one provokes. `03-tags`, `04-playlists`, `05-themes`,
+answer what that one provokes. It runs the homepage hero's recipe on the
+homepage's album, so a reader arriving from the website meets the same cover and
+the same metadata they just saw; the window is 40px shorter, being the app's own
+default size rather than the hero's. `03-tags`, `04-playlists`, `05-themes`,
 `06-search` and `07-equalizer` are one feature apiece. Renumbering a poster means renaming
 its file only: a scene's id strips the number prefix, so `store-sizes` is
 `store-sizes` wherever it sits in the set.

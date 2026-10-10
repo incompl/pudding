@@ -22,9 +22,10 @@ const BYTES_PER_SAMPLE = 2;
 const PREVIEW_SECONDS = 4;
 
 // Five albums share one photograph. "A Little Nugget of Universe" carries its own because the
-// website's homepage screenshot is the one scene that restores that album
-// (HERO_ALBUM in e2e/screenshots/scenes.mjs), precisely so the hero's cover is
-// not the cover every documentation image already shows.
+// two "app at rest" images restore that album (HERO_ALBUM in
+// e2e/screenshots/scenes.mjs) — the website's homepage screenshot and the first
+// App Store poster, which is meant to be recognisable as it — precisely so their
+// cover is not the cover every documentation image already shows.
 const ART_DIR = fileURLToPath(new URL("../images/", import.meta.url));
 const DEFAULT_COVER = "sample album art 1.jpg";
 const HERO_COVER = "sample album art 2.jpg";

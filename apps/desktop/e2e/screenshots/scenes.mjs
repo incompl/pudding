@@ -23,13 +23,16 @@ export function initialSettings(library, manifest) {
   };
 }
 
-// The album every scene but the homepage hero arrives on.
+// The album every scene but the two "app at rest" images arrives on.
 const defaultAlbum = (manifest) => manifest.tracks[0].album;
 
-// The album the homepage screenshot arrives on instead. It exists so that image
-// can carry its own cover: the fixture library gives this one album a different
-// photograph (gen-screenshot-library.mjs), and nothing else in the suite shows
-// it — the artist, search, queue and editor scenes each feature another album.
+// The album the homepage screenshot and the first App Store poster arrive on
+// instead. It exists so those images can carry their own cover: the fixture
+// library gives this one album a different photograph
+// (gen-screenshot-library.mjs), and no other scene shows it — the artist,
+// search, queue and editor scenes each feature another album. The two that do
+// share it on purpose: the poster is meant to be recognisable as the homepage
+// image, so its art and metadata have to be the same ones.
 const HERO_ALBUM = 'A Little Nugget of Universe';
 
 // One album's tracks as the paused session a scene arrives on. A scene that
@@ -182,10 +185,10 @@ const albumPaths = (library, manifest, album) => manifest.tracks
 
 // --- Recipes -----------------------------------------------------------------
 
-// Parameterised by the album it arrives on, because its two scenes differ in
-// nothing else: the homepage hero takes HERO_ALBUM so its Now Playing art is not
-// the cover every documentation image already shows, and the light-theme image
-// takes the album the rest of the suite uses.
+// Parameterised by the album it arrives on, because its three scenes differ in
+// little else: the homepage hero and the first App Store poster take HERO_ALBUM
+// so their Now Playing art is not the cover every documentation image already
+// shows, and the light-theme image takes the album the rest of the suite uses.
 const basicLayout = (album) => async function basicLayout(d, library, manifest) {
   await nowPlaying(d, library, manifest, { clearQueue: true, album });
   // The Files panel stays on its index — the library views, then the Playlists
@@ -719,11 +722,16 @@ export const scenes = [
 
   // The app as it opens: the Files panel on its index (the six library views,
   // then the playlists) beside Now Playing, with no queue, no drill, and every
-  // optional playback feature off. It runs the same recipe as the homepage hero
-  // and the light-theme image, on the album the rest of the poster set arrives
-  // on — so the first thing a reader sees here is the first thing they will see
-  // in the app rather than a configuration of it. The dense Songs table this
-  // used to lead with has not left the set: it is the tall window of 02.
+  // optional playback feature off — so the first thing a reader sees here is the
+  // first thing they will see in the app rather than a configuration of it. The
+  // dense Songs table this used to lead with has not left the set: it is the
+  // tall window of 02.
+  //
+  // It is the homepage hero exactly: the same recipe on the same HERO_ALBUM, so
+  // the cover and the three metadata lines in its Now Playing are the ones the
+  // website leads with. Someone who arrives at the store from the site should
+  // recognise the first poster as the picture they just saw, and the two images
+  // only differ by the 40px of height HERO_WINDOW adds and the frame around it.
   //
   // It is the one poster that captures at DEFAULT_WINDOW rather than
   // STORE_WINDOW: this is the app at rest, and the size it rests at is the one
@@ -732,7 +740,9 @@ export const scenes = [
   // `placements` centres a capture in the frame's box, so the room it gives
   // back is poster ground rather than stretched app pixels.
   storeScene('01-library', 'Simple Yet Powerful.', {
-    size: DEFAULT_WINDOW, prepare: basicLayout(),
+    size: DEFAULT_WINDOW,
+    settings: (library, manifest) => ({ playbackSession: restoredAlbum(library, manifest, HERO_ALBUM) }),
+    prepare: basicLayout(HERO_ALBUM),
   }),
 
   // A poster made of several windows, and the one that has to follow 01: that
