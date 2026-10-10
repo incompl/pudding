@@ -32,7 +32,9 @@ const BOX = { x: 64, y: 120, width: 1152, height: 640 };
 // window has, and this is the same 960 x 640 the documentation set uses (WINDOW
 // in scenes.mjs), so the store shows the app in the shape every other image of
 // it does. `placements` centres it, so what fills the space either side is the
-// poster's own background rather than app pixels.
+// poster's own background rather than app pixels. A poster may still name its
+// own size, and the lead one does: `01-library` captures at the size the app
+// opens at (DEFAULT_WINDOW in scenes.mjs).
 export const STORE_WINDOW = { width: 960, height: 640 };
 
 // macOS rounds a window's corners and `screencapture -o` keeps that as alpha, so

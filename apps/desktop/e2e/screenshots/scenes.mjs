@@ -59,6 +59,21 @@ const WINDOW = { width: 960, height: 640 };
 // between 720 and 960: below ~720 the art itself starts shrinking, and below
 // 601 the app switches to its compact layout.
 const HERO_WINDOW = { width: 800, height: 640 };
+
+// The window the app opens at on a first run, which is the size the store's
+// lead poster shows it at (see `01-library`) — a reader's first look at the app
+// is then the window they will actually get, not a roomier one arranged for a
+// picture. Read out of the shipping config rather than restated here, because
+// the default belongs to that file: change it there and the poster follows.
+const DEFAULT_WINDOW = (() => {
+  const conf = JSON.parse(readFileSync(fileURLToPath(new URL('../../src-tauri/tauri.conf.json', import.meta.url)), 'utf8'));
+  const { width, height } = conf.app?.windows?.[0] ?? {};
+  if (!width || !height) {
+    throw new Error('tauri.conf.json no longer declares the main window size, so the poster cannot show the app at its default size');
+  }
+  return { width, height };
+})();
+
 const asset = (name) => [`apps/website/src/assets/${name}.png`];
 
 // --- Fictional stream list ---------------------------------------------------
@@ -709,8 +724,15 @@ export const scenes = [
   // on — so the first thing a reader sees here is the first thing they will see
   // in the app rather than a configuration of it. The dense Songs table this
   // used to lead with has not left the set: it is the tall window of 02.
+  //
+  // It is the one poster that captures at DEFAULT_WINDOW rather than
+  // STORE_WINDOW: this is the app at rest, and the size it rests at is the one
+  // it opens at. A window 160 × 40 larger is a small lie in the place a reader
+  // is least able to check it, and the smaller window reads as itself here —
+  // `placements` centres a capture in the frame's box, so the room it gives
+  // back is poster ground rather than stretched app pixels.
   storeScene('01-library', 'Simple Yet Powerful.', {
-    prepare: basicLayout(),
+    size: DEFAULT_WINDOW, prepare: basicLayout(),
   }),
 
   // A poster made of several windows, and the one that has to follow 01: that
