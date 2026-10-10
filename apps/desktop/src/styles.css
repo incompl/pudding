@@ -3880,12 +3880,19 @@ body.dragging-noselect * {
   margin: 0;
 }
 
+/* The extra breathing room around the primary button lives here, on both
+   sides, so the gap above and below it is symmetric. It belongs on this row
+   rather than on the neighbours because this row inherits the panel's font
+   size -- an em margin on .files-empty-detail would resolve against its
+   smaller 0.9em text and come out short. The column's 0.35em gap adds to
+   each side equally. */
 .files-empty-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.55em;
   margin-top: 0.55em;
+  margin-bottom: 0.55em;
 }
 
 .files-empty-actions button {
@@ -3906,7 +3913,7 @@ body.dragging-noselect * {
 }
 
 .files-empty-detail {
-  margin: 0.35em 0 0;
+  margin: 0;
   font-size: 0.9em;
 }
 
