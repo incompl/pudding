@@ -25,7 +25,7 @@ Local files and internet radio
 
 Inspired by the classic music players of yesteryear, Pudding has the ease-of-use and polish of a modern app.
 
-## Keywords (100 max, comma separated, no spaces)s
+## Keywords (100 max, comma separated, no spaces)
 
 mp3,flac,alac,m3u,id3,tag,editor,radio,icecast,shoutcast,gapless,equalizer,replaygain,library
 
@@ -38,7 +38,7 @@ mp3,flac,alac,m3u,id3,tag,editor,radio,icecast,shoutcast,gapless,equalizer,repla
 Own your music.
 Play it in Pudding.
 
-Pudding is an audio player for local files. There is no no account, no subscription, and nothing to sign in to.
+Pudding is an audio player for local files. There is no account, no subscription, and nothing to sign in to.
 
 WHAT MAKES PUDDING DIFFERENT
 
