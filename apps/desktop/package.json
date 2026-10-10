@@ -20,6 +20,7 @@
     "e2e": "pnpm build:e2e && pnpm test:e2e",
     "drive": "node e2e/drive.mjs --dev",
     "caliper": "node scripts/caliper.mjs",
+    "reset": "tools/reset-local-state.sh",
     "screenshots:update": "node --import tsx e2e/screenshots/run.mjs"
   },
   "dependencies": {

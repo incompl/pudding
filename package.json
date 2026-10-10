@@ -23,6 +23,7 @@
     "e2e": "pnpm --filter @pudding/desktop e2e",
     "drive": "pnpm --filter @pudding/desktop drive",
     "caliper": "pnpm --filter @pudding/desktop caliper",
+    "reset": "pnpm --filter @pudding/desktop reset",
     "desktop:dev": "pnpm --filter @pudding/desktop tauri dev",
     "desktop:build": "pnpm --filter @pudding/desktop tauri build",
     "desktop:test": "pnpm --filter @pudding/desktop test:unit",
