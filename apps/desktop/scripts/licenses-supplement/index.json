@@ -24,11 +24,6 @@
     "file": "alloc-stdlib.txt",
     "source": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/master/LICENSE"
   },
-  "seahash": {
-    "license": "MIT",
-    "file": "seahash.txt",
-    "source": "https://gitlab.redox-os.org/redox-os/seahash/-/blob/master/LICENSE"
-  },
   "brotli": {
     "license": "BSD-3-Clause AND MIT",
     "file": "brotli-bsd-3-clause.txt",

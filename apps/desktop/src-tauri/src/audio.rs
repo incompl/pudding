@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, StreamConfig};
+use cpal::{SampleFormat, StreamConfig};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use rtrb::{Consumer as RbConsumer, Producer as RbProducer, RingBuffer};
 use rubato::{
@@ -789,7 +789,7 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     let default_cfg = device
         .default_output_config()
         .map_err(|e| format!("default_output_config: {e}"))?;
-    let output_rate = default_cfg.sample_rate().0;
+    let output_rate = default_cfg.sample_rate();
     let sample_format = default_cfg.sample_format();
 
     // The rates this device can be switched to, read once and cached: asking
@@ -802,7 +802,7 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
 
     let stream_cfg = StreamConfig {
         channels: OUT_CHANNELS as u16,
-        sample_rate: SampleRate(output_rate),
+        sample_rate: output_rate,
         // None lets cpal choose. Letting the OS pick keeps latency reasonable
         // without us hard-coding a buffer that some backend rejects.
         buffer_size: cpal::BufferSize::Default,
@@ -810,7 +810,10 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
 
     log::info!(
         "audio: device={} rate={} format={:?} channels={} switchable={:?}",
-        device.name().unwrap_or_else(|_| "<unknown>".into()),
+        device
+            .description()
+            .map(|d| d.name().to_string())
+            .unwrap_or_else(|_| "<unknown>".into()),
         output_rate,
         sample_format,
         OUT_CHANNELS,
@@ -1007,7 +1010,7 @@ fn build_stream(
         shared,
         last_flush_gen: gen,
         viz,
-        eq: EqChain::new(cfg.sample_rate.0),
+        eq: EqChain::new(cfg.sample_rate),
         // The ring holds only what was pre-filled before this stream existed,
         // and nothing has read it yet: the same "silence here is by design"
         // state a flush leaves behind, so borrow its underrun suppression.
@@ -1033,7 +1036,7 @@ fn build_stream(
 
     let stream = device
         .build_output_stream(
-            cfg,
+            *cfg,
             move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 fill_output(&mut state, out);
             },
@@ -2614,7 +2617,7 @@ fn device_output_rates(device: &cpal::Device) -> Vec<u32> {
         Ok(configs) => configs
             .filter(|c| c.sample_format() == SampleFormat::F32)
             .filter(|c| c.min_sample_rate() == c.max_sample_rate())
-            .map(|c| c.min_sample_rate().0)
+            .map(|c| c.min_sample_rate())
             .collect(),
         Err(e) => {
             // Not fatal: an empty list simply means nothing is followable and
@@ -3033,7 +3036,7 @@ fn build_replacement(
     device.set_rate(rate)?;
     let cfg = StreamConfig {
         channels: OUT_CHANNELS as u16,
-        sample_rate: SampleRate(rate),
+        sample_rate: rate,
         buffer_size: cpal::BufferSize::Default,
     };
     let (viz_producer, viz_consumer) = RingBuffer::<f32>::new(viz_ring_samples());

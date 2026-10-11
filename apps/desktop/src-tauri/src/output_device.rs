@@ -39,7 +39,7 @@ impl OutputDevice {
         #[cfg(not(target_os = "macos"))]
         self.device
             .default_output_config()
-            .map(|cfg| cfg.sample_rate().0)
+            .map(|cfg| cfg.sample_rate())
             .map_err(|e| format!("could not read current output rate: {e}"))
     }
 
@@ -71,9 +71,11 @@ impl OutputDevice {
     }
 }
 
-// CPAL 0.15 does not expose its device ID. Bracket its lookup with native
-// reads, retrying the entire selection if the default changes during startup.
-// Accepting just the second ID could pair one device's handle with another's ID.
+// CPAL does not hand out the raw AudioDeviceID we need for the CoreAudio
+// property calls below: 0.18's `DeviceTrait::id` is the device's UID string,
+// not the integer. So bracket its lookup with native reads, retrying the entire
+// selection if the default changes during startup. Accepting just the second ID
+// could pair one device's handle with another's ID.
 #[cfg(any(target_os = "macos", test))]
 fn stable_default_device<T>(
     mut read_id: impl FnMut() -> Result<u32, String>,

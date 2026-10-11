@@ -34,18 +34,18 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 tauri-plugin-store = "2.4.3"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 log = "0.4"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 lofty = "0.25.3"
-base64 = "0.22"
-notify = "6"
-notify-debouncer-full = "0.3"
+base64 = "0.23"
+notify = "8"
+notify-debouncer-full = "0.7"
 symphonia = { version = "0.6", features = ["mp3", "aac", "flac", "alac", "vorbis", "isomp4", "ogg", "aiff"] }
 # Opus has no pure-Rust decoder in Symphonia (0.6 ships none, and the Ogg
 # demuxer already maps Opus streams — only the decoder was missing). This
@@ -55,8 +55,8 @@ symphonia = { version = "0.6", features = ["mp3", "aac", "flac", "alac", "vorbis
 # Needs cmake at build time. BSD-3-Clause; Help > Licenses picks it up from
 # opusic-sys's own LICENSE via gen-licenses.mjs.
 symphonia-adapter-libopus = "0.3"
-cpal = "0.15"
-rtrb = "0.3"
+cpal = "0.18"
+rtrb = "0.4"
 rubato = "0.16"
 crossbeam-channel = "0.5"
 ureq = "2"

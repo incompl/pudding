@@ -25,21 +25,21 @@
     "screenshots:update": "node --import tsx e2e/screenshots/run.mjs"
   },
   "dependencies": {
-    "@preact/signals-core": "^1.14.2",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2.7.1",
-    "@tauri-apps/plugin-log": "^2",
-    "@tauri-apps/plugin-opener": "^2.5.4",
-    "@tauri-apps/plugin-store": "^2.4.3"
+    "@preact/signals-core": "^1.14.4",
+    "@tauri-apps/api": "^2.12.3",
+    "@tauri-apps/plugin-dialog": "^2.8.2",
+    "@tauri-apps/plugin-log": "^2.10.1",
+    "@tauri-apps/plugin-opener": "^2.7.1",
+    "@tauri-apps/plugin-store": "^2.5.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
-    "@tauri-apps/cli": "^2",
-    "@types/node": "^22.10.0",
-    "@types/ws": "^8.5.13",
-    "tsx": "^4.19.2",
-    "typescript": "~5.6.2",
-    "vite": "^6.0.3",
-    "ws": "^8.18.0"
+    "@playwright/test": "^1.64.0",
+    "@tauri-apps/cli": "^2.12.2",
+    "@types/node": "^24.19.2",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "~5.6.3",
+    "vite": "^8.3.4",
+    "ws": "^8.22.0"
   }
 }

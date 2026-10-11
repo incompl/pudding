@@ -24,8 +24,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use base64::Engine;
 use lofty::prelude::*;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
+use notify::{RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{
@@ -84,7 +84,7 @@ struct DbHandle {
 // The whole set is replaced (old debouncers dropped, which stops their threads)
 // whenever the roots change; empty when no library roots are set.
 struct WatcherState {
-    inner: Mutex<Vec<Debouncer<RecommendedWatcher, FileIdMap>>>,
+    inner: Mutex<Vec<Debouncer<RecommendedWatcher, RecommendedCache>>>,
 }
 
 // Handles to the Playback menu's checkboxes. The frontend owns the authoritative
@@ -2053,10 +2053,8 @@ fn watch_libraries(
         // this command afresh). Acceptable for a music library; the explicit-rescan
         // and boot paths still function.
         debouncer
-            .watcher()
             .watch(&root, RecursiveMode::Recursive)
             .map_err(|e| e.to_string())?;
-        debouncer.cache().add_root(&root, RecursiveMode::Recursive);
         guard.push(debouncer);
     }
     Ok(())
@@ -4049,6 +4047,17 @@ fn same_file_identity(a: &FileStamp, b: &FileStamp) -> bool {
     }
 }
 
+/// Lowercase hex for a hash digest. sha2 0.11 returns a `hybrid_array::Array`,
+/// which — unlike the old `GenericArray` — has no `LowerHex` impl, so the
+/// digests we store as text are formatted here.
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
 fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
     use sha2::{Digest, Sha256};
     let mut file = std::fs::File::open(path)?;
@@ -4061,7 +4070,7 @@ fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex_digest(&digest.finalize()))
 }
 
 fn sha256_open_file(file: &mut std::fs::File) -> Result<String, std::io::Error> {
@@ -4078,7 +4087,7 @@ fn sha256_open_file(file: &mut std::fs::File) -> Result<String, std::io::Error> 
         digest.update(&buffer[..read]);
     }
     file.seek(SeekFrom::Start(old))?;
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex_digest(&digest.finalize()))
 }
 
 fn sync_parent(path: &Path) -> Result<(), std::io::Error> {
@@ -4712,7 +4721,7 @@ fn tag_write_fingerprint(tag: &lofty::tag::Tag) -> TagWriteFingerprint {
         first_picture_sha256: tag.pictures().first().map(|picture| {
             let mut digest = Sha256::new();
             digest.update(picture.data());
-            format!("{:x}", digest.finalize())
+            hex_digest(&digest.finalize())
         }),
     }
 }
@@ -7419,8 +7428,9 @@ mod tests {
     use super::*;
 
     fn debounced_path(path: &str) -> notify_debouncer_full::DebouncedEvent {
-        notify_debouncer_full::DebouncedEvent::from(
+        notify_debouncer_full::DebouncedEvent::new(
             notify::Event::new(notify::EventKind::Any).add_path(PathBuf::from(path)),
+            std::time::Instant::now(),
         )
     }
 

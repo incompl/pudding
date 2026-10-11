@@ -963,7 +963,7 @@ fn relativize(base_dir: &Path, track: &str, bounds: &Bounds) -> String {
 }
 
 fn content_revision(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::hex_digest(&Sha256::digest(bytes))
 }
 
 #[derive(Serialize)]
@@ -1335,6 +1335,21 @@ fn parse_playlist_name(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // content_revision formats its digest by hand (sha2 0.11 dropped LowerHex on
+    // the output array), so pin it to the canonical NIST vectors: a change here
+    // would silently invalidate every revision stamp already on disk.
+    #[test]
+    fn content_revision_matches_known_sha256() {
+        assert_eq!(
+            content_revision(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            content_revision(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn stale_playlist_saves_preserve_external_edits_and_deletions() {
