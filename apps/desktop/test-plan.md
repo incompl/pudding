@@ -12,21 +12,34 @@ ReplayGain-tagged files), one cloud-backed root (Proton/iCloud) with evicted
 files, `pnpm gen:screenshot-library` for the big-library checks, one real
 Icecast URL, one `.pls` URL.
 
+`pnpm gen:format-library` writes one short tone per format to
+`~/Pudding Format Fixtures` for the §2 format, sample-rate and corrupt-file
+checks. Files are numbered in play order and rise in pitch, so the row playing
+is visible and audible. macOS covers wav/aiff/flac/m4a/aac on its own; mp3,
+ogg, opus and the MPEG-4 ADTS variant need `brew install ffmpeg`, and anything
+missing is skipped and listed. They all come from one encoder chain, so they are a format checklist,
+not a substitute for the real library above.
+
 ---
 
 ## 1. First run / cold start
 
-- [ ] Fresh profile → empty state shows **Choose Music Folder** and **Play Sample**
-- [ ] Play Sample plays the bundled track
-- [ ] Choose a folder → scan progress bar in Files footer, app stays usable during scan
-- [ ] Scan completes → tree populated, footer progress gone
-- [ ] Relaunch → roots still readable (bookmark restore), no re-pick prompt
-- [ ] Relaunch → Files tab restores the exact drill location and open tab
+- [x] Fresh profile → empty state shows **Choose Music Folder** and **Play Sample**
+- [x] Play Sample plays the bundled track
+- [x] Choose a folder → scan progress bar in Files footer, app stays usable during scan
+- [x] Scan completes → tree populated, footer progress gone
+- [x] Relaunch → roots still readable (bookmark restore), no re-pick prompt
+- [x] Relaunch → open tab (Files/Streams) restored; a Files view drill reopens at same page
 
 ## 2. Playback engine
 
 - [ ] Play one of each: mp3, flac, wav, m4a/aac, alac, ogg, opus, aiff
+- [ ] Alias extensions play too: `.oga`, `.aif`, and raw ADTS `.aac` (check its duration and seek)
+- [ ] Both raw-ADTS markers play: `11 aac adts.aac` (MPEG-2, afconvert) and
+      `15 aac adts mpeg4.aac` (MPEG-4, ffmpeg)
 - [ ] Gapless: a continuous album crosses a track boundary with no click or gap
+      (use FLAC/ALAC/MP3 — an AAC album clicks by design, see README
+      “Gapless and AAC”; don't file that as a bug)
 - [ ] Pause/resume mid-track, seek by scrub, seek by `←`/`→` (10s)
 - [ ] Volume `⌘↑`/`⌘↓` and `+`/`-`; `M` mutes and unmutes; menu Mute check tracks
 - [ ] Shuffle on mid-track: current track keeps playing, next pick is random
@@ -38,6 +51,10 @@ Icecast URL, one `.pls` URL.
 - [ ] Switch output device while playing (unplug headphones) → playback continues or recovers, no crash
 - [ ] Sleep/wake while playing → recovers
 - [ ] A DRM/corrupt file errors with a message rather than silence or a hang
+      (`13 corrupt truncated.flac` claims 4s and ends early; `14 corrupt garbage.mp3` never decodes)
+- [ ] A file that cannot be decoded says so instead of leaving a dead row:
+      a toast naming the file, and the queue moves on to the next track
+      (`14 corrupt garbage.mp3` is the one that fails at open)
 
 ## 3. Library views
 

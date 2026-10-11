@@ -47,14 +47,14 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use serde::Serialize;
-use symphonia::core::audio::{AudioBufferRef, Signal};
-use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::audio::{Audio, GenericAudioBufferRef};
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+use symphonia::core::units::{Time, Timestamp};
 use tauri::{AppHandle, Emitter};
 
 use lofty::prelude::*;
@@ -1175,7 +1175,7 @@ struct TrackReader {
     // and carry None.
     _file_read: Option<crate::FileReadLease>,
     reader: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
+    decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     input_rate: u32,
     input_channels: usize,
@@ -1516,7 +1516,7 @@ fn decode_loop(
                         if let Some(idx) = audible_idx {
                             if idx < queue.len() && (frontier.is_none() || idx != frontier_idx) {
                                 let rg = shared.rg_mode.load(Ordering::Relaxed);
-                                if let Some(reader) = open_track(&queue[idx], output_rate, rg) {
+                                if let Ok(reader) = open_track(&queue[idx], output_rate, rg) {
                                     frontier = Some(reader);
                                     frontier_idx = idx;
                                     shared.queue_exhausted.store(false, Ordering::Relaxed);
@@ -2022,33 +2022,35 @@ fn open_stream(
     if let Some(ct) = conn.content_type.as_deref() {
         hint.mime_type(ct);
     }
-    let fmt_opts = FormatOptions {
-        enable_gapless: false,
-        ..Default::default()
-    };
+    let fmt_opts: FormatOptions = Default::default();
     let meta_opts: MetadataOptions = Default::default();
 
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &fmt_opts, &meta_opts)
+    let reader = symphonia::default::get_probe()
+        .probe(&hint, mss, fmt_opts, meta_opts)
         .map_err(|e| format!("probe: {e}"))?;
-    let reader = probed.format;
 
     let track = reader
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| "no decodable audio in stream".to_string())?;
+    let audio_params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
         .ok_or_else(|| "no decodable audio in stream".to_string())?;
     let track_id = track.id;
-    let input_rate = track.codec_params.sample_rate.unwrap_or(44_100);
-    let input_rate_declared = track.codec_params.sample_rate.is_some();
-    let input_channels = track
-        .codec_params
+    let input_rate = audio_params.sample_rate.unwrap_or(44_100);
+    let input_rate_declared = audio_params.sample_rate.is_some();
+    let input_channels = audio_params
         .channels
+        .as_ref()
         .map(|c| c.count())
         .unwrap_or(2)
         .max(1);
-    let decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+    // Gapless trimming is meaningless mid-stream, and in 0.6 it is the decoder
+    // (not the demuxer) that trims, so it is switched off here rather than in
+    // FormatOptions.
+    let decoder = codecs()
+        .make_audio_decoder(audio_params, &AudioDecoderOptions::default().gapless(false))
         .map_err(|e| format!("codec init: {e}"))?;
     let resampler = make_resampler(input_rate, output_rate, input_channels);
 
@@ -2255,7 +2257,7 @@ fn advance_to_next_playable(
             };
         }
         match open_track(&queue[*frontier_idx], output_rate, rg_mode) {
-            Some(reader) => {
+            Ok(reader) => {
                 // The handle exists from here on, so record it here — before the
                 // switch_to return below, which defers this track's origin until
                 // the rate rebuild and would otherwise leave an open file named
@@ -2295,8 +2297,8 @@ fn advance_to_next_playable(
                     needs_fetch: None,
                 };
             }
-            None => {
-                emit_error(app, &queue[*frontier_idx], "could not open");
+            Err(e) => {
+                emit_error(app, &queue[*frontier_idx], &e);
                 *frontier_idx += 1;
             }
         }
@@ -2315,9 +2317,17 @@ fn decode_and_push(
     producer_frames: &mut u64,
 ) -> Result<StepOutcome, String> {
     // Step 1: pull a packet → decode → append to pending_in (planar).
-    let packet = match tr.reader.next_packet() {
-        Ok(p) => p,
-        Err(SymError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+    // 0.6 signals end-of-stream as Ok(None). A truncated file still surfaces as
+    // an UnexpectedEof IoError, and both mean "this track is done", so they are
+    // funnelled into one None here and share the flush-and-end path below.
+    let next = match tr.reader.next_packet() {
+        Ok(packet) => packet,
+        Err(SymError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => None,
+        Err(e) => return Err(format!("next_packet: {e}")),
+    };
+    let packet = match next {
+        Some(p) => p,
+        None => {
             // EOF: flush the resampler's tail, push it, then signal end.
             if !tr.flushed {
                 let tail = tr
@@ -2337,10 +2347,9 @@ fn decode_and_push(
             }
             return Ok(StepOutcome::TrackEnded);
         }
-        Err(e) => return Err(format!("next_packet: {e}")),
     };
 
-    if packet.track_id() != tr.track_id {
+    if packet.track_id != tr.track_id {
         return Ok(StepOutcome::Continue);
     }
 
@@ -2365,8 +2374,8 @@ fn decode_and_push(
     // the playhead never advances).
     if !tr.spec_resolved {
         let spec = decoded.spec();
-        let actual_channels = spec.channels.count().max(1);
-        let actual_rate = spec.rate;
+        let actual_channels = spec.channels().count().max(1);
+        let actual_rate = spec.rate();
         if actual_channels != tr.input_channels || actual_rate != tr.input_rate {
             log::info!(
                 "audio: reconciling spec for {}: channels {}->{}, rate {}->{}",
@@ -3069,35 +3078,60 @@ pub(crate) fn probe_one_audio_packet_unleased(
     if let Some(ext) = named_as.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let probed = symphonia::default::get_probe()
-        .format(
+    let mut reader = symphonia::default::get_probe()
+        .probe(
             &hint,
             mss,
-            &FormatOptions {
-                enable_gapless: true,
-                ..Default::default()
-            },
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|e| e.to_string())?;
-    let mut reader = probed.format;
-    reader.next_packet().map_err(|e| e.to_string())?;
-    Ok(())
+    // 0.6 reports end-of-stream as Ok(None) rather than an UnexpectedEof error.
+    // A container with a valid header but no packets at all is still broken, so
+    // treat that as a failure exactly as the IoError used to be.
+    match reader.next_packet().map_err(|e| e.to_string())? {
+        Some(_) => Ok(()),
+        None => Err("no audio packets".to_string()),
+    }
 }
 
-fn open_track(path: &std::path::Path, output_rate: u32, rg_mode: u8) -> Option<TrackReader> {
+// Symphonia's own codec registry plus Opus.
+//
+// `symphonia::default::get_codecs()` is a fixed static registry built from the
+// enabled feature flags, and there is no Opus feature to enable: Symphonia 0.6
+// ships no Opus decoder at all. The Ogg demuxer, though, already maps Opus
+// streams completely — it parses OpusHead, reports 48 kHz, the channel layout
+// and the pre-skip as the track's delay — so the only missing piece was a
+// decoder for CODEC_ID_OPUS. This registry is the default set with libopus
+// registered on top, and every decoder in the app is built from it.
+fn codecs() -> &'static symphonia::core::codecs::registry::CodecRegistry {
+    static CODECS: std::sync::OnceLock<symphonia::core::codecs::registry::CodecRegistry> =
+        std::sync::OnceLock::new();
+    CODECS.get_or_init(|| {
+        let mut registry = symphonia::core::codecs::registry::CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut registry);
+        registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+        registry
+    })
+}
+
+fn open_track(
+    path: &std::path::Path,
+    output_rate: u32,
+    rg_mode: u8,
+) -> Result<TrackReader, String> {
     let file_read = match crate::begin_file_read(path) {
         Ok(lease) => lease,
         Err(e) => {
             log::warn!("audio: refusing to open {}: {e}", path.display());
-            return None;
+            return Err(format!("could not open: {e}"));
         }
     };
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
             log::warn!("audio: open {} failed: {e}", path.display());
-            return None;
+            return Err(format!("could not open: {e}"));
         }
     };
 
@@ -3107,53 +3141,64 @@ fn open_track(path: &std::path::Path, output_rate: u32, rg_mode: u8) -> Option<T
         hint.with_extension(ext);
     }
 
-    // enable_gapless: symphonia consults the file's LAME/Xing header (MP3) or
-    // edit lists (M4A/AAC) and trims encoder delay + padding for us. This is
-    // the difference between "audible click at every MP3 boundary" and
-    // "actually gapless." Verify on a known-gapless album.
-    let fmt_opts = FormatOptions {
-        enable_gapless: true,
-        ..Default::default()
-    };
+    let fmt_opts: FormatOptions = Default::default();
     let meta_opts: MetadataOptions = Default::default();
 
-    let probed = match symphonia::default::get_probe().format(&hint, mss, &fmt_opts, &meta_opts) {
-        Ok(p) => p,
+    let reader = match symphonia::default::get_probe().probe(&hint, mss, fmt_opts, meta_opts) {
+        Ok(r) => r,
         Err(e) => {
             log::warn!("audio: probe {} failed: {e}", path.display());
-            return None;
+            return Err(format!("unsupported or damaged file: {e}"));
         }
     };
-    let reader = probed.format;
 
     let default_track = reader
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)?;
-    let track_id = default_track.id;
-    let input_rate = default_track.codec_params.sample_rate.unwrap_or(44_100);
-    let input_rate_declared = default_track.codec_params.sample_rate.is_some();
-    let input_channels = default_track
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| "no decodable audio track in file".to_string())?;
+    let audio_params = default_track
         .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or_else(|| "no decodable audio track in file".to_string())?;
+    let track_id = default_track.id;
+    let input_rate = audio_params.sample_rate.unwrap_or(44_100);
+    let input_rate_declared = audio_params.sample_rate.is_some();
+    let input_channels = audio_params
         .channels
+        .as_ref()
         .map(|c| c.count())
         .unwrap_or(2)
         .max(1);
     let duration_seconds = compute_duration_seconds(default_track);
 
-    let decoder = match symphonia::default::get_codecs()
-        .make(&default_track.codec_params, &DecoderOptions::default())
+    // gapless: the decoder consults the file's LAME/Xing header and trims
+    // encoder delay + padding for us. This is the difference between "audible
+    // click at every MP3 boundary" and "actually gapless." Symphonia 0.6 moved
+    // the switch from FormatOptions to the decoder and defaults it on; it is
+    // spelled out here because it is load-bearing.
+    //
+    // Coverage is per format. The lossless ones (FLAC, ALAC, PCM/WAV/AIFF) have
+    // no encoder delay to remove and are sample-exact either way; MP3, Vorbis
+    // and Opus carry theirs in the LAME/Xing header, the Ogg granule position
+    // and the Opus pre-skip, and all three are trimmed. AAC is the one gap:
+    // neither symphonia-format-isomp4 nor symphonia-codec-aac implements
+    // trimming, so .m4a AAC and raw .aac keep ~2112 frames of priming. 0.5.5
+    // was worse — only the MP3 demuxer trimmed anything. Measured deltas
+    // against a 4 s tone are in README.md's "Gapless and AAC".
+    // See gapless_trimming_is_active_and_exact_for_mp3.
+    let decoder = match codecs()
+        .make_audio_decoder(audio_params, &AudioDecoderOptions::default().gapless(true))
     {
         Ok(d) => d,
         Err(e) => {
             log::warn!("audio: codec init {} failed: {e}", path.display());
-            return None;
+            return Err(format!("no decoder for this format: {e}"));
         }
     };
 
     let resampler = make_resampler(input_rate, output_rate, input_channels);
 
-    Some(TrackReader {
+    Ok(TrackReader {
         _file_read: Some(file_read),
         reader,
         decoder,
@@ -3250,28 +3295,39 @@ fn compute_duration_seconds(track: &Track) -> f64 {
     // with the codec's time_base, it gives us a duration in seconds. Some
     // unusual files don't carry one of these; we report 0 and the UI shows
     // "0:00" but playback still works.
-    let tb = match track.codec_params.time_base {
+    let tb = match track.time_base {
         Some(t) => t,
         None => return 0.0,
     };
-    let n_frames = match track.codec_params.n_frames {
-        Some(n) => n,
-        None => return 0.0,
+    // 0.6 exposes both a container-stated duration and a playable frame count,
+    // and recommends the former for display: a track's timebase is not always
+    // the reciprocal of its frame rate, so the two can disagree slightly. Fall
+    // back to the frame count, which is what this used before 0.6.
+    if let Some(duration) = track.duration {
+        if let Some(t) = tb.calc_duration(duration) {
+            return t.as_secs_f64();
+        }
+    }
+    let Some(n_frames) = track.num_frames else {
+        return 0.0;
     };
-    let t = tb.calc_time(n_frames);
-    t.seconds as f64 + t.frac
+    match tb.calc_time(Timestamp::new(n_frames as i64)) {
+        Some(t) => t.as_secs_f64(),
+        None => 0.0,
+    }
 }
 
 fn seek_track(tr: &mut TrackReader, target_seconds: f64) -> bool {
-    let secs = target_seconds.trunc() as u64;
-    let frac = target_seconds - secs as f64;
+    // Time's fields are private as of 0.6, and try_from_secs_f64 rejects
+    // non-finite or out-of-range input — a refusal to seek is the right answer
+    // for those, so bail rather than clamping to something arbitrary.
+    let Some(time) = Time::try_from_secs_f64(target_seconds.max(0.0)) else {
+        return false;
+    };
     let result = tr.reader.seek(
         SeekMode::Accurate,
         SeekTo::Time {
-            time: Time {
-                seconds: secs,
-                frac,
-            },
+            time,
             track_id: Some(tr.track_id),
         },
     );
@@ -3359,79 +3415,118 @@ fn make_resampler(input_rate: u32, output_rate: u32, channels: usize) -> Resampl
     ))
 }
 
-fn append_planar(decoded: &AudioBufferRef<'_>, into: &mut [Vec<f32>], expected_channels: usize) {
+fn append_planar(
+    decoded: &GenericAudioBufferRef<'_>,
+    into: &mut [Vec<f32>],
+    expected_channels: usize,
+) {
     // Decoded buffer may be any sample format; we convert to f32 planar.
-    // Symphonia's AudioBufferRef::convert() helps but the explicit per-format
-    // path here is clearer and avoids an extra allocation.
-    let channels = decoded.spec().channels.count().min(expected_channels);
+    // Symphonia 0.6's copy_to_vecs_planar would do this in one call, and as of
+    // 0.6 its scaling matches ours exactly — but it replaces the destination
+    // vectors rather than appending to them, and these append into pending_in
+    // across packets. The explicit path also keeps the signed-PCM scaling
+    // visible (see signal_integrity_tests).
+    let channels = decoded.spec().channels().count().min(expected_channels);
     match decoded {
-        AudioBufferRef::F32(buf) => {
+        GenericAudioBufferRef::F32(buf) => {
             for c in 0..channels {
-                into[c].extend_from_slice(buf.chan(c));
+                into[c].extend_from_slice(buf.plane(c).unwrap_or(&[]));
             }
         }
-        AudioBufferRef::F64(buf) => {
+        GenericAudioBufferRef::F64(buf) => {
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| v as f32));
+                into[c].extend(buf.plane(c).unwrap_or(&[]).iter().map(|&v| v as f32));
             }
         }
-        AudioBufferRef::S32(buf) => {
+        GenericAudioBufferRef::S32(buf) => {
             let scale = 1.0 / (i32::MAX as f32);
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| v as f32 * scale));
+                into[c].extend(
+                    buf.plane(c)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|&v| v as f32 * scale),
+                );
             }
         }
-        AudioBufferRef::S24(buf) => {
+        GenericAudioBufferRef::S24(buf) => {
             // S24 samples ride in i32 with values in [-2^23, 2^23-1].
             let scale = 1.0 / 8_388_608.0;
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| v.inner() as f32 * scale));
+                into[c].extend(
+                    buf.plane(c)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|&v| v.inner() as f32 * scale),
+                );
             }
         }
-        AudioBufferRef::S16(buf) => {
+        GenericAudioBufferRef::S16(buf) => {
             // Signed PCM spans [-2^(bits-1), 2^(bits-1)-1]. Using MAX adds
             // gain and maps the negative endpoint below -1.0.
             let scale = 1.0 / 32_768.0;
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| v as f32 * scale));
+                into[c].extend(
+                    buf.plane(c)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|&v| v as f32 * scale),
+                );
             }
         }
-        AudioBufferRef::S8(buf) => {
+        GenericAudioBufferRef::S8(buf) => {
             let scale = 1.0 / 128.0;
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| v as f32 * scale));
+                into[c].extend(
+                    buf.plane(c)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|&v| v as f32 * scale),
+                );
             }
         }
-        AudioBufferRef::U32(buf) => {
+        GenericAudioBufferRef::U32(buf) => {
             let scale = 1.0 / (u32::MAX as f32 / 2.0);
             for c in 0..channels {
                 into[c].extend(
-                    buf.chan(c)
+                    buf.plane(c)
+                        .unwrap_or(&[])
                         .iter()
                         .map(|&v| (v as f32 - u32::MAX as f32 / 2.0) * scale),
                 );
             }
         }
-        AudioBufferRef::U24(buf) => {
+        GenericAudioBufferRef::U24(buf) => {
             let scale = 1.0 / 8_388_608.0;
             for c in 0..channels {
                 into[c].extend(
-                    buf.chan(c)
+                    buf.plane(c)
+                        .unwrap_or(&[])
                         .iter()
                         .map(|&v| (v.inner() as f32 - 8_388_608.0) * scale),
                 );
             }
         }
-        AudioBufferRef::U16(buf) => {
+        GenericAudioBufferRef::U16(buf) => {
             let scale = 1.0 / 32_768.0;
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| (v as f32 - 32_768.0) * scale));
+                into[c].extend(
+                    buf.plane(c)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|&v| (v as f32 - 32_768.0) * scale),
+                );
             }
         }
-        AudioBufferRef::U8(buf) => {
+        GenericAudioBufferRef::U8(buf) => {
             let scale = 1.0 / 128.0;
             for c in 0..channels {
-                into[c].extend(buf.chan(c).iter().map(|&v| (v as f32 - 128.0) * scale));
+                into[c].extend(
+                    buf.plane(c)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|&v| (v as f32 - 128.0) * scale),
+                );
             }
         }
     }
@@ -3524,7 +3619,7 @@ fn flush_paused_restore(
         return false;
     };
     let rg = shared.rg_mode.load(Ordering::Relaxed);
-    let Some(mut reader) = open_track(path, output_rate, rg) else {
+    let Ok(mut reader) = open_track(path, output_rate, rg) else {
         return false;
     };
     if !seek_track(&mut reader, position) {
@@ -3989,13 +4084,16 @@ mod signal_integrity_tests {
 
     #[test]
     fn signed_eight_bit_pcm_uses_the_full_negative_range() {
-        use std::borrow::Cow;
-        use symphonia::core::audio::{AudioBuffer, Channels, SignalSpec};
-        let mut buffer = AudioBuffer::<i8>::new(4, SignalSpec::new(44_100, Channels::FRONT_LEFT));
+        use symphonia::core::audio::{AudioBuffer, AudioMut, AudioSpec, Channels, Position};
+        let spec = AudioSpec::new(44_100, Channels::Positioned(Position::FRONT_LEFT));
+        let mut buffer = AudioBuffer::<i8>::new(spec, 4);
         buffer.render_silence(None);
-        buffer.chan_mut(0).copy_from_slice(&[-128, -1, 0, 127]);
+        buffer
+            .plane_mut(0)
+            .expect("channel 0")
+            .copy_from_slice(&[-128, -1, 0, 127]);
         let mut output = vec![Vec::new()];
-        append_planar(&AudioBufferRef::S8(Cow::Borrowed(&buffer)), &mut output, 1);
+        append_planar(&GenericAudioBufferRef::S8(&buffer), &mut output, 1);
         assert_eq!(output[0], [-1.0, -1.0 / 128.0, 0.0, 127.0 / 128.0]);
     }
 
@@ -4090,6 +4188,319 @@ mod signal_integrity_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod container_coverage_tests {
+    //! Container-level coverage for the formats AUDIO_EXTS advertises but the
+    //! committed fixtures never exercise. Everything here is synthesized in
+    //! process: `pnpm gen:format-library` needs afconvert/ffmpeg and its output
+    //! is not committed, so a test that depended on it would be a test that
+    //! silently skips.
+
+    use super::*;
+
+    /// A sample rate as AIFF stores it: an 80-bit IEEE 754 extended float,
+    /// big-endian, normalized so the mantissa's top bit is set.
+    fn extended80(rate: u32) -> [u8; 10] {
+        let shift = rate.leading_zeros();
+        let exponent = 16383u16 + (31 - shift) as u16;
+        let mantissa = (rate as u64) << (32 + shift);
+        let mut out = [0u8; 10];
+        out[..2].copy_from_slice(&exponent.to_be_bytes());
+        out[2..].copy_from_slice(&mantissa.to_be_bytes());
+        out
+    }
+
+    /// Stereo 16-bit AIFF (`FORM`/`COMM`/`SSND`, big-endian samples) plus the
+    /// f32 samples it should decode to. Deliberately not a round number of
+    /// frames, like write_pcm_fixture.
+    fn write_aiff_fixture(extension: &str) -> (PathBuf, Vec<f32>) {
+        let frames = 5_003u32;
+        let rate = 44_100u32;
+        let data_size = frames * 2 * 2;
+
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&2i16.to_be_bytes()); // Stereo.
+        comm.extend_from_slice(&frames.to_be_bytes());
+        comm.extend_from_slice(&16i16.to_be_bytes()); // Bits per sample.
+        comm.extend_from_slice(&extended80(rate));
+
+        // The edge samples check sign and full-scale handling, which is the
+        // whole point of exercising a big-endian container.
+        let edges = [-32768i32, 32767, -1, 0, 1, 16384];
+        let mut samples = Vec::new();
+        let mut expected = Vec::new();
+        for frame in 0..frames {
+            for channel in 0..2u32 {
+                let index = frame as usize * 2 + channel as usize;
+                let sample = if index < edges.len() {
+                    edges[index]
+                } else {
+                    ((frame * 7_919 + channel * 17_011) % 65_536) as i32 - 32_768
+                };
+                samples.extend_from_slice(&(sample as i16).to_be_bytes());
+                expected.push(sample as f32 / 32_768.0);
+            }
+        }
+
+        let mut ssnd = Vec::new();
+        ssnd.extend_from_slice(&0u32.to_be_bytes()); // offset
+        ssnd.extend_from_slice(&0u32.to_be_bytes()); // blockSize
+        ssnd.extend_from_slice(&samples);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FORM");
+        let form_size = 4 + (8 + comm.len() as u32) + (8 + ssnd.len() as u32);
+        bytes.extend_from_slice(&form_size.to_be_bytes());
+        bytes.extend_from_slice(b"AIFF");
+        bytes.extend_from_slice(b"COMM");
+        bytes.extend_from_slice(&(comm.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&comm);
+        bytes.extend_from_slice(b"SSND");
+        bytes.extend_from_slice(&(ssnd.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&ssnd);
+        assert_eq!(bytes.len() as u32, 8 + form_size);
+        assert_eq!(data_size as usize, samples.len());
+
+        let path = std::env::temp_dir().join(format!(
+            "pudding-aiff-coverage-{}.{extension}",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).expect("write AIFF fixture");
+        (path, expected)
+    }
+
+    /// Decode a whole file through the real open_track + decode_and_push +
+    /// fill_output path and return every f32 sample the output callback saw.
+    fn decode_to_samples(reader: &mut TrackReader, rate: u32, capacity: usize) -> Vec<f32> {
+        let shared = Arc::new(SharedState::new(rate));
+        let (mut producer, consumer) = RingBuffer::<f32>::new(capacity + 2);
+        let (viz, _viz_consumer) = RingBuffer::<f32>::new(viz_ring_samples());
+        let mut callback = ConsumerState {
+            rb: consumer,
+            shared: Arc::clone(&shared),
+            last_flush_gen: 0,
+            viz,
+            eq: EqChain::new(rate),
+            post_flush: true,
+        };
+        let mut produced = 0;
+        let mut actual = Vec::new();
+        loop {
+            let outcome = decode_and_push(reader, &mut producer, &shared, &mut produced)
+                .expect("decode fixture");
+            while callback.rb.slots() > 0 {
+                let mut block = vec![0.0; callback.rb.slots().min(514)];
+                fill_output(&mut callback, &mut block);
+                actual.extend(block);
+            }
+            if matches!(outcome, StepOutcome::TrackEnded) {
+                break;
+            }
+        }
+        actual
+    }
+
+    /// Guards the "aiff" feature on the symphonia dependency. Without it
+    /// AiffReader is cfg'd out of register_enabled_formats and every .aiff/.aif
+    /// file in the library probes as unsupported — symphonia-format-riff is in
+    /// the tree either way (the default "wav" feature pulls it), so the only
+    /// thing standing between AIFF playing and not is that flag.
+    #[test]
+    fn aiff_big_endian_pcm_decodes_sample_exact() {
+        // Both extensions AUDIO_EXTS accepts: open_track hints the probe with
+        // the extension, so .aif has to be recognized as well as .aiff.
+        for extension in ["aiff", "aif"] {
+            let (path, expected) = write_aiff_fixture(extension);
+            let mut reader = open_track(&path, 44_100, 0)
+                .unwrap_or_else(|e| panic!(".{extension}: open_track failed: {e}"));
+            std::fs::remove_file(&path).expect("remove AIFF fixture");
+            assert_eq!(reader.input_rate, 44_100, ".{extension}: sample rate");
+            assert_eq!(reader.input_channels, 2, ".{extension}: channels");
+            assert!(
+                (reader.duration_seconds - 5_003.0 / 44_100.0).abs() < 1e-4,
+                ".{extension}: duration {} s",
+                reader.duration_seconds
+            );
+
+            let actual = decode_to_samples(&mut reader, 44_100, expected.len());
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                ".{extension}: missing/extra samples"
+            );
+            for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(actual, expected, ".{extension}: sample {index}");
+            }
+        }
+    }
+
+    /// One ADTS frame: a 7-byte header (AAC-LC, 44.1 kHz, stereo, no CRC) over
+    /// a payload of zeros. `mpeg2` sets the header's ID bit, which is the only
+    /// byte-level difference between an MPEG-2 and an MPEG-4 ADTS stream of
+    /// this shape — verified against real afconvert and ffmpeg output.
+    fn adts_frame(mpeg2: bool, payload: usize) -> Vec<u8> {
+        let frame_len = 7 + payload;
+        let mut f = vec![
+            0xff,
+            0xf0 | if mpeg2 { 0x08 } else { 0x00 } | 0x01,
+            // profile=AAC-LC, sampling_frequency_index=4 (44100), channel_config=2
+            0x50,
+            0x80 | ((frame_len >> 11) & 0x03) as u8,
+            ((frame_len >> 3) & 0xff) as u8,
+            (((frame_len & 0x07) << 5) as u8) | 0x1f,
+            0xfc,
+        ];
+        f.resize(frame_len, 0);
+        f
+    }
+
+    fn write_adts_fixture(mpeg2: bool) -> PathBuf {
+        let mut bytes = Vec::new();
+        for _ in 0..8 {
+            bytes.extend_from_slice(&adts_frame(mpeg2, 128));
+        }
+        let path = std::env::temp_dir().join(format!(
+            "pudding-adts-{}-{}.aac",
+            if mpeg2 { "mpeg2" } else { "mpeg4" },
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).expect("write ADTS fixture");
+        path
+    }
+
+    /// Raw ADTS (`.aac`, no container) opens and reports its stream parameters.
+    /// test-plan.md §2 calls this out separately because there is no container
+    /// to read duration or seek points from.
+    #[test]
+    fn mpeg4_adts_opens_from_its_header() {
+        let path = write_adts_fixture(false);
+        let reader = open_track(&path, 44_100, 0).expect("open MPEG-4 ADTS");
+        std::fs::remove_file(&path).expect("remove ADTS fixture");
+        assert_eq!(reader.input_rate, 44_100);
+        assert_eq!(reader.input_channels, 2);
+    }
+
+    /// Opus, end to end through the real open_track + decode path.
+    ///
+    /// Symphonia ships no Opus decoder at any version, so this covers the
+    /// libopus adapter registered in `codecs()`. The Ogg demuxer supplies the
+    /// stream parameters and the pre-skip; libopus supplies the samples.
+    ///
+    /// The fixture is 0.5 s of 48 kHz mono whose OpusHead declares a 312-sample
+    /// pre-skip (libopus's default). Decoded at the native 48 kHz the resampler
+    /// is a passthrough, so the output should be exactly 24000 frames — the
+    /// pre-skip trimmed and nothing else added. A non-trivial peak rules out
+    /// the failure where a decoder is registered but yields silence.
+    #[test]
+    fn opus_decodes_at_native_rate_with_pre_skip_trimmed() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests-fixtures")
+            .join("mono48_opus.opus");
+        let mut reader = open_track(&path, 48_000, 0).expect("open Opus fixture");
+        assert_eq!(reader.input_rate, 48_000, "Opus always decodes at 48 kHz");
+        assert_eq!(reader.input_channels, 1);
+
+        let samples = decode_to_samples(&mut reader, 48_000, 48_000);
+        let frames = samples.len() / OUT_CHANNELS;
+        assert_eq!(
+            frames, 24_000,
+            "0.5 s at 48 kHz with the 312-frame pre-skip removed"
+        );
+        let peak = samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.1, "decoded Opus is silent (peak {peak})");
+    }
+
+    /// Decode a committed fixture straight through symphonia and count the
+    /// frames the decoder actually yields, with gapless trimming on or off.
+    fn decoded_frames_with_gapless(fixture: &str, gapless: bool) -> u64 {
+        use symphonia::core::audio::GenericAudioBufferRef;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests-fixtures")
+            .join(fixture);
+        let file = File::open(&path).expect("open fixture");
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+        let mut reader = symphonia::default::get_probe()
+            .probe(
+                &hint,
+                mss,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
+            .expect("probe fixture");
+        let track = reader.default_track(TrackType::Audio).expect("audio track");
+        let track_id = track.id;
+        let params = track
+            .codec_params
+            .as_ref()
+            .and_then(|p| p.audio())
+            .expect("params");
+        let mut decoder = codecs()
+            .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(gapless))
+            .expect("decoder");
+
+        let mut frames = 0u64;
+        while let Some(packet) = reader.next_packet().expect("next packet") {
+            if packet.track_id != track_id {
+                continue;
+            }
+            let decoded = decoder.decode(&packet).expect("decode");
+            frames += match &decoded {
+                GenericAudioBufferRef::F32(b) => b.frames(),
+                other => other.frames(),
+            } as u64;
+        }
+        frames
+    }
+
+    /// Gapless playback is the engine's headline feature, and symphonia 0.6
+    /// moved the switch from `FormatOptions::enable_gapless` (default off) to
+    /// `AudioDecoderOptions::gapless` (default on). That move is silent — the
+    /// old field simply stopped existing — so this pins the behaviour rather
+    /// than the spelling.
+    ///
+    /// The fixture is 0.5 s of 44.1 kHz mono from LAME, whose Xing/LAME header
+    /// declares the encoder delay and padding. Trimmed, it decodes to exactly
+    /// 22050 frames; untrimmed, to 24192. Asserting the exact figure checks the
+    /// trimming is *right*, not merely happening.
+    ///
+    /// Note which formats this covers: as of 0.6 gapless needs support in both
+    /// the demuxer and the decoder, and ISO/MP4 and AAC-LC have neither, so
+    /// M4A/AAC is not gapless. That was equally true on 0.5.5, where only the
+    /// MP3 demuxer implemented trimming at all.
+    #[test]
+    fn gapless_trimming_is_active_and_exact_for_mp3() {
+        let trimmed = decoded_frames_with_gapless("mono44_lame.mp3", true);
+        let untrimmed = decoded_frames_with_gapless("mono44_lame.mp3", false);
+        assert!(
+            trimmed < untrimmed,
+            "gapless trimming did nothing: {trimmed} frames with it on, {untrimmed} with it off"
+        );
+        assert_eq!(
+            trimmed, 22_050,
+            "0.5 s at 44.1 kHz, delay and padding removed"
+        );
+    }
+
+    /// MPEG-2 ADTS (ID bit set, `0xfff9`) — what `afconvert -f adts` writes.
+    /// symphonia 0.5.5 registered only the `[0xff, 0xf1]` marker and synced on
+    /// `while sync != 0xfff1`, so these files probed to EOF and never played.
+    /// 0.6 registers all four ADTS markers and syncs on `sync & 0xfff6 ==
+    /// 0xfff0`, which is what fixed them; this guards against regressing to a
+    /// single-marker probe.
+    #[test]
+    fn mpeg2_adts_opens_from_its_header() {
+        let path = write_adts_fixture(true);
+        let reader = open_track(&path, 44_100, 0).expect("open MPEG-2 ADTS");
+        std::fs::remove_file(&path).expect("remove ADTS fixture");
+        assert_eq!(reader.input_rate, 44_100);
+        assert_eq!(reader.input_channels, 2);
     }
 }
 
@@ -4651,7 +5062,7 @@ mod rate_switch_tests {
             shared.paused.store(true, Ordering::Relaxed);
             let origins = Arc::new(Mutex::new(Origins::default()));
             let mut queue = vec![fixture.clone(), fixture.clone()];
-            let mut frontier = open_track(&fixture, 44_100, 0);
+            let mut frontier = open_track(&fixture, 44_100, 0).ok();
             // Pending decoded input must survive along with the ring itself.
             frontier.as_mut().unwrap().pending_in[0].push(0.125);
             let mut frontier_idx = 1;

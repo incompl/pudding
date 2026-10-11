@@ -35,13 +35,37 @@ These features are bog standard for streaming service apps, but rare for file-ba
 
 ### Local playback
 
-- Custom Rust audio engine (symphonia + cpal) with gapless playback: tracks are joined sample-to-sample in a single continuous output stream
+- Custom Rust audio engine (symphonia + cpal) with gapless playback: tracks are joined sample-to-sample in a single continuous output stream. Lossless formats (FLAC, ALAC, WAV, AIFF) have no encoder delay to remove, and MP3, Ogg Vorbis and Opus have theirs trimmed from the LAME/Xing header, the Ogg granule position and the Opus pre-skip respectively. **AAC is the exception** — see [gapless and AAC](#gapless-and-aac)
 - Plays MP3, FLAC, WAV, AAC/M4A, Ogg/Opus, and AIFF
 - High-quality sinc resampling to match your output device
 - Optional sample-rate switching (Playback > Match Source Sample Rate): sets the output device to the file's own rate, so a 44.1 kHz track plays back at 44.1 kHz with no sample-rate conversion anywhere in the chain: a bit-perfect path to CoreAudio whenever volume is at 100% with the EQ and ReplayGain off.
 - Shuffle and repeat (off / all / one), applied live without interrupting the current track
 - Autoadvance toggle in the Playback menu — turn it off and playback stops at the end of each track instead of rolling on
 - ReplayGain volume normalization (off / track / album) that honors standard gain tags, with peak-based clip prevention — untagged files play unchanged
+
+#### Gapless and AAC
+
+AAC is the one format Pudding does not play gaplessly: an AAC album clicks at
+every track boundary. Both `.m4a` AAC and raw `.aac` are affected. ALAC in an
+`.m4a` is *not* — it is lossless and has no encoder delay, so it is already
+sample-exact.
+
+AAC encoders prime the stream with 2112 frames of silence (~48 ms at 44.1 kHz)
+and pad the final block out to 1024 frames. Playing the file back without
+removing them means every track starts ~48 ms late and ends with a short tail,
+which is exactly the gap gapless playback is supposed to close.
+
+Nothing removes them today. Gapless trimming needs the demuxer to say how much
+to cut and the decoder to cut it, and for AAC neither half exists in Symphonia
+0.6.1: `symphonia-format-isomp4` parses the `elst` edit list but never applies
+it (its demuxer carries a TODO to support edits), and `symphonia-codec-aac`
+contains no trimming code at all. The MP3 decoder is the reference
+implementation of the other side of that contract — one `buf.trim()` call
+gated on the gapless option.
+
+Raw `.aac` is a harder case again: ADTS has no container, so there is nowhere
+for an encoder to record the delay. Short of assuming the 2112-frame constant,
+raw ADTS cannot be made reliably gapless by anyone.
 
 ### Library
 
@@ -111,7 +135,7 @@ resolution.
 
 ## Install
 
-No prebuilt release yet. Requires [Rust](https://www.rust-lang.org/tools/install), [Node](https://nodejs.org/), and [pnpm](https://pnpm.io/).
+No prebuilt release yet. Requires [Rust](https://www.rust-lang.org/tools/install), [Node](https://nodejs.org/), [pnpm](https://pnpm.io/), and [CMake](https://cmake.org/) (`brew install cmake`), which builds the bundled libopus for Opus playback.
 
 ```sh
 pnpm install

@@ -1112,13 +1112,21 @@ async function openDecadeQueue(decade: number): Promise<void> {
 // A brief, self-dismissing confirmation (e.g. "Added 12 tracks"). Add-to-queue
 // often lands on the list where the growth is visible anyway, but the toast
 // confirms the append even when the tracks scroll in below the fold.
+//
+// The hold scales with the message: a three-word confirmation is read at a
+// glance, but a wrapped decode error ("unsupported or damaged file: ...") needs
+// long enough to actually finish reading. ~55ms/char is a relaxed reading pace,
+// floored so short messages still register and capped so nothing lingers.
+const TOAST_MIN_MS = 1600;
+const TOAST_MAX_MS = 7000;
 let toastTimer: number | undefined;
 export function toast(message: string): void {
   if (!toastEl) return;
+  const hold = Math.min(TOAST_MAX_MS, Math.max(TOAST_MIN_MS, message.length * 55));
   toastEl.textContent = message;
   toastEl.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => toastEl.classList.remove("show"), 1600);
+  toastTimer = window.setTimeout(() => toastEl.classList.remove("show"), hold);
 }
 
 // "Go to artist" / "Go to album" rows for a track's context menu, each present

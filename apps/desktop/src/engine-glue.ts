@@ -28,6 +28,7 @@ import {
   queueIsActivePool,
   loadArt,
   cleanStreamText,
+  toast,
 } from "./main";
 import { setNowPlaying, handleEnded } from "./playback";
 import { applyDownloaded } from "./track-facts";
@@ -61,8 +62,14 @@ export const engine = new GaplessEngine({
   onTime: (t) => { currentTime.value = t; nowPlayingPositionTick(t); },
   onDuration: (d) => { duration.value = d; },
   onPlayingChange: (p) => { isPlaying.value = p; },
+  // test-plan.md §2 requires a failing file to say so rather than vanish into
+  // a silent skip. The engine has already stepped past it by the time this
+  // arrives, so the toast is the only thing the user ever sees: name the file,
+  // since the row that failed may be several tracks back up the queue.
   onError: (path, message) => {
     console.error("audio: track failed", path, message);
+    const name = path.split(/[\\/]/).pop() ?? path;
+    toast(`${name}: ${message}`);
   },
   onFetching: (path) => {
     fetchingPath.value = path;

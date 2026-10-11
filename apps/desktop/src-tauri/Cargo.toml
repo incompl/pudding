@@ -46,7 +46,15 @@ lofty = "0.25.3"
 base64 = "0.22"
 notify = "6"
 notify-debouncer-full = "0.3"
-symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "alac", "vorbis", "isomp4", "ogg"] }
+symphonia = { version = "0.6", features = ["mp3", "aac", "flac", "alac", "vorbis", "isomp4", "ogg", "aiff"] }
+# Opus has no pure-Rust decoder in Symphonia (0.6 ships none, and the Ogg
+# demuxer already maps Opus streams — only the decoder was missing). This
+# adapter plugs libopus into Symphonia's codec registry; its default
+# "bundled" feature compiles the vendored libopus C source straight into the
+# binary, so there is no dylib to ship and nothing for a user to install.
+# Needs cmake at build time. BSD-3-Clause; Help > Licenses picks it up from
+# opusic-sys's own LICENSE via gen-licenses.mjs.
+symphonia-adapter-libopus = "0.3"
 cpal = "0.15"
 rtrb = "0.3"
 rubato = "0.16"
