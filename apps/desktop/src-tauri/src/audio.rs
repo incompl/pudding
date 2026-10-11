@@ -43,8 +43,10 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use rtrb::{Consumer as RbConsumer, Producer as RbProducer, RingBuffer};
+use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+    Async, FixedAsync, Indexing, Resampler, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
 };
 use serde::Serialize;
 use symphonia::core::audio::{Audio, GenericAudioBufferRef};
@@ -3349,9 +3351,25 @@ fn seek_track(tr: &mut TrackReader, target_seconds: f64) -> bool {
 enum ResampleStage {
     // input_rate == output_rate: no conversion needed.
     Passthrough,
-    // Boxed because SincFixedIn is large (sinc tables) and TrackReader is moved
-    // around; the enum shouldn't inherit its footprint.
-    Sinc(Box<SincFixedIn<f32>>),
+    // Boxed because the sinc resampler is large (sinc tables) and TrackReader is
+    // moved around; the enum shouldn't inherit its footprint.
+    Sinc(Box<SincStage>),
+}
+
+// Async with FixedAsync::Input is rubato 5's spelling of the old SincFixedIn:
+// input chunks are always RESAMPLER_CHUNK_FRAMES, output size varies.
+struct SincStage {
+    resampler: Async<f32>,
+    // Output frames of pure startup delay still to be dropped.
+    //
+    // The sinc filter needs history before it can emit a sample, so its first
+    // output frames are silence. rubato 0.16 swallowed those itself — its first
+    // process() call simply returned a shorter chunk. 5.0 emits them and instead
+    // reports the count through output_delay(), leaving the trim to the caller.
+    // Dropping them here is what keeps a resampled track from gaining ~3ms of
+    // silence at its head, which is the same per-track gap the flush tail below
+    // exists to avoid at the other end.
+    skip: usize,
 }
 
 impl ResampleStage {
@@ -3360,11 +3378,10 @@ impl ResampleStage {
     fn process(&mut self, input: Vec<Vec<f32>>) -> Result<Vec<Vec<f32>>, String> {
         match self {
             ResampleStage::Passthrough => Ok(input),
-            ResampleStage::Sinc(r) => {
-                let in_refs: Vec<&[f32]> = input.iter().map(|v| v.as_slice()).collect();
-                r.process(&in_refs, None)
-                    .map_err(|e| format!("resample: {e}"))
-            }
+            // Callers only hand us full chunks, so no Indexing is needed.
+            ResampleStage::Sinc(s) => s
+                .run(&input, RESAMPLER_CHUNK_FRAMES, None)
+                .map_err(|e| format!("resample: {e}")),
         }
     }
 
@@ -3373,22 +3390,65 @@ impl ResampleStage {
         match self {
             // No internal state — the pending frames *are* the tail, exactly.
             ResampleStage::Passthrough => Ok(pending_in.to_vec()),
-            ResampleStage::Sinc(r) => {
-                // Feed the resampler one last partial chunk padded with zeros so
-                // its internal state flushes the audio tail. Without this, the
-                // last ~5ms of every track are lost — a small but real per-track
-                // gap.
-                let padded: Vec<Vec<f32>> = (0..channels)
-                    .map(|c| {
-                        let mut v = pending_in[c].clone();
-                        v.resize(RESAMPLER_CHUNK_FRAMES, 0.0);
-                        v
-                    })
-                    .collect();
-                let in_refs: Vec<&[f32]> = padded.iter().map(|v| v.as_slice()).collect();
-                r.process(&in_refs, None).map_err(|e| format!("flush: {e}"))
+            ResampleStage::Sinc(s) => {
+                // Feed the resampler one last short chunk so its internal state
+                // flushes the audio tail. Without this, the last ~5ms of every
+                // track are lost — a small but real per-track gap. `partial_len`
+                // is rubato 5's version of the zero-padding we used to do by
+                // hand: it reads this many real frames and treats the rest of
+                // the chunk as silence, and Some(0) is explicitly allowed for a
+                // pure-silence flush.
+                //
+                // Channels can be unevenly filled if a packet decoded short, and
+                // the adapter requires every channel to hold the frame count we
+                // declare, so take the shortest.
+                let valid = pending_in[..channels]
+                    .iter()
+                    .map(Vec::len)
+                    .min()
+                    .unwrap_or(0);
+                let indexing = Indexing::new().partial_len(valid);
+                s.run(pending_in, valid, Some(&indexing))
+                    .map_err(|e| format!("flush: {e}"))
             }
         }
+    }
+}
+
+impl SincStage {
+    // One `process_into_buffer` call against planar f32 buffers. `frames` is how
+    // many frames of `input` the adapter exposes; `indexing` carries
+    // `partial_len` when that is short of a full chunk. Returns the written
+    // output frames, planar, less any startup delay still owed.
+    fn run(
+        &mut self,
+        input: &[Vec<f32>],
+        frames: usize,
+        indexing: Option<&Indexing>,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        let channels = self.resampler.nbr_channels();
+        let in_buf = SequentialSliceOfVecs::new(input, channels, frames)
+            .map_err(|e| format!("input adapter: {e}"))?;
+        // rubato always writes a full output chunk, even for a partial input.
+        let out_frames = self.resampler.output_frames_next();
+        let mut out: Vec<Vec<f32>> = vec![vec![0.0; out_frames]; channels];
+        {
+            let mut out_buf = SequentialSliceOfVecs::new_mut(&mut out, channels, out_frames)
+                .map_err(|e| format!("output adapter: {e}"))?;
+            let (_, written) = self
+                .resampler
+                .process_into_buffer(&in_buf, &mut out_buf, indexing)
+                .map_err(|e| e.to_string())?;
+            debug_assert_eq!(written, out_frames);
+        }
+        if self.skip > 0 {
+            let drop_frames = self.skip.min(out_frames);
+            for ch in out.iter_mut() {
+                ch.drain(..drop_frames);
+            }
+            self.skip -= drop_frames;
+        }
+        Ok(out)
     }
 }
 
@@ -3398,24 +3458,28 @@ fn make_resampler(input_rate: u32, output_rate: u32, channels: usize) -> Resampl
     }
     let params = SincInterpolationParameters {
         sinc_len: 256,
-        f_cutoff: 0.95,
+        // rubato 5 made this Option: None lets it derive the cutoff from the
+        // window and filter length. Pinned to the value we shipped on 0.16 so
+        // the filter response doesn't move under us.
+        f_cutoff: Some(0.95),
         interpolation: SincInterpolationType::Linear,
         oversampling_factor: 256,
         window: WindowFunction::BlackmanHarris2,
     };
     let ratio = output_rate as f64 / input_rate as f64;
-    ResampleStage::Sinc(Box::new(
-        SincFixedIn::<f32>::new(
-            ratio,
-            // max_resample_ratio_relative — used by rubato for buffer sizing. 2.0
-            // is plenty since input/output rates are fixed within a track.
-            2.0,
-            params,
-            RESAMPLER_CHUNK_FRAMES,
-            channels,
-        )
-        .expect("resampler init"),
-    ))
+    let resampler = Async::<f32>::new_sinc(
+        ratio,
+        // max_resample_ratio_relative — used by rubato for buffer sizing. 2.0
+        // is plenty since input/output rates are fixed within a track.
+        2.0,
+        &params,
+        RESAMPLER_CHUNK_FRAMES,
+        channels,
+        FixedAsync::Input,
+    )
+    .expect("resampler init");
+    let skip = resampler.output_delay();
+    ResampleStage::Sinc(Box::new(SincStage { resampler, skip }))
 }
 
 fn append_planar(
@@ -5460,5 +5524,174 @@ mod held_paths_tests {
             opened: Some("/c.mp3".to_string()),
         };
         assert!(held_paths_of(&origins, true).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod resample_tests {
+    //! Guards for the load-bearing properties of ResampleStage, all of which
+    //! are invisible to the fixture tests above (they only assert that *some*
+    //! audio came out):
+    //!
+    //!   1. Passthrough really bypasses the filter at ratio 1.0. rubato has no
+    //!      1:1 fast path, and letting one back in cost ~97% of the decode
+    //!      thread on the commonest setup (44.1 kHz device, 44.1 kHz files).
+    //!   2. flush() drains the sinc tail. Without it the last ~5ms of every
+    //!      track is dropped.
+    //!   3. The startup delay is trimmed, so a resampled track doesn't open on
+    //!      a few ms of filter silence. rubato 0.16 did this for us; 5.0 made
+    //!      it the caller's job.
+    use super::*;
+
+    // Planar DC at full scale — the simplest signal whose resampled value is
+    // still 1.0, so "did real audio come through" is a value check, not a
+    // spectrum check.
+    fn dc(channels: usize, frames: usize) -> Vec<Vec<f32>> {
+        vec![vec![1.0f32; frames]; channels]
+    }
+
+    #[test]
+    fn matching_rates_take_the_passthrough_path() {
+        let mut stage = make_resampler(44_100, 44_100, 2);
+        assert!(matches!(stage, ResampleStage::Passthrough));
+        // Identity, not merely the right length: no filter ran.
+        let input = dc(2, RESAMPLER_CHUNK_FRAMES);
+        assert_eq!(stage.process(input.clone()).unwrap(), input);
+        // And the pending frames pass through flush exactly as they are.
+        let pending = dc(2, 500);
+        assert_eq!(stage.flush(&pending, 2).unwrap(), pending);
+    }
+
+    #[test]
+    fn differing_rates_resample_at_the_requested_ratio() {
+        // Each full input chunk yields about chunk * ratio output frames. The
+        // exact count drifts by one either way as rubato carries the fractional
+        // remainder, so allow a couple of frames.
+        for (in_rate, out_rate, channels) in [
+            (44_100, 48_000, 2),
+            (96_000, 44_100, 2),
+            (22_050, 44_100, 1),
+        ] {
+            let mut stage = make_resampler(in_rate, out_rate, channels);
+            assert!(matches!(stage, ResampleStage::Sinc(_)));
+            let ratio = out_rate as f64 / in_rate as f64;
+            let want = (RESAMPLER_CHUNK_FRAMES as f64 * ratio).round() as i64;
+            // Measure a settled chunk: the first call is a few frames short
+            // while the interpolator's history fills.
+            stage.process(dc(channels, RESAMPLER_CHUNK_FRAMES)).unwrap();
+            let out = stage.process(dc(channels, RESAMPLER_CHUNK_FRAMES)).unwrap();
+            assert_eq!(out.len(), channels, "{in_rate}->{out_rate}: channel count");
+            let got = out[0].len() as i64;
+            assert!(
+                (got - want).abs() <= 2,
+                "{in_rate}->{out_rate}: got {got} frames, want ~{want}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_chunk_does_not_open_with_startup_silence() {
+        // The sinc filter's first output frames are silence while its history
+        // fills. 0.16 dropped them for us; 5.0 hands them over and reports the
+        // count via output_delay(). If we ever stop trimming them, every
+        // resampled track gains a few ms of silence at its head.
+        let mut stage = make_resampler(44_100, 48_000, 2);
+        let (delay, promised) = match &stage {
+            ResampleStage::Sinc(s) => {
+                (s.resampler.output_delay(), s.resampler.output_frames_next())
+            }
+            _ => unreachable!("44.1k -> 48k must resample"),
+        };
+        assert!(delay > 0, "expected a startup delay to trim");
+        let out = stage.process(dc(2, RESAMPLER_CHUNK_FRAMES)).unwrap();
+        for ch in &out {
+            // Full-scale, not silence. Not ~1.0 exactly: a hard step into DC
+            // rings, and the filter's overshoot lands near 1.12 here.
+            assert!(
+                ch[0].abs() > 0.5,
+                "first frame {} is startup silence, not audio",
+                ch[0]
+            );
+        }
+        // rubato wrote `promised` frames and we handed back `delay` fewer.
+        assert_eq!(promised - out[0].len(), delay, "startup delay not trimmed");
+        // The trim is one-shot: later chunks come through whole.
+        let settled = stage.process(dc(2, RESAMPLER_CHUNK_FRAMES)).unwrap();
+        assert!(settled[0].len() > out[0].len());
+    }
+
+    #[test]
+    fn flush_drains_the_sinc_tail_rather_than_silence() {
+        let mut stage = make_resampler(44_100, 48_000, 2);
+        // Prime the filter so its internal history holds real audio.
+        for _ in 0..3 {
+            stage.process(dc(2, RESAMPLER_CHUNK_FRAMES)).unwrap();
+        }
+        let pending = 500;
+        let tail = stage.flush(&dc(2, pending), 2).unwrap();
+
+        // The tail covers the pending frames at the output rate. Everything
+        // past that is the zero-padding rubato substitutes for the frames we
+        // never had, as it was on 0.16.
+        let real = (pending as f64 * 48_000.0 / 44_100.0) as usize;
+        assert!(
+            tail[0].len() >= real,
+            "tail of {} frames cannot hold {real} resampled frames",
+            tail[0].len()
+        );
+        for ch in &tail {
+            assert!(
+                ch[..real].iter().all(|s| (s - 1.0).abs() < 1e-3),
+                "flushed tail is not the DC input: {:?}",
+                &ch[..8]
+            );
+        }
+    }
+
+    #[test]
+    fn flush_on_a_chunk_boundary_still_drains() {
+        // A track whose length is an exact multiple of the chunk size leaves
+        // pending_in empty. The tail still has to come out, so this must be a
+        // pure-silence input chunk, not a skipped call or an error.
+        let mut stage = make_resampler(44_100, 48_000, 2);
+        stage.process(dc(2, RESAMPLER_CHUNK_FRAMES)).unwrap();
+        let tail = stage.flush(&[Vec::new(), Vec::new()], 2).unwrap();
+        assert!(!tail[0].is_empty());
+        assert!(
+            (tail[0][0] - 1.0).abs() < 1e-3,
+            "first flushed frame {} is not the carried-over tail",
+            tail[0][0]
+        );
+    }
+
+    #[test]
+    fn flush_tolerates_unevenly_filled_channels() {
+        // A short decode can leave one channel ahead of the other; flush reads
+        // the shortest, and the adapter would reject a longer claim.
+        let mut stage = make_resampler(44_100, 48_000, 2);
+        stage.process(dc(2, RESAMPLER_CHUNK_FRAMES)).unwrap();
+        let pending = vec![vec![1.0f32; 300], vec![1.0f32; 120]];
+        let tail = stage.flush(&pending, 2).unwrap();
+        assert_eq!(tail.len(), 2);
+        assert!(!tail[0].is_empty());
+    }
+
+    #[test]
+    fn repeated_chunks_do_not_drift_from_the_ratio() {
+        // The fractional remainder is carried between calls, so 100 chunks must
+        // land on the ratio far more tightly than any single chunk does.
+        let mut stage = make_resampler(44_100, 48_000, 2);
+        // Past the startup chunk, which runs a few frames short.
+        stage.process(dc(2, RESAMPLER_CHUNK_FRAMES)).unwrap();
+        let chunks = 100;
+        let mut produced = 0usize;
+        for _ in 0..chunks {
+            produced += stage.process(dc(2, RESAMPLER_CHUNK_FRAMES)).unwrap()[0].len();
+        }
+        let want = (chunks * RESAMPLER_CHUNK_FRAMES) as f64 * 48_000.0 / 44_100.0;
+        assert!(
+            (produced as f64 - want).abs() <= 2.0,
+            "{produced} frames over {chunks} chunks, want ~{want}"
+        );
     }
 }

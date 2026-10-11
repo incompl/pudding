@@ -57,7 +57,7 @@ symphonia = { version = "0.6", features = ["mp3", "aac", "flac", "alac", "vorbis
 symphonia-adapter-libopus = "0.3"
 cpal = "0.18"
 rtrb = "0.4"
-rubato = "0.16"
+rubato = "5.0"
 crossbeam-channel = "0.5"
 ureq = "3"
 url = "2"
