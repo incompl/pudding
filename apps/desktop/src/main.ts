@@ -85,6 +85,7 @@ import {
   currentTime,
   duration,
   volume,
+  silenced,
   volumePopoverOpen,
   currentNodePath,
   currentPoolPath,
@@ -241,11 +242,13 @@ import {
   seekBy,
   seekTo,
   setVolume,
-  setLastNonZeroVolume,
+  setPreSilenceVolume,
+  beginVolumeGesture,
+  endVolumeGesture,
+  toggleMute,
   skipNext,
   skipPrev,
   hasNextTrack,
-  lastNonZeroVolume,
   rowPlayButton,
 } from "./playback";
 import {
@@ -320,6 +323,11 @@ export const KEY_ROOT_BOOKMARKS = "libraryRootBookmarks";
 export const KEY_STREAM_LIST_PATH = "manifestPath";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
 export const KEY_VOLUME = "volume";
+// The level unmuting returns to when the slider itself is parked at zero. Saved
+// beside the volume because a session can end silent: without it, a relaunch
+// would unmute to the default 1.0 — full blast on headphones, and no relation to
+// what was actually being listened to (see preSilenceVolume in playback.ts).
+export const KEY_PRE_SILENCE_VOLUME = "preSilenceVolume";
 // Window size is remembered per layout mode so the double-click toggle can
 // restore the size you last used in the *other* mode.
 const KEY_WINDOW_SIZE_NORMAL = "windowSizeNormal";
@@ -3275,11 +3283,6 @@ function setupPlayerControls(): void {
   });
 }
 
-// Shared by the volume button and the Playback menu's Mute item.
-function toggleMute(): void {
-  setVolume(volume.value > 0 ? 0 : lastNonZeroVolume);
-}
-
 function setupVolumeControl(): void {
   // The button is click-to-open, not hover-to-open: a merely passing pointer
   // never unfurls the bar over the transport. The first click opens it; a
@@ -3305,11 +3308,13 @@ function setupVolumeControl(): void {
 
   volumeBar.addEventListener("pointerdown", () => {
     dragging = true;
+    beginVolumeGesture();
   });
 
   window.addEventListener("pointerup", () => {
     if (!dragging) return;
     dragging = false;
+    endVolumeGesture();
     // Releasing outside the cluster is the deferred mouseleave.
     if (!volumeControlEl.matches(":hover")) volumePopoverOpen.value = false;
   });
@@ -3540,9 +3545,15 @@ function setupEffects(): void {
 
   effect(() => {
     const v = volume.value;
-    void engine.setVolume(v);
+    // The gate is the engine's business only — the slider keeps its position
+    // while muted, so there's a level to come back to that the user can see.
+    void engine.setVolume(silenced.value ? 0 : v);
     volumeBar.value = String(v);
     volumeBar.style.setProperty("--progress", `${v * 100}%`);
+    // The waves read as level, not as output: they track the slider through a
+    // mute as well, so the glyph still says what unmuting would restore. The
+    // slash alone carries silence — a muted 80% reads as a struck-through 80%.
+    volumeBtn.classList.toggle("muted", silenced.value);
     const waves = volumeBtn.querySelectorAll<SVGPathElement>(".volume-wave");
     waves.forEach((w, i) => {
       w.style.opacity = String(i === 0 ? v : v >= 1 ? 1 : 0);
@@ -4148,7 +4159,14 @@ async function init(): Promise<void> {
   const splitterWidth = (await app.store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
   const storedVolume = await app.store.get<number>(KEY_VOLUME);
   volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;
-  setLastNonZeroVolume(volume.value);
+  // A session that ended silent has no level left in `volume` to fall back on,
+  // which is the whole reason the pre-silence level is persisted separately.
+  const storedPreSilence = await app.store.get<number>(KEY_PRE_SILENCE_VOLUME);
+  setPreSilenceVolume(
+    typeof storedPreSilence === "number" && storedPreSilence > 0
+      ? Math.min(1, storedPreSilence)
+      : volume.value,
+  );
 
   // Autoadvance (global, defaults on). Prefer the new key; fall back to the legacy
   // browsing setting so an existing user's off-preference carries over. Sync the
@@ -4198,7 +4216,8 @@ async function init(): Promise<void> {
 
   // Keep the Playback-menu checkmarks in sync with the frontend's own state —
   // these effects fire on load (syncing the persisted values) and after any
-  // toolbar or menu change. Mute reflects a zeroed volume.
+  // toolbar or menu change. Mute reflects silence from either source (the
+  // gate or a zeroed slider), so the checkmark never offers a dead toggle.
   effect(() => {
     void invoke("set_shuffle_checked", { shuffle: shuffleMode.value });
   });
@@ -4206,7 +4225,7 @@ async function init(): Promise<void> {
     void invoke("set_repeat_checked", { mode: repeatMode.value });
   });
   effect(() => {
-    void invoke("set_mute_checked", { muted: volume.value === 0 });
+    void invoke("set_mute_checked", { muted: silenced.value });
   });
   // ReplayGain: push the mode to the engine and check the matching menu radio.
   // Fires on load (seeding the engine from the persisted value) and after any change.

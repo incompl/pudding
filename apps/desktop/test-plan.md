@@ -33,15 +33,20 @@ not a substitute for the real library above.
 
 ## 2. Playback engine
 
-- [ ] Play one of each: mp3, flac, wav, m4a/aac, alac, ogg, opus, aiff
-- [ ] Alias extensions play too: `.oga`, `.aif`, and raw ADTS `.aac` (check its duration and seek)
-- [ ] Both raw-ADTS markers play: `11 aac adts.aac` (MPEG-2, afconvert) and
+- [x] Play one of each: mp3, flac, wav, m4a/aac, alac, ogg, opus, aiff
+- [x] Alias extensions play too: `.oga`, `.aif`, and raw ADTS `.aac` (check its duration and seek)
+- [x] Both raw-ADTS markers play: `11 aac adts.aac` (MPEG-2, afconvert) and
       `15 aac adts mpeg4.aac` (MPEG-4, ffmpeg)
-- [ ] Gapless: a continuous album crosses a track boundary with no click or gap
-      (use FLAC/ALAC/MP3 — an AAC album clicks by design, see README
-      “Gapless and AAC”; don't file that as a bug)
-- [ ] Pause/resume mid-track, seek by scrub, seek by `←`/`→` (10s)
+- [x] Gapless: a continuous album crosses a track boundary with no click or gap
+      (AAC doesn't work, known bug)
+- [x] Pause/resume mid-track, seek by scrub, seek by `←`/`→` (10s)
 - [ ] Volume `⌘↑`/`⌘↓` and `+`/`-`; `M` mutes and unmutes; menu Mute check tracks
+- [ ] Mute keeps the slider where it was and crosses out the glyph; unmute returns
+      to that level; volume up unmutes, volume down stays muted
+- [ ] Slider dragged slowly to zero: menu Mute is checked, and unchecking it comes
+      back at the pre-drag level (not 1%)
+- [ ] Quit muted → relaunch is audible (mute isn't persisted). Quit with the slider
+      at zero → relaunch is silent, and unmuting returns to the pre-zero level, not 100%
 - [ ] Shuffle on mid-track: current track keeps playing, next pick is random
 - [ ] Repeat off / all / one each behave at end of context
 - [ ] Autoadvance off → stops at end of track; Repeat One still repeats; manual skip still advances

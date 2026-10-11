@@ -2736,6 +2736,24 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   transition: opacity 120ms ease;
 }
 
+/* The slash is the only thing in the toolbar that says "muted": the slider holds
+   its position through a mute and the waves hold theirs, so the state rides
+   entirely on this one line.
+
+   The cut fades on the same curve: inside the mask, opacity scales the black
+   marks' contribution, so a half-faded slash sits in a half-opened channel and
+   the two never come apart mid-transition. */
+.volume-slash,
+.volume-slash-cut {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+#volume-btn.muted .volume-slash,
+#volume-btn.muted .volume-slash-cut {
+  opacity: 1;
+}
+
 #volume-popover {
   position: absolute;
   right: calc(100% + 6px);

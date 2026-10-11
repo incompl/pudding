@@ -231,9 +231,44 @@
             <div id="volume-control">
               <button id="volume-btn" type="button" aria-label="Volume">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" />
-                  <path class="volume-wave" d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                  <path class="volume-wave" d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                  <!-- The slash is drawn in currentColor over shapes in that same
+                       colour, so it needs a gap cut for it or it vanishes inside them.
+                       Masking (rather than backing it with a stroke in the background
+                       colour) keeps the cut right through hover and :active, where
+                       what is behind the button changes.
+
+                       Two black marks, both fading in with the slash:
+                       - the channel: the slash's own line, stroked wider than the
+                         slash, so background shows on either side of it. Its round
+                         caps are what trim the wave arcs back from their tips.
+                       - the chop: everything past the line on the speaker's side
+                         (left of x=13, clear of the arcs, which start at x=15.5).
+                         The cone's bottom corner sits 4.24 off the line, so no
+                         sane channel width reaches it — widening only shrinks the
+                         crumb it saws off to an antialiased speck. The chop removes
+                         it outright, and the cone ends on one clean diagonal edge
+                         parallel to the slash. -->
+                  <mask id="volume-mute-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+                    <rect x="0" y="0" width="24" height="24" fill="#fff" stroke="none" />
+                    <g class="volume-slash-cut">
+                      <path d="M2.5 21.5 21.5 2.5" stroke="#000" stroke-width="6" />
+                      <polygon points="0 24 13 11 13 24" fill="#000" stroke="none" />
+                    </g>
+                  </mask>
+                  <!-- Masked as one group: the slash crosses the cone and both arcs. -->
+                  <g mask="url(#volume-mute-mask)">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" />
+                    <path class="volume-wave" d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                    <path class="volume-wave" d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                  </g>
+                  <!-- Muted mark: one line struck through the speaker, not a mark
+                       parked beside it. It sits on the anti-diagonal through (12,12),
+                       which centres it in the round button and is also the icon's own
+                       geometry — both arcs are circles about that point, and their
+                       ends sit on this very line. It runs nearly corner to corner:
+                       at this size the mark has to carry the whole state, so it is
+                       sized to be unmistakable rather than tucked inside the ink. -->
+                  <path class="volume-slash" d="M2.5 21.5 21.5 2.5" />
                 </svg>
               </button>
               <div id="volume-popover">

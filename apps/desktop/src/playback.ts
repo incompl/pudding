@@ -25,6 +25,8 @@ import {
   currentTime,
   duration,
   volume,
+  muted,
+  silenced,
   queuePlayingIndex,
   activeQueue,
   repeatMode,
@@ -47,6 +49,7 @@ import {
   trackCountSubtitle,
   playQueue,
   KEY_VOLUME,
+  KEY_PRE_SILENCE_VOLUME,
 } from "./main";
 
 // --- Playback ---
@@ -195,26 +198,65 @@ function syncRowPlayLabel(btn: HTMLElement): void {
   );
 }
 
+// Where unmuting lands when the slider itself sits at zero — muting with the
+// gate leaves the slider where it was, so this covers only the other way to
+// reach silence. It holds the level from *before* the slider went down, not the
+// last value on the way: a drag fires one `input` per 0.01 step, so trailing
+// every setVolume would remember 0.01 and "unmute" to inaudible. A drag
+// snapshots once at gesture start and holds that until the pointer is released;
+// discrete changes (keys, menu) have no in-between values to confuse it.
+let preSilenceVolume = 1;
+let gestureHeld = false;
+
 const persistVolume = debounce(async (v: number) => {
   await app.store.set(KEY_VOLUME, v);
+  // Rides along with the volume: the write that matters is the one landing on
+  // zero, and by then the snapshot already holds the level from before the
+  // slider went down. A relaunch can then unmute to that instead of to 1.0.
+  await app.store.set(KEY_PRE_SILENCE_VOLUME, preSilenceVolume);
   await app.store.save();
 }, 200);
 
-// Most recent non-muted volume, restored when unmuting via the volume button.
-export let lastNonZeroVolume = 1;
-
 // Seed the remembered volume from the restored setting at startup (a reassigned
 // module `let` can't be written across a module boundary).
-export function setLastNonZeroVolume(v: number): void {
-  if (v > 0) lastNonZeroVolume = v;
+export function setPreSilenceVolume(v: number): void {
+  if (v > 0) preSilenceVolume = v;
+}
+
+export function beginVolumeGesture(): void {
+  setPreSilenceVolume(volume.value);
+  gestureHeld = true;
+}
+
+export function endVolumeGesture(): void {
+  gestureHeld = false;
 }
 
 export function setVolume(v: number): void {
   const clamped = Math.max(0, Math.min(1, v));
-  if (clamped > 0) lastNonZeroVolume = clamped;
+  if (clamped > 0 && !gestureHeld) preSilenceVolume = clamped;
+  // Any volume change that isn't a reduction lifts the gate — asking for more
+  // (or for the level it's already at, so `+` at full volume is never a dead
+  // key) is the one direction that can't startle anyone, and it matches the
+  // hardware keys. Turning it *down* leaves the mute standing: someone who
+  // muted for silence must not get sound back by reaching for less of it.
+  // Set before the no-op guard, so unmuting works at an unchanged level.
+  if (clamped > 0 && clamped >= volume.value) muted.value = false;
   if (clamped === volume.value) return;
   volume.value = clamped;
   persistVolume(clamped);
+}
+
+// Shared by the volume button, bare M, and the Playback menu's Mute item.
+// "Unmute" has to undo whichever control silenced the output: lift the gate,
+// and lift the slider off zero if that's where it's parked.
+export function toggleMute(): void {
+  if (!silenced.value) {
+    muted.value = true;
+    return;
+  }
+  muted.value = false;
+  if (volume.value === 0) setVolume(preSilenceVolume);
 }
 
 export function seekBy(seconds: number): void {

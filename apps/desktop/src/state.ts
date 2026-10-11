@@ -217,6 +217,19 @@ export const isPlaying = signal(false);
 export const currentTime = signal(0);
 export const duration = signal(0);
 export const volume = signal(1);
+
+// Mute is its own flag, not a zeroed volume: muting gates the engine's gain
+// while the slider keeps its position, so unmuting returns to the level that
+// was still on screen and there's no remembered value to go stale. Not
+// persisted on purpose — a launch should never come up silent because of a
+// mute set days ago.
+export const muted = signal(false);
+
+// What the user means by "muted": no sound is coming out, whichever control is
+// responsible. The gate and a slider sitting at zero both qualify, so this is
+// what the engine gain, the toolbar glyph and the menu checkmark all read.
+export const silenced = computed(() => muted.value || volume.value === 0);
+
 export const volumePopoverOpen = signal(false);
 
 // The track playback is waiting on a download for, or null. A cloud file that
