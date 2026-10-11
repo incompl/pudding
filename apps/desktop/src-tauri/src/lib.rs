@@ -1546,20 +1546,26 @@ async fn read_stream_list(path: String) -> Result<StreamList, String> {
         let mtime = (!remote)
             .then(|| crate::playlist::file_mtime_ms(&path))
             .flatten();
+        // Both branches decode like a playlist rather than read as strict UTF-8:
+        // M3U in the wild is often Latin-1/Windows-1252, and a list that won't
+        // decode is a list the pane marks unwritable and refuses to edit. ureq's
+        // own read_to_string() would be the strict read, since it only applies
+        // its lossy decoder to `text/*` bodies and stream lists are served as
+        // audio/x-mpegurl.
         let contents = if remote {
-            ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(15))
+            let bytes = ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(15)))
                 .user_agent(USER_AGENT)
                 .build()
+                .new_agent()
                 .get(&path)
                 .call()
                 .map_err(|e| e.to_string())?
-                .into_string()
-                .map_err(|e| e.to_string())?
+                .body_mut()
+                .read_to_vec()
+                .map_err(|e| e.to_string())?;
+            crate::playlist::decode_bytes(&bytes)
         } else {
-            // Decoded like a playlist rather than read as strict UTF-8: M3U in the
-            // wild is often Latin-1/Windows-1252, and a list that won't decode is a
-            // list the pane marks unwritable and refuses to edit.
             read_stream_file(&path)?.ok_or_else(|| format!("{path}: no such file"))?
         };
         let streams = parse_m3u_stream_list(&contents).ok_or_else(|| {
@@ -2191,25 +2197,27 @@ async fn get_stream_image(image: String) -> Option<String> {
 
 fn fetch_stream_image(image: &str) -> Option<String> {
     let (bytes, mime) = if image.starts_with("http://") || image.starts_with("https://") {
-        let resp = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(15))
+        let resp = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(15)))
             .user_agent(USER_AGENT)
             .build()
+            .new_agent()
             .get(image)
             .call()
             .map_err(|e| log::warn!("stream image fetch failed for {image}: {e}"))
             .ok()?;
         // Servers routinely mislabel static files; trust the header only when
         // it says image, otherwise fall back to the URL's extension.
-        let mime = match resp.content_type() {
-            ct if ct.starts_with("image/") => ct.to_string(),
+        let mime = match resp.body().mime_type() {
+            Some(ct) if ct.starts_with("image/") => ct.to_string(),
             _ => image_mime_from_ext(&image).to_string(),
         };
         let mut bytes = Vec::new();
         // take() caps memory; reading one byte past the limit distinguishes
         // "exactly at the cap" from "truncated", which must be rejected rather
         // than decoded as a broken image.
-        resp.into_reader()
+        resp.into_body()
+            .into_reader()
             .take(MAX_STREAM_IMAGE_BYTES + 1)
             .read_to_end(&mut bytes)
             .ok()?;

@@ -59,7 +59,7 @@ cpal = "0.18"
 rtrb = "0.4"
 rubato = "0.16"
 crossbeam-channel = "0.5"
-ureq = "2"
+ureq = "3"
 url = "2"
 
 # macOS system Now Playing + media keys (MediaPlayer.framework). Direct objc2

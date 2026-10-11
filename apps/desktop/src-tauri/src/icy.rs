@@ -18,6 +18,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use symphonia::core::io::MediaSource;
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::time::Duration as TransportDuration;
+use ureq::unversioned::transport::{
+    Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
+};
 
 // Playlist bodies are tiny (a handful of URLs); anything bigger than this is
 // not a playlist and we refuse to buffer it.
@@ -48,38 +53,105 @@ pub struct IcyConnection {
     pub title: Arc<Mutex<Option<String>>>,
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(CONNECT_TIMEOUT)
-        .timeout_read(READ_TIMEOUT)
+// ureq 3 has no equivalent of ureq 2's `timeout_read`. Its timeouts are
+// deadlines rather than per-read caps, and the one covering the body,
+// `timeout_recv_body`, budgets the *whole* body measured from the moment the
+// response headers arrived. A radio body never ends, so any value at all would
+// abort playback that long into the stream, while leaving it unset lets a dead
+// connection block in `read()` forever, so the engine's reconnect never fires.
+//
+// The transport is the last layer that still sees individual socket reads
+// (`TcpTransport::await_input` turns the deadline it is handed into
+// `set_read_timeout`), so the liveness cap is reimposed there by shortening
+// that deadline to READ_TIMEOUT on every read.
+#[derive(Debug)]
+struct IdleTimeout<T> {
+    inner: T,
+    idle: TransportDuration,
+}
+
+impl<T: Transport> Transport for IdleTimeout<T> {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        // min() so a shorter real deadline still wins; the idle cap only ever
+        // shortens the wait, it never extends one ureq meant to be tighter.
+        let after = self.idle.min(timeout.after);
+        self.inner.await_input(NextTimeout { after, ..timeout })
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
+    }
+}
+
+// Last link in the chain, so it wraps whatever the default chain produced —
+// the TLS transport for https, the bare TCP one for http.
+#[derive(Debug)]
+struct IdleTimeoutConnector(TransportDuration);
+
+impl<In: Transport> Connector<In> for IdleTimeoutConnector {
+    type Out = IdleTimeout<In>;
+
+    fn connect(
+        &self,
+        _: &ConnectionDetails,
+        chained: Option<In>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        Ok(chained.map(|inner| IdleTimeout {
+            inner,
+            idle: self.0,
+        }))
+    }
+}
+
+fn agent(read_timeout: Duration, connect_timeout: Duration) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_connect(Some(connect_timeout))
         .user_agent(crate::USER_AGENT)
-        .build()
+        .build();
+    ureq::Agent::with_parts(
+        config,
+        DefaultConnector::new().chain(IdleTimeoutConnector(read_timeout.into())),
+        DefaultResolver::default(),
+    )
 }
 
 pub fn connect(url: &str) -> Result<IcyConnection, String> {
-    let agent = agent();
+    connect_with(&agent(READ_TIMEOUT, CONNECT_TIMEOUT), url)
+}
+
+fn connect_with(agent: &ureq::Agent, url: &str) -> Result<IcyConnection, String> {
     let mut target = url.to_string();
 
     for _ in 0..MAX_PLAYLIST_HOPS {
         let resp = agent
             .get(&target)
-            .set("Icy-MetaData", "1")
-            .set("Accept", "*/*")
+            .header("Icy-MetaData", "1")
+            .header("Accept", "*/*")
             .call()
             .map_err(|e| format!("connect {target}: {e}"))?;
 
-        let content_type = {
-            let ct = resp.content_type().trim().to_ascii_lowercase();
-            if ct.is_empty() {
-                None
-            } else {
-                Some(ct)
-            }
-        };
+        let content_type = resp
+            .body()
+            .mime_type()
+            .map(|ct| ct.trim().to_ascii_lowercase())
+            .filter(|ct| !ct.is_empty());
 
         if looks_like_playlist(content_type.as_deref(), &target) {
             let mut body = String::new();
-            resp.into_reader()
+            resp.into_body()
+                .into_reader()
                 .take(PLAYLIST_MAX_BYTES)
                 .read_to_string(&mut body)
                 .map_err(|e| format!("read playlist {target}: {e}"))?;
@@ -91,17 +163,24 @@ pub fn connect(url: &str) -> Result<IcyConnection, String> {
             continue;
         }
 
-        let metaint: usize = resp
-            .header("icy-metaint")
+        // Decoded with from_utf8 rather than HeaderValue::to_str, which rejects
+        // any byte above 0x7F: station names carry accents often enough that
+        // to_str would drop them, and ureq 2's header accessor decoded as UTF-8
+        // too. A name that isn't valid UTF-8 is still skipped, as before.
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+        };
+        let metaint: usize = header("icy-metaint")
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0);
-        let station_name = resp
-            .header("icy-name")
+        let station_name = header("icy-name")
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
         let title = Arc::new(Mutex::new(None));
-        let raw = resp.into_reader();
+        let raw = resp.into_body().into_reader();
         let reader: Box<dyn Read + Send> = if metaint > 0 {
             Box::new(IcyReader::new(raw, metaint, Arc::clone(&title)))
         } else {
@@ -331,6 +410,174 @@ impl MediaSource for NetSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    const HDR_200: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: audio/mpeg\r\n\r\n";
+
+    // A one-shot HTTP server on a loopback port. `script` runs once the request
+    // headers have been drained and owns the socket for its duration: a radio
+    // body is close-delimited, so the script must keep the socket alive — the
+    // moment it returns the client sees EOF instead of whatever was being
+    // tested. Returns the URL to point connect_with() at.
+    fn serve(script: impl FnOnce(&mut std::net::TcpStream) + Send + 'static) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while !req.ends_with(b"\r\n\r\n") {
+                match sock.read(&mut byte) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => req.push(byte[0]),
+                }
+            }
+            script(&mut sock);
+        });
+        format!("http://{addr}/stream")
+    }
+
+    fn test_agent(idle: Duration) -> ureq::Agent {
+        agent(idle, Duration::from_secs(5))
+    }
+
+    // The upgrade to ureq 3 turns on this and the next test. ureq 3 has no
+    // per-read timeout, and the body timeout it does have is a single deadline
+    // for the whole body, so the two failure modes to rule out are a dead
+    // stream that hangs forever and a healthy stream that gets cut off.
+    #[test]
+    fn a_stalled_stream_errors_at_the_idle_timeout() {
+        let url = serve(|sock| {
+            sock.write_all(HDR_200).expect("write headers");
+            sock.write_all(&[7u8; 64]).expect("write audio");
+            sock.flush().expect("flush");
+            // Stall with the socket still open: no bytes, no FIN.
+            std::thread::sleep(Duration::from_secs(10));
+        });
+
+        let idle = Duration::from_millis(300);
+        let conn = connect_with(&test_agent(idle), &url).expect("connect");
+        let mut reader = conn.reader;
+        let mut buf = [0u8; 4096];
+        let started = std::time::Instant::now();
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => panic!("got EOF; the stall should surface as a timeout"),
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= idle && elapsed < idle * 8,
+            "stall surfaced after {elapsed:?}, idle cap is {idle:?}"
+        );
+    }
+
+    #[test]
+    fn a_slow_stream_outlives_the_idle_timeout() {
+        // 15 writes, each gap well under the cap but together five times it. A
+        // total-body deadline of `idle` would abort partway through.
+        const WRITES: usize = 15;
+        const CHUNK: usize = 64;
+        let url = serve(|sock| {
+            sock.write_all(HDR_200).expect("write headers");
+            sock.flush().expect("flush");
+            for i in 0..WRITES {
+                std::thread::sleep(Duration::from_millis(100));
+                if sock.write_all(&[i as u8; CHUNK]).is_err() {
+                    return;
+                }
+                let _ = sock.flush();
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        let conn = connect_with(&test_agent(Duration::from_millis(300)), &url).expect("connect");
+        let mut reader = conn.reader;
+        let mut got = Vec::new();
+        while got.len() < WRITES * CHUNK {
+            let mut buf = [0u8; 256];
+            let n = reader
+                .read(&mut buf)
+                .expect("a stream still sending must not time out");
+            assert!(n > 0, "unexpected EOF after {} bytes", got.len());
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert!(got.iter().all(|&b| (b as usize) < WRITES));
+    }
+
+    // content-type reaches the symphonia hint with its charset parameter
+    // stripped, and a UTF-8 icy-name survives: http's HeaderValue::to_str
+    // rejects every byte above 0x7F, so the header is decoded here instead.
+    #[test]
+    fn response_headers_become_content_type_station_name_and_metaint() {
+        let audio: Vec<u8> = (0..64u8).collect();
+        let body = icy_body(16, &audio, "Live Set");
+        let url = serve(move |sock| {
+            let head = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "content-type: Audio/MPEG; charset=utf-8\r\n",
+                "icy-metaint: 16\r\n",
+                // Latin-small-e-acute as UTF-8, the encoding modern Icecast uses.
+                "icy-name: Radio Caf\u{e9}\r\n\r\n",
+            );
+            sock.write_all(head.as_bytes()).expect("write headers");
+            sock.write_all(&body).expect("write body");
+            sock.flush().expect("flush");
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        let conn = connect_with(&test_agent(Duration::from_secs(2)), &url).expect("connect");
+        assert_eq!(conn.content_type.as_deref(), Some("audio/mpeg"));
+        assert_eq!(conn.station_name.as_deref(), Some("Radio Café"));
+
+        let title = Arc::clone(&conn.title);
+        let mut reader = conn.reader;
+        let mut got = vec![0u8; audio.len()];
+        reader
+            .read_exact(&mut got)
+            .expect("read de-interleaved audio");
+        assert_eq!(got, audio, "metaint must have been honored");
+        assert_eq!(title.lock().unwrap().as_deref(), Some("Live Set"));
+    }
+
+    // A playlist hop: the .pls body is read to a String and the stream URL in
+    // it becomes the next request. Exercises into_body().into_reader() on a
+    // non-audio content type.
+    #[test]
+    fn a_pls_body_redirects_to_the_stream() {
+        let stream = serve(|sock| {
+            sock.write_all(HDR_200).expect("write headers");
+            sock.write_all(&[3u8; 32]).expect("write audio");
+            sock.flush().expect("flush");
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        let pls = serve(move |sock| {
+            let body = format!("[playlist]\nNumberOfEntries=1\nFile1={stream}\n");
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: audio/x-scpls\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(head.as_bytes()).expect("write headers");
+            sock.write_all(body.as_bytes()).expect("write body");
+            sock.flush().expect("flush");
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        let conn = connect_with(&test_agent(Duration::from_secs(2)), &pls).expect("connect");
+        assert_eq!(conn.content_type.as_deref(), Some("audio/mpeg"));
+        let mut reader = conn.reader;
+        let mut got = [0u8; 32];
+        reader
+            .read_exact(&mut got)
+            .expect("read audio past the hop");
+        assert_eq!(got, [3u8; 32]);
+    }
 
     // Builds an ICY body: audio bytes interleaved with metadata blocks every
     // `metaint` bytes.
