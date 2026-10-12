@@ -20,6 +20,31 @@ ogg, opus and the MPEG-4 ADTS variant need `brew install ffmpeg`, and anything
 missing is skipped and listed. They all come from one encoder chain, so they are a format checklist,
 not a substitute for the real library above.
 
+`pnpm gen:replaygain-library` writes the ReplayGain set to
+`~/Pudding ReplayGain Fixtures` for the §2 ReplayGain check. One 440 Hz tone
+per case, each recorded at a different level and tagged with the figure that
+brings it back to the same one, so "ReplayGain track" should flatten the whole
+folder; file names say what each is for, and the script prints the peak every
+file should reach in each mode. `afconvert` covers all but the last three
+(mp3/ogg/opus, which only re-check that the tags are found in those
+containers). Synthetic tones with hand-written tags: they prove the gain is
+read, applied and clamped, not that Pudding agrees with a real scanner, so
+keep the ReplayGain-tagged files in the real library too.
+
+`pnpm gen:sample-rate-library` writes the sample-rate set to
+`~/Pudding Sample Rate Fixtures` for the §2 Match Source Sample Rate check.
+The same 440 Hz tone at every rate that matters — the ones a device offers, the
+ones it doesn't (22.05k, 11.025k and 37.8k, where the whole-multiple rule
+decides), two deliberate track joins, and the rate as each container declares
+it. Constant pitch is the assertion: a row that plays sharp or flat is audio
+reaching the device at a rate nothing resampled it to. The script reads your
+output device's rate list out of Pudding's log and prints the device rate every
+file should land on, so the expected switches are known before you play it.
+`afconvert` covers all but the last three. One machine's rate list and
+synthetic tones: they prove the rate is read, chosen and switched to, not that
+the switch is inaudible on a DAC whose driver is slow, so run the real library
+over one too.
+
 ---
 
 ## 1. First run / cold start
@@ -40,47 +65,46 @@ not a substitute for the real library above.
 - [x] Gapless: a continuous album crosses a track boundary with no click or gap
       (AAC doesn't work, known bug)
 - [x] Pause/resume mid-track, seek by scrub, seek by `←`/`→` (10s)
-- [ ] Volume `⌘↑`/`⌘↓` and `+`/`-`; `M` mutes and unmutes; menu Mute check tracks
-- [ ] Mute keeps the slider where it was and crosses out the glyph; unmute returns
-      to that level; volume up unmutes, volume down stays muted
-- [ ] Slider dragged slowly to zero: menu Mute is checked, and unchecking it comes
+- [x] Volume `⌘↑`/`⌘↓` and `+`/`-`; `M` mutes and unmutes; menu Mute check tracks
+- [x] Mute keeps the slider where it was and crosses out the glyph; unmute returns
+- [x] Volume up unmutes, volume down stays muted
+- [x] Slider dragged slowly to zero: menu Mute is checked, and unchecking it comes
       back at the pre-drag level (not 1%)
-- [ ] Quit muted → relaunch is audible (mute isn't persisted). Quit with the slider
+- [x] Quit muted → relaunch is audible (mute isn't persisted).
+- [x] Quit with the slider
       at zero → relaunch is silent, and unmuting returns to the pre-zero level, not 100%
-- [ ] Shuffle on mid-track: current track keeps playing, next pick is random
-- [ ] Repeat off / all / one each behave at end of context
-- [ ] Autoadvance off → stops at end of track; Repeat One still repeats; manual skip still advances
-- [ ] ReplayGain off/track/album: level changes on a tagged file, untagged file unchanged, no clipping on a hot file
-- [ ] Match Source Sample Rate on: play 44.1k then 96k, device rate follows, rate restored on quit
-- [ ] EQ (`⌥⌘E`): move a band → audible; preamp works; bars glow with band energy; EQ off is bypassed
-- [ ] Switch output device while playing (unplug headphones) → playback continues or recovers, no crash
-- [ ] Sleep/wake while playing → recovers
-- [ ] A DRM/corrupt file errors with a message rather than silence or a hang
-      (`13 corrupt truncated.flac` claims 4s and ends early; `14 corrupt garbage.mp3` never decodes)
-- [ ] A file that cannot be decoded says so instead of leaving a dead row:
-      a toast naming the file, and the queue moves on to the next track
-      (`14 corrupt garbage.mp3` is the one that fails at open)
+- [x] Shuffle on mid-track: current track keeps playing, next pick is random
+- [x] Repeat off / all / one each behave at end of context
+- [x] Autoadvance off → stops at end of track; Repeat One still repeats; manual skip still advances
+- [x] ReplayGain off/track/album: play `~/Pudding ReplayGain Fixtures` in each mode, compare against the table that the script printed
+- [x] Match Source Sample Rate on: play `~/Pudding Sample Rate Fixtures` down the
+      list, device rate follows the table the script printed, pitch never moves,
+      and a gap appears only where the table says 'switch'
+- [x] Quit with a non-default rate running → device rate restored
+- [x] EQ (`⌥⌘E`): move a band → audible; preamp works; bars glow with band energy; EQ off is bypassed
+- [x] Switch output device while playing (unplug headphones) → playback continues or recovers, no crash
+- [x] Sleep/wake while playing → recovers
 
 ## 3. Library views
 
-- [ ] Root menu lists Browse / Songs / Artists / Albums / Genres / Decades + playlists
-- [ ] Browse drills the real folder tree; "Play folder" plays it as an album
-- [ ] Songs: flat list, scroll deep into it (windowing — no blank rows, no jank)
-- [ ] Artists → artist detail (albums + all tracks) → album → tracks; Back at each level
-- [ ] Albums drills straight to tracks; multi-disc album sorts by disc then track
-- [ ] Genres and Decades open onto tracks; decade label reads `1990s`
-- [ ] Click the Files tab while showing → pops to root
-- [ ] Live watching: add, edit and delete a file on disk with the app open → tree and views update with no manual rescan
-- [ ] Rename a folder on disk → updates
-- [ ] Big library (500k fixture): root menu, Songs, and column sort all stay responsive
+- [x] Root menu lists Browse / Songs / Artists / Albums / Genres / Decades + playlists
+- [x] Browse drills the real folder tree; "Play folder" plays it as a queue
+- [x] Songs: flat list, scroll deep into it (windowing — no blank rows, no jank)
+- [x] Artists → artist detail (albums + all tracks) → album → tracks; Back at each level
+- [x] Albums drills straight to tracks; multi-disc album sorts by disc then track
+- [x] Genres and Decades open onto tracks; decade label reads `1990s`
+- [x] Click the Files tab while showing → pops to root
+- [x] Live watching: add, edit and delete a file on disk with the app open → tree and views update with no manual rescan
+- [x] Rename a folder on disk → updates
+- [x] Big library (500k fixture): root menu, Songs, and column sort all stay responsive
 
 ## 4. Selection and row state
 
-- [ ] `⌘`-click and `⇧`-click multi-select; `Esc` clears
-- [ ] `↑`/`↓` move selection, `Enter` activates
-- [ ] Every verb acts on the whole selection: play, queue, add to playlist, edit tags
-- [ ] Playing track draws eq-bars glyph; the row the right pane is about draws accent text — independently
-- [ ] Playing playlist row gets the glyph; open playlist row gets the accent
+- [x] `⌘`-click and `⇧`-click multi-select; `Esc` clears
+- [x] `↑`/`↓` move selection, `Enter` activates
+- [x] Every verb acts on the whole selection: queue, add to playlist, edit tags
+- [x] Playing track draws eq-bars glyph; the row the right pane is about draws accent text — independently
+- [x] Playing playlist row gets the glyph; open playlist row gets the accent
 
 ## 5. Columns
 

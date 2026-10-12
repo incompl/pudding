@@ -12,6 +12,8 @@
     "build": "pnpm --filter @pudding/desktop build",
     "gen:licenses": "pnpm --filter @pudding/desktop gen:licenses",
     "gen:format-library": "pnpm --filter @pudding/desktop gen:format-library",
+    "gen:replaygain-library": "pnpm --filter @pudding/desktop gen:replaygain-library",
+    "gen:sample-rate-library": "pnpm --filter @pudding/desktop gen:sample-rate-library",
     "gen:screenshot-library": "pnpm --filter @pudding/desktop gen:screenshot-library",
     "typecheck": "pnpm --filter @pudding/desktop typecheck",
     "preview": "pnpm --filter @pudding/desktop preview",
