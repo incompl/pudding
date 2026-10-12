@@ -11,7 +11,7 @@ import type {
   SearchFolder,
   SearchTrack,
 } from "./types";
-import { activeTab, app } from "./state";
+import { app } from "./state";
 import { searchResultsEl, searchInput } from "./dom-refs";
 import { showContextMenu } from "./context-menu";
 import {
@@ -19,7 +19,7 @@ import {
   goToAlbum,
   goToFolder,
   goToFile,
-  persistActiveTab,
+  goToStream,
   libraryRootPaths,
   searchItemTrackProvider,
   addToPlaylistItem,
@@ -64,10 +64,10 @@ export function setupSearch(): void {
 
   function choose(item: SearchItem): void {
     if (item.kind === "artist") {
-      // Collection hits GO TO their detail view (switching to the Files tab and
-      // drilling) rather than playing — the navigator now has a place to land,
-      // and play happens from there. Leaf hits (a single file, a stream) have no
-      // detail view, so they still play.
+      // Choosing a hit NEVER plays — every kind goes to where the thing lives, so
+      // the dropdown has one predictable outcome instead of one that depends on
+      // which row you happened to land on. Play is a right-click away on the leaf
+      // kinds (see the row's context menu), or a click once you're there.
       goToArtist(item.artist.name);
     } else if (item.kind === "album") {
       goToAlbum(item.album.album, item.album.artist);
@@ -76,8 +76,7 @@ export function setupSearch(): void {
       void goToFolder(item.folder.path);
     } else if (item.kind === "file") {
       // A track hit SHOWS the track — reveal it in the Browse tree — rather than
-      // playing it, matching how the collection hits go to a detail view. Play is
-      // still one right-click away (see the row's context menu).
+      // playing it, matching how the collection hits go to a detail view.
       void goToFile(item.track.path);
     } else if (item.kind === "playlist") {
       // Open the playlist in the right pane — the same "go to" the navigator's
@@ -85,10 +84,16 @@ export function setupSearch(): void {
       // Flash the header to mark where the hit landed, matching album/artist hits.
       void browsePlaylistPath(item.playlist.path, { flash: true });
     } else {
-      activeTab.value = "streams";
-      void persistActiveTab();
-      playStream(item.stream);
+      // A station hit selects its row in the Streams tab, the leaf-level analogue
+      // of revealing a track in Browse.
+      goToStream(item.stream.url);
     }
+    dismiss();
+  }
+
+  // Clear the box, drop focus, and close the dropdown: the common tail of every
+  // way a hit is acted on, whether chosen or played from its context menu.
+  function dismiss(): void {
     searchInput.value = "";
     searchInput.blur();
     close();
@@ -173,10 +178,13 @@ export function setupSearch(): void {
         text,
       );
       if (i === activeIndex) activeRow = row;
-      // Right-click a track-bearing hit to add it to a playlist. File hits also
-      // carry Play here, since left-click now shows the track instead of playing it.
+      // Right-click a track-bearing hit to add it to a playlist. The leaf kinds —
+      // a file, a station — also carry Play here, since left-click only shows them.
+      // The menu is built per right-click, not per render, so its playlist submenu
+      // can't go stale while the dropdown sits open.
       const provider = searchItemTrackProvider(item);
-      if (provider) {
+      const playable = item.kind === "file" || item.kind === "stream";
+      if (provider || playable) {
         row.addEventListener("contextmenu", (e) => {
           e.preventDefault();
           const menu: ContextMenuItem[] = [];
@@ -186,13 +194,20 @@ export function setupSearch(): void {
               label: "Play",
               action: () => {
                 playSearchTrack(track);
-                searchInput.value = "";
-                searchInput.blur();
-                close();
+                dismiss();
+              },
+            });
+          } else if (item.kind === "stream") {
+            const stream = item.stream;
+            menu.push({
+              label: "Play",
+              action: () => {
+                playStream(stream);
+                dismiss();
               },
             });
           }
-          menu.push(addToPlaylistItem(provider));
+          if (provider) menu.push(addToPlaylistItem(provider));
           void showContextMenu(e.clientX, e.clientY, menu);
         });
       }

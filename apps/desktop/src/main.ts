@@ -1263,6 +1263,23 @@ export async function goToFile(path: string): Promise<void> {
   revealTreeRow(path);
 }
 
+// Reveal a station in the Streams tab — switch to it, select the row, and scroll
+// it into view. The stream arm of "show, don't play": the last search hit that
+// still played on click now lands here instead. The selection highlight is the
+// persistent "here it is" marker, so there's no flash (unlike goToFile's tree
+// row). The tab effect runs synchronously, making the row measurable before
+// scrollIntoView is called even when Streams was previously hidden.
+export function goToStream(url: string): void {
+  clearTreeSelection();
+  activeTab.value = "streams";
+  void persistActiveTab();
+  app.lastSelectionPane = "stream";
+  selectedStreamUrl.value = url;
+  streamsContainer
+    .querySelector(`.node-label[data-stream-url="${CSS.escape(url)}"]`)
+    ?.scrollIntoView({ block: "nearest" });
+}
+
 // Clicking the now-playing title reveals what is playing in the matching sidebar.
 // A stream switches to Streams, selects its station, and scrolls that row into view.
 // A track is revealed in its *playing context* — the pool autoadvance is walking
@@ -1290,16 +1307,8 @@ export function revealNowPlaying(): void {
     if (!url) return;
     // Match a user-driven tab switch, except keep the destination station selected
     // so the title acts as a real "show me this" link rather than merely opening
-    // the right tab. The tab effect runs synchronously, making the row measurable
-    // before scrollIntoView is called even when Streams was previously hidden.
-    clearTreeSelection();
-    activeTab.value = "streams";
-    void persistActiveTab();
-    app.lastSelectionPane = "stream";
-    selectedStreamUrl.value = url;
-    streamsContainer
-      .querySelector(`.node-label[data-stream-url="${CSS.escape(url)}"]`)
-      ?.scrollIntoView({ block: "nearest" });
+    // the right tab.
+    goToStream(url);
     return;
   }
   const path = currentNodePath.value;

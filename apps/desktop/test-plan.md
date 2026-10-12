@@ -116,8 +116,8 @@ over one too.
 ## 6. Search
 
 - [ ] `⌘F` focuses; results cover tracks, folders, artists, albums, playlists, streams
-- [ ] Type an album name + `Enter` → plays it
-- [ ] Arrow keys + `Enter` through results; right-click a result gets the same verbs
+- [ ] Choosing any hit navigates, never plays: artist/album → detail view, folder/track → revealed in Browse, playlist → opens in the right pane, station → selected in Streams
+- [ ] Arrow keys + `Enter` through results; right-click a track or station result offers **Play**
 - [ ] Blur then refocus → query, caret and results restored
 - [ ] Fast typing never shows a stale slower result
 
