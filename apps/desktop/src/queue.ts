@@ -119,6 +119,28 @@ import {
 let queueWin: WindowedList | null = null;
 let renderedQueue: Queue | null = null;
 let renderedIsSource = false;
+// The *list* the pane last painted, kept apart from `renderedQueue` above — which
+// repaintQueueList deliberately clears to defeat the identity guard, and which every
+// curation replaces with a new object anyway. This one answers a different question:
+// is the pane being handed the same list over again, or a different one? That is
+// what decides whether the reader's horizontal scroll position is still theirs (see
+// keepX in renderQueue). `null` = nothing painted.
+let renderedListId: string | null = null;
+
+// The identity behind that comparison. A playlist is its file, so two reads of the
+// same `.m3u8` are the same list however many objects they arrive in. An ephemeral
+// queue has no such name, so it gets one stamped on first paint and carried forward
+// by the `{...list}` spread every curation makes — the same trick Queue.historyId
+// plays for the undo stacks, and for the same reason. A queue built from scratch
+// (Play album, Create queue) arrives without one, so it reads as the different list
+// it is instead of inheriting the last queue's offset on the strength of both having
+// no sourcePath.
+let viewIdSeq = 0;
+function listIdentity(queue: Queue): string {
+  if (queue.sourcePath) return `pl:${queue.sourcePath}`;
+  if (!queue.viewId) queue.viewId = `q:${++viewIdSeq}`;
+  return queue.viewId;
+}
 
 // --- columns (right pane) ---------------------------------------------------
 //
@@ -396,6 +418,9 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
     queueListEl.replaceChildren();
     queueWin = null;
     renderedQueue = null;
+    // Nothing is being shown, so there is no table and no offset into one: the next
+    // list to arrive here is a first look, however far this one was scrolled.
+    renderedListId = null;
     return;
   }
   const isPlaylist = isPlaylistSource(queue);
@@ -458,6 +483,25 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
   // Row count, so the drag-drop drop-index math can resolve an insert-at-the-end
   // without every row being mounted (updateDropTarget reads it).
   queueListEl.dataset.rowCount = String(queue.tracks.length);
+  // The sideways scroll offset, carried over the rebuild below when the pane is
+  // being handed the same list again — a sort, a drag, a removal, a play-advance
+  // that missed the identity guard above. All of those leave the columns exactly
+  // as they were, so the reader's horizontal position in the table is not this
+  // render's to reset; only a *different* list is a first look that starts at the
+  // left edge. Read before the teardown, because the teardown is what loses it:
+  // the rebuild below forces layout (win.flush measures a row) while the pane
+  // holds no rows yet, and the browser clamps the offset to what is reachable at
+  // that moment. Put back by restoreScrollX, once the rows are there again.
+  const listId = listIdentity(queue);
+  const keepX = listId === renderedListId ? queueListEl.scrollLeft : 0;
+  renderedListId = listId;
+  const restoreScrollX = (): void => {
+    // Only ever upward, and only to where the reader had it: if the rebuilt table
+    // is genuinely narrower than it was (a column dropped, `Reset column widths`)
+    // the clamp standing is the right answer, and a plain assignment would fight
+    // the window's own reveal for no reason.
+    if (keepX > 0 && queueListEl.scrollLeft < keepX) queueListEl.scrollLeft = keepX;
+  };
   queueListEl.replaceChildren();
   // A playlist with no rows at all. Say so in the pane: a blank list reads as a
   // load that failed, and this is the one case where the pane has nothing else to
@@ -487,6 +531,7 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
     const rows = queueListEl.querySelectorAll<HTMLElement>("li.queue-row:not(.colhead)");
     const row = revealTo != null ? rows[revealTo] : undefined;
     if (row && typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "nearest" });
+    restoreScrollX();
     return;
   }
 
@@ -497,6 +542,11 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
   // exist on this same tick — no one-frame blank flash, and a click synthesized
   // straight after a render (curation, tests) finds its row.
   win.flush();
+  // The table is at full width as of this line, so the offset can go back on: the
+  // header row is in the DOM, and flush has mounted the first slice synchronously,
+  // which is the other thing the width can come from (a pane with its headers
+  // switched off has only its rows to be wide).
+  restoreScrollX();
   // Reveal past the sticky header, so a scrolled-to row never lands under it.
   if (revealTo != null) win.revealIndex(revealTo, stickyMargin());
 }

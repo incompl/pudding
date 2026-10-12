@@ -8,7 +8,17 @@
 //      and neither consults the viewport.
 //   2. In column mode nothing is dropped; folded, the row stops at two fields.
 //      A pane laying out columns never drops one however crowded it gets — they
-//      just go thin and ellipsize ("you made the mess and you can unmake it").
+//      go thin and ellipsize ("you made the mess and you can unmake it"), down to
+//      MIN_CH and no further. That floor is also why a table can outgrow its pane:
+//      ten of the sixteen fields are `fixed` and sized to their own content (a
+//      date is twenty characters wide whatever else is on screen), so a full set
+//      asks for more width than any pane has. Past that point the table scrolls
+//      sideways rather than squeezing a date down to an ellipsis — and the rows
+//      and the header row grow with it, so a highlight and the header's own opaque
+//      ground still reach the table's far edge rather than stopping at the pane's
+//      (see `min-width: min-content` in styles.css). Below that point nothing
+//      scrolls: the fr shares spend exactly the pane's width, which is every set
+//      small enough to fit and so the only state most panes are ever in.
 //      Folded, though, the row is a single line, and a line carrying more than two
 //      fields doesn't show a third: it truncates mid-word at the right edge, having
 //      already spent the title's width on a field the reader never sees. So the
@@ -24,11 +34,15 @@
 //      divides its width by those weights, so a set of columns lays itself out with
 //      nothing to configure — and a pane the user never touches stays that way.
 //      Dragging a header divider overrides the weight for the two columns it sits
-//      between (see resizedWidths). The override is a *share*, not a pixel count:
-//      the layout still spends the pane's whole width, so a resized table never
-//      scrolls sideways, never leaves a gutter, and still reflows when the splitter
-//      moves. Widths are per pane and persisted; `Reset column widths` hands the
-//      pane back to the weights above.
+//      between (see resizedWidths). While the table fits its pane the override is
+//      a *share*, not a pixel count: the layout still spends the pane's whole
+//      width, so a resized table never leaves a gutter and still reflows when the
+//      splitter moves. Once the table has outgrown the pane there is no share left
+//      to trade — every text column is already sitting on its floor — so a drag
+//      raises or lowers that one column's floor (columnFloors) and the table gets
+//      wider or narrower by what the boundary moved, which is the only thing
+//      moving a boundary can mean in a table that scrolls. Widths are per pane and
+//      persisted; `Reset column widths` hands the pane back to the weights above.
 //
 // State is per pane (library / queue), because the app already shipped two
 // hard-coded field sets: the queue row composed the artist and deliberately never
@@ -411,6 +425,29 @@ export const columnWidths: Record<ColumnPane, Signal<ColumnWidths>> = {
   queue: signal<ColumnWidths>({}),
 };
 
+// Per-column *floor* overrides, in `ch`, for text columns only — the other half of
+// a divider drag, and the half that only exists once the table has outgrown its
+// pane.
+//
+// Why the widths map above can't carry these: in an overflowing table every text
+// column is already pinned at MIN_CH, so its `fr` share decides nothing and
+// rewriting it is a drag that stores something and changes nothing on screen. What
+// the reader is actually holding then is the column's floor, so that is what the
+// drag writes — in `ch`, the unit the floor is stated in, which is also why it
+// can't share a map with the `fr` shares.
+//
+// The two coexist rather than replacing each other, and both are honoured at once
+// (`minmax(floor, share)`): a pane dragged wide while overflowing and later cut
+// back to a set that fits goes back to dividing the pane by shares, with the floors
+// still saying how thin each column may ever get — including how thin a later drag
+// may make it, since a floor the layout honours and a drag doesn't is a boundary
+// that springs back (see resizedWidths). Sparse, like the widths: a column absent
+// here floors at MIN_CH.
+export const columnFloors: Record<ColumnPane, Signal<ColumnWidths>> = {
+  library: signal<ColumnWidths>({}),
+  queue: signal<ColumnWidths>({}),
+};
+
 // The pane's live column set: the user's list if they've set one, else the
 // automatic set the row builder computed for this particular list.
 // Peeked, not read reactively: renderQueue runs inside a signals effect, and
@@ -427,20 +464,44 @@ export function isAutomatic(pane: ColumnPane): boolean {
 
 // --- layout -----------------------------------------------------------------
 
+// The narrowest a column may ever be, in `ch` — the floor a crowded table squeezes
+// its text columns down to, and the floor a drag may leave one at. One number for
+// both, because they are one rule: below it a column is no longer a thin column,
+// it is a sliver with no legible text and no visible handle left to undo it with.
+// Two numbers would also contradict each other — a drag that could go below the
+// layout floor would store a width the next render refused to honour. Which is why
+// a column carrying a floor of its own (columnFloors) stops a drag at *that*
+// instead: same rule, the reader's number in place of the default.
+//
+// Five characters is about the narrowest that still says what the column holds:
+// four and an ellipsis ("Anam…"). Only text columns take it; a fixed column is
+// sized to its own content and never shrinks (see gridTemplate).
+const MIN_CH = 5;
+
 // The grid track list for a column set, handed to the row (and the header row) as
 // the `--cols` custom property. Computed once per list, not per row — see below
 // for why the list is the only thing that may decide a track's width.
 //
 // Two kinds of track:
 //
-//   minmax(0, Wfr) — text fields. The `0` minimum is the whole "you made the mess"
-//     policy in one token: with a `ch` minimum the row would overflow its pane
-//     once enough columns were added (and the only cures are a horizontal
-//     scrollbar or dropping fields). With `0`, an over-full row just gets thin
-//     and every cell ellipsizes — dense, legible, and obviously self-inflicted.
+//   minmax(Fch, Wfr) — text fields. The share is the "you made the mess" policy:
+//     an over-full row gets thin and every cell ellipsizes rather than any field
+//     being dropped. The floor is the limit on that — a column squeezed past it is
+//     no longer a thin column, it is a sliver with nothing legible in it and no
+//     visible handle left to undo it with. F is the column's stored floor or
+//     MIN_CH; W its stored share or ColumnDef.weight.
 //   <n>ch — fixed fields (times, kinds). Short and load-bearing; squeezing "3:45"
 //     to "3…" saves nothing and costs everything, so these never take an fr share
 //     and never shrink with the pane.
+//
+// Both minimums are definite lengths, and that is load-bearing twice over. It is
+// what lets the table outgrow its pane in the first place (the grid stops dividing
+// and starts overflowing), and it is what makes the overflow *measurable*: a grid
+// whose every track minimum is a length has a min-content width that is a function
+// of the template alone, identical in the header and in every row, with no cell's
+// text in it. That is the number `min-width: min-content` resolves against in
+// styles.css, and the reason a row's highlight and the header's opaque ground can
+// span the whole table without this module computing a pixel.
 //
 // The fixed track is a length rather than `max-content` because **every row is its
 // own grid**. A max-content track is measured against the text of the row it is
@@ -452,10 +513,10 @@ export function isAutomatic(pane: ColumnPane): boolean {
 // A dragged column takes its stored override in place of the number it would have
 // worked out for itself — the weight for a text field, the fitted `ch` for a fixed
 // one — and the shape of its track is otherwise unchanged. So a resized text column
-// is still `minmax(0, Nfr)`: it keeps the `0` minimum and keeps taking its share of
-// the pane, which is what makes a dragged table reflow with the splitter and never
-// overflow. `pane` is optional so a caller with no pane in hand (a test, a one-off
-// measurement) gets the unmodified rule-3 layout.
+// is still `minmax(Fch, Nfr)`: it keeps its floor and keeps taking its share of the
+// pane, which is what makes a dragged table reflow with the splitter. `pane` is
+// optional so a caller with no pane in hand (a test, a one-off measurement) gets
+// the unmodified rule-3 layout.
 export function gridTemplate(
   ids: ColumnId[],
   tracks: SearchTrack[] = [],
@@ -463,12 +524,13 @@ export function gridTemplate(
   pane?: ColumnPane,
 ): string {
   const widths = pane ? columnWidths[pane].peek() : undefined;
+  const floors = pane ? columnFloors[pane].peek() : undefined;
   return ids
     .map((id) => {
       const def = BY_ID.get(id);
-      if (!def) return "minmax(0, 1fr)";
+      if (!def) return `minmax(${MIN_CH}ch, 1fr)`;
       const set = widths?.[id];
-      if (!def.fixed) return `minmax(0, ${set ?? def.weight}fr)`;
+      if (!def.fixed) return `minmax(${floors?.[id] ?? MIN_CH}ch, ${set ?? def.weight}fr)`;
       if (set != null) return `${set}ch`;
       const ch = fixedWidth(def, tracks, withHeader);
       // No rows to measure (an empty list, or a caller that has none to hand):
@@ -558,23 +620,37 @@ function fixedWidth(def: ColumnDef, tracks: SearchTrack[], withHeader: boolean):
 // A divider sits between two adjacent columns and trades width between exactly
 // those two: the boundary you are holding is the only one that moves, and every
 // other column stays where the reader left it. That also keeps the row's total
-// width constant by construction — the one property everything else here rests on,
-// since a table that can't change its own total can't overflow the pane, can't
-// leave a gutter at the right edge, and needs no horizontal scrollbar to be honest
-// (rule 2). It is why there is no divider after the last column: there would be
+// width constant by construction, so a table that fits its pane stays fitting it —
+// no gutter opening at the right edge, no scrollbar appearing because a boundary
+// moved. It is why there is no divider after the last column: there would be
 // nothing on the far side to take the width from.
 //
 // The result is written back as *shares* rather than pixels — see ColumnWidths.
-
-// The narrowest a drag may leave a column: enough for a character and its ellipsis.
-// Below that a column is no longer a thin column, it's a mistake with no visible
-// handle left to undo it with — and unlike an over-full row, squeezing here isn't
-// something the reader can see themselves doing.
-const MIN_CH = 3;
+//
+// A table that has already outgrown its pane plays by the other half of rule 3.
+// There is nothing to trade: every text column is pinned at its floor and the fr
+// pool is empty, so a pair trade would store numbers that change nothing and paint
+// a boundary that springs back on the next render. So the drag moves the one
+// column to the divider's left and lets the table's total change — it is already
+// scrolling, and in a scrolling table a boundary is a width, not a share. The last
+// column still has no divider, and in this arm that does cost something: it is the
+// one column a drag can't narrow. It is also the one column whose width costs the
+// reader nothing, since the table's right edge is wherever it ends.
 
 function round(n: number, places: number): number {
   const f = 10 ** places;
   return Math.round(n * f) / f;
+}
+
+// The narrowest a drag may leave the column at `index`, in px: its own stored floor
+// if it has one, else MIN_CH. Only text columns carry a floor — a fixed column's
+// stored number *is* its width, and a drag on its own divider is about to overwrite
+// it — so a fixed column floors at MIN_CH like a text column that was never dragged
+// in a scrolling table.
+function floorPx(ids: ColumnId[], index: number, floors: ColumnWidths, ch: number): number {
+  const def = BY_ID.get(ids[index]);
+  const stored = def && !def.fixed ? floors[ids[index]] : undefined;
+  return (stored ?? MIN_CH) * ch;
 }
 
 // Resolve one divider drag.
@@ -594,6 +670,12 @@ function round(n: number, places: number): number {
 //   • a fixed column only when the divider is one of its own. Pinning Time's width
 //     because the user dragged Title/Artist would quietly stop it fitting the list,
 //     which is a change nobody asked for at a divider they never touched.
+//
+// `prevFloors` is the pane's floor map, which both arms need: the overflow arm
+// edits it, and the fitting arm clamps against it, because a floor outlives the
+// overflow that made it. `scrolling` picks the arm. The returned `floors` is present
+// only in the overflow arm, so a caller in the fitting case cannot accidentally
+// write a floor map it was never handed one of.
 export function resizedWidths(
   prev: ColumnWidths,
   ids: ColumnId[],
@@ -601,15 +683,51 @@ export function resizedWidths(
   startPx: readonly number[],
   dx: number,
   ch: number,
-): { widths: ColumnWidths; px: number[] } {
+  prevFloors: ColumnWidths = {},
+  scrolling = false,
+): { widths: ColumnWidths; floors?: ColumnWidths; px: number[] } {
   const px = startPx.slice();
+  if (scrolling) {
+    // One column moves and the table's total moves with it. Clamped at the floor
+    // from the near side only — there is no far side to run out of, since what the
+    // drag is spending is the scroll, not the pane.
+    px[index] = Math.max(MIN_CH * ch, startPx[index] + dx);
+    const widths: ColumnWidths = { ...prev };
+    const floors: ColumnWidths = { ...prevFloors };
+    const def = BY_ID.get(ids[index]);
+    // The same number either way, into whichever map that column's track reads its
+    // length from: a fixed column *is* its `ch` width, a text column's is its floor
+    // (the share it also carries is what it will divide a pane by again if the set
+    // ever shrinks back to one that fits).
+    if (def) {
+      const n = round(px[index] / ch, 2);
+      if (def.fixed) widths[ids[index]] = n;
+      else floors[ids[index]] = n;
+    }
+    return { widths, floors, px };
+  }
   const pair = startPx[index] + startPx[index + 1];
   // Clamp to the floor from *both* ends: the pair's total is fixed, so holding the
-  // left column above the minimum is the same act as holding the right one above
-  // it. A pair too narrow to give both the floor splits what there is instead of
-  // refusing to move at all.
-  const min = Math.min(MIN_CH * ch, pair / 2);
-  px[index] = Math.max(min, Math.min(pair - min, startPx[index] + dx));
+  // left column above its own minimum is the same act as holding the right one
+  // above its own.
+  //
+  // Each end's own floor, not one number for the pair, because a column dragged in
+  // a scrolling table carries a floor of its own and gridTemplate honours it
+  // whether the table still scrolls or not. Clamping at MIN_CH here instead would
+  // let the drag paint a boundary past that floor and then hand the commit a share
+  // the floor overrules: the column springs back on the next render, and the width
+  // it takes back comes off the *other* text columns, so a drag at one divider ends
+  // up moving a column at the far end of the table — the one thing this whole
+  // section exists to prevent. The floor is the reader's own number, and the way
+  // under it is the gesture that unmade it (double-click the divider, `Reset column
+  // widths`), not a drag that silently disagrees with the next render.
+  //
+  // A pair too narrow to seat both floors scales them down to what there is,
+  // instead of refusing to move at all.
+  const lo = floorPx(ids, index, prevFloors, ch);
+  const hi = floorPx(ids, index + 1, prevFloors, ch);
+  const fit = lo + hi > pair ? pair / (lo + hi) : 1;
+  px[index] = Math.max(lo * fit, Math.min(pair - hi * fit, startPx[index] + dx));
   px[index + 1] = pair - px[index];
 
   const widths: ColumnWidths = { ...prev };
@@ -640,7 +758,7 @@ export function resizedWidths(
 // us, which is the whole reason a drag reads its starting point off the DOM rather
 // than recomputing the template it wrote. Empty unless the element really is a laid
 // out grid: below the fold gate the same node is inline text and its computed
-// template is the unresolved `minmax(0, 2.4fr) ...` string, which is not a
+// template is the unresolved `minmax(5ch, 2.4fr) ...` string, which is not a
 // measurement and must never be mistaken for one.
 function trackWidths(grid: HTMLElement): number[] {
   const parts = getComputedStyle(grid)
@@ -674,6 +792,18 @@ function paneGrids(pane: ColumnPane, header: HTMLElement): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(".col-grid")];
 }
 
+// Is the table wider than the pane it sits in — i.e. is the list scrolling
+// sideways? Measured, not inferred: whether the fr pool ran out depends on the
+// font, the pane and the list's own fixed columns, none of which this module can
+// compute. The header row grows to the table's full width (min-width: min-content,
+// see styles.css) while its parent is a size container, so its inline size is
+// pinned to the pane however far the table overruns it — which makes the two boxes
+// exactly the comparison wanted. The half pixel is slack for a fractional layout.
+function tableOverflows(header: HTMLElement): boolean {
+  const avail = header.parentElement?.clientWidth ?? 0;
+  return avail > 0 && header.getBoundingClientRect().width > avail + 0.5;
+}
+
 function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: number): void {
   const grid = (e.currentTarget as HTMLElement).closest<HTMLElement>(".col-grid");
   if (!grid) return;
@@ -690,7 +820,17 @@ function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: nu
   // same one), so a drag that ends where it started can hand it back — see onUp.
   const original = grid.style.getPropertyValue("--cols");
   const prev = columnWidths[pane].peek();
+  // Needed whichever arm this turns out to be: the overflow arm writes a floor, and
+  // the fitting arm has to stop at the ones already there (see resizedWidths).
+  const prevFloors = columnFloors[pane].peek();
+  // Which arm the whole drag runs in, decided once at mousedown rather than per
+  // move: a drag that widens an overflowing table past the point where it would
+  // have fitted — or back under it — must not change what the boundary means under
+  // the reader's hand halfway through.
+  const head = grid.closest<HTMLElement>(".colhead");
+  const scrolling = head != null && tableOverflows(head);
   let widths = prev;
+  let floors: ColumnWidths | undefined;
   // Whether the boundary is anywhere but where it started, which is not the same
   // question as whether the mouse moved: a drag held past the floor, or dragged out
   // and back, ends with the columns exactly as they were.
@@ -701,9 +841,19 @@ function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: nu
   document.body.classList.add("dragging");
 
   const onMove = (ev: MouseEvent): void => {
-    const next = resizedWidths(prev, ids, index, startPx, ev.clientX - startX, ch);
+    const next = resizedWidths(
+      prev,
+      ids,
+      index,
+      startPx,
+      ev.clientX - startX,
+      ch,
+      prevFloors,
+      scrolling,
+    );
     moved = next.px.some((w, i) => w !== startPx[i]);
     widths = next.widths;
+    floors = next.floors;
     // Painted from the drag's own pixels rather than from the template the commit
     // will write. They agree — the commit is computed from these same pixels — but
     // the pixels are exact and need no second pass over the list to size the fixed
@@ -737,6 +887,7 @@ function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: nu
     document.addEventListener("click", swallow, true);
     setTimeout(() => document.removeEventListener("click", swallow, true), 0);
     columnWidths[pane].value = widths;
+    if (floors) columnFloors[pane].value = floors;
     commit(pane);
   };
 
@@ -750,9 +901,13 @@ function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: nu
 // treats that pair as the unit.
 function resetPair(pane: ColumnPane, ids: ColumnId[], index: number): void {
   const widths = { ...columnWidths[pane].peek() };
-  delete widths[ids[index]];
-  delete widths[ids[index + 1]];
+  const floors = { ...columnFloors[pane].peek() };
+  for (const id of [ids[index], ids[index + 1]]) {
+    delete widths[id];
+    delete floors[id];
+  }
   columnWidths[pane].value = widths;
+  columnFloors[pane].value = floors;
   commit(pane);
 }
 
@@ -1014,6 +1169,7 @@ function setAutomatic(pane: ColumnPane, on: boolean, auto: ColumnId[]): void {
     // just the field list — a pane still wearing a set of hand-dragged boundaries
     // isn't one the app is choosing for you.
     columnWidths[pane].value = {};
+    columnFloors[pane].value = {};
     if (pane === "library") librarySort.value = null;
   }
   commit(pane);
@@ -1080,7 +1236,8 @@ export function columnsMenuItems(pane: ColumnPane, auto: ColumnId[]): ContextMen
         commit(pane);
       },
     },
-    ...(Object.keys(columnWidths[pane].peek()).length > 0
+    ...(Object.keys(columnWidths[pane].peek()).length > 0 ||
+    Object.keys(columnFloors[pane].peek()).length > 0
       ? [
           // Only when there is something to undo. The gesture that makes widths is a
           // drag on a divider, and the one that unmakes a pair is a double-click on
@@ -1093,6 +1250,7 @@ export function columnsMenuItems(pane: ColumnPane, auto: ColumnId[]): ContextMen
             label: "Reset column widths",
             action: () => {
               columnWidths[pane].value = {};
+              columnFloors[pane].value = {};
               commit(pane);
             },
           },
@@ -1147,6 +1305,8 @@ interface StoredPrefs {
   librarySort?: SortState;
   libraryWidths?: ColumnWidths;
   queueWidths?: ColumnWidths;
+  libraryFloors?: ColumnWidths;
+  queueFloors?: ColumnWidths;
 }
 
 export async function persist(): Promise<void> {
@@ -1159,6 +1319,8 @@ export async function persist(): Promise<void> {
     librarySort: librarySort.peek(),
     libraryWidths: columnWidths.library.peek(),
     queueWidths: columnWidths.queue.peek(),
+    libraryFloors: columnFloors.library.peek(),
+    queueFloors: columnFloors.queue.peek(),
   };
   try {
     await app.store.set(KEY, prefs);
@@ -1176,12 +1338,14 @@ function sanitize(ids: ColumnId[] | null | undefined): ColumnId[] | null {
   return canonical(known);
 }
 
-// The same rule for widths, and one more: a width has to be a positive, finite
-// number to be a width at all. Both units are small — an `fr` weight beside the
-// table's 1.6s and 2.4s, or a `ch` count — so anything past CH_CAP is not a wide
-// column, it is a corrupt store or an older build's units, and honouring it would
-// hand one column the pane and ellipsize every other to nothing. Dropped
-// individually, so one bad entry costs one column's width rather than the layout.
+// The same rule for widths and floors, and one more: a width has to be a positive,
+// finite number to be a width at all. Every unit here is small — an `fr` weight
+// beside the table's 1.6s and 2.4s, or a `ch` count — so anything past CH_CAP is
+// not a wide column, it is a corrupt store or an older build's units, and
+// honouring it would hand one column the pane and ellipsize every other to
+// nothing. A floor past the cap is worse still: it would scroll the table out to a
+// width nothing on screen explains. Dropped individually, so one bad entry costs
+// one column's width rather than the layout.
 const CH_CAP = 200;
 
 function sanitizeWidths(widths: ColumnWidths | undefined): ColumnWidths {
@@ -1191,6 +1355,20 @@ function sanitizeWidths(widths: ColumnWidths | undefined): ColumnWidths {
     if (!BY_ID.has(id)) continue;
     if (typeof n !== "number" || !isFinite(n) || n <= 0 || n > CH_CAP) continue;
     out[id] = n;
+  }
+  return out;
+}
+
+// Floors run the same gauntlet, and then one more: only a text column has a floor
+// to begin with — a fixed column's stored number is its width outright (see
+// gridTemplate) — so an entry for one is a corrupt store or an older build's map.
+// Dropped rather than carried along, because a floor nothing reads would still
+// count as something to undo and put `Reset column widths` in the menu with nothing
+// on screen to show for it.
+function sanitizeFloors(floors: ColumnWidths | undefined): ColumnWidths {
+  const out = sanitizeWidths(floors);
+  for (const id of Object.keys(out) as ColumnId[]) {
+    if (BY_ID.get(id)?.fixed) delete out[id];
   }
   return out;
 }
@@ -1206,6 +1384,8 @@ export async function loadColumnPrefs(): Promise<void> {
     columnHeaders.queue.value = prefs.queueHeaders === true;
     columnWidths.library.value = sanitizeWidths(prefs.libraryWidths);
     columnWidths.queue.value = sanitizeWidths(prefs.queueWidths);
+    columnFloors.library.value = sanitizeFloors(prefs.libraryFloors);
+    columnFloors.queue.value = sanitizeFloors(prefs.queueFloors);
     const s = prefs.librarySort;
     librarySort.value = s && BY_ID.has(s.id) ? { id: s.id, dir: s.dir === -1 ? -1 : 1 } : null;
   } catch (e) {

@@ -44,6 +44,7 @@ import {
   currentNavStep,
   popNavToRoot,
   renderNav,
+  repaintNavPane,
   refreshNavPaneAfterScan,
   invalidateNavListCache,
   registerNavList,
@@ -1765,7 +1766,10 @@ export function renderLeafTrackList(
       buildHeaderCells("library", cols, librarySort.peek(), (id) => {
         librarySort.value = nextSort(librarySort.peek(), id);
         void persistColumnPrefs();
-        renderNav();
+        // repaintNavPane, not renderNav: a sort reorders the rows under the same
+        // columns, so the table must not also jump back to its left edge if the
+        // reader had scrolled it sideways.
+        repaintNavPane();
       }),
     );
     ul.appendChild(
@@ -1822,10 +1826,13 @@ export function renderLeafTrackList(
   return ul;
 }
 
-// A column-set / header / sort change has to rebuild the pane's rows, and no
-// signal the nav render path tracks covers that — so the picker re-renders it
-// explicitly. renderNav() rebuilds the current drill pane in place.
-setColumnRepaint("library", () => renderNav());
+// A column-set / header / sort / width change has to rebuild the pane's rows, and
+// no signal the nav render path tracks covers that — so the picker re-renders it
+// explicitly. repaintNavPane() rebuilds the current drill pane in place, keeping
+// the horizontal scroll offset: these are all edits to the table the reader is
+// looking at, including the commit at the end of a divider drag, and none of them
+// is a reason to haul a sideways-scrolled table back to its left edge.
+setColumnRepaint("library", () => repaintNavPane());
 // Both panes' "make room" hooks are registered here, not one per module: the
 // divider between them is a single number, and main.ts is what owns it.
 setColumnRoom("library", () => ensureColumnRoom("library"));

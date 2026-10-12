@@ -24,6 +24,7 @@ import {
   columnHeaders,
   columnSets,
   columnWidths,
+  columnFloors,
   columnsMenuItem,
   gridClasses,
   gridTemplate,
@@ -47,6 +48,8 @@ beforeEach(() => {
   columnHeaders.queue.value = false;
   columnWidths.library.value = {};
   columnWidths.queue.value = {};
+  columnFloors.library.value = {};
+  columnFloors.queue.value = {};
   librarySort.value = null;
 });
 
@@ -64,15 +67,40 @@ function track(path: string, extra: Partial<SearchTrack> = {}): SearchTrack {
 const colsOf = (els: HTMLElement[]): (string | null)[] =>
   els.map((e) => e.getAttribute("data-col"));
 
-test("text columns take fr weights, and never a ch minimum", () => {
-  // The 0 minimum is the whole "you made the mess" policy: an over-full row gets
-  // thin and ellipsizes instead of overflowing the pane. A ch minimum here would
-  // reintroduce horizontal overflow, which the design rules out.
+test("text columns take fr weights down to a floor they can still be read at", () => {
+  // The share is the "you made the mess" policy: an over-full row gets thin and
+  // ellipsizes instead of dropping a field. The floor is the limit on that — below
+  // five characters a column is a sliver with nothing legible in it and no visible
+  // handle left to undo it with.
   assert.equal(
     gridTemplate(["title", "artist", "album"], []),
-    "minmax(0, 2.4fr) minmax(0, 1.6fr) minmax(0, 1.6fr)",
+    "minmax(5ch, 2.4fr) minmax(5ch, 1.6fr) minmax(5ch, 1.6fr)",
   );
-  assert.ok(!gridTemplate(["title", "artist", "album", "albumArtist"], []).includes("ch"));
+  // Every minimum in the template is a definite length — which is what gives the
+  // grid a min-content width that depends on the template alone, the number the
+  // rows and the sticky header both grow to when the table outruns its pane.
+  assert.ok(
+    gridTemplate(["title", "artist", "album", "albumArtist"], [])
+      .split(" ")
+      .every((part) => /^(minmax\(\d+ch,|\d+(\.\d+)?fr\))$/.test(part)),
+  );
+});
+
+test("a dragged floor replaces the default one, and coexists with the share", () => {
+  // The two halves of rule 3 are stored separately and both honoured at once: the
+  // floor says how thin this column may ever get, the share how a pane that fits
+  // is divided. A set dragged wide while scrolling and later cut back to one that
+  // fits goes back to dividing by shares, with the floors still holding.
+  columnFloors.library.value = { title: 24 };
+  columnWidths.library.value = { title: 2.8 };
+  assert.equal(
+    gridTemplate(["title", "artist"], [], false, "library"),
+    "minmax(24ch, 2.8fr) minmax(5ch, 1.6fr)",
+  );
+  // Fixed columns have no floor of their own: they are already a definite width.
+  columnFloors.library.value = { duration: 24 };
+  const ts = [track("/m/a.mp3", { duration: 254 })];
+  assert.equal(gridTemplate(["duration"], ts, false, "library"), "4ch");
 });
 
 test("a fixed column is sized by the list, so every row's grid agrees", () => {
@@ -81,15 +109,15 @@ test("a fixed column is sized by the list, so every row's grid agrees", () => {
   // laid its row out on column boundaries of its own, shifting the whole row.
   // Five characters of time, so five ch, for every row in the list.
   const ts = [track("/m/a.mp3", { duration: 254 }), track("/m/b.mp3", { duration: 634 })];
-  assert.equal(gridTemplate(["title", "duration"], ts), "minmax(0, 2.4fr) 5ch");
+  assert.equal(gridTemplate(["title", "duration"], ts), "minmax(5ch, 2.4fr) 5ch");
   // ...and four when nothing in the list runs to ten minutes: the width follows the
   // list's own content, not a reserved worst case.
-  assert.equal(gridTemplate(["title", "duration"], [ts[0]]), "minmax(0, 2.4fr) 4ch");
+  assert.equal(gridTemplate(["title", "duration"], [ts[0]]), "minmax(5ch, 2.4fr) 4ch");
   // Letters run wider than the `0` the ch unit measures, so a text-valued fixed
   // column (the kind) counts them at more than one ch each.
   assert.equal(gridTemplate(["kind"], ts), "5ch");
   // No rows to measure at all: nothing can disagree, so the row sizes itself.
-  assert.equal(gridTemplate(["title", "duration"]), "minmax(0, 2.4fr) max-content");
+  assert.equal(gridTemplate(["title", "duration"]), "minmax(5ch, 2.4fr) max-content");
 });
 
 test("with the header up a fixed column also fits its own label", () => {
@@ -750,18 +778,18 @@ test("a resized column is still a share of the pane, not a size", () => {
   columnWidths.library.value = { title: 2.8, artist: 1.2 };
   assert.equal(
     gridTemplate(["title", "artist"], [], false, "library"),
-    "minmax(0, 2.8fr) minmax(0, 1.2fr)",
+    "minmax(5ch, 2.8fr) minmax(5ch, 1.2fr)",
   );
   // The `0` minimum survives the override: an over-full row still ellipsizes rather
   // than pushing past the pane.
-  assert.ok(gridTemplate(["title", "artist"], [], false, "library").includes("minmax(0,"));
+  assert.ok(gridTemplate(["title", "artist"], [], false, "library").includes("minmax(5ch,"));
   // A pane with no widths of its own is untouched — and so is a caller that names
   // no pane at all.
   assert.equal(
     gridTemplate(["title", "artist"], [], false, "queue"),
-    "minmax(0, 2.4fr) minmax(0, 1.6fr)",
+    "minmax(5ch, 2.4fr) minmax(5ch, 1.6fr)",
   );
-  assert.equal(gridTemplate(["title", "artist"]), "minmax(0, 2.4fr) minmax(0, 1.6fr)");
+  assert.equal(gridTemplate(["title", "artist"]), "minmax(5ch, 2.4fr) minmax(5ch, 1.6fr)");
 });
 
 test("dragging a fixed column pins it in ch, and only the one that was dragged", () => {
@@ -777,7 +805,7 @@ test("dragging a fixed column pins it in ch, and only the one that was dragged",
   assert.equal(widths.duration, undefined);
   const ts = [track("/m/a.mp3", { duration: 634 })];
   columnWidths.library.value = widths;
-  assert.equal(gridTemplate(ids, ts, false, "library"), "minmax(0, 2.4fr) 15ch 5ch");
+  assert.equal(gridTemplate(ids, ts, false, "library"), "minmax(5ch, 2.4fr) 15ch 5ch");
 });
 
 test("a drag that changes the fr pool holds the columns it isn't touching still", () => {
@@ -786,11 +814,11 @@ test("a drag that changes the fr pool holds the columns it isn't touching still"
   // weights are rewritten from the final pixels instead, which is what keeps Album
   // at the 160px the reader is looking at.
   const ids: ColumnId[] = ["title", "album", "duration"];
-  const { widths, px } = resizedWidths({}, ids, 1, [240, 160, 60], 20, CH);
-  assert.deepEqual(px, [240, 180, 40]);
+  const { widths, px } = resizedWidths({}, ids, 1, [240, 160, 100], 20, CH);
+  assert.deepEqual(px, [240, 180, 80]);
   // The pool the two text columns divide is 20px smaller than it was, and their
   // weights are restated against it: still totalling the table's own 2.4 + 1.6.
-  assert.deepEqual(widths, { title: 2.286, album: 1.714, duration: 4 });
+  assert.deepEqual(widths, { title: 2.286, album: 1.714, duration: 8 });
   assert.equal(round3(widths.title! + widths.album!), 4);
   // Which lands Title back on the 240px it was already at, rather than shaving it
   // to pay for a column at the other end of the row.
@@ -804,13 +832,103 @@ test("a column can't be dragged narrower than it can be read", () => {
   // undoable. Clamped from both ends, since the pair's total is fixed.
   const ids: ColumnId[] = ["title", "artist"];
   const far = resizedWidths({}, ids, 0, [200, 200], -1000, CH);
-  assert.deepEqual(far.px, [30, 370]);
+  assert.deepEqual(far.px, [50, 350]);
   const other = resizedWidths({}, ids, 0, [200, 200], 1000, CH);
-  assert.deepEqual(other.px, [370, 30]);
+  assert.deepEqual(other.px, [350, 50]);
   // A pair with no room for two floors splits what there is instead of refusing to
   // move at all.
   const tiny = resizedWidths({}, ids, 0, [20, 20], -1000, CH);
   assert.deepEqual(tiny.px, [20, 20]);
+});
+
+test("once the table scrolls, a divider changes the table's width, not a share", () => {
+  // There is nothing to trade when the table has already outgrown its pane: every
+  // text column is pinned at its floor and the fr pool is empty, so a pair trade
+  // would store numbers that change nothing and paint a boundary that springs back
+  // on the next render. The one column left of the divider moves instead, and the
+  // table gets wider by what the boundary moved.
+  const ids: ColumnId[] = ["title", "artist", "created"];
+  const { widths, floors, px } = resizedWidths({}, ids, 0, [50, 50, 200], 120, CH, {}, true);
+  assert.deepEqual(px, [170, 50, 200]);
+  // A text column's number is its floor, in ch — the only thing its track reads a
+  // length from while the fr pool is empty.
+  assert.deepEqual(floors, { title: 17 });
+  // And nothing lands in the shares: Artist is untouched, and so is the share
+  // Title will divide a pane by again if the set ever shrinks back to one that fits.
+  assert.deepEqual(widths, {});
+});
+
+test("a fixed column dragged in a scrolling table still stores a ch width", () => {
+  // Same number, the other map: a fixed column *is* its ch width, so that is where
+  // the drag writes — and the column to the divider's right is left alone, unlike
+  // the fitting arm where the pair is the unit.
+  const ids: ColumnId[] = ["title", "created", "modified"];
+  const { widths, floors, px } = resizedWidths(
+    {},
+    ids,
+    1,
+    [50, 200, 200],
+    -60,
+    CH,
+    { title: 17 },
+    true,
+  );
+  assert.deepEqual(px, [50, 140, 200]);
+  assert.deepEqual(widths, { created: 14 });
+  // The floors it was handed come back untouched, so one drag can't quietly
+  // rewrite the boundaries the reader placed at every other divider.
+  assert.deepEqual(floors, { title: 17 });
+});
+
+test("a scrolling drag stops at the same floor a fitting one does", () => {
+  // One rule, one number: a column too thin to read is a column too thin to read,
+  // whether the pane ran out of room or the reader did. There is no far end to
+  // clamp against here — what the drag spends is the scroll, not the pane.
+  const ids: ColumnId[] = ["title", "created"];
+  const far = resizedWidths({}, ids, 0, [100, 200], -1000, CH, {}, true);
+  assert.deepEqual(far.px, [50, 200]);
+  const wide = resizedWidths({}, ids, 0, [100, 200], 1000, CH, {}, true);
+  assert.deepEqual(wide.px, [1100, 200]);
+});
+
+test("a fitting drag stops at a floor a scrolling one left behind", () => {
+  // A floor outlives the overflow that made it (gridTemplate honours it either
+  // way), so the pair trade has to stop at it. Clamping at MIN_CH instead would
+  // paint a boundary past the floor and then commit a share the floor overrules:
+  // the column springs back on the next render, and the width it takes back comes
+  // off the other text columns — a drag at one divider moving a column at the far
+  // end of the table.
+  const ids: ColumnId[] = ["title", "artist"];
+  const held = resizedWidths({}, ids, 0, [240, 160], -100, CH, { title: 24 });
+  assert.deepEqual(held.px, [240, 160]);
+  // Wider is still fine, and so is narrower as far as the floor: it is a floor, not
+  // a pin.
+  assert.deepEqual(resizedWidths({}, ids, 0, [300, 100], -40, CH, { title: 24 }).px, [260, 140]);
+  // The far end's floor binds too — the pair's total is fixed, so holding one above
+  // its minimum is the same act as holding the other above its own.
+  assert.deepEqual(resizedWidths({}, ids, 0, [160, 240], 100, CH, { artist: 24 }).px, [160, 240]);
+  // A pair too narrow to seat both floors scales them down to what there is rather
+  // than refusing to move, as it already does for two MIN_CH floors.
+  assert.deepEqual(
+    resizedWidths({}, ids, 0, [100, 100], -500, CH, { title: 30, artist: 10 }).px,
+    [150, 50],
+  );
+  // And a fixed column has no floor to stop at: its stored number is its width, and
+  // this drag is about to overwrite it.
+  const fixedIds: ColumnId[] = ["duration", "title"];
+  assert.deepEqual(
+    resizedWidths({}, fixedIds, 0, [200, 200], -1000, CH, { duration: 24 }).px,
+    [50, 350],
+  );
+});
+
+test("the fitting arm never returns floors to write", () => {
+  // The caller writes columnFloors only when it is handed a map back, so a drag on
+  // a table that fits cannot pin a floor the reader never asked for.
+  const { floors } = resizedWidths({}, ["title", "artist"], 0, [200, 200], 40, CH, {
+    title: 24,
+  });
+  assert.equal(floors, undefined);
 });
 
 test("every header carries a divider except the last, which has nothing to trade with", () => {
@@ -829,12 +947,18 @@ test("dragged widths survive a restart, per pane", () => {
   const store = fakeStore();
   columnWidths.library.value = { title: 2.8, artist: 1.2 };
   columnWidths.queue.value = { duration: 6.5 };
+  columnFloors.library.value = { title: 24 };
   return persist().then(async () => {
     columnWidths.library.value = {};
     columnWidths.queue.value = {};
+    columnFloors.library.value = {};
     await loadColumnPrefs();
     assert.deepEqual(columnWidths.library.value, { title: 2.8, artist: 1.2 });
     assert.deepEqual(columnWidths.queue.value, { duration: 6.5 });
+    // Floors too: a scrolling table the reader laid out by hand is still the
+    // layout the next launch paints.
+    assert.deepEqual(columnFloors.library.value, { title: 24 });
+    assert.deepEqual(columnFloors.queue.value, {});
     assert.ok(store.saved());
     app.store = undefined as unknown as typeof app.store;
   });
@@ -848,9 +972,16 @@ test("a stored width that isn't one is dropped, a column at a time", () => {
   const store = fakeStore();
   store.seed({
     libraryWidths: { title: 2.8, artist: 0, album: "wide", kind: 1e9, rating: 3, location: 1.1 },
+    libraryFloors: { title: 24, artist: 1e9, duration: 12 },
   });
   return loadColumnPrefs().then(() => {
     assert.deepEqual(columnWidths.library.value, { title: 2.8, location: 1.1 });
+    // Floors run the same gauntlet. One past the cap is worse than a bad width —
+    // it would scroll the table out to a width nothing on screen explains — and a
+    // floor on a *fixed* column is a number nothing reads, since its stored width is
+    // its width outright. Both go, so `Reset column widths` can't come out of the
+    // menu with nothing on screen to show for itself.
+    assert.deepEqual(columnFloors.library.value, { title: 24 });
     // Nothing stored for the queue at all: no widths, not a broken map.
     assert.deepEqual(columnWidths.queue.value, {});
     app.store = undefined as unknown as typeof app.store;
@@ -864,12 +995,19 @@ test("the picker offers to reset widths only once there are widths to reset", ()
   const build = picker("library", ["title", "artist"]);
   const labels = (): (string | undefined)[] => build().map((i) => i.label);
   assert.ok(!labels().includes("Reset column widths"));
+  // A floor is a drag too — the one a scrolling table records — so it brings the
+  // undo out on its own.
+  columnFloors.library.value = { title: 24 };
+  assert.ok(labels().includes("Reset column widths"));
+  columnFloors.library.value = {};
   columnWidths.library.value = { title: 2.8, artist: 1.2 };
   assert.ok(labels().includes("Reset column widths"));
   // It follows the two switches: they govern the layout, this undoes an edit to it.
   assert.deepEqual(labels().slice(0, 3), ["Auto columns", "Show header", "Reset column widths"]);
+  columnFloors.library.value = { title: 24 };
   build().find((i) => i.label === "Reset column widths")!.action!();
   assert.deepEqual(columnWidths.library.value, {});
+  assert.deepEqual(columnFloors.library.value, {});
   // Only this pane's. Widths are per pane like every other column setting.
   columnWidths.queue.value = { duration: 6 };
   build().find((i) => i.label === "Auto columns");
@@ -882,9 +1020,11 @@ test("going back to automatic gives up the dragged widths too", () => {
   const build = picker("library", ["title", "artist"]);
   build().find((i) => i.label === "Album")!.action!();
   columnWidths.library.value = { title: 2.8, artist: 1.2 };
+  columnFloors.library.value = { title: 24 };
   build().find((i) => i.label === "Auto columns")!.action!();
   assert.equal(columnSets.library.value, null);
   assert.deepEqual(columnWidths.library.value, {});
+  assert.deepEqual(columnFloors.library.value, {});
 });
 
 function round3(n: number): number {

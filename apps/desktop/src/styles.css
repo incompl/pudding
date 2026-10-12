@@ -1692,6 +1692,12 @@ body.np-zen.np-idle #now-playing-controls {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Stated, not inherited from the line above. A column set wide enough to outrun
+     the pane scrolls sideways rather than ellipsizing a date (see the .col-grid
+     overflow block), and this is the box that scrolls — which it would also do
+     silently, since `visible` on one axis computes to `auto` beside an `auto` on
+     the other. Naming it keeps that a decision rather than a side effect. */
+  overflow-x: auto;
   /* Query container for the row layout: when this pane is wide enough the rows
      split the artist into its own column (see the @container listcol block).
      Keyed off the pane's own inline size, not the window/viewport, so each pane
@@ -1971,6 +1977,75 @@ body.np-zen.np-idle #now-playing-controls {
      can't overlay an arbitrary last column, so it gets its own space. */
   .queue-row .col-grid {
     padding-right: 1.1em;
+  }
+  /* ...and the ✕ is centred in that slot rather than offset from one end of it.
+     The slot is 1.5em wide — the 1.1em the grid reserves above plus the row's own
+     0.4em right padding (see .queue-row) — and the base rule's `right: 0.5em`
+     puts the glyph nearer the last column than the row's edge, which reads as the
+     ✕ having drifted left into the table rather than sitting in a margin.
+
+     Centred by the browser's own arithmetic, not by a number here: two insets
+     bounding the slot, a shrink-to-fit width, and auto margins to split what's
+     left. The alternative is solving `right` against the ✕'s advance, which is a
+     constant this sheet would have to re-derive every time the glyph or the type
+     changed — and the ✕'s padding is symmetric, so centring its box centres the
+     glyph in it. fit-content rather than max-content so a slot narrower than the
+     ✕ clamps instead of pushing it out past the row's edge.
+
+     The insets are in the ✕'s own em, which is 0.85 of the row's (see
+     .queue-remove's font-size) — hence the division, which is what makes 1.5em of
+     row read as 1.5em of row here too.
+
+     Column mode only. A folded row has no reserved slot: there the ✕ overlays the
+     runtime it hides on hover, and `right: 0.5em` is where that swap happens. */
+  .queue-row .queue-remove {
+    left: calc(100% - 1.5em / 0.85);
+    right: 0;
+    width: fit-content;
+    margin-inline: auto;
+  }
+
+  /* --- When the table is wider than its pane -----------------------------
+
+     It can be. Ten of the sixteen fields are `fixed` and sized to their own
+     content — two dates alone are forty characters — so a full set asks for more
+     width than any pane has, and past that point the list scrolls sideways
+     rather than ellipsizing a date (see rule 2 in columns.ts). The row's *box*
+     has to grow with it, because the box is what paints: a row is laid out to the
+     pane's width (and the windowed ones are pinned to it outright, left:0 /
+     right:0 from windowed-list.ts), so without this a hover fill, a selection,
+     the playing accent and — worst — the sticky header's opaque ground all stop
+     at the pane's right edge. Scrolled right, the header stops covering anything
+     and the rows it is meant to label scroll through it.
+
+     min-content, not a number this sheet or that module computes. Every track in
+     the template is a definite length at its minimum (`Nch` fixed, `minmax(Fch,
+     Wfr)` text — see gridTemplate), so the grid's min-content width is a function
+     of the template alone: no cell's text is in it, it is identical in the header
+     and in every row, and the browser adds the gutter and the row's own padding
+     for free. Two numbers that have to agree, computed by the one thing that can
+     see both. While a divider is being dragged the panes wear a pure-pixel
+     template instead, which is just as definite, so the growing table tracks the
+     mouse without this rule knowing a drag is happening.
+
+     Scoped to rows inside a column host. A Browse tree row carries no .col-grid
+     and no template; min-content there is its filename, which would scroll the
+     folder tree sideways for a long one. */
+  .col-host .nav-track-row,
+  #queue-list .queue-row {
+    min-width: min-content;
+  }
+  /* And the cell says the same thing from the inside, lifting the `min-width: 0`
+     it wears as a flex item (.nav-cell / .queue-text). Two reasons, and the first
+     is the one that matters: a flex item that may shrink to nothing is a grid
+     that gets squeezed below its own track minimums, which is the overflow
+     reappearing one box further in. The second is that it states the row's
+     intrinsic width outright instead of leaving it to how an engine sizes a
+     `flex: 1 1 0%` item for min-content. Costs nothing while the table fits —
+     the shares are already wider than the floors there, so nothing binds. */
+  .queue-text.col-grid,
+  .nav-cell.col-grid {
+    min-width: min-content;
   }
 }
 

@@ -326,6 +326,12 @@ export interface Queue {
   // from the next's. Playlists key their history by sourcePath instead. See
   // curation history in queue.ts.
   historyId?: string;
+  // View identity for an *ephemeral* queue, on the same lazily-stamped, spread-
+  // carried terms as historyId above: it answers "is the pane being handed the same
+  // list over again, or a different one?", which is what decides whether the
+  // reader's horizontal scroll position in the table is still theirs. A playlist
+  // keys off sourcePath instead. See renderQueue in queue.ts.
+  viewId?: string;
 }
 
 export interface ScanResult {
