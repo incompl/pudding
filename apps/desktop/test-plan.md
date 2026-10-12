@@ -115,11 +115,11 @@ over one too.
 
 ## 6. Search
 
-- [ ] `⌘F` focuses; results cover tracks, folders, artists, albums, playlists, streams
-- [ ] Choosing any hit navigates, never plays: artist/album → detail view, folder/track → revealed in Browse, playlist → opens in the right pane, station → selected in Streams
-- [ ] Arrow keys + `Enter` through results; right-click a track or station result offers **Play**
-- [ ] Blur then refocus → query, caret and results restored
-- [ ] Fast typing never shows a stale slower result
+- [x] `⌘F` focuses; results cover tracks, folders, artists, albums, playlists, streams
+- [x] Choosing any hit navigates, never plays
+- [x] Arrow keys + `Enter` through results; right-click a track or station result offers **Play**
+- [x] Blur then refocus → query, caret and results restored
+- [x] Fast typing never shows a stale slower result
 
 ## 7. Queue
 
