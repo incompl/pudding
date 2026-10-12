@@ -29,6 +29,8 @@
 // folder expands/collapses) can call `update()` to resize + repaint in place —
 // keeping the measured row height and scroll position, so there's no reflash.
 
+import { resizeProbe, resizeCount } from "./resize-perf";
+
 export interface WindowedList {
   el: HTMLElement;
   // Re-read the count, resize the spacer, and force a repaint of the visible slice
@@ -143,7 +145,10 @@ export function windowedList(opts: {
     return [first, last];
   }
 
-  function paint(): void {
+  // A const, not a hoisted declaration, so the resize profiler can wrap it (the
+  // wrapper is pass-through unless the profiler is armed). Nothing above this
+  // line may call paint; a new caller added there would hit the TDZ.
+  const paint = resizeProbe("wlist:paint", (): void => {
     frame = 0;
     // Detached: navigated away. Stop listening and let the node be collected.
     if (!container.isConnected) {
@@ -190,7 +195,8 @@ export function windowedList(opts: {
       row.style.height = `${rowHeight}px`;
       container.appendChild(row);
     }
-  }
+    resizeCount("wlist:rows-rebuilt", last - first + 1);
+  });
 
   // Coalesce the scroll-event flood into one recompute per frame; the hot path never
   // flushes layout, so native scroll stays smooth.
@@ -200,7 +206,10 @@ export function windowedList(opts: {
 
   // A resize can change how many rows fit and shift the list's offset, so remeasure
   // before repainting.
-  function onResize(): void {
+  // Also a const for the profiler's sake (see paint). teardown() removes this
+  // exact reference, which holds either way since the probe returns the
+  // original function untouched when disabled.
+  const onResize = resizeProbe("wlist:resize-event", (): void => {
     if (!container.isConnected) {
       teardown();
       return;
@@ -208,7 +217,7 @@ export function windowedList(opts: {
     // Force a re-measure of the offset (paint does it) — a resize can shift it.
     offsetMeasured = false;
     schedule();
-  }
+  });
 
   function teardown(): void {
     if (frame !== 0) cancelAnimationFrame(frame);
@@ -223,14 +232,16 @@ export function windowedList(opts: {
   // this is what brings it back once the box returns; it also covers a resize that
   // shifts the offset. Observes the scroll pane, NOT our own container: paint writes
   // container.style.height, which would otherwise feed back as a resize and loop.
-  const ro = new ResizeObserver(() => {
-    if (!container.isConnected) {
-      teardown();
-      return;
-    }
-    offsetMeasured = false;
-    schedule();
-  });
+  const ro = new ResizeObserver(
+    resizeProbe("wlist:observer", () => {
+      if (!container.isConnected) {
+        teardown();
+        return;
+      }
+      offsetMeasured = false;
+      schedule();
+    }),
+  );
 
   // Resolve the scrolling ancestor once (needs the container connected), wiring its
   // scroll listener and the resize observer together so both attach exactly once.

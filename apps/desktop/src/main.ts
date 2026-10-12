@@ -36,6 +36,7 @@ import { windowedList } from "./windowed-list";
 import { maybeStartE2eBridge } from "./e2e-bridge";
 import { createVisualizer, type Visualizer } from "./visualizer";
 import { bootProfileStart, bootStep, bootProfileReport } from "./perf";
+import { armResizeProfiler, resizeProbe, resizeAsync } from "./resize-perf";
 import {
   initLibraryNav,
   decadeLabel,
@@ -2501,14 +2502,19 @@ async function setupWindowSize(
   // Mode is derived from viewport height, so sync on every resize (manual drags
   // across the breakpoint included) and once now for the initial normal-mode start.
   const syncMiniplayerChecked = () => {
-    void invoke("set_miniplayer_checked", { mini: isMiniViewport() });
+    void resizeAsync("ipc:miniplayer-check", () =>
+      invoke("set_miniplayer_checked", { mini: isMiniViewport() }),
+    );
   };
   syncMiniplayerChecked();
 
-  window.addEventListener("resize", () => {
-    persistSize();
-    syncMiniplayerChecked();
-  });
+  window.addEventListener(
+    "resize",
+    resizeProbe("persist+menu-sync", () => {
+      persistSize();
+      syncMiniplayerChecked();
+    }),
+  );
 
   const storedPos = await app.store.get<{ x: number; y: number }>(
     KEY_WINDOW_POSITION,
@@ -3964,6 +3970,7 @@ async function init(): Promise<void> {
   // Boot profiler (off unless `localStorage.puddingBootPerf = "1"`): arm the
   // long-task observer before any work so the first-paint freeze is captured.
   bootProfileStart();
+  armResizeProfiler();
 
   if (navigator.userAgent.includes("Mac")) {
     document.body.classList.add("platform-mac");
@@ -4043,7 +4050,7 @@ async function init(): Promise<void> {
   });
   // Recompute the title/artist marquees on every resize (width change or a
   // mode switch across the breakpoint both change whether the lines overflow).
-  window.addEventListener("resize", updateMarquees);
+  window.addEventListener("resize", resizeProbe("marquees", updateMarquees));
   // Mini-only expand button (shown where the mini-player toggle sits in full
   // view); its arrows are the mirror of that toggle's collapse glyph.
   const expandBtn = document.querySelector("#expand-btn") as HTMLButtonElement;

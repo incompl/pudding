@@ -23,6 +23,7 @@
 //     blooms over them. The bg and bloom slowly drift through a neon palette.
 
 import { listen } from "@tauri-apps/api/event";
+import { resizeProbe } from "./resize-perf";
 
 interface WaveformEvent {
   samples: number[];
@@ -265,7 +266,7 @@ export async function createVisualizer(container: HTMLElement): Promise<Visualiz
     seedStars();
   };
   resize();
-  new ResizeObserver(() => resize()).observe(container);
+  new ResizeObserver(resizeProbe("viz:canvas-resize", () => resize())).observe(container);
 
   // Whether the rAF loop is live. Declared up here so the waveform listener
   // below can see it.
