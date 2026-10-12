@@ -34,6 +34,7 @@ import {
   popNavToRoot,
   refreshNavPlaylists,
   invalidateNavListCache,
+  repaintNavPane,
   type LibraryNavDeps,
   type NavStep,
 } from "../src/library-nav.ts";
@@ -45,6 +46,10 @@ type Call = { name: string; args: unknown[] };
 
 interface Fixture {
   container: FakeEl;
+  // The box that actually scrolls (#tab-files). #library-nav is display:contents,
+  // so it is this sibling — not the rebuilt container — that holds the pane's
+  // scroll offsets across a render.
+  filesScroller: FakeEl;
   folderTree: FakeEl;
   createBtn: FakeEl;
   filesEmpty: FakeEl;
@@ -65,6 +70,7 @@ interface Fixture {
 function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture {
   const doc = installFakeDom();
   const container = doc.registerRoot("library-nav");
+  const filesScroller = doc.registerRoot("tab-files");
   const folderTree = doc.registerRoot("folder-tree");
   const createBtn = doc.registerRoot("create-playlist-btn");
   const filesEmpty = doc.registerRoot("files-empty");
@@ -142,6 +148,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
   initLibraryNav(deps, initial);
   return {
     container,
+    filesScroller,
     folderTree,
     createBtn,
     filesEmpty,
@@ -252,6 +259,78 @@ test("a view drills in (replace + back header); back returns to the root menu", 
   assert.ok(!hasBackHeader(container), "back should return to the root");
   assert.deepEqual(labels(container).slice(0, 6), ["Browse", "Songs", "Artists", "Albums", "Genres", "Decades"]);
   assert.ok(!createBtn.classList.contains("hidden"), "create button returns at root");
+});
+
+// A repaint rebuilds the open pane under the reader — a column-set change, a header
+// toggle, the commit at the end of a divider drag. None of them moves a row, so the
+// reader's place in the list is theirs and survives the rebuild on both axes. The
+// scroll box is a sibling that outlives every render here (#library-nav is
+// display:contents), so this is the pane *not* being hauled anywhere.
+test("a repaint leaves the reader where they were, on both axes", async () => {
+  const { container, filesScroller } = setup();
+  rowByLabel(container, "Songs").fire("click");
+  await flush();
+
+  filesScroller.scrollTop = 420;
+  filesScroller.scrollLeft = 96;
+  repaintNavPane();
+  await flush();
+
+  assert.equal(filesScroller.scrollTop, 420, "a repaint must not jump the list to its first row");
+  assert.equal(
+    filesScroller.scrollLeft,
+    96,
+    "a repaint must not haul a sideways-scrolled table back to its left edge",
+  );
+  popNavToRoot(); // leave the shared module stack at root for the next test
+});
+
+// ...and when the rebuild *does* lose the offsets, they go back on. The pane refills
+// from a promise, so a real cache miss leaves the browser laying out a pane that
+// holds nothing but "Loading..." and clamping both offsets to zero in between —
+// modeled here by zeroing them in exactly that gap. Keeping the reader's place can't
+// rest on the rebuild happening to land inside one frame, which is the whole reason
+// the offsets ride across it as a one-shot.
+test("a repaint puts the reader's place back if the rebuild clamped it away", async () => {
+  const { container, filesScroller } = setup();
+  rowByLabel(container, "Songs").fire("click");
+  await flush();
+
+  filesScroller.scrollTop = 420;
+  filesScroller.scrollLeft = 96;
+  repaintNavPane();
+  // The clamp a laid-out, rowless pane would apply before the rows come back.
+  filesScroller.scrollTop = 0;
+  filesScroller.scrollLeft = 0;
+  await flush(); // the load resolves and the rows return
+  await flush(); // the frame after, where the restore that waits for them lands
+
+  assert.equal(filesScroller.scrollTop, 420, "the vertical offset must be put back");
+  assert.equal(filesScroller.scrollLeft, 96, "the horizontal offset must be put back");
+  popNavToRoot();
+});
+
+// The one repaint that does move the reader: a sort reorders the rows under them, so
+// the first row is the new answer and the offset they had points at nothing. The
+// table itself is unchanged, so their sideways place still stands.
+test("a sort lands the pane at the top, and says so rather than hoping for a clamp", async () => {
+  const { container, filesScroller } = setup();
+  rowByLabel(container, "Songs").fire("click");
+  await flush();
+
+  filesScroller.scrollTop = 420;
+  filesScroller.scrollLeft = 96;
+  repaintNavPane({ toTop: true });
+  await flush();
+  await flush();
+
+  assert.equal(filesScroller.scrollTop, 0, "a sort must land at the top of the list");
+  assert.equal(
+    filesScroller.scrollLeft,
+    96,
+    "a sort must not haul a sideways-scrolled table back to its left edge",
+  );
+  popNavToRoot();
 });
 
 test("a playlist row OPENS RIGHT without drilling — the root menu stays put", async () => {

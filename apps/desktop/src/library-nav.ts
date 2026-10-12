@@ -487,33 +487,63 @@ function rootMenuBody(): HTMLElement {
   return host;
 }
 
-// The horizontal offset a repaint is carrying across its rebuild, in px, or 0 for
-// a navigation (which starts at the left edge). Written by render and taken by the
-// list body it is building, as that body is built — see repaintNavPane for why it
-// can't live on the stack of either, and asyncListBody for why it is taken then
-// rather than when the rows arrive.
-let pendingScrollX = 0;
+// The reader's place in the pane, in px on both axes. A repaint carries it across
+// the rebuild; a navigation carries zeros, since the top-left is where a pane you
+// have not seen before starts. Written by render and taken by the list body it is
+// building, as that body is built — see repaintNavPane for why it can't live on the
+// stack of either, and asyncListBody for why it is taken then rather than when the
+// rows arrive.
+interface NavScroll {
+  x: number;
+  y: number;
+}
 
-// Put a repaint's offset back, now that `host` holds a table again. The browser
-// clamps for us if the rebuilt table turned out narrower than the one that was
-// scrolled (a column dropped, `Reset column widths`), so there's no max to work out.
-function restoreScrollX(x: number, host: HTMLElement): void {
-  if (x <= 0) return;
+const NO_SCROLL: NavScroll = { x: 0, y: 0 };
+
+let pendingScroll: NavScroll = NO_SCROLL;
+
+// Put a repaint's place back, now that `host` holds a table again.
+//
+// On the microtask after this fill rather than in it, because the pane is not yet
+// as big as the list it is showing: the windowed slice mounts on a microtask of its
+// own (see windowedList), and that is what gives the table its full width and the
+// list its full height. A write before it can only be clamped to what an empty pane
+// can hold, which is nothing — and for the vertical axis that clamp would be the
+// one thing to *lose* an offset that usually crosses the rebuild untouched. One
+// microtask later both axes take first try, and still inside this same task, so no
+// intermediate position is ever painted.
+//
+// Then one retry a frame later, as a backstop for a list whose rows weren't
+// measurable yet (the window retries its own first paint until the pane has a box).
+// Not a chase loop: a write of an offset the pane already holds is a no-op, so the
+// retry costs nothing when it wasn't needed, and where the rebuilt table really is
+// smaller than the one that was scrolled (a column dropped, `Reset column widths`,
+// a shorter list) the clamp standing is the right answer.
+//
+// What this does *not* do is remount the slice the vertical write just scrolled
+// away from — the right pane's equivalent does (renderQueue's restoreScroll calls
+// win.flush()), because the slice the window mounted was chosen for the scrollTop
+// the clamp had put at 0, i.e. the top of the list. This pane relies on the window
+// to come back on its own instead, and it does: the first paint of a list built
+// here is still pending on an animation frame when `put` runs, and the scroll event
+// `put` fires schedules another, both of them inside the frame that follows this
+// task and so ahead of its paint. That holds because the fill resolves in a task of
+// its own; it would not hold from inside a frame callback, where both would slip to
+// the next frame and the reader would see one frame of bare spacer. The difference
+// from the right pane is not a decision — it is that nothing here has a handle on
+// the list's window to flush (render builds and forgets it), which is the thing to
+// fix if that ever shows.
+function restoreScroll(keep: NavScroll, host: HTMLElement): void {
+  if (keep.x <= 0 && keep.y <= 0) return;
   const scroller = filesScroller();
   if (!scroller) return;
-  scroller.scrollLeft = x;
-  // Either it took, or the table is narrower than the offset and the clamp is the
-  // right answer. The one case worth a second look is a list whose width comes
-  // from its rows rather than from a header row — headers off — because the
-  // windowed slice mounts a frame after this and the pane is momentarily only as
-  // wide as its spacer. One retry, not a chase loop: that single frame is the only
-  // thing being waited for, and a write to a pane that isn't overflowing is a
-  // no-op, so the retry costs nothing when it wasn't needed.
-  if (scroller.scrollLeft < x) {
-    requestAnimationFrame(() => {
-      if (host.isConnected) scroller.scrollLeft = x;
-    });
-  }
+  const put = (): void => {
+    if (!host.isConnected) return;
+    if (keep.x > 0 && scroller.scrollLeft < keep.x) scroller.scrollLeft = keep.x;
+    if (keep.y > 0 && scroller.scrollTop < keep.y) scroller.scrollTop = keep.y;
+  };
+  queueMicrotask(put);
+  requestAnimationFrame(put);
 }
 
 // A list body that loads asynchronously. build() must return synchronously, so
@@ -530,11 +560,11 @@ function asyncListBody<T>(opts: {
 }): HTMLElement {
   const host = list();
   // Taken here, on the way past, rather than read when the load resolves: this is
-  // the pane the offset was measured on, and holding it in the closure is what
-  // keeps a navigation that supersedes us from finding it still waiting — and keeps
-  // us from putting back an offset that belongs to whatever superseded us.
-  const keepX = pendingScrollX;
-  pendingScrollX = 0;
+  // the pane the offsets were measured on, and holding them in the closure is what
+  // keeps a navigation that supersedes us from finding them still waiting — and
+  // keeps us from putting back a place that belongs to whatever superseded us.
+  const keep = pendingScroll;
+  pendingScroll = NO_SCROLL;
   const loading = h("div", { class: "nav-coming-soon", text: "Loading..." });
   host.appendChild(loading);
   opts
@@ -545,7 +575,7 @@ function asyncListBody<T>(opts: {
       // for leaf lists it would clobber the shared navLeafTracks the selection
       // painter maps rows through — mismatching the list actually on screen.
       if (!host.isConnected) return;
-      // No table arrived, so there is no offset to put back.
+      // No table arrived, so there is no place to put back.
       if (items.length === 0) {
         loading.textContent = opts.empty;
         return;
@@ -553,10 +583,9 @@ function asyncListBody<T>(opts: {
       host.replaceChildren();
       opts.fill(items, host);
       // The table exists as of this line — fill has appended the leaf list, header
-      // row and all — so the scroller is as wide as it is going to get and a
-      // repaint's offset can go back on. Here rather than after render() returns,
-      // because that is a tick too early: see repaintNavPane.
-      restoreScrollX(keepX, host);
+      // row and all — so a repaint's place can go back on. Here rather than after
+      // render() returns, because that is a tick too early: see repaintNavPane.
+      restoreScroll(keep, host);
     })
     .catch((e) => {
       if (!host.isConnected) return;
@@ -1018,24 +1047,44 @@ function filesScroller(): HTMLElement | null {
   return document.getElementById("tab-files") as HTMLElement | null;
 }
 
-// Repaint the open pane *without* moving the table sideways — a sort, a column-set
-// change, a divider drag's commit, a width reset. Every one of those rebuilds the
-// same pane with the same columns, so the reader's horizontal position is not
-// something the repaint gets to change; it is a fact about the table they are
-// reading, and the table is still the same table.
+// Repaint the open pane *without moving the reader* — a divider drag's commit, a
+// width reset, a column-set change, a header toggle. Every one of those rebuilds
+// the same list with the same rows in the same order, so where the reader is in it
+// is not something the repaint gets to change: it is a fact about the table they
+// are reading, and the table is still the same table. Both axes, and deliberately
+// so — a resize that hauled a long list back to its first row would lose the reader
+// their place for a change they can see the whole of anyway.
 //
-// Why it can't just be read and written around render(): the pane refills from a
-// promise (see asyncListBody — even a cache hit resolves a tick later), so the
-// scroller is laid out holding nothing but "Loading..." in between and the browser
-// has already clamped scrollLeft to 0 by the time the new rows exist. The offset
-// therefore rides across the gap as a one-shot and is put back by the fill, which
-// is the moment the table has a width to hold it again.
+// `toTop` is the one gesture that is allowed to move them: a sort. The row order
+// changed, so the top of the list is the new answer.
 //
-// Only the horizontal axis. Vertically a repaint still lands at the top, and for
-// the gesture that most often causes one — a sort — that reads as intentional: the
-// row order changed, so the top of the list is the new answer. The columns didn't.
-export function repaintNavPane(): void {
-  render(filesScroller()?.scrollLeft ?? 0);
+// Why the offsets can't just be read and written around render(): the pane refills
+// from a promise (see asyncListBody — even a cache hit resolves a tick later), so
+// the scroller is laid out holding nothing but "Loading..." in between and the
+// browser has already clamped scrollLeft to 0 by the time the new rows exist. The
+// place therefore rides across the gap as a one-shot and is put back by the fill,
+// which is the moment the table can hold it again (see restoreScroll, where the
+// vertical axis needs a different touch from the horizontal one).
+//
+// The vertical offset usually survives a rebuild on its own — the scroll box
+// outlives every render here (#library-nav is `display: contents`, so the element
+// holding the offsets is never the one torn down) and the refill lands inside the
+// same frame. That is why this pane kept the reader's place while the right pane,
+// whose rebuild forces a layout while it holds no rows (renderQueue's win.flush),
+// did not. Carrying it anyway is what makes keeping it a decision rather than a
+// side effect of that timing: a cache miss really does resolve a frame later, and
+// that rebuild would otherwise lose the place this one keeps.
+export function repaintNavPane(opts: { toTop?: boolean } = {}): void {
+  const scroller = filesScroller();
+  const keep: NavScroll = {
+    x: scroller?.scrollLeft ?? 0,
+    y: opts.toTop ? 0 : (scroller?.scrollTop ?? 0),
+  };
+  // Landing at the top is written too, not left to the rebuild's clamp: zero is a
+  // valid offset at any content height, so doing it here — while the old rows are
+  // still up — takes once and for all.
+  if (opts.toTop && scroller) scroller.scrollTop = 0;
+  render(keep);
 }
 
 // Reload the current drill pane from the backend — main.ts calls this after a
@@ -1081,11 +1130,11 @@ export function refreshNavPaneAfterScan(): void {
   requestAnimationFrame(restore);
 }
 
-// `keepX` is the horizontal offset to restore once this render's pane has rebuilt
-// far enough to hold it — see repaintNavPane, which is the only caller that passes
-// one. Everybody else (push, back, renderNav, reload) is a navigation into a
-// different pane, where the left edge is the right place to start.
-function render(keepX = 0): void {
+// `keep` is the place to restore once this render's pane has rebuilt far enough to
+// hold it — see repaintNavPane, which is the only caller that passes one.
+// Everybody else (push, back, renderNav, reload) is a navigation into a different
+// pane, where the top-left is the right place to start.
+function render(keep: NavScroll = NO_SCROLL): void {
   container.replaceChildren();
   // A fresh pane starts with no keyboard list; each pane's row builder re-registers
   // one (synchronously for the root menu, from the async fill for the views). Clears
@@ -1158,9 +1207,9 @@ function render(keepX = 0): void {
   // next pane that has one. Every pane the repaint can reach is an async list
   // today; the root menu and the get-started prompt above are not, and a future
   // sync pane shouldn't have to know this variable exists.
-  pendingScrollX = keepX;
+  pendingScroll = keep;
   container.appendChild(pane.build());
-  pendingScrollX = 0;
+  pendingScroll = NO_SCROLL;
 
   // render() is the single choke point every navigation flows through (enterView,
   // push, back, popNavToRoot), so persist the current place here. An empty stack

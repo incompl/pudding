@@ -1842,7 +1842,11 @@ body.np-zen.np-idle #now-playing-controls {
    is added or removed at the switch — which is why it costs no JS at all, and why
    each pane can sit on its own side of the breakpoint independently.
 
-   The track list arrives as --cols (see gridTemplate), computed once for the whole
+   The track list arrives as --cols (see gridTemplate), set once on the pane's own
+   list element and inherited from there by the header row and by every row the
+   window mounts — so a committed column width is one property write and no row is
+   rebuilt, and a row scrolled in mid-drag is laid out like its neighbours without
+   being told anything. Computed once for the whole
    list: text fields get minmax(0, Wfr) and fixed fields (times, kinds) a width in
    ch. The `0` minimum is the whole policy in one token — an over-full row gets
    thin and ellipsizes rather than overflowing the pane, so adding a tenth column
@@ -2052,8 +2056,8 @@ body.np-zen.np-idle #now-playing-controls {
 /* --- The optional header row ---------------------------------------------
 
    Off by default, per pane. It is a real row — same shell, same padding, same
-   gutter, same --cols — so it lines up with the rows by construction rather than
-   by a second set of matched numbers.
+   gutter, and the same inherited --cols — so it lines up with the rows by
+   construction rather than by a second set of matched numbers.
 
    It is display:none outside column mode, gated by the *same* container query as
    the columns themselves, so a header can never appear above a folded row. That
@@ -2135,7 +2139,21 @@ body.np-zen.np-idle #now-playing-controls {
 .colhead-cell.sortable {
   cursor: pointer;
 }
-.colhead-cell.sortable:hover {
+/* Two exclusions, and the lit label means one thing because of them: "click here
+   and the list sorts by this column".
+
+   Not under a divider. The 10px target sits inside the header cell it trails (it
+   has to — the grid's gap is a gap, with no element to hang it on), so the pointer
+   resting on a boundary is also resting on that cell, and the label would light for
+   a press that resizes instead of sorting. The grip's own mousedown stops the sort
+   from firing; this stops the header from promising it.
+
+   Not while a drag is in progress. A resize drags the pointer across the header,
+   over labels whose own grip it is nowhere near, so :has() alone would hand the
+   highlight to each column the boundary passes under. body.dragging covers the
+   splitter's drag too, where the same applies. The global `cursor: col-resize
+   !important` already takes the pointer cursor away for both reasons. */
+body:not(.dragging) .colhead-cell.sortable:not(:has(.colhead-grip:hover)):hover {
   color: var(--text);
 }
 .colhead-cell.col-num {
@@ -2189,9 +2207,9 @@ body.np-zen.np-idle #now-playing-controls {
    Invisible at rest. The gap already separates the columns, and a permanent rule
    down every boundary would be the vertical chrome the header block deliberately
    goes without (see .colhead) — drawn eight times over, in a list whose one line of
-   contrast is meant to be labels against data. The col-resize cursor is what tells
-   the reader the boundary is draggable, exactly as it does over #splitter; the line
-   appears under the pointer to say which boundary is about to move. */
+   contrast is meant to be labels against data. The lines come back on hover, in two
+   steps: faintly across the whole set when the pointer is anywhere in the header,
+   full strength on the one it is over (see the hover rules below). */
 .colhead-grip {
   position: absolute;
   top: 0;
@@ -2216,22 +2234,50 @@ body.np-zen.np-idle #now-playing-controls {
   width: 1px;
   background: var(--text-faint);
   opacity: 0;
+  /* Short enough to feel like a response to the pointer rather than an animation —
+     eight lines cutting in hard on cross reads as a flicker. */
+  transition: opacity 90ms ease;
 }
-.colhead-grip:hover::after {
+/* Two steps, both keyed off hover. Entering the header row reveals *every*
+   divider at once, faintly: the targets are 10px in a header whose columns are
+   inches wide, so a reader with no line to aim at has to sweep the row hunting for
+   the cursor to change. The faint set is the map — it says "the boundaries are
+   here, and they move" the moment the pointer arrives anywhere in the header, and
+   costs nothing at rest, which is where the row spends its life. The divider under
+   the pointer then goes full strength to say which boundary is about to move;
+   together with the col-resize cursor that is the confirmation you are on target.
+
+   Both steps are off for the duration of any drag (body:not(.dragging)), and the
+   dragged header draws its own set instead — see below. Hover is the wrong input
+   once the mouse is down: the pointer has left the 10px target within the first few
+   pixels, and it travels across the header (and over the *other* pane's header,
+   which is not resizing) for the rest of the gesture. */
+body:not(.dragging) .colhead:hover .colhead-grip::after {
+  opacity: 0.5;
+}
+body:not(.dragging) .colhead:hover .colhead-grip:hover::after {
   opacity: 1;
 }
-/* Held: the divider being dragged stays lit for as long as the mouse is down, and
-   every other one goes quiet — the pointer leaves the 10px target on the first few
-   pixels of the drag, so :hover alone would drop the line exactly when it is doing
-   its job, and light whichever divider the pointer happened to sweep past. Marked
-   with a class rather than :active because the mousedown handler preventDefaults
-   (to suppress the text selection a drag would otherwise start), which is enough to
-   cost the element its activation state. body.dragging is the splitter's own class,
-   and a divider drag is the same gesture. */
-body.dragging .colhead-grip:hover::after {
-  opacity: 0;
+/* Held: for as long as the mouse is down, the header being resized keeps its whole
+   set of dividers drawn — faint, with the one being dragged lit — independent of
+   hover. A resize drag wanders well outside the header row and outside the window,
+   and the boundaries don't stop existing because the pointer went south. Keeping
+   the set up also keeps the moving line in context: you watch the boundary travel
+   toward its neighbours instead of one lit line adrift in an empty row.
+
+   Keyed on the dragged header (.col-resizing-head, set in columns.ts) rather than
+   on body.dragging, so this is the one pane that draws them. The other pane's
+   boundaries are not moving, and a splitter drag — which shares body.dragging — is
+   not dragging a boundary at all.
+
+   The dragged divider is marked with a class rather than matched by :active because
+   the mousedown handler preventDefaults (to suppress the text selection a drag
+   would otherwise start), which is enough to cost the element its activation
+   state. */
+.colhead.col-resizing-head .colhead-grip::after {
+  opacity: 0.5;
 }
-body.dragging .colhead-grip.col-resizing::after {
+.colhead.col-resizing-head .colhead-grip.col-resizing::after {
   opacity: 1;
   background: var(--text-dim);
 }

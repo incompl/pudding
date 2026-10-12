@@ -2,9 +2,10 @@
 // with no browser and no dependency (jsdom/happy-dom). The navigator touches a
 // narrow slice of the DOM — createElement, className/textContent, setAttribute,
 // append / appendChild / replaceChildren, addEventListener, classList.toggle,
-// isConnected, and getElementById — so we model exactly that, faithfully enough for the
-// behaviors the tests assert (especially isConnected flipping to false when
-// replaceChildren detaches a subtree, which the async-load guard depends on).
+// isConnected, getElementById, and the scroll offsets of the pane its children lay
+// out in — so we model exactly that, faithfully enough for the behaviors the tests
+// assert (especially isConnected flipping to false when replaceChildren detaches a
+// subtree, which the async-load guard depends on).
 //
 // This is deliberately not a general DOM: it implements only what the module
 // exercises. If library-nav starts using more of the DOM, extend this.
@@ -34,6 +35,11 @@ interface ModeledElement {
   className: string;
   textContent: string;
   readonly isConnected: boolean;
+  // The scroll offsets of a scroll pane. Plain numbers here: the fake has no
+  // layout, so nothing clamps them — which is enough to assert *who writes what*
+  // (library-nav zeroes scrollTop on a repaint and carries scrollLeft across it).
+  scrollTop: number;
+  scrollLeft: number;
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | null;
   // data-* attributes, the way `h` writes them (el.dataset.col = "artist").
@@ -70,6 +76,8 @@ type FaithfulKeys =
   | "className"
   | "textContent"
   | "isConnected"
+  | "scrollTop"
+  | "scrollLeft"
   | "setAttribute"
   | "getAttribute";
 type _FaithfulEl = Pick<ModeledElement, FaithfulKeys> extends Pick<HTMLElement, FaithfulKeys>
@@ -88,6 +96,8 @@ export class FakeEl implements ModeledElement {
   readonly tagName: string;
   type = "";
   className = "";
+  scrollTop = 0;
+  scrollLeft = 0;
   readonly children: FakeEl[] = [];
   parentNode: FakeEl | null = null;
   private ownText = "";
@@ -235,6 +245,12 @@ export class FakeDocument implements ModeledDocument {
 /** Install a fresh document on globalThis and return it. */
 export function installFakeDom(): FakeDocument {
   const doc = new FakeDocument();
+  // The navigator defers a few writes by one frame — notably putting the reader's
+  // scroll offsets back once the rebuilt pane can hold them (see restoreScroll).
+  // A macrotask stands in for the frame, so a test's `flush()` reaches it; there is
+  // no layout here, so "next frame" only has to mean "after the current one".
+  globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) =>
+    setTimeout(() => cb(0), 0)) as unknown as typeof requestAnimationFrame;
   // The one unavoidable cast: globalThis.document is typed as the full Document,
   // and FakeDocument is deliberately a partial (see ModeledDocument). Everything
   // the source actually reaches through `document` is covered by the contract

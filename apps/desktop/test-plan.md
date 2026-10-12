@@ -108,10 +108,10 @@ over one too.
 
 ## 5. Columns
 
-- [ ] Right-click list → toggle header on, sort by each column type (text, number, time, date)
-- [ ] Add/remove each column; automatic mode picks per-list defaults
-- [ ] Drag dividers to resize; undo widths from the context menu
-- [ ] Narrow the pane until rows fold to one line, then widen back
+- [x] Right-click list → toggle header on, sort by each column type (text, number, time, date)
+- [x] Add/remove each column; automatic mode picks per-list defaults
+- [x] Drag dividers to resize; undo widths from the context menu
+- [x] Narrow the pane until rows fold to one line, then widen back
 
 ## 6. Search
 

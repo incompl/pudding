@@ -63,6 +63,7 @@ import {
   gridClasses,
   isSortedBy,
   nextSort,
+  setColumnGeometry,
   setColumnRepaint,
   sortTracks,
   QUEUE_CELLS,
@@ -175,6 +176,13 @@ function queueSortMark(tracks: SearchTrack[]): SortState {
   return isSortedBy(tracks, lastQueueSort) ? lastQueueSort : null;
 }
 
+// A sort is the one curation that moves the reader: it puts the rows in a new
+// order, so the first row is the new answer and the offset they had points at rows
+// that have gone elsewhere. Set by sortQueueBy and taken by the render its curation
+// triggers — deliberately not "every curation", because a reorder, a removal or a
+// drag-in leaves the reader reading the same part of the same list.
+let pendingQueueTop = false;
+
 function sortQueueBy(id: ColumnId): void {
   const list = curatedList();
   if (!list) return;
@@ -191,19 +199,29 @@ function sortQueueBy(id: ColumnId): void {
     repaintQueueList();
     return;
   }
+  pendingQueueTop = true;
   applyCuration(sortTracks(list.tracks, next));
 }
 
+// Publish the list's column template: one property on #queue-list, inherited by the
+// header row and by every row the window mounts. The single place in this pane that
+// knows where the template lives — a render writes it on the way through, and a
+// committed divider drag writes it again without rebuilding a thing.
+function writeQueueTemplate(
+  cols: ColumnId[],
+  tracks: SearchTrack[],
+  withHeader: boolean,
+): void {
+  queueListEl.style.setProperty("--cols", gridTemplate(cols, tracks, withHeader, "queue"));
+}
+
 // The header row, when the pane's headers are switched on. Built as a real
-// .queue-row — same padding, same gutter width, same --cols template — so it lines
-// up with the rows by construction rather than by a second set of matched numbers.
-// It is display:none outside column mode, gated by the *same* container query as
-// the columns, so a header can never appear above a folded row.
-function buildQueueHeader(cols: ColumnId[], template: string, tracks: SearchTrack[]): HTMLElement {
-  const cells = h("span", {
-    class: "queue-text col-grid",
-    style: { "--cols": template },
-  });
+// .queue-row — same padding, same gutter width, and the same inherited --cols — so
+// it lines up with the rows by construction rather than by a second set of matched
+// numbers. It is display:none outside column mode, gated by the *same* container
+// query as the columns, so a header can never appear above a folded row.
+function buildQueueHeader(cols: ColumnId[], tracks: SearchTrack[]): HTMLElement {
+  const cells = h("span", { class: "queue-text col-grid" });
   append(cells, buildHeaderCells("queue", cols, queueSortMark(tracks), sortQueueBy));
   return h(
     "li",
@@ -243,7 +261,6 @@ function buildQueueRow(
   isSource: boolean,
   viewToPool: number[],
   cols: ColumnId[],
-  template: string,
   i: number,
 ): HTMLElement {
   const t = queue.tracks[i];
@@ -274,10 +291,7 @@ function buildQueueRow(
   // line via the `· ` separators in CSS. Either way the row is a single line, so
   // the windowed row geometry (each slot placed at i * rowHeight, from one probe
   // row) stays uniform.
-  const text = h("span", {
-    class: gridClasses("queue", "queue-text"),
-    style: { "--cols": template },
-  });
+  const text = h("span", { class: gridClasses("queue", "queue-text") });
   append(text, buildCells(t, cols, QUEUE_CELLS));
   // The row's one aside — "(Missing file)" for a playlist row whose file is gone,
   // or a cloud file's "(Downloading...)" / "(Not downloaded)". Shared with the
@@ -413,7 +427,17 @@ function stickyMargin(): number {
   return queueListEl.querySelector<HTMLElement>(".colhead")?.offsetHeight ?? 0;
 }
 
-export function renderQueue(queue: Queue | null, isSource: boolean): void {
+// `opts.repaint` marks a rebuild of the list the reader is already looking at — a
+// column-set change, a header toggle, a sort's dropped arrow, the commit at the end
+// of a divider drag (see repaintQueueList, the only caller that passes it). None of
+// those moves a row, so the reader's place in the list is theirs to keep: such a
+// rebuild neither chases the playing row nor consumes an append's pending reveal,
+// where every other render of this pane does both.
+export function renderQueue(
+  queue: Queue | null,
+  isSource: boolean,
+  opts: { repaint?: boolean } = {},
+): void {
   if (!queue) {
     queueListEl.replaceChildren();
     queueWin = null;
@@ -441,12 +465,15 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
 
   // A pending append/insert target wins over the playing row for the reveal, once
   // (and only when we're showing the queue it targeted — a browsed playlist has its
-  // own, unrelated rows, so it never steals a queue append's scroll).
-  const pending = isSource ? app.pendingQueueScrollIndex : null;
-  app.pendingQueueScrollIndex = null;
+  // own, unrelated rows, so it never steals a queue append's scroll). A repaint
+  // reveals nothing and consumes nothing: it is the same list in the same order, so
+  // the row the reader is looking at stays the row they are looking at, and an
+  // append still waiting for its scroll gets it from the render that follows.
+  const pending = isSource && !opts.repaint ? app.pendingQueueScrollIndex : null;
+  if (!opts.repaint) app.pendingQueueScrollIndex = null;
   const playIdx = isSource ? queuePlayingIndex.peek() : null;
   const playingView = playIdx != null ? viewIndexOfPlayable(queue.tracks, playIdx) : -1;
-  const revealTo = pending ?? (playingView >= 0 ? playingView : null);
+  const revealTo = opts.repaint ? null : (pending ?? (playingView >= 0 ? playingView : null));
 
   // Same list object as the last paint — a play-advance or a selection change, not a
   // content edit (every curation swaps in a new Queue object). Repaint the playing
@@ -471,36 +498,71 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
     return;
   }
 
+  // A sort's pending "land at the top", taken the same one-shot way the append's
+  // reveal is and skipped by a repaint for the same reason: a repaint is not the
+  // render a sort is waiting for, so it neither answers nor swallows the request.
+  //
+  // Taken *below* the fast path above, unlike that reveal, because the fast path
+  // cannot answer this one — it keeps the window exactly as it is, which is the
+  // whole point of it. Reading the flag up there would clear a request that only a
+  // rebuild can serve, and the sort would quietly stay where it was. Nothing writes
+  // a signal between sortQueueBy's flag and applyCuration's render that would make
+  // the pane effect re-run on the *same* Queue object today, so this is a guard
+  // rather than a fix — but it is one added signal read away from being a fix.
+  const toTop = opts.repaint ? false : pendingQueueTop;
+  if (!opts.repaint) pendingQueueTop = false;
+
   renderedQueue = queue;
   renderedIsSource = isSource;
   const cols = activeColumns("queue", autoQueueColumns(queue.tracks));
   // One template for the whole list, computed here rather than per row: a fixed
   // column's width is a fact about the list (see gridTemplate), and this is the
-  // only place that sees all of it — the rows below are built one at a time, as
-  // the window scrolls them in.
+  // only place that sees all of it — the rows below are built one at a time, as the
+  // window scrolls them in.
+  //
+  // It rides the list itself, because `--cols` inherits: the header and every row
+  // the window mounts read the one value from #queue-list. That is what makes a
+  // committed width a single property write rather than a rebuild (see
+  // regridQueueList), and what keeps a row scrolled in mid-drag laid out like the
+  // rows either side of it.
   const showHeader = columnHeaders.queue.peek();
-  const template = gridTemplate(cols, queue.tracks, showHeader, "queue");
+  writeQueueTemplate(cols, queue.tracks, showHeader);
   // Row count, so the drag-drop drop-index math can resolve an insert-at-the-end
   // without every row being mounted (updateDropTarget reads it).
   queueListEl.dataset.rowCount = String(queue.tracks.length);
-  // The sideways scroll offset, carried over the rebuild below when the pane is
-  // being handed the same list again — a sort, a drag, a removal, a play-advance
-  // that missed the identity guard above. All of those leave the columns exactly
-  // as they were, so the reader's horizontal position in the table is not this
-  // render's to reset; only a *different* list is a first look that starts at the
-  // left edge. Read before the teardown, because the teardown is what loses it:
-  // the rebuild below forces layout (win.flush measures a row) while the pane
-  // holds no rows yet, and the browser clamps the offset to what is reachable at
-  // that moment. Put back by restoreScrollX, once the rows are there again.
+  // The reader's place in the pane — both axes — carried over the rebuild below
+  // when the pane is being handed the same list again: a sort, a drag, a removal, a
+  // repaint, a play-advance that missed the identity guard above. All of those
+  // leave the table and the rows as they were, so where the reader is in it is not
+  // this render's to reset; only a *different* list is a first look that starts at
+  // the top left. Read before the teardown, because the teardown is what loses it:
+  // the rebuild below forces layout (win.flush measures a row) while the pane holds
+  // no rows yet, and the browser clamps both offsets to what is reachable at that
+  // moment — which is nothing. Put back by restoreScroll, once the rows are there
+  // again.
   const listId = listIdentity(queue);
-  const keepX = listId === renderedListId ? queueListEl.scrollLeft : 0;
+  const sameList = listId === renderedListId;
+  const keepX = sameList ? queueListEl.scrollLeft : 0;
+  // Vertically a sort is the exception the table isn't: the columns are untouched,
+  // so the sideways place above still stands, while the rows are not and the top of
+  // the list is where this render belongs (see pendingQueueTop).
+  const keepY = sameList && !toTop ? queueListEl.scrollTop : 0;
   renderedListId = listId;
-  const restoreScrollX = (): void => {
-    // Only ever upward, and only to where the reader had it: if the rebuilt table
-    // is genuinely narrower than it was (a column dropped, `Reset column widths`)
-    // the clamp standing is the right answer, and a plain assignment would fight
-    // the window's own reveal for no reason.
+  const restoreScroll = (): void => {
+    // Only ever back up to where the reader had it: if the rebuilt list is
+    // genuinely narrower or shorter than it was (a column dropped, `Reset column
+    // widths`, a removal) the clamp standing is the right answer, and a plain
+    // assignment would fight the window's own reveal for no reason.
     if (keepX > 0 && queueListEl.scrollLeft < keepX) queueListEl.scrollLeft = keepX;
+    if (keepY > 0 && queueListEl.scrollTop < keepY) {
+      queueListEl.scrollTop = keepY;
+      // The slice the flush above mounted was chosen for a scrollTop the clamp had
+      // just put at 0, so it is the top of the list. Repaint it synchronously
+      // against the restored offset rather than leaving the scroll event to do it
+      // next frame, which would show one frame of bare spacer where the reader's
+      // rows belong.
+      queueWin?.flush();
+    }
   };
   queueListEl.replaceChildren();
   // A playlist with no rows at all. Say so in the pane: a blank list reads as a
@@ -516,22 +578,27 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
   }
   // Sticky, inside #queue-list — which is the query container, so the header can
   // be gated by the same @container rule the columns are.
-  const header = showHeader ? buildQueueHeader(cols, template, queue.tracks) : null;
+  const header = showHeader ? buildQueueHeader(cols, queue.tracks) : null;
   if (header) queueListEl.appendChild(header);
 
   const buildRow = (i: number): HTMLElement =>
-    buildQueueRow(queue, isSource, viewToPool, cols, template, i);
+    buildQueueRow(queue, isSource, viewToPool, cols, i);
 
   // Debug/e2e escape hatch: render every row eagerly (no measured-layout windowing)
   // so fake-DOM tests can assert on real rows. Mirrors renderLeafTrackList.
   if ((globalThis as { __noWindowing?: boolean }).__noWindowing) {
     queueWin = null;
     for (let i = 0; i < queue.tracks.length; i++) queueListEl.appendChild(buildRow(i));
+    // Place, then reveal — the same order the windowed path below ends up in (where
+    // revealIndex is deferred a frame and so always lands last). The other way round
+    // a restored vertical offset overrides the reveal it was supposed to defer to:
+    // a reveal that scrolls *up* to its row leaves scrollTop below where the reader
+    // had it, which is exactly the gap restoreScroll fills in.
+    restoreScroll();
     // Index among the *track* rows: the column header, when shown, is child 0.
     const rows = queueListEl.querySelectorAll<HTMLElement>("li.queue-row:not(.colhead)");
     const row = revealTo != null ? rows[revealTo] : undefined;
     if (row && typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "nearest" });
-    restoreScrollX();
     return;
   }
 
@@ -542,27 +609,47 @@ export function renderQueue(queue: Queue | null, isSource: boolean): void {
   // exist on this same tick — no one-frame blank flash, and a click synthesized
   // straight after a render (curation, tests) finds its row.
   win.flush();
-  // The table is at full width as of this line, so the offset can go back on: the
-  // header row is in the DOM, and flush has mounted the first slice synchronously,
-  // which is the other thing the width can come from (a pane with its headers
-  // switched off has only its rows to be wide).
-  restoreScrollX();
+  // The list is at its full size as of this line, so the reader's place can go back
+  // on: the header row is in the DOM, and flush has mounted the first slice
+  // synchronously and sized the spacer to the whole list — which is where the
+  // scrollable height comes from, and the other thing the width can come from (a
+  // pane with its headers switched off has only its rows to be wide).
+  restoreScroll();
   // Reveal past the sticky header, so a scrolled-to row never lands under it.
   if (revealTo != null) win.revealIndex(revealTo, stickyMargin());
 }
 
-// Force a full rebuild of the list rows — the column set, header visibility, or
-// sort changed, none of which any signal the render effect tracks. renderQueue
-// short-circuits when handed the same Queue object, so clear that guard first.
+// Force a full rebuild of the list rows — the column set, header visibility, the
+// column widths a divider drag just committed, or a sort's dropped arrow, none of
+// which any signal the render effect tracks. renderQueue short-circuits when handed
+// the same Queue object, so clear that guard first — and tell it this is a repaint,
+// so the rebuild leaves the reader exactly where they were instead of hunting down
+// the playing row (see renderQueue's `opts.repaint`).
 export function repaintQueueList(): void {
   const q = renderedQueue;
   if (!q) return;
   const isSource = renderedIsSource;
   renderedQueue = null;
-  renderQueue(q, isSource);
+  renderQueue(q, isSource, { repaint: true });
 }
 
 setColumnRepaint("queue", repaintQueueList);
+// A width change is not a rebuild: the list carries the template and every row
+// inherits it, so committing a divider drag means recomputing that one string and
+// writing it back — no teardown, no reflash, and the reader keeps their place
+// without anything having to carry it. The fixed columns are sized from the rows
+// (see gridTemplate), which is why this is computed here rather than in columns.ts.
+function regridQueueList(): void {
+  const q = renderedQueue;
+  if (!q) return;
+  writeQueueTemplate(
+    activeColumns("queue", autoQueueColumns(q.tracks)),
+    q.tracks,
+    columnHeaders.queue.peek(),
+  );
+}
+
+setColumnGeometry("queue", regridQueueList);
 // Scroll a row of the open list (queue or browsed playlist) into view by its
 // view index — the equivalent of scrollIntoView({ block: "nearest" }). Backs
 // keyboard list navigation, whose selection move must keep the focused row on

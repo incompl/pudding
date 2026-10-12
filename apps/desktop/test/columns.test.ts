@@ -31,6 +31,8 @@ import {
   isSortedBy,
   nextSort,
   resizedWidths,
+  setColumnGeometry,
+  setColumnRepaint,
   setColumnRoom,
   sortTracks,
   NAV_CELLS,
@@ -1012,6 +1014,33 @@ test("the picker offers to reset widths only once there are widths to reset", ()
   columnWidths.queue.value = { duration: 6 };
   build().find((i) => i.label === "Auto columns");
   assert.deepEqual(columnWidths.queue.value, { duration: 6 });
+});
+
+// Width and set are different kinds of edit, and the machinery now says which is
+// which. A width is one `--cols` property on the pane's list that every row and the
+// header inherit, so committing one writes that string and nothing is rebuilt: no
+// loader replayed, no reader moved, no frame of empty pane. A set change really does
+// need new rows — different cells — so it still goes through the full repaint.
+test("a width commit rewrites the template; only a set change rebuilds the rows", () => {
+  const calls: string[] = [];
+  setColumnRepaint("library", () => calls.push("repaint"));
+  setColumnGeometry("library", () => calls.push("regrid"));
+  const build = picker("library", ["title", "artist"]);
+
+  build().find((i) => i.label === "Album")!.action!();
+  assert.deepEqual(calls, ["repaint"], "ticking a field changes the cells, so the rows rebuild");
+
+  calls.length = 0;
+  columnWidths.library.value = { title: 2.8, artist: 1.2 };
+  columnFloors.library.value = { title: 24 };
+  build().find((i) => i.label === "Reset column widths")!.action!();
+  assert.deepEqual(calls, ["regrid"], "undoing widths is a template write, not a rebuild");
+  assert.deepEqual(columnWidths.library.value, {});
+  assert.deepEqual(columnFloors.library.value, {});
+
+  // Module-level hooks: hand them back so a later test isn't talking to these spies.
+  setColumnRepaint("library", () => {});
+  setColumnGeometry("library", () => {});
 });
 
 test("going back to automatic gives up the dragged widths too", () => {

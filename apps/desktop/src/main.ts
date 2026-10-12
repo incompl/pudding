@@ -25,6 +25,7 @@ import {
   nextSort,
   persist as persistColumnPrefs,
   setColumnHost,
+  setColumnGeometry,
   setColumnRepaint,
   setColumnRoom,
   sortTracks,
@@ -1515,6 +1516,13 @@ function fieldVaries(
   return false;
 }
 
+// The open leaf list's "write my column widths again" closure, set by the render
+// below and called by the column machinery when a divider drag commits (see
+// setColumnGeometry). Null until a leaf list has been built — the root menu, the
+// Browse tree and the Artists/Albums drill lists carry no columns, so there is
+// nothing to regrid.
+let regridNavList: (() => void) | null = null;
+
 export function renderLeafTrackList(
   inputTracks: SearchTrack[],
   ctx: LeafListContext,
@@ -1525,11 +1533,6 @@ export function renderLeafTrackList(
   const tracks = sortTracks(inputTracks, librarySort.peek());
   app.navLeafTracks = tracks;
   app.navLeafPoolPath = ctx.syntheticPath;
-  // The query container for this list's header row. The windowed row block inside
-  // declares its own `listcol` container at the identical width, so header and rows
-  // switch into column mode together.
-  const ul = h("div", { class: "nav-list col-host" });
-
   // Show a field in the dimmed suffix only when the list's tracks disagree about it
   // (mirrors the browse tree's per-folder showArtist). A field that's the same on
   // every row is noise repeated down the list, so drop it: an album view (one album,
@@ -1554,8 +1557,28 @@ export function renderLeafTrackList(
   // column's width is a fact about the list (see gridTemplate), and this is the
   // only place that sees all of it — the rows below are built one at a time, as
   // the window scrolls them in.
+  //
+  // It rides the list rather than each row, because `--cols` inherits: the header
+  // and every row the window mounts — now or after ten thousand rows of scrolling —
+  // read the one value from here. That is what makes a width change a single
+  // property write instead of a rebuild (see regridNavList below and columns.ts's
+  // commitGeometry), and what keeps a row scrolled in mid-drag laid out like the
+  // rows either side of it.
+  //
+  // The list is also the query container for the header row: the windowed row block
+  // inside declares its own `listcol` container at the identical width, so header
+  // and rows switch into column mode together.
   const showHeader = columnHeaders.library.peek();
-  const colTemplate = gridTemplate(cols, tracks, showHeader, "library");
+  const template = (): string => gridTemplate(cols, tracks, showHeader, "library");
+  const ul = h("div", { class: "nav-list col-host", style: { "--cols": template() } });
+  // How a width change reaches this list without rebuilding it: recompute that one
+  // template and write it back. Held as a closure because the answer depends on what
+  // this render knows — which columns are up, which tracks are in the list, whether
+  // the header is showing — none of which columns.ts can see. Replaced by the next
+  // render; a stale one no-ops on the disconnected list it captured.
+  regridNavList = () => {
+    if (ul.isConnected) ul.style.setProperty("--cols", template());
+  };
 
   // Play from `index` in context (cf. playTreeTrack): select the row so it stays
   // highlighted, drop the queue-row highlight, dismiss any queue/playlist chrome
@@ -1610,10 +1633,7 @@ export function renderLeafTrackList(
     // `title · artist · album` line via the `· ` separators in CSS. Every row is one
     // line at any width either way, so the height never varies — the uniform height
     // the window positions rows by (row i at i * rowHeight).
-    const cell = h("span", {
-      class: gridClasses("library", "nav-cell"),
-      style: { "--cols": colTemplate },
-    });
+    const cell = h("span", { class: gridClasses("library", "nav-cell") });
     append(cell, buildCells(t, cols, NAV_CELLS));
     // The same aside the queue's rows wear — "(Not downloaded)" for a cloud file,
     // "(Downloading...)" while the engine is parked on one. It is a fact about the
@@ -1757,10 +1777,7 @@ export function renderLeafTrackList(
   // display:none outside column mode, gated by the *same* container query as the
   // columns, so a header can never appear above a folded row.
   if (showHeader) {
-    const headCells = h("span", {
-      class: "nav-cell col-grid",
-      style: { "--cols": colTemplate },
-    });
+    const headCells = h("span", { class: "nav-cell col-grid" });
     append(
       headCells,
       buildHeaderCells("library", cols, librarySort.peek(), (id) => {
@@ -1768,8 +1785,10 @@ export function renderLeafTrackList(
         void persistColumnPrefs();
         // repaintNavPane, not renderNav: a sort reorders the rows under the same
         // columns, so the table must not also jump back to its left edge if the
-        // reader had scrolled it sideways.
-        repaintNavPane();
+        // reader had scrolled it sideways. `toTop` is the one repaint that does
+        // move the reader vertically — the order changed under them, so the first
+        // row is the new answer and the offset they had points at nothing.
+        repaintNavPane({ toTop: true });
       }),
     );
     ul.appendChild(
@@ -1826,19 +1845,26 @@ export function renderLeafTrackList(
   return ul;
 }
 
-// A column-set / header / sort / width change has to rebuild the pane's rows, and
-// no signal the nav render path tracks covers that — so the picker re-renders it
-// explicitly. repaintNavPane() rebuilds the current drill pane in place, keeping
-// the horizontal scroll offset: these are all edits to the table the reader is
-// looking at, including the commit at the end of a divider drag, and none of them
-// is a reason to haul a sideways-scrolled table back to its left edge.
+// A column-set / header / sort change has to rebuild the pane's rows — different
+// cells, or the same cells in a new order — and no signal the nav render path tracks
+// covers that, so the picker re-renders it explicitly. repaintNavPane() rebuilds the
+// current drill pane in place, keeping the reader's place in it on both axes: these
+// are edits to the table the reader is looking at, and none of them moves a row, so
+// none is a reason to haul a scrolled list back to its first row or its left edge.
+// (A sort does move rows, and asks to land at the top; see its own call above.)
 setColumnRepaint("library", () => repaintNavPane());
+// A *width* change doesn't rebuild anything: it rewrites the one template the list
+// carries and every row inherits it (see renderLeafTrackList). Nothing is torn
+// down, so there is no loader to replay, no place to put back, and no frame where
+// the pane holds no rows.
+setColumnGeometry("library", () => regridNavList?.());
 // Both panes' "make room" hooks are registered here, not one per module: the
 // divider between them is a single number, and main.ts is what owns it.
 setColumnRoom("library", () => ensureColumnRoom("library"));
 setColumnRoom("queue", () => ensureColumnRoom("queue"));
-// The same containers a "make room" nudge measures are the ones a divider drag
-// repaints, so both hooks are answered by the one lookup.
+// The same containers a "make room" nudge measures are the ones that carry each
+// pane's `--cols` template, so both hooks are answered by the one lookup: a divider
+// drag repaints a pane by writing that one property (see columns.ts's beginResize).
 setColumnHost("library", () => columnContainer("library"));
 setColumnHost("queue", () => columnContainer("queue"));
 

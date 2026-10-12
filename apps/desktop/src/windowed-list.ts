@@ -45,12 +45,12 @@ export interface WindowedList {
   // already fully visible, so it keeps e.g. a playing row on screen as it advances
   // without yanking the list on every step. `margin` reserves px at the top edge.
   revealIndex(index: number, margin?: number): void;
-  // Paint the first row slice synchronously, now, instead of waiting for the first
-  // animation frame. Call right after inserting `el` into a *visible* container so
-  // the rows exist on the same tick the caller built them (no one-frame blank flash,
-  // and DOM-driving code — tests, a click synthesized straight after a render — sees
-  // the rows immediately). A no-op if the container isn't laid out yet; the normal
-  // rAF path still fires as the fallback.
+  // Paint the first row slice synchronously, now, rather than on the microtask that
+  // normally mounts it (see the bottom of windowedList). Call right after inserting
+  // `el` into a *visible* container when code on this very tick depends on the rows
+  // being there — a click synthesized straight after a render, a scroll offset being
+  // restored, a test reading the DOM. A no-op if the container isn't laid out yet;
+  // the microtask and rAF paths still fire as the fallback.
   flush(): void;
 }
 
@@ -331,8 +331,26 @@ export function windowedList(opts: {
   }
 
   window.addEventListener("resize", onResize);
-  // The container isn't in the DOM yet (the caller inserts what we return), so the
-  // first paint waits a frame for layout unless flush() primes it first.
+  // The container isn't in the DOM yet — the caller inserts what we return — so the
+  // first paint waits to be placed. Two chances, the earlier one first:
+  //
+  //   - a microtask, which is still inside the task that built this list and so
+  //     still ahead of the browser's next paint. Every list in the app is inserted
+  //     synchronously by its caller, so this is the one that fires, and it is what
+  //     keeps a rebuilt pane from painting a frame of bare spacer before its rows
+  //     mount — the black flash a column resize used to leave in the pane it
+  //     rebuilt. A caller that hasn't placed us yet is left strictly alone: paint()
+  //     treats a detached container as "navigated away" and tears the list down, so
+  //     the guard here is load-bearing, not defensive.
+  //   - an animation frame, the fallback for exactly that caller (the folder tree
+  //     defers its build while hidden), and the first moment a container inserted
+  //     during this task is guaranteed to have a box.
+  //
+  // Both run `start`, and the second is a no-op when the first already mounted the
+  // slice: paint() returns early while the visible range is unchanged.
+  queueMicrotask(() => {
+    if (container.isConnected) start();
+  });
   requestAnimationFrame(start);
 
   return { el: container, update, scrollToIndex, revealIndex, flush: start };

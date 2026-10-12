@@ -478,9 +478,12 @@ export function isAutomatic(pane: ColumnPane): boolean {
 // sized to its own content and never shrinks (see gridTemplate).
 const MIN_CH = 5;
 
-// The grid track list for a column set, handed to the row (and the header row) as
-// the `--cols` custom property. Computed once per list, not per row — see below
-// for why the list is the only thing that may decide a track's width.
+// The grid track list for a column set, published as the `--cols` custom property
+// on the pane's list and inherited by the header row and by every row the window
+// mounts. Computed once per list, not per row — see below for why the list is the
+// only thing that may decide a track's width, and commitGeometry for what owning
+// one value on one element buys: a width change is a property write, not a
+// rebuild.
 //
 // Two kinds of track:
 //
@@ -781,17 +784,6 @@ function chPx(grid: HTMLElement): number {
   return w > 0 ? w : 8;
 }
 
-// Every grid in the pane — the header and each mounted row — so a drag can repaint
-// them all directly. Live rows are not rebuilt while the mouse is down: a drag is a
-// continuous gesture over a list that is not changing, and tearing the list down
-// per mousemove would cost a full render of the pane per frame and drop the scroll
-// position under the reader's cursor. The model is written once, on mouseup.
-function paneGrids(pane: ColumnPane, header: HTMLElement): HTMLElement[] {
-  const root = columnHost[pane]();
-  if (!root) return [header];
-  return [...root.querySelectorAll<HTMLElement>(".col-grid")];
-}
-
 // Is the table wider than the pane it sits in — i.e. is the list scrolling
 // sideways? Measured, not inferred: whether the fr pool ran out depends on the
 // font, the pane and the list's own fixed columns, none of which this module can
@@ -807,6 +799,13 @@ function tableOverflows(header: HTMLElement): boolean {
 function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: number): void {
   const grid = (e.currentTarget as HTMLElement).closest<HTMLElement>(".col-grid");
   if (!grid) return;
+  // The one element the whole drag writes to: `--cols` lives on the pane's list and
+  // every grid under it — the header and each mounted row — inherits it. Live rows
+  // are never rebuilt while the mouse is down, which a drag can't afford: a
+  // continuous gesture over a list that isn't changing, where a rebuild per
+  // mousemove would cost a full render of the pane per frame.
+  const host = columnHost[pane]();
+  if (!host) return;
   const startPx = trackWidths(grid);
   if (startPx.length !== ids.length) return;
   e.preventDefault();
@@ -815,10 +814,9 @@ function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: nu
   const startX = e.clientX;
   const grip = e.currentTarget as HTMLElement;
   grip.classList.add("col-resizing");
-  const grids = paneGrids(pane, grid);
-  // The template every grid in the pane is currently wearing (they all wear the
-  // same one), so a drag that ends where it started can hand it back — see onUp.
-  const original = grid.style.getPropertyValue("--cols");
+  // The template the pane is currently wearing, so a drag that ends where it
+  // started can hand it back — see onUp.
+  const original = host.style.getPropertyValue("--cols");
   const prev = columnWidths[pane].peek();
   // Needed whichever arm this turns out to be: the overflow arm writes a floor, and
   // the fitting arm has to stop at the ones already there (see resizedWidths).
@@ -839,6 +837,12 @@ function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: nu
   // suppressed text selection, and it already means "a col-resize drag is in
   // progress" — which this is.
   document.body.classList.add("dragging");
+  // Which header owns the drag. The dividers stay drawn for its whole duration (see
+  // .col-resizing-head in styles.css), and that has to be *this* header: body-level
+  // state would light the other pane's dividers too, which are not moving, and the
+  // splitter's drag would light both panes' while no boundary is being dragged at
+  // all.
+  head?.classList.add("col-resizing-head");
 
   const onMove = (ev: MouseEvent): void => {
     const next = resizedWidths(
@@ -859,20 +863,21 @@ function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: nu
     // the pixels are exact and need no second pass over the list to size the fixed
     // columns the drag isn't touching.
     const template = next.px.map((w) => `${w}px`).join(" ");
-    for (const g of grids) g.style.setProperty("--cols", template);
+    host.style.setProperty("--cols", template);
   };
 
   const onUp = (): void => {
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
     document.body.classList.remove("dragging");
+    head?.classList.remove("col-resizing-head");
     grip.classList.remove("col-resizing");
     if (!moved) {
       // Nothing to save — and nothing to keep: the pane is still wearing the pixel
       // template the drag painted, which is the same layout but no longer a set of
       // shares, so it would sit frozen until the next rebuild instead of reflowing
       // with the splitter. Put the shares back.
-      for (const g of grids) g.style.setProperty("--cols", original);
+      host.style.setProperty("--cols", original);
       return;
     }
     // A drag that ends inside the header cell it started in still fires a click on
@@ -888,7 +893,7 @@ function beginResize(e: MouseEvent, pane: ColumnPane, ids: ColumnId[], index: nu
     setTimeout(() => document.removeEventListener("click", swallow, true), 0);
     columnWidths[pane].value = widths;
     if (floors) columnFloors[pane].value = floors;
-    commit(pane);
+    commitGeometry(pane);
   };
 
   document.addEventListener("mousemove", onMove);
@@ -908,7 +913,7 @@ function resetPair(pane: ColumnPane, ids: ColumnId[], index: number): void {
   }
   columnWidths[pane].value = widths;
   columnFloors[pane].value = floors;
-  commit(pane);
+  commitGeometry(pane);
 }
 
 // --- rows -------------------------------------------------------------------
@@ -1137,9 +1142,12 @@ export function setColumnRoom(pane: ColumnPane, fn: () => void): void {
   makeRoom[pane] = fn;
 }
 
-// The pane's list container, registered the same way again — a divider drag
-// repaints every mounted row in the pane, and this module knows a pane has rows
-// without knowing where either pane keeps them.
+// The element the pane's `--cols` template lives on — its list — registered the
+// same way again. The template is one property on one element and every grid under
+// it inherits it, which is what lets a divider drag repaint the pane by writing a
+// single value (see beginResize) and lets a committed width skip the rebuild
+// entirely (see commitGeometry). This module knows a pane has a list without
+// knowing where either pane keeps it.
 const columnHost: Record<ColumnPane, () => HTMLElement | null> = {
   library: () => null,
   queue: () => null,
@@ -1149,9 +1157,34 @@ export function setColumnHost(pane: ColumnPane, fn: () => HTMLElement | null): v
   columnHost[pane] = fn;
 }
 
+// Write the pane's current template onto that host, registered by each pane's owner
+// because the template is a fact about the *list* (its fixed columns are sized from
+// the rows, see gridTemplate) and only the owner has the rows in hand.
+const regrid: Record<ColumnPane, () => void> = { library: () => {}, queue: () => {} };
+
+export function setColumnGeometry(pane: ColumnPane, fn: () => void): void {
+  regrid[pane] = fn;
+}
+
+// A change to what the columns *are* — the set, the header, the sort — has to
+// rebuild the pane's rows: different cells, or the same cells in a different order.
 function commit(pane: ColumnPane): void {
   void persist();
   repaint[pane]();
+}
+
+// A change to how wide they are is not that. Column widths reach the DOM as one
+// custom property on the pane's list, so every row and the header pick a new one up
+// by inheritance, and a rebuild would be the long way round to the same pixels: it
+// would tear the list down, replay its loader, lose the reader's place and blank the
+// pane for a frame — all to write a string that can simply be written. So a width
+// commit does exactly what the drag that preceded it did, with the one difference
+// that is the point of committing: the template it writes is the stored one, made of
+// shares rather than the drag's pixels, so the table reflows with the splitter
+// again.
+function commitGeometry(pane: ColumnPane): void {
+  void persist();
+  regrid[pane]();
 }
 
 // Switch a pane between automatic and a literal set — the two directions of the
@@ -1251,7 +1284,7 @@ export function columnsMenuItems(pane: ColumnPane, auto: ColumnId[]): ContextMen
             action: () => {
               columnWidths[pane].value = {};
               columnFloors[pane].value = {};
-              commit(pane);
+              commitGeometry(pane);
             },
           },
         ]
