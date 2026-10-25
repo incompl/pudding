@@ -13,6 +13,7 @@ import {
   npAlbum,
   npArt,
   npStreamMeta,
+  streamHealth,
   isStream,
   isPlaying,
   currentTime,
@@ -27,6 +28,7 @@ import {
   siblingByPath,
   queueIsActivePool,
   loadArt,
+  loadStreamArt,
   cleanStreamText,
   toast,
 } from "./main";
@@ -102,6 +104,21 @@ export const engine = new GaplessEngine({
       npStreamMeta.value = { song: song || cleaned, artist };
     } else {
       npStreamMeta.value = null;
+    }
+  },
+  // Connection health for the transport's live indicator. Guarded like the
+  // metadata above: an event from a stream we have already left must not
+  // relabel whatever is playing now.
+  onStreamHealth: (health) => {
+    if (!isStream.value) return;
+    const recovered = health === "live" && streamHealth.value !== "live";
+    streamHealth.value = health;
+    // A station started with nothing to fetch over fetched no art, and no other
+    // event would ever ask again — the connection coming back is the one thing
+    // that makes the attempt worth repeating. Stations whose art is simply
+    // missing retry too, which costs one request per reconnect.
+    if (recovered && app.streamArtPending) {
+      void loadStreamArt(app.streamArtPending);
     }
   },
 });

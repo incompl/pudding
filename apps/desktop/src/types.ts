@@ -187,6 +187,14 @@ export interface Stream {
   image?: string | null;
 }
 
+// How a playing stream is doing, as the engine reports it (see StreamHealth in
+// audio.rs). "reconnecting" covers both a connection the engine is redialing and
+// one that has merely stopped delivering audio — nothing a listener can tell
+// apart, and the latter is what they notice first. "live" is also where a paused
+// stream rests: the disconnect pause performs is not an outage. "offline" means
+// the engine ran out of retries and paused the session, so play is "try again".
+export type StreamHealth = "live" | "reconnecting" | "offline";
+
 // A stream list as read_stream_list returns it: the stations plus the mtime the
 // file carried at that read. The stamp goes back with every index-addressed edit
 // (update/move/delete), which the backend refuses if the file has moved on since —

@@ -123,35 +123,39 @@ over one too.
 
 ## 7. Queue
 
-- [ ] No queue → context menu offers only **Create queue**
-- [ ] With a queue → **Play next** inserts after playhead, **Add to queue** appends
+- [x] No queue → context menu offers only **Create queue**
+- [x] With a queue → **Play next** inserts after playhead, **Add to queue** appends
 - [ ] Counts in labels are right for a multi-select (`Play 5 next`)
-- [ ] Drag to reorder; `Delete` removes selected rows
-- [ ] `⌘Z` / `⌘⇧Z` undo and redo a reorder, an insert and a remove; playing track stays found across undo
-- [ ] Queue ends → stops, no playhead; pressing play restarts from the top
-- [ ] **Clear** tears the queue down (native Stop)
-- [ ] `⌘S` saves the queue as a playlist
+- [x] Drag to reorder; `Delete` removes selected rows
+- [x] `⌘Z` / `⌘⇧Z` undo and redo a reorder, an insert and a remove; playing track stays found across undo
+- [x] Queue ends → stops, no playhead; pressing play restarts from the top
+- [x] **Clear** discards the queue for good; a track playing from it keeps playing, detached
+- [x] **Clear** on an already-drained queue goes back to the empty hero
+- [x] `⌘S` saves the queue as a playlist
 
 ## 8. Playlists
 
-- [ ] File ▸ New Playlist → empty saved `.m3u8` appears in the tree
-- [ ] Drag tracks (and a multi-select) in from the left; file autosaves — verify bytes on disk
-- [ ] Right-click anything (track, album, artist, playlist) ▸ Add to playlist ▸ existing / new
-- [ ] Single-click opens for browsing; double-click plays
-- [ ] Rename in tree → edits `#PLAYLIST` in the file; File ▸ Move Playlist File moves/renames the file
-- [ ] Delete → goes to Trash, recoverable
-- [ ] Reorder and remove rows inside an open playlist; undo works
-- [ ] Hand-edit the `.m3u8` externally → app notices ("changed on disk")
-- [ ] A one-station `.m3u8` opened → tunes in as radio; a station among tracks shows "(Stream)" with its own play button
-- [ ] Playlist with a missing/moved path → clear error, no crash
+- [x] File ▸ New Playlist → empty saved `.m3u8` appears in the tree
+- [x] Drag tracks (and a multi-select) in from the left; file autosaves — verify bytes on disk
+- [x] Right-click anything (track, album, artist, playlist) ▸ Add to playlist ▸ existing / new
+- [x] Single-click opens for browsing; double-click plays
+- [x] Rename in tree → edits `#PLAYLIST` in the file; File
+- [x] Move Playlist File moves/renames the file
+- [x] Delete → goes to Trash, recoverable
+- [x] Reorder and remove rows inside an open playlist; undo works
+- [x] Hand-edit the `.m3u8` externally → app notices ("changed on disk")
+- [x] A one-station `.m3u8` opened → tunes in as radio; a station among tracks shows "(Stream)" with its own play button
+- [x] Playlist with a missing/moved path → clear error, no crash
 
 ## 9. Streams
 
-- [ ] Default list seeded and writable on a fresh profile
-- [ ] Add, edit, reorder, delete a station; per-station art shows
-- [ ] Play an Icecast stream → ICY now-playing updates, Live Broadcast replaces the seek bar
-- [ ] Pause disconnects, resume rejoins live edge
-- [ ] Kill the network mid-stream → reconnect with backoff, then recovers
+- [x] Default list seeded and writable on a fresh profile
+- [x] Add, edit, reorder, delete a station; per-station art shows
+- [x] Play an Icecast stream → ICY now-playing updates, Live Broadcast replaces the seek bar
+- [x] Pause disconnects, resume rejoins live edge
+- [ ] Kill the network mid-stream → indicator reads "Reconnecting" about a second after the audio stops (not when the socket times out), reconnect with backoff, then recovers and reads "Live Broadcast" again
+- [ ] Leave the network down past the 30s give-up → indicator reads "Offline" and stops pulsing; play reconnects
+- [ ] Start a station with the network already down, then restore it → it connects, and the station art (which had nothing to fetch over) loads on the reconnect
 - [ ] A `.pls` and a `.m3u` stream URL resolve
 - [ ] Point Settings at a remote `http(s)` list → loads read-only (no add/edit/delete)
 - [ ] Point it at a local file → writable again

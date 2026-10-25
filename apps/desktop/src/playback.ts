@@ -18,6 +18,7 @@ import {
   npAlbumArtist,
   npArt,
   npStreamMeta,
+  streamHealth,
   currentNodePath,
   currentStreamUrl,
   selectedStreamUrl,
@@ -651,6 +652,13 @@ export function playStream(stream: Stream): void {
   // that don't send titles).
   setNowPlaying(stream.name, null, null);
   npStreamMeta.value = null;
+  // Starts out claiming live, which is what a station that comes up in the
+  // usual fraction of a second should say rather than flashing a status on the
+  // way up. The engine announces the new session's real health within a tick
+  // (it keys its reporting on the play epoch precisely so this reset and that
+  // report can't talk past each other), and a failing connect reports in on
+  // its first retry.
+  streamHealth.value = "live";
   void engine.playStream(stream.url);
   // Stream list station art shows in the same spot as album art. Like loadArt,
   // the previous art stays up until the new image is ready (a failed or absent
@@ -659,6 +667,7 @@ export function playStream(stream: Stream): void {
   if (stream.image) {
     void loadStreamArt(stream.image);
   } else {
+    app.streamArtPending = null;
     clearArt();
   }
 }
@@ -681,6 +690,7 @@ export function applyStreamEdit(oldUrl: string, next: Stream): void {
   if (next.image) {
     void loadStreamArt(next.image);
   } else {
+    app.streamArtPending = null;
     clearArt();
   }
 }

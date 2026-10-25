@@ -74,6 +74,7 @@ import type {
   RecentItem,
   TrackProvider,
   LeafListContext,
+  StreamHealth,
 } from "./types";
 import {
   hasTrack,
@@ -83,6 +84,7 @@ import {
   npAlbumArtist,
   npArt,
   npStreamMeta,
+  streamHealth,
   isStream,
   isPlaying,
   currentTime,
@@ -1967,21 +1969,30 @@ export function clearArt(): void {
   npArt.value = null;
 }
 
+// Station art, with the retry bookkeeping a stream needs and a file doesn't: a
+// file's art either reads or doesn't, while a station's fetch can fail purely
+// for want of a network and come good on the reconnect. Leaving the marker set
+// is what makes that retry happen, so it is cleared only by an image landing.
+export async function loadStreamArt(image: string): Promise<void> {
+  app.streamArtPending = image;
+  if (await applyArt(() => invoke<string | null>("get_stream_image", { image }), image)) {
+    if (app.streamArtPending === image) app.streamArtPending = null;
+  }
+}
+
 export async function loadArt(path: string): Promise<void> {
   await applyArt(() => invoke<string | null>("get_art", { path }), path);
 }
 
-// Station art declared in the stream stream list, fetched by the backend (the
-// CSP forbids remote/file <img> sources, so it arrives as a data URL just
-// like embedded track art).
-export async function loadStreamArt(image: string): Promise<void> {
-  await applyArt(() => invoke<string | null>("get_stream_image", { image }), image);
-}
-
+// Fetch art and put it on screen, the backend doing the reading either way (the
+// CSP forbids remote/file <img> sources, so it arrives as a data URL just like
+// embedded track art). True only when this request is the one that set the art:
+// a fetch that failed, came back empty, or was overtaken by a newer request has
+// put nothing on screen, which is what a caller that means to retry asks about.
 async function applyArt(
   fetchArt: () => Promise<string | null>,
   source: string,
-): Promise<void> {
+): Promise<boolean> {
   const id = ++app.artRequestId;
   // Note: we intentionally do NOT clear npArt here. Keeping the previous
   // track's art on screen until the new one is fetched and decoded avoids a
@@ -1992,9 +2003,9 @@ async function applyArt(
     dataUrl = await fetchArt();
   } catch (e) {
     console.error("art load failed for", source, e);
-    return;
+    return false;
   }
-  if (id !== app.artRequestId) return;
+  if (id !== app.artRequestId) return false;
   if (dataUrl) {
     // Decode off-screen so the on-screen swap is instantaneous rather than
     // showing a half-painted image.
@@ -2005,9 +2016,10 @@ async function applyArt(
     } catch {
       /* decode can reject on detached images; assign anyway */
     }
-    if (id !== app.artRequestId) return;
+    if (id !== app.artRequestId) return false;
   }
   npArt.value = dataUrl;
+  return dataUrl !== null;
 }
 
 // --- Event wiring ---
@@ -3392,6 +3404,47 @@ function applyStreamMeta(
   updateMarquee(streamMetaArtistEl);
 }
 
+// What the live indicator reads in each connection state (CSS upper-cases it).
+// "Live Broadcast" is the healthy claim; the other two exist so the slot stops
+// making that claim the moment it stops being true.
+const LIVE_LABELS: Record<StreamHealth, string> = {
+  live: "Live Broadcast",
+  reconnecting: "Reconnecting",
+  offline: "Offline",
+};
+
+// A reconnect that lands on the first try is over in a few hundred ms and the
+// ring buffer covers it, so the listener hears no gap — flashing a status at
+// them would be the only evidence anything happened. Hold the swap for a beat
+// and let those pass unremarked. An outage they can actually hear has already
+// spent STREAM_DRY_LABEL_DELAY being silent by the time it is reported, so this
+// is the second half of a ~1s wait, not the whole of it. Give-up is reported at
+// once: that one is final, and the silence it explains has already started.
+const RECONNECT_LABEL_DELAY_MS = 700;
+
+// Two states, because through the delay above they differ — which is the whole
+// point: `target` is the health last reported, `shown` is the label actually in
+// the element. Idempotent on `target` so the effect re-running for an unrelated
+// reason (a pause, say) can't keep pushing a pending swap further out.
+let liveLabelTarget: StreamHealth = "live";
+let liveLabelShown: StreamHealth = "live";
+let liveLabelTimer: ReturnType<typeof setTimeout> | undefined;
+
+function setLiveIndicatorHealth(health: StreamHealth): void {
+  if (health === liveLabelTarget) return;
+  liveLabelTarget = health;
+  clearTimeout(liveLabelTimer);
+  const show = (): void => {
+    liveLabelShown = health;
+    liveIndicatorEl.textContent = LIVE_LABELS[health];
+  };
+  if (health === "reconnecting" && liveLabelShown === "live") {
+    liveLabelTimer = setTimeout(show, RECONNECT_LABEL_DELAY_MS);
+    return;
+  }
+  show();
+}
+
 // The live-pulse keyframes start and end on the paused gray, so stopping
 // doesn't cut the pulse off mid-cycle: clamp the infinite animation to the
 // end of its current iteration, then pin the .paused color once it lands
@@ -3474,8 +3527,14 @@ function setupEffects(): void {
   // renderNavBar for the state table.
   effect(renderNavBar);
   effect(() => {
-    liveIndicatorEl.classList.toggle("hidden", !isStream.value);
+    const streaming = isStream.value;
+    const health = streamHealth.value;
+    liveIndicatorEl.classList.toggle("hidden", !streaming);
     setLiveIndicatorPaused(!isPlaying.value);
+    // Leaving streams rests the label at "Live Broadcast", so the next station
+    // starts from the healthy claim rather than inheriting the last one's
+    // outage — and any swap still pending dies with it.
+    setLiveIndicatorHealth(streaming ? health : "live");
   });
   effect(() => {
     // In the layout (invisibly) for the whole stream; .visible fades the text

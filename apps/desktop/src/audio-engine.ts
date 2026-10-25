@@ -9,7 +9,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { SearchTrack } from "./types";
+import type { SearchTrack, StreamHealth } from "./types";
 
 export interface AudioEngineCallbacks {
   // Fires when playback advances to a new track (initial track of a Play, or
@@ -42,6 +42,9 @@ export interface AudioEngineCallbacks {
   // (arrives on connect/reconnect); `title` is the latest in-band StreamTitle,
   // null until the first one arrives or when the station clears it.
   onStreamMetadata: (station: string | null, title: string | null) => void;
+  // The stream's connection dropped, came back, or ran out of retries. Fires
+  // on changes only, so it is safe to drive UI that animates on transition.
+  onStreamHealth: (health: StreamHealth) => void;
 }
 
 interface TrackChangedEvent {
@@ -69,6 +72,9 @@ interface FetchingEvent {
 interface StreamMetadataEvent {
   station: string | null;
   title: string | null;
+}
+interface StreamHealthEvent {
+  health: StreamHealth;
 }
 
 export class GaplessEngine {
@@ -149,6 +155,11 @@ export class GaplessEngine {
     this.unlistens.push(
       await listen<StreamMetadataEvent>("audio:stream-metadata", (e) => {
         this.cb.onStreamMetadata(e.payload.station, e.payload.title);
+      }),
+    );
+    this.unlistens.push(
+      await listen<StreamHealthEvent>("audio:stream-health", (e) => {
+        this.cb.onStreamHealth(e.payload.health);
       }),
     );
   }

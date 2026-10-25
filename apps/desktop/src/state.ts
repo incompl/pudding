@@ -14,6 +14,7 @@ import type {
   ReplayGainMode,
   TreeNode,
   Stream,
+  StreamHealth,
   SearchTrack,
   RecentItem,
   PlaylistRef,
@@ -52,6 +53,12 @@ export interface AppState {
   // list, or a read that failed).
   streamListMtime: number | null;
   currentStreamName: string | null;
+  // The playing station's art URL while its fetch still owes us an image —
+  // cleared the moment one lands. A station started with no network fetches
+  // nothing, and nothing would ever ask again, so the engine reporting the
+  // stream live again (onStreamHealth) retries whatever is parked here. Null
+  // for a station with no art declared, and while the art on screen is its own.
+  streamArtPending: string | null;
   // The synthetic/real parent whose children form the audible pool.
   currentParent: TreeNode | null;
   // Bumps per art request so a stale async art load can't overwrite a newer one.
@@ -149,6 +156,7 @@ export const app: AppState = {
   allStreams: [],
   streamListMtime: null,
   currentStreamName: null,
+  streamArtPending: null,
   get currentParent(): TreeNode | null {
     return currentParentNode;
   },
@@ -211,6 +219,12 @@ export const npArt = signal<string | null>(null);
 export const npStreamMeta = signal<{ song: string; artist: string | null } | null>(
   null,
 );
+
+// The playing stream's connection health, as the engine reports it. Drives the
+// transport's live indicator, which says "Reconnecting" through an outage rather
+// than claiming a broadcast that isn't arriving. Reset by playStream; meaningless
+// (and ignored) while isStream is false.
+export const streamHealth = signal<StreamHealth>("live");
 
 export const isStream = signal(false);
 export const isPlaying = signal(false);

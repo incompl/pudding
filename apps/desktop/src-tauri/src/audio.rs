@@ -151,6 +151,14 @@ const STREAM_RETRY_INITIAL: Duration = Duration::from_millis(500);
 const STREAM_RETRY_MAX: Duration = Duration::from_secs(4);
 const STREAM_GIVE_UP: Duration = Duration::from_secs(30);
 
+// How long the ring must stay dry before the indicator stops claiming the
+// broadcast is live. Long enough that a lone hiccup goes unremarked, short
+// enough that the label and the silence arrive together — the socket's own
+// read timeout is ten seconds, so without this the label trails the silence by
+// most of that. Checked on the position thread's POSITION_EMIT_INTERVAL_MS
+// tick, which sets the granularity.
+const STREAM_DRY_LABEL_DELAY: Duration = Duration::from_millis(250);
+
 // === Commands from the frontend ===
 
 pub enum Command {
@@ -311,6 +319,16 @@ pub struct SharedState {
     // waveform_emit_loop. Default false: nothing is open at launch.
     viz_scope_wanted: AtomicBool,
     viz_bands_wanted: AtomicBool,
+    // A radio session is the current source (as opposed to a file queue, or
+    // nothing). Gates the stream-health reporting in position_emit_loop: a
+    // starved ring during file playback is a decode problem, not an outage, and
+    // has no indicator to describe it.
+    streaming: AtomicBool,
+    // The socket half of StreamHealth as a code (see StreamHealth::from_code),
+    // written by the decode thread as connections drop, return, and run out of
+    // retries. Not emitted from there — position_emit_loop combines it with the
+    // audible half and is the only thing that reports.
+    stream_conn: AtomicU8,
 }
 
 impl SharedState {
@@ -338,6 +356,8 @@ impl SharedState {
             rate_follow: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             rate_switch_pending: AtomicBool::new(false),
+            streaming: AtomicBool::new(false),
+            stream_conn: AtomicU8::new(StreamHealth::Live as u8),
             viz_scope_wanted: AtomicBool::new(false),
             viz_bands_wanted: AtomicBool::new(false),
         }
@@ -478,6 +498,51 @@ pub struct SpectrumEvent {
 pub struct StreamMetadataEvent {
     pub station: Option<String>,
     pub title: Option<String>,
+}
+
+// How the live stream's connection is doing, for the transport's live
+// indicator. A brief outage is inaudible — the ring buffer plays on while the
+// engine redials — but one that outlasts the buffer is silence, and the
+// indicator should say what is happening rather than keep claiming "live".
+//
+// Two halves of the engine know different parts of this, and the indicator
+// needs both. The socket half (SharedState::stream_conn, written by the decode
+// thread) knows what the connection is doing, but learns a dead one only when a
+// read times out — ten seconds of silence the listener has already sat through
+// (see icy::READ_TIMEOUT). The audible half is the ring running dry, which the
+// output callback's underrun counter records the moment it happens. They are
+// combined, and the event emitted, in position_emit_loop: one thread, so the
+// label can never be whipsawed between two writers.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum StreamHealth {
+    // Connected, decoding, and audible. Also the state a paused session rests
+    // in, since the disconnect pause performs is not an outage.
+    Live = 0,
+    // Either the socket is gone and retrying with backoff (server EOF, read
+    // error, or a connect attempt that failed inside the give-up budget), or
+    // audio has stopped arriving — nothing a listener can tell apart.
+    Reconnecting = 1,
+    // The outage outlasted STREAM_GIVE_UP, so the session was paused. Play is
+    // "try again" from here.
+    Offline = 2,
+}
+
+impl StreamHealth {
+    fn from_code(code: u8) -> Self {
+        match code {
+            1 => StreamHealth::Reconnecting,
+            2 => StreamHealth::Offline,
+            _ => StreamHealth::Live,
+        }
+    }
+}
+
+// Emitted only when the combined health changes; see position_emit_loop.
+#[derive(Serialize, Clone)]
+pub struct StreamHealthEvent {
+    pub health: StreamHealth,
 }
 
 // === Public handle ===
@@ -1340,6 +1405,7 @@ fn decode_loop(
                         pending_switch = update_rate_switch(&shared, pending_switch, None);
                         producer_frames = 0;
                         reset_for_new_playback(&shared, &origins);
+                        shared.streaming.store(true, Ordering::Relaxed);
                         emit_state(&app, true, true);
                         stream = Some(StreamSession::new(url));
                     }
@@ -1365,6 +1431,12 @@ fn decode_loop(
                                     // give-up doesn't inherit old backoff.
                                     s.reset_retry();
                                 }
+                                // Either way the session now holds no
+                                // connection by choice, so it rests at Live:
+                                // pausing mid-outage drops "Reconnecting"
+                                // (nothing is), and resuming after a give-up
+                                // clears "Offline" for the retry about to run.
+                                s.set_conn(&shared, StreamHealth::Live);
                             }
                             emit_state(&app, !now, true);
                         }
@@ -1901,6 +1973,15 @@ impl StreamSession {
         }
     }
 
+    // Record what the connection is doing. Only ever the socket's own view —
+    // the reporting, and the audible half of the picture, belong to
+    // position_emit_loop. The opening connect is deliberately quiet: a session
+    // starts out nominally Live, so a station that comes up in the usual
+    // fraction of a second never flashes a status the listener has no use for.
+    fn set_conn(&self, shared: &Arc<SharedState>, conn: StreamHealth) {
+        shared.stream_conn.store(conn as u8, Ordering::Relaxed);
+    }
+
     fn reset_retry(&mut self) {
         self.retry_delay = STREAM_RETRY_INITIAL;
         self.next_attempt_at = Instant::now();
@@ -1909,11 +1990,12 @@ impl StreamSession {
 
     // Records a failed connect and schedules the next attempt with backoff.
     // Returns false when the outage has exhausted the give-up budget.
-    fn connect_failed(&mut self, app: &AppHandle, err: &str) -> bool {
+    fn connect_failed(&mut self, shared: &Arc<SharedState>, app: &AppHandle, err: &str) -> bool {
         log::warn!("audio: stream {}: {err}", self.url);
         let now = Instant::now();
         let began = *self.outage_since.get_or_insert(now);
         if now.duration_since(began) >= STREAM_GIVE_UP {
+            self.set_conn(shared, StreamHealth::Offline);
             emit_error(
                 app,
                 &PathBuf::from(&self.url),
@@ -1921,6 +2003,7 @@ impl StreamSession {
             );
             return false;
         }
+        self.set_conn(shared, StreamHealth::Reconnecting);
         self.next_attempt_at = now + self.retry_delay;
         self.retry_delay = (self.retry_delay * 2).min(STREAM_RETRY_MAX);
         true
@@ -1955,13 +2038,14 @@ fn stream_step(
                 s.title = o.title;
                 s.station = o.station;
                 s.reset_retry();
+                s.set_conn(shared, StreamHealth::Live);
                 // Announce the station immediately, carrying the last known
                 // title across the (re)connect. If the song changed while
                 // disconnected, the first in-band title corrects it within
                 // seconds.
                 emit_stream_metadata(app, &s.station, &s.last_title);
             }
-            Err(e) => return s.connect_failed(app, &e),
+            Err(e) => return s.connect_failed(shared, app, &e),
         }
         return true;
     }
@@ -1988,6 +2072,7 @@ fn stream_step(
             s.reader = None;
             s.outage_since = Some(Instant::now());
             s.next_attempt_at = Instant::now();
+            s.set_conn(shared, StreamHealth::Reconnecting);
             true
         }
         Err(e) => {
@@ -1997,6 +2082,7 @@ fn stream_step(
             s.reader = None;
             s.outage_since = Some(Instant::now());
             s.next_attempt_at = Instant::now();
+            s.set_conn(shared, StreamHealth::Reconnecting);
             true
         }
     }
@@ -3650,6 +3736,10 @@ fn reset_for_new_playback(shared: &Arc<SharedState>, origins: &Arc<Mutex<Origins
     shared.total_produced.store(0, Ordering::Relaxed);
     shared.queue_exhausted.store(false, Ordering::Relaxed);
     shared.paused.store(false, Ordering::Relaxed);
+    // Whatever is starting, it starts as a file queue with a healthy stream
+    // slot; PlayStream claims the radio flag right after this returns.
+    shared.streaming.store(false, Ordering::Relaxed);
+    shared.stream_conn.store(StreamHealth::Live as u8, Ordering::Relaxed);
     // New session: bump the epoch so origins published from here on are
     // recognized as a fresh Play even when they reuse the previous track's slot
     // and path (replaying the same track).
@@ -3804,6 +3894,18 @@ fn position_emit_loop(shared: Arc<SharedState>, origins: Arc<Mutex<Origins>>, ap
     let mut reported_underrun_events: u64 = 0;
     let mut reported_underrun_frames: u64 = 0;
     let mut last_underrun_log = Instant::now();
+    // Stream health: the underrun count this thread last saw, when the current
+    // run of dry ticks began (None = audio is arriving), and what was last
+    // reported — as (play epoch, health), because the health alone is not enough
+    // to dedupe against. The frontend resets its own copy to Live when it starts
+    // a station, so a new session that lands in the same state as the old one
+    // (tune to a second station while the first is still retrying) is a change
+    // over there even though it is not one here; keying on the epoch re-announces
+    // it. The underrun count is tracked apart from the diagnostic counters above,
+    // which only move when the rate-limited log line fires.
+    let mut seen_underrun_events: u64 = 0;
+    let mut dry_since: Option<Instant> = None;
+    let mut reported: Option<(u64, StreamHealth)> = None;
 
     loop {
         std::thread::sleep(Duration::from_millis(POSITION_EMIT_INTERVAL_MS));
@@ -3831,6 +3933,42 @@ fn position_emit_loop(shared: Arc<SharedState>, origins: Arc<Mutex<Origins>>, ap
             reported_underrun_events = underrun_events;
             reported_underrun_frames = underrun_frames;
             last_underrun_log = Instant::now();
+        }
+
+        // Is the ring dry? A starved callback bumps the counter every few ms,
+        // so a tick that sees no new underrun at all means audio is flowing
+        // again — which is what keeps a reconnect from flapping the label while
+        // the first chunk is still being decoded.
+        if underrun_events != seen_underrun_events {
+            seen_underrun_events = underrun_events;
+            dry_since.get_or_insert_with(Instant::now);
+        } else {
+            dry_since = None;
+        }
+
+        // Report the stream's health: the socket's view, overridden by silence
+        // the listener can hear. Give-up outranks both — it is the end of the
+        // retrying, not more of it. Off a stream there is nothing to describe
+        // and the indicator is hidden, so nothing is reported and the record is
+        // dropped, which also makes the next session announce itself from
+        // scratch rather than against a label that is no longer on screen.
+        let streaming = shared.streaming.load(Ordering::Relaxed);
+        if !streaming {
+            reported = None;
+        } else {
+            let conn = StreamHealth::from_code(shared.stream_conn.load(Ordering::Relaxed));
+            let dry = dry_since.is_some_and(|since| since.elapsed() >= STREAM_DRY_LABEL_DELAY);
+            let health = match conn {
+                StreamHealth::Offline => StreamHealth::Offline,
+                StreamHealth::Reconnecting => StreamHealth::Reconnecting,
+                StreamHealth::Live if dry => StreamHealth::Reconnecting,
+                StreamHealth::Live => StreamHealth::Live,
+            };
+            let epoch = shared.play_epoch.load(Ordering::Relaxed);
+            if reported != Some((epoch, health)) {
+                reported = Some((epoch, health));
+                let _ = app.emit("audio:stream-health", StreamHealthEvent { health });
+            }
         }
 
         let frames_played = shared.frames_played.load(Ordering::Relaxed);
