@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { effect } from "@preact/signals-core";
-import { h } from "./dom";
+import { h, setText } from "./dom";
 import type {
   InlineEditorOptions,
   InlineEditorArtwork,
@@ -234,13 +234,16 @@ function buildTagProgressPanel(heading: string): {
           stop.classList.add("hidden");
           return;
         }
-        status.textContent = busy.label;
+        setText(status, busy.label);
         if (busy.progress) {
           cup.update(busy.progress.done, busy.progress.total, busy.label);
         }
         if (busy.stop) {
-          stop.textContent = busy.stop.label;
-          stop.onclick = busy.stop.onStop;
+          // Through setText, and `onclick` only when the handler is a different
+          // function: this runs once per file, and a Stop whose label is rebuilt
+          // under the pointer is a Stop that silently doesn't fire (see setText).
+          setText(stop, busy.stop.label);
+          if (stop.onclick !== busy.stop.onStop) stop.onclick = busy.stop.onStop;
           stop.classList.remove("hidden");
         } else {
           stop.classList.add("hidden");
@@ -646,7 +649,9 @@ export function buildInlineEditor(opts: InlineEditorOptions): HTMLFormElement {
     // but a save already carries the values it was given, so a field changed
     // under it would be a lie about what landed on disk.
     for (const input of inputs.values()) input.disabled = next != null;
-    cancelBtn.textContent = next?.stop ? next.stop.label : "Cancel";
+    // setText because this is called per file while a batch read counts itself
+    // off, and rewriting the label under the pointer loses the press.
+    setText(cancelBtn, next?.stop ? next.stop.label : "Cancel");
     syncEnabled();
   };
   // A field is touched the moment it fires `input`, not when its value ends up

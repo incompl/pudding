@@ -10,7 +10,7 @@ import { load } from "@tauri-apps/plugin-store";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { signal, computed, effect } from "@preact/signals-core";
 import { engine } from "./engine-glue";
-import { h, eqBars, append } from "./dom";
+import { h, eqBars, append, setText } from "./dom";
 import {
   activeColumns,
   buildCells,
@@ -968,10 +968,14 @@ export const shownPlaylistPath = computed(() => {
 function renderNavBar(): void {
   const nav = paneView.value.nav;
   if (!nav) return; // no list → nav hidden via .has-nav
-  navBarTextEl.textContent = nav.text;
-  navBarBtnEl.textContent = nav.button ?? "";
+  setText(navBarTextEl, nav.text);
+  // The two buttons go through setText because a repaint that lands between a
+  // press and its release takes the pressed text node with it, and the click is
+  // then never dispatched (see setText). A nav repaint is rare next to a tag
+  // write's per-file one, but the press it eats is just as quiet.
+  setText(navBarBtnEl, nav.button ?? "");
   navBarBtnEl.classList.toggle("hidden", nav.button === null);
-  navBarAltBtnEl.textContent = nav.altButton ?? "";
+  setText(navBarAltBtnEl, nav.altButton ?? "");
   navBarAltBtnEl.classList.toggle("hidden", nav.altButton === null);
 }
 

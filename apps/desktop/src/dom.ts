@@ -80,6 +80,25 @@ export function eqBars(): HTMLElement {
   );
 }
 
+// Set an element's text only when it differs from what is already there.
+//
+// Not a micro-optimization: assigning textContent throws away the element's text
+// node and builds a new one, and WebKit decides a click happened by remembering
+// the node that was pressed and checking the release lands on it. Press a button
+// whose label is rewritten under the pointer and that remembered node is gone by
+// mouseup, so no click is dispatched at all and the handler silently never runs.
+// A label repainted on a timer or a progress event — "Stop" rewritten twelve
+// times a second for the whole of a bulk tag write — therefore eats presses that
+// land on the lettering, while presses on the surrounding padding (the button
+// element itself, which is never replaced) work. The guard makes the repaint a
+// no-op instead of a node swap.
+//
+// Any text that is repainted faster than a person can click should go through
+// here. Plain static text is free to use `h`'s `text` or textContent directly.
+export function setText(el: Element, text: string): void {
+  if (el.textContent !== text) el.textContent = text;
+}
+
 // Append children to a parent, flattening arrays and skipping falsy entries.
 // Numbers/strings become text nodes. Exposed for render functions that build a
 // container up front and fill it in a loop.
