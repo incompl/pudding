@@ -674,7 +674,7 @@ export async function deletePlaylistNode(node: TreeNode): Promise<void> {
 // unrelated playback.
 export async function deletePlaylistPath(path: string, name: string): Promise<void> {
   const filename = path.split(/[\\/]/).pop() ?? path;
-  const ok = await confirm(`This will move ${filename} to the Trash`, {
+  const ok = await confirm(`This will move ${filename} to the Trash.`, {
     title: `Delete ${name}?`,
     kind: "warning",
   });

@@ -2604,7 +2604,7 @@ fn fold_common_tags(
     progress: &dyn Fn(usize, usize),
 ) -> Result<CommonTags, String> {
     let Some((first, rest)) = paths.split_first() else {
-        return Err("No tracks to edit.".to_string());
+        return Err("No tracks to edit".to_string());
     };
     let total = paths.len();
     // One file is no fold and needs no digest: read its picture straight and skip

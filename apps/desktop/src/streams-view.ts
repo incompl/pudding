@@ -231,6 +231,13 @@ function openEditStationEditor(stream: Stream): void {
   openPaneEditor("stream", editor);
 }
 
+// The stream list's file name, for messages that say what a station is being
+// removed from. Falls back to a generic phrase if the path input is somehow empty.
+function streamListName(): string {
+  const leaf = streamListPathInput.value.split("/").filter(Boolean).pop();
+  return leaf ?? "the stream list";
+}
+
 async function deleteStream(stream: Stream): Promise<void> {
   const index = app.allStreams.indexOf(stream);
   if (index < 0) return;
@@ -238,7 +245,7 @@ async function deleteStream(stream: Stream): Promise<void> {
   // pane can re-read the list while it is up, and a stamp read on the far side of
   // it would vouch for a file this `index` was never counted against.
   const openedAt = app.streamListMtime;
-  const ok = await confirm(`This will remove ${stream.name} from the stream list.`, {
+  const ok = await confirm(`This will remove the station from ${streamListName()}.`, {
     title: `Remove ${stream.name}?`,
     kind: "warning",
   });

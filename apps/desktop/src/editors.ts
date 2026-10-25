@@ -1319,7 +1319,7 @@ export function editMetadataProviderItem(getTracks: TrackProvider): ContextMenuI
           // Nothing to open the form on. Say why here rather than putting up an
           // editor with no files behind it.
           toast(
-            skipped > 0 ? "Those tracks aren't downloaded yet." : "Nothing to edit here.",
+            skipped > 0 ? "Those tracks aren't downloaded yet" : "Nothing to edit here",
           );
           return;
         }
