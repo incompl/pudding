@@ -139,8 +139,8 @@ over one too.
 - [x] Drag tracks (and a multi-select) in from the left; file autosaves — verify bytes on disk
 - [x] Right-click anything (track, album, artist, playlist) ▸ Add to playlist ▸ existing / new
 - [x] Single-click opens for browsing; double-click plays
-- [x] Rename in tree → edits `#PLAYLIST` in the file; File
-- [x] Move Playlist File moves/renames the file
+- [x] Rename in tree → edits `#PLAYLIST` in the file
+- [x] File ▸ Move Playlist File moves/renames the file
 - [x] Delete → goes to Trash, recoverable
 - [x] Reorder and remove rows inside an open playlist; undo works
 - [x] Hand-edit the `.m3u8` externally → app notices ("changed on disk")
@@ -153,25 +153,27 @@ over one too.
 - [x] Add, edit, reorder, delete a station; per-station art shows
 - [x] Play an Icecast stream → ICY now-playing updates, Live Broadcast replaces the seek bar
 - [x] Pause disconnects, resume rejoins live edge
-- [ ] Kill the network mid-stream → indicator reads "Reconnecting" about a second after the audio stops (not when the socket times out), reconnect with backoff, then recovers and reads "Live Broadcast" again
-- [ ] Leave the network down past the 30s give-up → indicator reads "Offline" and stops pulsing; play reconnects
-- [ ] Start a station with the network already down, then restore it → it connects, and the station art (which had nothing to fetch over) loads on the reconnect
-- [ ] A `.pls` and a `.m3u` stream URL resolve
-- [ ] Point Settings at a remote `http(s)` list → loads read-only (no add/edit/delete)
-- [ ] Point it at a local file → writable again
-- [ ] Bad URL → error, list intact
+- [x] Kill the network mid-stream → indicator reads "Reconnecting" about a second after the audio stops (not when the socket times out), reconnect with backoff, then recovers and reads "Live Broadcast" again
+- [x] Leave the network down past the 30s give-up → indicator reads "Offline" and stops pulsing; play reconnects
+- [x] Start a station with the network already down, then restore it → it connects, and the station art (which had nothing to fetch over) loads on the reconnect
+- [x] A `.pls` and a `.m3u` stream URL resolve
+- [x] Point Settings at a remote `http(s)` list → loads read-only (no add/edit/delete)
+- [x] Point it at a local file → writable again
+- [x] Bad URL → error, list intact
 
 ## 10. Metadata editing
 
-- [ ] Edit one file: every field + artwork; verify on disk with another tagger
-- [ ] Bulk edit a selection: heading shows the count, disagreeing fields left untouched
-- [ ] Progress and result screen name the fields and tracks changed
-- [ ] **Revert update** restores only the fields that save wrote; a file a third party changed since is skipped
-- [ ] Done dismisses the revert affordance; it does not come back
+- [x] Edit one file: every field + artwork; verify on disk with another tagger
+- [x] Bulk edit a selection: heading shows the count, disagreeing fields left untouched
+- [x] Progress and result screen name the fields and tracks changed
+- [x] **Revert update** restores only the fields that save wrote; a file a third party changed since is skipped
+- [x] Done dismisses the revert affordance; it does not come back
 - [ ] File identity preserved: inode unchanged after a save (`stat`), Proton Drive shows a new version
-- [ ] Cancel a long bulk write mid-run → consistent state
-- [ ] Kill the app mid-write → next launch recovers or keeps the recovery copy and says so
-- [ ] Read-only file / no permission → error, original untouched
+- [x] Cancel a long bulk write mid-run → consistent state
+- [x] Kill the app mid-write → next launch recovers or keeps the recovery copy and says so
+- [ ] **Retry restore** with an unidentifiable copy also present → the orphan entry and its path survive the retry
+- [ ] Discard where one copy won't delete (`chmod` its folder) → report says how many went, not that nothing did
+- [x] Read-only file / no permission → error, original untouched
 
 ## 11. Now Playing and interface
 

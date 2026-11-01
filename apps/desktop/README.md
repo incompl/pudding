@@ -95,7 +95,9 @@ library, then writes the original file directly to preserve links and file ident
 verifies the finished file and requested metadata, and restores the
 original in place if anything fails. Interrupted writes are detected and recovered
 at startup where possible; otherwise the recovery files are kept for manual
-resolution.
+resolution. Either way the next launch reports what it found, and a copy it
+couldn't put back is reported again at every launch — with the option to retry
+or discard it — until it is resolved.
 
 ### Playback queue
 

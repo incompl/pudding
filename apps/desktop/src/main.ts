@@ -227,6 +227,7 @@ import {
   editMetadataItem,
   editMetadataProviderItem,
   editTags,
+  showMetadataRecoveryReport,
   startTitleEdit,
 } from "./editors";
 import {
@@ -4789,6 +4790,11 @@ async function init(): Promise<void> {
   // Flush the boot report once init's synchronous work is done. Deferred inside
   // (setTimeout) so post-init paint/layout freezes are captured too.
   bootProfileReport();
+
+  // Report a metadata save that a crash or a force-quit cut short. Last, and not
+  // awaited: it opens the right pane, so it goes after everything that sets up
+  // what the pane sits on, and a player must never wait on it to start.
+  void showMetadataRecoveryReport();
 
   if (app.libraryRoots.length) {
     void invoke("rescan_libraries", { paths: app.libraryRoots });

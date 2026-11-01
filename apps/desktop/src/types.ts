@@ -100,6 +100,41 @@ export interface TagWriteReport {
   revertTracks: number;
 }
 
+// One entry from the startup recovery sweep: an interrupted metadata save, and
+// what this launch could do about it. `restored` is finished business — the track
+// holds exactly the bytes it held before that save. Anything else is unresolved:
+// the track may be half-written and the only original bytes left are in the
+// recovery copy, so the entry carries the paths the retry and discard actions
+// work on. Mirrors the Rust RecoveryNotice.
+//
+// The nulls are what stop the report claiming more than the entry knows, and
+// every sentence about an entry has to be worded from them: `target` is null when
+// the record was too damaged to say which track the copy belongs to, and `backup`
+// is null when there is no copy left to point at, retry, or warn about losing.
+export interface RecoveryNotice {
+  restored: boolean;
+  // False when the save failed in front of the user and the writing process said
+  // so at the time, rather than being cut short by a crash or a force-quit. Only
+  // the cause differs; the copy is in the same state either way.
+  crashed: boolean;
+  target: string | null;
+  // Set on unresolved entries only; null once there is nothing left to act on.
+  manifest: string | null;
+  backup: string | null;
+  reason: string | null;
+}
+
+// What a discard of recovery copies managed. The pairs are removed one at a
+// time, so "some of them went" is a real outcome and not an edge case: a copy
+// already unlinked stays unlinked whatever the pair after it did. `failure` is
+// null only when the whole set went, and a failure alongside a non-zero
+// `discarded` must never be reported as nothing having happened — those bytes
+// were the last copy of an original. Mirrors the Rust DiscardReport.
+export interface DiscardReport {
+  discarded: number;
+  failure: string | null;
+}
+
 // `stale` is the difference between a file that was not written and one that was
 // written correctly but whose library row could not be updated. The second is not
 // a save failure: the note counts it with the saved and says the list will catch

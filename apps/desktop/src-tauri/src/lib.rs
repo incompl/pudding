@@ -4060,10 +4060,12 @@ fn same_file_identity(a: &FileStamp, b: &FileStamp) -> bool {
 /// digests we store as text are formatted here.
 pub(crate) fn hex_digest(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
@@ -4166,12 +4168,17 @@ fn overwrite_open_file(dst: &mut std::fs::File, source: &Path) -> Result<(), std
 enum RecoveryState {
     Prepared,
     Committed,
+    Retained,
 }
 
 // The manifest makes a recovery copy actionable after a force-quit or power
 // loss. `Prepared` means the target may have been interrupted mid-write and must
 // be restored; `Committed` means the write was fully verified and the remaining
-// files are only cleanup left behind by a crash.
+// files are only cleanup left behind by a crash. `Retained` is a `Prepared` the
+// writing process itself gave up on: the save failed, its own rollback failed,
+// and it reported that to the user before returning. Recovery treats the two
+// identically — storage that was unwritable then may be writable now — but a
+// `Retained` copy is not news from a crash, so the launch report says so.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RecoveryManifest {
     version: u8,
@@ -4218,8 +4225,19 @@ impl RecoveryManifest {
     }
 
     fn mark_committed(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        self.rewrite_state(RecoveryState::Committed, path)
+    }
+
+    // Marked after the in-session rollback has already failed, so a failure to
+    // record it is not worth propagating: the manifest stays `Prepared` and the
+    // next launch over-attributes the copy to a crash rather than losing it.
+    fn mark_retained(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        self.rewrite_state(RecoveryState::Retained, path)
+    }
+
+    fn rewrite_state(&mut self, state: RecoveryState, path: &Path) -> Result<(), std::io::Error> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        self.state = RecoveryState::Committed;
+        self.state = state;
         let bytes =
             serde_json::to_vec(self).map_err(|error| std::io::Error::other(error.to_string()))?;
         let staged = path.with_extension(format!(
@@ -4266,7 +4284,18 @@ impl BackupFile {
         }
     }
 
-    fn retain(self) -> PathBuf {
+    // Keep both files instead of removing them, and record in the manifest that
+    // this process already answered for them, so the next launch doesn't blame a
+    // crash for a failure the user watched happen.
+    fn retain(mut self) -> PathBuf {
+        if let Some((manifest, path)) = &mut self.manifest {
+            if let Err(error) = manifest.mark_retained(path) {
+                log::warn!(
+                    "metadata recovery: couldn't mark {} retained: {error}",
+                    path.display()
+                );
+            }
+        }
         let path = self.path.clone();
         std::mem::forget(self);
         path
@@ -4287,11 +4316,148 @@ impl Drop for BackupFile {
     }
 }
 
+// Cleanup order for a pair the sweep itself is finishing with: the record first,
+// so a crash between the two unlinks can never leave a manifest pointing at a
+// copy that is gone — which the next launch would have to read as an interrupted
+// save. The user-triggered discard reverses this; see discard_recovery_pair.
 fn discard_recovery_artifact(backup: &Path, manifest: &Path) -> Result<(), std::io::Error> {
     std::fs::remove_file(manifest)?;
     sync_parent(manifest)?;
-    std::fs::remove_file(backup)?;
-    sync_parent(backup)
+    // Tolerant of a copy that is already gone: a committed record whose copy
+    // something else removed is cleanup to finish, not a failure to report.
+    remove_if_present(backup)
+}
+
+fn remove_if_present(path: &Path) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(path) {
+        Ok(()) => sync_parent(path),
+        // Already gone is the state the caller asked for.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+// Throw away one preserved pair because the user asked to. The copy goes first
+// here, the opposite of the sweep's own cleanup: if removing the copy fails, the
+// pair is still joined and the report can offer it again, whereas removing the
+// record first and then failing would orphan bytes no later sweep could name.
+fn discard_recovery_pair(backup: &Path, manifest: &Path) -> Result<(), DiscardFailure> {
+    remove_if_present(backup).map_err(|error| DiscardFailure {
+        path: backup.to_path_buf(),
+        error,
+    })?;
+    remove_if_present(manifest).map_err(|error| DiscardFailure {
+        path: manifest.to_path_buf(),
+        error,
+    })
+}
+
+// Which half refused, and why. The copy goes first, so the half that failed is
+// not the one a caller would guess at: naming the copy in every message would
+// point the user at a file that a record-removal failure had just successfully
+// deleted.
+#[derive(Debug)]
+struct DiscardFailure {
+    path: PathBuf,
+    error: std::io::Error,
+}
+
+// The copy a record belongs to, inferred from the record's own name rather than
+// its contents: the writer creates the pair as `<backup>` and `<backup>.json`,
+// so this holds even when the JSON inside is unreadable.
+fn backup_for_manifest(manifest: &Path) -> PathBuf {
+    manifest.with_extension("")
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+// What one recovery entry turned into, in the terms the user has to decide in.
+// A restored track is finished business; a preserved copy is an open question —
+// the track may be half-written, and the only original bytes left anywhere are
+// the ones in that copy — so it carries the paths and the reason this launch
+// couldn't settle it. Handed to the frontend as the launch report.
+//
+// The optional fields are what keep the report from claiming more than the entry
+// knows: `target` is None when the record is too damaged to say which track the
+// copy belongs to, and `backup` is None when there is no copy left to point at.
+// The frontend words each of those cases from these fields rather than assuming
+// the usual one.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryNotice {
+    restored: bool,
+    // False when the writing process survived its own failure and said so at the
+    // time: see RecoveryState::Retained. The report then doesn't attribute the
+    // copy to a crash.
+    crashed: bool,
+    target: Option<String>,
+    // Preserved entries only: what a retry or a discard acts on.
+    manifest: Option<String>,
+    backup: Option<String>,
+    reason: Option<String>,
+}
+
+impl RecoveryNotice {
+    fn restored(target: &Path, crashed: bool) -> Self {
+        Self {
+            restored: true,
+            crashed,
+            target: Some(path_string(target)),
+            manifest: None,
+            backup: None,
+            reason: None,
+        }
+    }
+
+    fn preserved(
+        target: &Path,
+        backup: Option<&Path>,
+        manifest: &Path,
+        crashed: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            restored: false,
+            crashed,
+            target: Some(path_string(target)),
+            manifest: Some(path_string(manifest)),
+            backup: backup.map(path_string),
+            reason: Some(reason.into()),
+        }
+    }
+
+    // A copy whose record is too damaged to name a track. The copy itself is all
+    // there is to point at, so that is what the entry carries; the record's own
+    // path is a file the user has no use for. The copy is required, because an
+    // entry with neither a track nor bytes is not something to report.
+    fn unidentified(manifest: &Path, backup: &Path, reason: impl Into<String>) -> Self {
+        Self {
+            restored: false,
+            crashed: true,
+            target: None,
+            manifest: Some(path_string(manifest)),
+            backup: Some(path_string(backup)),
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+// Ordered by track, then by record for the entries that name no track, so the
+// launch report reads the same way twice.
+fn sort_recovery_notices(notices: &mut [RecoveryNotice]) {
+    notices.sort_by(|a, b| (&a.target, &a.manifest).cmp(&(&b.target, &b.manifest)));
+}
+
+// A manifest is ours to act on only when it sits in the recovery directory under
+// the name the writer gave it. Guards the retry and discard commands, which take
+// a path from the frontend and delete files with it.
+fn is_recovery_manifest(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "json")
+        && path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".pudding-backup-"))
 }
 
 // Finish the transaction a previous process left behind. A manifest is never
@@ -4300,113 +4466,360 @@ fn discard_recovery_artifact(backup: &Path, manifest: &Path) -> Result<(), std::
 // window after bytes first reached the track. We refuse to overwrite a path that
 // now names a different inode: an external replacement is newer information than
 // the stale recovery record and must be resolved by the user.
-fn recover_incomplete_metadata_writes(dir: &Path) -> Result<(), std::io::Error> {
-    std::fs::create_dir_all(dir)?;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let manifest_path = entry.path();
-        let is_manifest = manifest_path.extension().is_some_and(|ext| ext == "json")
-            && manifest_path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(".pudding-backup-"));
-        if !is_manifest {
-            continue;
-        }
-        let manifest: RecoveryManifest = match std::fs::read(&manifest_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<RecoveryManifest>(&bytes).ok())
-        {
-            Some(manifest) if manifest.version == 1 => manifest,
-            _ => {
-                log::error!(
-                    "metadata recovery: preserving unreadable manifest {}",
-                    manifest_path.display()
-                );
-                continue;
-            }
-        };
-
-        if !manifest.backup.is_file() {
+//
+// None means there was nothing to tell: a committed entry is a crash's leftover
+// cleanup, not news. Every other outcome is reported, because a recovery the
+// user is never told about is indistinguishable from an edit that silently
+// didn't happen.
+fn resolve_recovery_manifest(manifest_path: &Path) -> Option<RecoveryNotice> {
+    // Which copy this entry is about, settled before the record is even read and
+    // from the record's name alone. Resolving an entry either restores from this
+    // path or deletes it, so it is the one thing here that can aim a delete at a
+    // file the user still wants, and the record's contents can't be trusted with
+    // it: a record written by an older build, left behind by a profile that
+    // moved, or corrupted into something that still parses can name any file on
+    // the disk. Deriving the name instead of vetting it is what makes that
+    // unreachable — and the writer names a record after its copy, so the copy is
+    // always the record's own path without the `.json`, which also rules out a
+    // damaged record naming a *different* record's copy.
+    let backup = backup_for_manifest(manifest_path);
+    let manifest: RecoveryManifest = match std::fs::read(manifest_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RecoveryManifest>(&bytes).ok())
+    {
+        Some(manifest) if manifest.version == 1 => manifest,
+        _ => {
             log::error!(
-                "metadata recovery: backup for {} is missing; preserving {}",
-                manifest.target.display(),
+                "metadata recovery: preserving unreadable manifest {}",
                 manifest_path.display()
             );
-            continue;
-        }
-        let backup_hash = match sha256_file(&manifest.backup) {
-            Ok(hash) if hash == manifest.original_sha256 => hash,
-            Ok(_) | Err(_) => {
+            // Nothing inside the record can be trusted, so the entry names no
+            // track and points at the copy the record's own name implies.
+            if !backup.is_file() {
+                // No track to name and no bytes to point at: this record holds
+                // nothing recoverable and nothing worth telling the user. It is
+                // left on disk rather than deleted, in case the read failure was
+                // the disk's rather than the file's, and a later launch that can
+                // read it resolves it properly.
                 log::error!(
-                    "metadata recovery: backup for {} does not match its manifest; preserving it",
-                    manifest.target.display()
+                    "metadata recovery: ignoring unreadable manifest {} with no copy behind it",
+                    manifest_path.display()
                 );
-                continue;
+                return None;
             }
-        };
-
-        if manifest.state == RecoveryState::Committed {
-            if let Err(error) = discard_recovery_artifact(&manifest.backup, &manifest_path) {
-                log::warn!(
-                    "metadata recovery: couldn't clean completed save for {}: {error}",
-                    manifest.target.display()
-                );
-            }
-            continue;
+            return Some(RecoveryNotice::unidentified(
+                manifest_path,
+                &backup,
+                "Pudding couldn't read the record of which track this copy belongs to.",
+            ));
         }
+    };
+    // A copy the writing process gave up on is not a crash's doing, and the user
+    // has already seen that save fail. Recovery is attempted either way.
+    let crashed = manifest.state != RecoveryState::Retained;
 
-        let mut target = match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&manifest.target)
-        {
-            Ok(file) => file,
+    // A record pointing somewhere else is read as pointing at its own copy — the
+    // substitution the discard command makes too — so the copy below reads as
+    // missing, which for a record that can't say where its copy went is the truth.
+    if manifest.backup != backup {
+        log::error!(
+            "metadata recovery: {} names {} as its copy, which isn't the one it was written for; reading it as {}",
+            manifest_path.display(),
+            manifest.backup.display(),
+            backup.display()
+        );
+    }
+
+    // Settled before the copy is examined at all: a committed record means the
+    // save finished and was verified, and that stays true whatever became of the
+    // leftover copy since. Checking the copy first would read a committed entry
+    // whose copy went missing or got damaged as an interrupted save and report a
+    // sound file as possibly incomplete, at every launch, with a retry that can
+    // never clear it.
+    if manifest.state == RecoveryState::Committed {
+        if let Err(error) = discard_recovery_artifact(&backup, manifest_path) {
+            log::warn!(
+                "metadata recovery: couldn't clean completed save for {}: {error}",
+                manifest.target.display()
+            );
+        }
+        return None;
+    }
+
+    if !backup.is_file() {
+        log::error!(
+            "metadata recovery: backup for {} is missing; preserving {}",
+            manifest.target.display(),
+            manifest_path.display()
+        );
+        return Some(RecoveryNotice::preserved(
+            &manifest.target,
+            None,
+            manifest_path,
+            crashed,
+            "The recovery copy is missing, so the original can't be put back.",
+        ));
+    }
+    let backup_hash = match sha256_file(&backup) {
+        Ok(hash) if hash == manifest.original_sha256 => hash,
+        Ok(_) | Err(_) => {
+            log::error!(
+                "metadata recovery: backup for {} does not match its manifest; preserving it",
+                manifest.target.display()
+            );
+            return Some(RecoveryNotice::preserved(
+                &manifest.target,
+                Some(&backup),
+                manifest_path,
+                crashed,
+                "The recovery copy doesn't match its record, so it isn't safe to put back.",
+            ));
+        }
+    };
+
+    let mut target = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&manifest.target)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            log::error!(
+                "metadata recovery: couldn't open {}: {error}; preserving recovery copy",
+                manifest.target.display()
+            );
+            return Some(RecoveryNotice::preserved(
+                &manifest.target,
+                Some(&backup),
+                manifest_path,
+                crashed,
+                format!("Pudding couldn't open the track to put the original back: {error}"),
+            ));
+        }
+    };
+    let still_original_inode =
+        path_and_descriptor_match(&manifest.target, &target, &manifest.original_stamp)
+            .unwrap_or(false);
+    if !still_original_inode {
+        log::error!(
+            "metadata recovery: {} was replaced after the interrupted save; preserving recovery copy",
+            manifest.target.display()
+        );
+        return Some(RecoveryNotice::preserved(
+            &manifest.target,
+            Some(&backup),
+            manifest_path,
+            crashed,
+            "Another program replaced the track after the interrupted save.",
+        ));
+    }
+
+    let already_original = sha256_open_file(&mut target).is_ok_and(|hash| hash == backup_hash);
+    let recovered = already_original || overwrite_open_file(&mut target, &backup).is_ok();
+    let verified = recovered
+        && sha256_open_file(&mut target).is_ok_and(|hash| hash == backup_hash)
+        && path_and_descriptor_match(&manifest.target, &target, &manifest.original_stamp)
+            .unwrap_or(false);
+    if !verified {
+        log::error!(
+            "metadata recovery: couldn't restore {}; preserving recovery copy",
+            manifest.target.display()
+        );
+        return Some(RecoveryNotice::preserved(
+            &manifest.target,
+            Some(&backup),
+            manifest_path,
+            crashed,
+            "Pudding couldn't write the original back to the track.",
+        ));
+    }
+    if let Err(error) = discard_recovery_artifact(&backup, manifest_path) {
+        log::warn!(
+            "metadata recovery: restored {} but couldn't clean its artifacts: {error}",
+            manifest.target.display()
+        );
+    } else {
+        log::warn!(
+            "metadata recovery: restored {} after an interrupted metadata save",
+            manifest.target.display()
+        );
+    }
+    Some(RecoveryNotice::restored(&manifest.target, crashed))
+}
+
+// Resolve every entry the recovery directory still holds.
+fn recover_incomplete_metadata_writes(dir: &Path) -> Result<Vec<RecoveryNotice>, std::io::Error> {
+    std::fs::create_dir_all(dir)?;
+    let mut notices = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let manifest_path = match entry {
+            Ok(entry) => entry.path(),
+            // One unreadable directory entry is not a reason to drop the notices
+            // already collected. The tracks they describe have had their original
+            // bytes written back to disk, and a report that never arrives leaves
+            // the user with an edit that silently didn't take — the thing this
+            // whole path exists to prevent. The rest of the directory still
+            // resolves; what this entry was stays on disk for the next launch.
             Err(error) => {
-                log::error!(
-                    "metadata recovery: couldn't open {}: {error}; preserving recovery copy",
-                    manifest.target.display()
-                );
+                log::error!("metadata recovery: couldn't read a recovery entry: {error}");
                 continue;
             }
         };
-        let still_original_inode =
-            path_and_descriptor_match(&manifest.target, &target, &manifest.original_stamp)
-                .unwrap_or(false);
-        if !still_original_inode {
-            log::error!(
-                "metadata recovery: {} was replaced after the interrupted save; preserving recovery copy",
-                manifest.target.display()
-            );
+        if !is_recovery_manifest(&manifest_path) {
             continue;
         }
-
-        let already_original = sha256_open_file(&mut target).is_ok_and(|hash| hash == backup_hash);
-        let recovered =
-            already_original || overwrite_open_file(&mut target, &manifest.backup).is_ok();
-        let verified = recovered
-            && sha256_open_file(&mut target).is_ok_and(|hash| hash == backup_hash)
-            && path_and_descriptor_match(&manifest.target, &target, &manifest.original_stamp)
-                .unwrap_or(false);
-        if !verified {
-            log::error!(
-                "metadata recovery: couldn't restore {}; preserving recovery copy",
-                manifest.target.display()
-            );
-            continue;
-        }
-        if let Err(error) = discard_recovery_artifact(&manifest.backup, &manifest_path) {
-            log::warn!(
-                "metadata recovery: restored {} but couldn't clean its artifacts: {error}",
-                manifest.target.display()
-            );
-        } else {
-            log::warn!(
-                "metadata recovery: restored {} after an interrupted metadata save",
-                manifest.target.display()
-            );
+        if let Some(notice) = resolve_recovery_manifest(&manifest_path) {
+            notices.push(notice);
         }
     }
-    Ok(())
+    sort_recovery_notices(&mut notices);
+    Ok(notices)
+}
+
+// The launch report, held until the frontend has a window to show it in. Only
+// the restored entries need holding: a preserved copy is still on disk, so the
+// retry resolves the directory again rather than trusting this snapshot.
+struct RecoveryNotices {
+    inner: Mutex<Vec<RecoveryNotice>>,
+}
+
+#[tauri::command]
+fn metadata_recovery_notices(state: State<RecoveryNotices>) -> Vec<RecoveryNotice> {
+    state
+        .inner
+        .lock()
+        .map(|notices| notices.clone())
+        .unwrap_or_default()
+}
+
+// A path from the frontend is only ever one of ours: same directory, same naming
+// as the writer produces. Anything else is refused rather than opened or deleted.
+fn recovery_manifest_arg(path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    if path.parent() != Some(metadata_recovery_root().as_path()) || !is_recovery_manifest(&path) {
+        return Err("That isn't one of Pudding's recovery records.".into());
+    }
+    Ok(path)
+}
+
+// Vetted as a batch, before any of it is acted on: these commands delete files,
+// and half the list done with an error returned is a worse answer than none of
+// it done.
+fn recovery_manifest_args(manifests: &[String]) -> Result<Vec<PathBuf>, String> {
+    manifests
+        .iter()
+        .map(|manifest| recovery_manifest_arg(manifest))
+        .collect()
+}
+
+// Re-attempt the entries the report is showing. The ordinary cause of a
+// preserved copy is a track that wasn't reachable at launch — a cloud file still
+// downloading, a drive not mounted yet — so a retry is the same resolution run
+// against storage that may have come back since.
+#[tauri::command]
+fn retry_metadata_recovery(
+    manifests: Vec<String>,
+    state: State<RecoveryNotices>,
+) -> Result<Vec<RecoveryNotice>, String> {
+    let paths = recovery_manifest_args(&manifests)?;
+    let mut notices = Vec::new();
+    for path in &paths {
+        if let Some(notice) = resolve_recovery_manifest(path) {
+            notices.push(notice);
+        }
+    }
+    sort_recovery_notices(&mut notices);
+    // Merged into the held report rather than replacing it: entries this retry
+    // didn't name are still unresolved, and the held report is what any later
+    // frontend attaching to this process reads.
+    //
+    // The merged report is also what comes back, because the frontend rebuilds
+    // the whole panel from this return. A retry only ever names the entries it
+    // can act on — a copy with a readable record and bytes behind it — so
+    // handing back just those would drop the ones it deliberately left alone:
+    // an orphan copy, a record whose copy is already gone. Those are still
+    // unresolved, still the only place their paths are written down, and still
+    // what the discard button acts on, so they have to survive the retry.
+    if let Ok(mut held) = state.inner.lock() {
+        let retried: Vec<String> = paths.iter().map(|path| path_string(path)).collect();
+        held.retain(|notice| {
+            !notice
+                .manifest
+                .as_ref()
+                .is_some_and(|manifest| retried.contains(manifest))
+        });
+        held.extend(notices.iter().cloned());
+        sort_recovery_notices(held.as_mut_slice());
+        return Ok(held.clone());
+    }
+    Ok(notices)
+}
+
+// What a discard managed, which is not always all of it or none of it: the pairs
+// go one at a time, and a copy that is already unlinked stays unlinked whatever
+// the pair after it did. Both fields travel together so the frontend can word
+// all-went, some-went and none-went apart, instead of reading a failure as
+// nothing having happened.
+#[derive(Debug, Serialize)]
+struct DiscardReport {
+    discarded: usize,
+    failure: Option<String>,
+}
+
+// One record and the copy it was written for. The copy's name comes from the
+// record's own name, never from the path stored inside it: that field is the one
+// thing in a record that can aim this delete at a file the user still wants, and
+// resolving an entry already refuses to trust it. A record that disagrees with
+// its own name would otherwise have the launch report offer one copy and this
+// delete remove another, orphaning the copy that was named.
+fn discard_one_recovery(manifest: &Path) -> Result<(), DiscardFailure> {
+    discard_recovery_pair(&backup_for_manifest(manifest), manifest)
+}
+
+// Throw away copies the user has decided they don't need. Destructive in the one
+// way that matters — for a track whose save was interrupted, this copy holds the
+// only original bytes left — so the frontend confirms before calling it.
+#[tauri::command]
+fn discard_metadata_recovery(
+    manifests: Vec<String>,
+    state: State<RecoveryNotices>,
+) -> Result<DiscardReport, String> {
+    let paths = recovery_manifest_args(&manifests)?;
+    let mut discarded = Vec::new();
+    let mut failures = Vec::new();
+    for path in &paths {
+        match discard_one_recovery(path) {
+            Ok(()) => discarded.push(path_string(path)),
+            Err(failed) => {
+                log::error!(
+                    "metadata recovery: couldn't discard {}: {}",
+                    path.display(),
+                    failed.error
+                );
+                // The pair is removed copy first, so the file still there is the
+                // one the error came from and not whichever half the caller
+                // happens to know the name of.
+                failures.push(format!("{}: {}", failed.path.display(), failed.error));
+            }
+        }
+    }
+    if let Ok(mut held) = state.inner.lock() {
+        held.retain(|notice| {
+            !notice
+                .manifest
+                .as_ref()
+                .is_some_and(|manifest| discarded.contains(manifest))
+        });
+    }
+    // Reported, not thrown. The deletions already happened one pair at a time,
+    // and the held report above has been pruned to match, so an error return
+    // here would be telling the user nothing went when the only copy of an
+    // original is already unlinked. The count and the failure travel together
+    // and the frontend words all three outcomes from them.
+    Ok(DiscardReport {
+        discarded: discarded.len(),
+        failure: (!failures.is_empty()).then(|| format!("Couldn't remove {}", failures.join("; "))),
+    })
 }
 
 fn path_and_descriptor_match(
@@ -6951,12 +7364,20 @@ pub fn run() {
             METADATA_RECOVERY_ROOT
                 .set(recovery_dir.clone())
                 .map_err(|_| "metadata recovery root was configured more than once")?;
-            if let Err(error) = recover_incomplete_metadata_writes(&recovery_dir) {
-                // A blocked library root must not prevent the player from
-                // starting. The manifest and backup stay intact and this is
-                // retried at the next launch, when the provider may be online.
-                log::error!("metadata recovery at startup failed: {error}");
-            }
+            let notices =
+                recover_incomplete_metadata_writes(&recovery_dir).unwrap_or_else(|error| {
+                    // A blocked library root must not prevent the player from
+                    // starting. The manifest and backup stay intact and this is
+                    // retried at the next launch, when the provider may be online.
+                    log::error!("metadata recovery at startup failed: {error}");
+                    Vec::new()
+                });
+            // Held rather than emitted: the frontend has no listener yet, and a
+            // report about a possibly damaged track is the last thing that should
+            // depend on winning a startup race.
+            app.manage(RecoveryNotices {
+                inner: Mutex::new(notices),
+            });
             let db_path = app_data.join(DB_FILE);
             let conn = open_connection(&db_path)?;
             init_schema(&conn)?;
@@ -7360,6 +7781,9 @@ pub fn run() {
             write_tags,
             undo_tag_write,
             cancel_tag_write,
+            metadata_recovery_notices,
+            retry_metadata_recovery,
+            discard_metadata_recovery,
             read_file_tags,
             read_common_tags,
             read_artwork_file,
@@ -10166,9 +10590,19 @@ mod tests {
             write_test_bytes(&mut file, b"interrupted metadata write").unwrap();
             sync_durable(&file).unwrap();
         }
-        recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+        let notices = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), original);
+        assert_eq!(notices.len(), 1, "a restored track is reported at launch");
+        assert!(notices[0].restored);
+        assert_eq!(
+            notices[0].target.as_deref(),
+            Some(&*target.to_string_lossy())
+        );
+        assert!(
+            notices[0].crashed,
+            "a Prepared manifest is a crash's leftover"
+        );
         assert!(
             !backup.exists(),
             "recovery backup is consumed after restoration"
@@ -10198,15 +10632,415 @@ mod tests {
             sync_durable(&file).unwrap();
         }
         manifest.mark_committed(&manifest_path).unwrap();
-        recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+        let notices = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), saved);
+        assert!(
+            notices.is_empty(),
+            "cleanup after a verified save is not news for the user"
+        );
         assert!(!backup.exists(), "completed-save backup is only cleanup");
         assert!(
             !manifest_path.exists(),
             "completed-save manifest is only cleanup"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A committed record means the save finished and was verified. What became of
+    // the leftover copy afterwards cannot make that save an interrupted one, and
+    // reading it as one would tell the user a sound file may be incomplete —
+    // every launch, with a retry that can never settle it.
+    #[test]
+    fn startup_recovery_says_nothing_about_a_committed_record_with_a_damaged_copy() {
+        let (dir, paths) = sample_copies("startup-committed-damaged", 2);
+        // The two ways a leftover copy stops answering for its record: gone from
+        // under it, and changed under it.
+        for (index, corrupt) in [false, true].into_iter().enumerate() {
+            let target = PathBuf::from(&paths[index]);
+            let recovery_dir = dir.join(format!("recovery-{index}"));
+            let (backup, manifest_path, mut manifest) =
+                prepared_recovery_manifest(&target, &recovery_dir);
+
+            let saved = b"verified metadata write";
+            {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&target)
+                    .unwrap();
+                write_test_bytes(&mut file, saved).unwrap();
+                sync_durable(&file).unwrap();
+            }
+            manifest.mark_committed(&manifest_path).unwrap();
+            if corrupt {
+                std::fs::write(&backup, b"copy damaged on disk").unwrap();
+            } else {
+                std::fs::remove_file(&backup).unwrap();
+            }
+
+            let notices = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                saved,
+                "a committed save is left as it was written (corrupt copy: {corrupt})"
+            );
+            assert!(
+                notices.is_empty(),
+                "a finished save is not an interrupted one (corrupt copy: {corrupt})"
+            );
+            assert!(
+                !manifest_path.exists(),
+                "and its record is cleaned up rather than reported again (corrupt copy: {corrupt})"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn startup_recovery_reports_a_copy_it_could_not_restore() {
+        let (dir, paths) = sample_copies("startup-preserved", 1);
+        let target = PathBuf::from(&paths[0]);
+        let recovery_dir = dir.join("recovery");
+        let (backup, manifest_path, _) = prepared_recovery_manifest(&target, &recovery_dir);
+
+        // Another program replaced the track: a new inode under the same path,
+        // which is newer information than the recovery record.
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&target, b"replaced by another tagger").unwrap();
+
+        let notices = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+
+        assert_eq!(notices.len(), 1);
+        let notice = &notices[0];
+        assert!(!notice.restored, "the track was not put back");
+        assert_eq!(notice.target.as_deref(), Some(&*target.to_string_lossy()));
+        assert_eq!(
+            notice.manifest.as_deref(),
+            Some(&*manifest_path.to_string_lossy())
+        );
+        assert_eq!(notice.backup.as_deref(), Some(&*backup.to_string_lossy()));
+        assert!(notice.reason.is_some(), "the user is told why it was kept");
+        assert!(backup.exists(), "the only original bytes left are kept");
+        assert!(manifest_path.exists(), "and so is the record naming them");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"replaced by another tagger",
+            "the other program's file is left alone"
+        );
+
+        // The report is re-derived from disk, so it returns at every launch
+        // until the copy is resolved.
+        let again = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+        assert_eq!(again.len(), 1);
+        assert!(!again[0].restored);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A save that failed in front of the user and could not roll itself back
+    // keeps its copy, and the next launch still tries again — but it must not
+    // tell that story as a crash the user never saw.
+    #[test]
+    fn a_copy_the_writer_gave_up_on_is_not_reported_as_a_crash() {
+        let (dir, paths) = sample_copies("startup-retained", 1);
+        let target = PathBuf::from(&paths[0]);
+        let recovery_dir = dir.join("recovery");
+        let (_, manifest_path, mut manifest) = prepared_recovery_manifest(&target, &recovery_dir);
+        manifest.mark_retained(&manifest_path).unwrap();
+
+        // Replaced since, so this launch can't settle the entry either.
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&target, b"replaced by another tagger").unwrap();
+
+        let notices = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(!notices[0].restored);
+        assert!(
+            !notices[0].crashed,
+            "the writing process survived and already reported this"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retaining_a_backup_records_that_the_writer_answered_for_it() {
+        let (dir, paths) = sample_copies("retain-marks-state", 1);
+        let target = PathBuf::from(&paths[0]);
+        let recovery_dir = dir.join("recovery");
+        let (backup_path, manifest_path, manifest) =
+            prepared_recovery_manifest(&target, &recovery_dir);
+
+        let mut held = BackupFile::new(backup_path.clone());
+        held.attach_manifest(manifest, manifest_path.clone());
+        assert_eq!(held.retain(), backup_path);
+
+        assert!(backup_path.exists(), "the copy is kept");
+        let written: RecoveryManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(written.state, RecoveryState::Retained);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A record too damaged to say which track it belongs to names no track. The
+    // report has to word that case from the entry rather than put a file from
+    // Application Support where a track title goes.
+    #[test]
+    fn startup_recovery_names_no_track_for_an_unreadable_record() {
+        let dir =
+            std::env::temp_dir().join(format!("pudding-recovery-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let backup = dir.join(".pudding-backup-damaged");
+        std::fs::write(&backup, b"the original bytes, whatever they belong to").unwrap();
+        let manifest_path = dir.join(".pudding-backup-damaged.json");
+        std::fs::write(&manifest_path, b"{ truncated by the same crash").unwrap();
+
+        let notices = recover_incomplete_metadata_writes(&dir).unwrap();
+
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0].target, None,
+            "no readable record, no track to name"
+        );
+        assert_eq!(
+            notices[0].backup.as_deref(),
+            Some(&*backup.to_string_lossy()),
+            "the copy is the only thing worth pointing at"
+        );
+        assert!(backup.exists() && manifest_path.exists());
+
+        // And with no copy behind it either, the record has nothing to recover
+        // and nothing to say, so it is neither reported nor destroyed.
+        std::fs::remove_file(&backup).unwrap();
+        assert!(recover_incomplete_metadata_writes(&dir).unwrap().is_empty());
+        assert!(
+            manifest_path.exists(),
+            "an unreadable record is never deleted on the strength of being unreadable"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The one preserved case with nothing left to put back. Telling the user a
+    // copy of the original is kept here would be the worst kind of wrong.
+    #[test]
+    fn startup_recovery_does_not_promise_a_copy_that_is_gone() {
+        let (dir, paths) = sample_copies("startup-no-copy", 1);
+        let target = PathBuf::from(&paths[0]);
+        let recovery_dir = dir.join("recovery");
+        let (backup, manifest_path, _) = prepared_recovery_manifest(&target, &recovery_dir);
+        std::fs::remove_file(&backup).unwrap();
+
+        let notices = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0].target.as_deref(),
+            Some(&*target.to_string_lossy())
+        );
+        assert_eq!(notices[0].backup, None, "there is no copy to offer");
+        assert!(
+            manifest_path.exists(),
+            "the record stays so the user can clear the entry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Point a record at a copy other than the one it was written for, the way an
+    // older build, a profile that moved or a corrupted field would.
+    fn point_recovery_record_at(manifest_path: &Path, backup: &Path) {
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        record["backup"] = serde_json::Value::String(path_string(backup));
+        std::fs::write(manifest_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    // The copy's path is the only field in a record that can aim a delete at a
+    // file the user still wants: resolving an entry removes the copy when the
+    // save is settled, and restores from it when it isn't. A record that still
+    // parses but names a track must get neither done to that track — and a
+    // bystander that is a byte-for-byte copy of the original would pass the
+    // digest gate, so the path has to be refused on its name alone.
+    #[test]
+    fn startup_recovery_never_acts_on_a_file_a_record_wrongly_names() {
+        let (dir, paths) = sample_copies("startup-foreign-copy", 4);
+        for (index, committed) in [true, false].into_iter().enumerate() {
+            let target = PathBuf::from(&paths[index * 2]);
+            let bystander = PathBuf::from(&paths[index * 2 + 1]);
+            let kept = std::fs::read(&bystander).unwrap();
+            let recovery_dir = dir.join(format!("recovery-{index}"));
+            let (backup, manifest_path, mut manifest) =
+                prepared_recovery_manifest(&target, &recovery_dir);
+            if committed {
+                manifest.mark_committed(&manifest_path).unwrap();
+            } else {
+                // Nothing at the name the record was written for, so a record
+                // trusted for its contents reaches for the bystander instead.
+                std::fs::remove_file(&backup).unwrap();
+            }
+            point_recovery_record_at(&manifest_path, &bystander);
+
+            let notices = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+
+            assert!(
+                bystander.is_file() && std::fs::read(&bystander).unwrap() == kept,
+                "a file a record wrongly names is neither consumed nor deleted (committed: {committed})"
+            );
+            if committed {
+                assert!(
+                    notices.is_empty(),
+                    "a finished save is still only cleanup to report"
+                );
+                assert!(!backup.exists(), "and its own copy is the one cleaned up");
+                assert!(!manifest_path.exists(), "along with its record");
+            } else {
+                assert_eq!(notices.len(), 1, "the entry is still reported");
+                assert_eq!(
+                    notices[0].backup, None,
+                    "a record that can't say where its copy went has none to offer"
+                );
+                assert!(!notices[0].restored, "and nothing was put back from it");
+                assert!(
+                    manifest_path.exists(),
+                    "the record stays so the user can clear the entry"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Discarding has to read a record's name the same way resolving does. A
+    // record whose stored path disagrees would otherwise have the launch report
+    // offer one copy and the discard delete another: the bystander loses bytes
+    // nobody asked to lose, and the copy that was named is left with no record
+    // to carry it into the next report. Both pairs live where the writer puts
+    // them, because a path anywhere else is refused on its location alone and
+    // would never reach the question this test is asking.
+    #[test]
+    fn discard_ignores_a_path_a_record_wrongly_names() {
+        let (dir, paths) = sample_copies("discard-foreign-copy", 1);
+        let target = PathBuf::from(&paths[0]);
+        let root = metadata_recovery_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let pid = std::process::id();
+        let mut pair = |suffix: &str| {
+            let backup = root.join(format!(".pudding-backup-discard-{pid}-{suffix}"));
+            durable_copy(&target, &backup).unwrap();
+            let stamp = file_stamp(&target).unwrap();
+            let hash = sha256_file(&backup).unwrap();
+            let (_, manifest_path) =
+                RecoveryManifest::prepare(&target, &backup, stamp, hash).unwrap();
+            (backup, manifest_path)
+        };
+        let (backup, manifest_path) = pair("a");
+        // A second pair, standing in for another entry still awaiting a decision.
+        let (bystander, bystander_manifest) = pair("b");
+        let kept = std::fs::read(&bystander).unwrap();
+        point_recovery_record_at(&manifest_path, &bystander);
+
+        discard_one_recovery(&manifest_path).unwrap();
+
+        assert!(
+            bystander.is_file() && std::fs::read(&bystander).unwrap() == kept,
+            "the copy another record is still holding is untouched"
+        );
+        assert!(bystander_manifest.is_file(), "and so is that record");
+        assert!(
+            !backup.exists(),
+            "the copy this record was written for is the one discarded"
+        );
+        assert!(!manifest_path.exists(), "along with the record itself");
+
+        for path in [&bystander, &bystander_manifest, &backup, &manifest_path] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A discard the filesystem refuses has to leave the pair joined: removing
+    // the record first and then failing on the copy would strand bytes that no
+    // later sweep could name, and so no later report could offer.
+    #[test]
+    fn a_failed_discard_leaves_the_pair_joined() {
+        let dir =
+            std::env::temp_dir().join(format!("pudding-recovery-stuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join(".pudding-backup-stuck.json");
+        let backup = dir.join(".pudding-backup-stuck");
+        std::fs::write(&manifest, b"{}").unwrap();
+        // A directory where the copy belongs: remove_file won't take it, which is
+        // as close as a test gets to a copy the filesystem won't give up.
+        std::fs::create_dir(&backup).unwrap();
+
+        let failure = discard_recovery_pair(&backup, &manifest).expect_err("a stuck copy");
+        assert_eq!(
+            failure.path, backup,
+            "the error names the half that refused"
+        );
+        assert!(
+            manifest.exists(),
+            "the record outlives a copy that could not be removed"
+        );
+
+        std::fs::remove_dir(&backup).unwrap();
+        std::fs::write(&backup, b"original bytes").unwrap();
+        discard_recovery_pair(&backup, &manifest).unwrap();
+        assert!(!backup.exists() && !manifest.exists());
+        // Asked for again, with both halves already gone, is the outcome asked
+        // for rather than an error to show.
+        discard_recovery_pair(&backup, &manifest).unwrap();
+
+        // The other half failing is the case that can misreport: the copy goes
+        // first and goes successfully, so an error named after the copy would
+        // point at the one file this call definitely did delete.
+        std::fs::write(&backup, b"original bytes").unwrap();
+        std::fs::create_dir(&manifest).unwrap();
+        let failure = discard_recovery_pair(&backup, &manifest).expect_err("a stuck record");
+        assert_eq!(
+            failure.path, manifest,
+            "the error names the record, not the copy it already removed"
+        );
+        assert!(!backup.exists(), "the copy went before the record refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The retry and discard commands take a path from the frontend and delete
+    // files with it, so the only paths they accept are ones the writer could
+    // have produced, in the directory the writer produces them in.
+    #[test]
+    fn recovery_actions_refuse_paths_that_are_not_ours() {
+        let root = metadata_recovery_root();
+        let ours = root.join(".pudding-backup-7-0.json");
+        assert!(recovery_manifest_arg(&ours.to_string_lossy()).is_ok());
+
+        // And a batch is refused whole, before any of it is acted on.
+        assert!(
+            recovery_manifest_args(&[
+                ours.to_string_lossy().into_owned(),
+                root.join("metadata.db").to_string_lossy().into_owned(),
+            ])
+            .is_err(),
+            "one foreign path refuses the batch"
+        );
+
+        for refused in [
+            root.join("metadata.db"),
+            root.join(".pudding-backup-7-0"),
+            root.join("nested").join(".pudding-backup-7-0.json"),
+            PathBuf::from("/etc/passwd"),
+        ] {
+            assert!(
+                recovery_manifest_arg(&refused.to_string_lossy()).is_err(),
+                "{} is not a recovery record",
+                refused.display()
+            );
+        }
+
+        // The path *inside* a record gets no such vetting because nothing acts
+        // on it: both resolving and discarding derive the copy's name from the
+        // record's own, so a record from a moved profile or corrupted into
+        // something that still parses has no path to aim anywhere. See
+        // `discard_ignores_a_path_a_record_wrongly_names`.
     }
 
     fn write_test_bytes(file: &mut std::fs::File, bytes: &[u8]) -> Result<(), std::io::Error> {
