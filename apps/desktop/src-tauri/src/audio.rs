@@ -3739,7 +3739,9 @@ fn reset_for_new_playback(shared: &Arc<SharedState>, origins: &Arc<Mutex<Origins
     // Whatever is starting, it starts as a file queue with a healthy stream
     // slot; PlayStream claims the radio flag right after this returns.
     shared.streaming.store(false, Ordering::Relaxed);
-    shared.stream_conn.store(StreamHealth::Live as u8, Ordering::Relaxed);
+    shared
+        .stream_conn
+        .store(StreamHealth::Live as u8, Ordering::Relaxed);
     // New session: bump the epoch so origins published from here on are
     // recognized as a fresh Play even when they reuse the previous track's slot
     // and path (replaying the same track).
@@ -3903,25 +3905,29 @@ fn position_emit_loop(shared: Arc<SharedState>, origins: Arc<Mutex<Origins>>, ap
     // over there even though it is not one here; keying on the epoch re-announces
     // it. The underrun count is tracked apart from the diagnostic counters above,
     // which only move when the rate-limited log line fires.
-    let mut seen_underrun_events: u64 = 0;
+    let mut seen_underrun_frames: u64 = 0;
     let mut dry_since: Option<Instant> = None;
     let mut reported: Option<(u64, StreamHealth)> = None;
 
     loop {
         std::thread::sleep(Duration::from_millis(POSITION_EMIT_INTERVAL_MS));
 
-        // Report ring underruns the callback recorded. Batched to at most one
-        // line a second: a starved ring produces them in bursts, and a log line
-        // per callback would itself become a source of load.
+        // What the callback recorded, read once for both readers below — the log
+        // line and the dry-ring test describe the same tick, and loading the
+        // pair twice would let them disagree about it. The rate is the one
+        // running now: a mid-session switch makes older frames a slightly
+        // different length, which is noise at the resolution of a diagnostic log
+        // line, and the dry test only ever measures the tick that just passed.
         let underrun_events = shared.underrun_events.load(Ordering::Relaxed);
+        let underrun_frames = shared.underrun_frames.load(Ordering::Relaxed);
+        let rate = shared.output_rate.load(Ordering::Relaxed).max(1);
+
+        // Report them. Batched to at most one line a second: a starved ring
+        // produces them in bursts, and a log line per callback would itself
+        // become a source of load.
         if underrun_events != reported_underrun_events
             && last_underrun_log.elapsed() >= Duration::from_secs(1)
         {
-            let underrun_frames = shared.underrun_frames.load(Ordering::Relaxed);
-            // Against the rate running now: a mid-session switch makes older
-            // frames a slightly different length, which is noise at the
-            // resolution of a diagnostic log line.
-            let rate = shared.output_rate.load(Ordering::Relaxed).max(1);
             let ms = |frames: u64| frames as f64 * 1000.0 / rate as f64;
             log::warn!(
                 "audio: ring underrun +{} callbacks / {:.1}ms silence (total {} / {:.1}ms)",
@@ -3935,12 +3941,26 @@ fn position_emit_loop(shared: Arc<SharedState>, origins: Arc<Mutex<Origins>>, ap
             last_underrun_log = Instant::now();
         }
 
-        // Is the ring dry? A starved callback bumps the counter every few ms,
-        // so a tick that sees no new underrun at all means audio is flowing
-        // again — which is what keeps a reconnect from flapping the label while
-        // the first chunk is still being decoded.
-        if underrun_events != seen_underrun_events {
-            seen_underrun_events = underrun_events;
+        // Is the ring dry? Not "did a callback come up short": a stream running
+        // close to the wire underruns continuously by a few frames at a time and
+        // is still perfectly audible, and counting that as silence put
+        // "Reconnecting" over a station the listener could hear. What the label
+        // is about is silence, so the measure is how much of the tick that just
+        // passed the callback had to fill with it. Half a tick is the bar — well
+        // past a crackle, and a dry ring writes silence for all of it — and it
+        // has to hold for STREAM_DRY_LABEL_DELAY to reach the label, which is
+        // what keeps a reconnect from flapping it while the first chunk is still
+        // being decoded.
+        let silence = underrun_frames.saturating_sub(seen_underrun_frames);
+        seen_underrun_frames = underrun_frames;
+        // A rate too low for a tick to hold a single frame leaves no bar to
+        // measure the silence against, and a bar of zero reads every tick as
+        // wholly silent — "Reconnecting" over audible playback, which is the
+        // thing this measure exists to stop. `rate` is clamped away from zero
+        // only so the log's divide is safe, so the bar is checked on its own
+        // account rather than trusted to that.
+        let tick_frames = u64::from(rate) * POSITION_EMIT_INTERVAL_MS / 1000;
+        if tick_frames > 0 && silence * 2 >= tick_frames {
             dry_since.get_or_insert_with(Instant::now);
         } else {
             dry_since = None;

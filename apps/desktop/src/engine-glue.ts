@@ -117,6 +117,13 @@ export const engine = new GaplessEngine({
     // event would ever ask again — the connection coming back is the one thing
     // that makes the attempt worth repeating. Stations whose art is simply
     // missing retry too, which costs one request per reconnect.
+    //
+    // Known gap: this only catches a connection that was seen to drop. Health
+    // starts out "live" and play resets it to "live", so a first `icy::connect`
+    // that blocks on a down network and then succeeds never produces the edge
+    // — that station keeps its missing art until a later reconnect or a
+    // restart. Left as is: the cost is one absent thumbnail, and the fix wants
+    // a signal from the connect itself rather than a wider edge here.
     if (recovered && app.streamArtPending) {
       void loadStreamArt(app.streamArtPending);
     }
