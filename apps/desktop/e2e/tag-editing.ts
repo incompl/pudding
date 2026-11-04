@@ -11,6 +11,7 @@
 //     repoint whoever is running it at a temp folder that no longer exists, and
 //     stamp their library database with three hundred tone copies.
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -76,6 +77,86 @@ export async function startIsolated(root: string): Promise<Harness> {
   const profile = path.join(root, "profile");
   await fs.mkdir(profile, { recursive: true });
   return startHarness({ env: { PUDDING_E2E_DATA_DIR: profile } });
+}
+
+// The same, but with the profile populated before the app ever sees it — which
+// `startIsolated` cannot do, because it mkdirs and launches in one step and the
+// startup sweep this is for runs inside `setup()`, before any window exists.
+//
+// Each entry in `plants` is an argument list for tools/plant-recovery-copy.mjs,
+// which is shelled out to rather than imported: `allowJs` is off in
+// tsconfig.test.json, so a .ts test cannot import a .mjs, and this way the
+// automated test drives the same entry point a manual pass does. `--profile` is
+// added here, so the plant and the app agree on the app-data root and the real
+// Application Support profile is never touched.
+//
+// Returns the three paths each plant left behind, in the order they were planted,
+// alongside the harness. Asserting a report means asserting the paths it names,
+// and asserting a restore means reading the track back.
+export type Planted = { track: string; copy: string; record: string };
+
+const plantScript = (): string => path.join(dir, "..", "tools", "plant-recovery-copy.mjs");
+
+// Undo a plant *before* the temp root is removed. Two of the plant flags leave
+// the filesystem refusing writes — `--stick` sets uchg on the copy and
+// `--lock-folder` takes the recovery directory down to mode 500 — and neither
+// yields to `fs.rm`, even with `force`. The script's own `--clean` is the thing
+// that knows the order to undo them in (the directory's mode first, then the
+// file flags, then the unlink), so it runs rather than being reimplemented here.
+//
+// Safe for a profile with nothing planted in it, which is why the teardown can
+// call it unconditionally instead of tracking which cases need it.
+export function cleanPlants(profile: string): void {
+  execFileSync(process.execPath, [plantScript(), "--clean", "--profile", profile], {
+    encoding: "utf8",
+  });
+}
+
+export async function startPlanted(
+  root: string,
+  plants: string[][],
+): Promise<{ harness: Harness; profile: string; planted: Planted[]; pid: number | null }> {
+  const profile = path.join(root, "profile");
+  await fs.mkdir(profile, { recursive: true });
+  const script = plantScript();
+  const planted = plants.map((plant) => {
+    const out = execFileSync(process.execPath, [script, "--profile", profile, ...plant], {
+      encoding: "utf8",
+    });
+    // Read back off the script's own report rather than guessed at: the copy is
+    // named after the millisecond it was planted in, so nothing else knows it.
+    const field = (name: string): string => {
+      const line = out.split("\n").find((text) => text.trimStart().startsWith(`${name}:`));
+      if (!line) throw new Error(`plant-recovery-copy printed no ${name}:\n${out}`);
+      // The copy's line carries a trailing note when --stick is on.
+      return line.slice(line.indexOf(":") + 1).replace(/\s{2,}\(.*$/, "").trim();
+    };
+    return { track: field("track"), copy: field("copy"), record: field("record") };
+  });
+  const harness = await startHarness({ env: { PUDDING_E2E_DATA_DIR: profile } });
+  return { harness, profile, planted, pid: harness.pid };
+}
+
+/** The tag-operation panel the pane is showing (a result, a review, a report). */
+export type OperationPanel = {
+  heading: string;
+  message: string;
+  details: string[];
+  buttons: string[];
+};
+
+export async function operationPanel(d: Driver): Promise<OperationPanel> {
+  return (await d.action("operationPanel")) as OperationPanel;
+}
+
+/** The same, or null while the pane is showing something else (or nothing). */
+export async function operationPanelOrNone(d: Driver): Promise<OperationPanel | null> {
+  return (await d.exists("#pane-editor-view .tag-operation")) ? operationPanel(d) : null;
+}
+
+/** Press a panel button by its label. Throws naming the labels it found. */
+export async function clickPanelButton(d: Driver, label: string): Promise<void> {
+  await d.action("clickPanelButton", { label });
 }
 
 // Copy `fixture` into a new library folder under `root`, `count` times, named so

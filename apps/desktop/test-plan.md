@@ -163,17 +163,10 @@ over one too.
 
 ## 10. Metadata editing
 
-- [x] Edit one file: every field + artwork; verify on disk with another tagger
-- [x] Bulk edit a selection: heading shows the count, disagreeing fields left untouched
-- [x] Progress and result screen name the fields and tracks changed
-- [x] **Revert update** restores only the fields that save wrote; a file a third party changed since is skipped
-- [x] Done dismisses the revert affordance; it does not come back
-- [ ] File identity preserved: inode unchanged after a save (`stat`), Proton Drive shows a new version
-- [x] Cancel a long bulk write mid-run → consistent state
-- [x] Kill the app mid-write → next launch recovers or keeps the recovery copy and says so
-- [ ] **Retry restore** with an unidentifiable copy also present → the orphan entry and its path survive the retry
-- [ ] Discard where one copy won't delete (`chmod` its folder) → report says how many went, not that nothing did
-- [x] Read-only file / no permission → error, original untouched
+- [ ] Edit one file: every field + artwork
+- [ ] Batch review names every field the patch is about to write
+- [ ] After a save, Done takes the Revert update button away for good
+- [ ] A save through Proton Drive leaves a new version in its history (does not delete / create a new file)
 
 ## 11. Now Playing and interface
 

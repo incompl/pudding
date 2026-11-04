@@ -27,6 +27,99 @@ type Request = {
   args?: Record<string, unknown>;
 };
 
+/** A native dialog the app put up, as the stub below saw it go past. */
+export type SeenDialog = { title: string | null; message: string; kind: string | null };
+
+// Standing in for the native dialogs, so a test can drive a flow that is gated
+// by one. `confirm()` from @tauri-apps/plugin-dialog is a single invoke of
+// `plugin:dialog|message` resolving to the label of the button the user clicked,
+// and `confirm` returns true iff that equals the Ok label — so answering that
+// one call is answering the dialog, and no NSAlert is ever created. Which
+// matters twice over: the harness has no way to dismiss one, and a modal left
+// standing would outlive the test that raised it.
+//
+// Answered at the IPC transport rather than above it. The obvious seam,
+// `window.__TAURI_INTERNALS__.invoke`, cannot be taken: Tauri defines both the
+// internals object and every method on it with a bare `Object.defineProperty`,
+// so they are non-writable *and* non-configurable and assigning to one throws.
+// What is left underneath is the request itself — on macOS the custom protocol,
+// which is a `fetch` to `ipc://localhost/<command>` whose response the protocol
+// script turns back into the invoke's resolution. `window.fetch` is an ordinary
+// writable global, and a dialog answered there has still gone through every line
+// of the app's own code, down to the title and message it handed the plugin,
+// which is what the tests read back. The alternative — a `confirmFn` threaded
+// through the app for the tests' benefit — would weaken the one confirmation
+// standing between the user and the last copy of someone's original.
+//
+// Every message dialog is answered while this is installed, not only confirms,
+// so a test asserts on what `dialogs` captured rather than assuming which one it
+// caught.
+const DIALOG_CMD = "plugin:dialog|message";
+
+// `convertFileSrc(cmd, "ipc")` builds `ipc://localhost/<encoded command>`, so
+// the command is the last path segment and nothing else about the URL matters.
+function ipcCommand(url: string): string | null {
+  if (!url.startsWith("ipc:")) return null;
+  try {
+    return decodeURIComponent(url.slice(url.lastIndexOf("/") + 1));
+  } catch {
+    return null;
+  }
+}
+
+const seenDialogs: SeenDialog[] = [];
+let realFetch: typeof fetch | null = null;
+let dialogAnswer: string | null = null;
+
+// `answer` is the button label the plugin resolves with ("Ok" accepts a confirm,
+// anything else declines it); null puts the real fetch back and lets the native
+// dialogs through again. Installing resets the capture log, so each test reads
+// only its own.
+function answerDialogs(answer: string | null): void {
+  seenDialogs.length = 0;
+  dialogAnswer = answer;
+  if (answer === null) {
+    if (realFetch) window.fetch = realFetch;
+    realFetch = null;
+    return;
+  }
+  if (realFetch) return;
+  realFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    const real = realFetch;
+    if (!real) throw new Error("e2e dialog stub lost the real fetch");
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof Request
+          ? input.url
+          : String(input);
+    if (dialogAnswer === null || ipcCommand(url) !== DIALOG_CMD) return real(input, init);
+    // The payload the app sent, which for a plain command is the JSON body.
+    let fields: Record<string, unknown> = {};
+    try {
+      if (typeof init?.body === "string") fields = JSON.parse(init.body) as Record<string, unknown>;
+    } catch {
+      // Captured as a dialog with no text rather than dropped: the test's
+      // assertion on the wording is a better failure than a silent passthrough
+      // that puts a real modal on screen.
+    }
+    seenDialogs.push({
+      title: fields.title == null ? null : String(fields.title),
+      message: String(fields.message ?? ""),
+      kind: fields.kind == null ? null : String(fields.kind),
+    });
+    // Shaped the way the IPC protocol script reads a reply: `Tauri-Response`
+    // picks the success callback over the error one, and the content type
+    // decides how the body is parsed back into the invoke's value.
+    return Promise.resolve(
+      new Response(JSON.stringify(dialogAnswer), {
+        headers: { "content-type": "application/json", "Tauri-Response": "ok" },
+      }),
+    );
+  };
+}
+
 function el(selector: string): Element {
   const found = document.querySelector(selector);
   if (!found) throw new Error(`no element for selector: ${selector}`);
@@ -156,6 +249,11 @@ async function handle(
       }
       return found;
     }
+    case "dialog":
+      answerDialogs(a.answer == null ? null : String(a.answer));
+      return true;
+    case "dialogs":
+      return seenDialogs.slice();
     case "probe":
       return probe();
     case "settle": {

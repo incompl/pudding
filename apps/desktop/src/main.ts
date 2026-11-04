@@ -4970,6 +4970,46 @@ async function init(): Promise<void> {
         input.value = a.value;
         input.dispatchEvent(new Event("input", { bubbles: true }));
       },
+      // The tag-operation panel the pane is showing, read back as data: the
+      // whole tag-write family reports through it (a write result, a batch
+      // review, the interrupted-save report) and it is not a form, so
+      // editorFields above can't see it. Its three regions carry classes; its
+      // buttons do not — they share two classes between them — so they come back
+      // as labels in view order and clickPanelButton below matches on one.
+      operationPanel: () => {
+        const panel = document.querySelector<HTMLElement>("#pane-editor-view .tag-operation");
+        if (!panel) throw new Error("no tag-operation panel is open");
+        return {
+          heading: panel.querySelector(".inline-editor-heading")?.textContent ?? "",
+          message: panel.querySelector(".tag-operation-message")?.textContent ?? "",
+          details: [...panel.querySelectorAll(".tag-operation-details li")].map(
+            (item) => item.textContent ?? "",
+          ),
+          buttons: [...panel.querySelectorAll(".tag-operation-actions button")].map(
+            (button) => button.textContent ?? "",
+          ),
+        };
+      },
+      // Press one of that panel's buttons by what it says, which is the only
+      // thing that tells them apart. Throws naming what it did find, because the
+      // alternative — an index — silently presses Discard when a label changes,
+      // and these buttons delete the only copy of an original.
+      clickPanelButton: (arg) => {
+        const label = String((arg as { label: string }).label);
+        const panel = document.querySelector<HTMLElement>("#pane-editor-view .tag-operation");
+        if (!panel) throw new Error("no tag-operation panel is open");
+        const buttons = [
+          ...panel.querySelectorAll<HTMLButtonElement>(".tag-operation-actions button"),
+        ];
+        const button = buttons.find((candidate) => candidate.textContent === label);
+        if (!button) {
+          throw new Error(
+            `no panel button labelled ${JSON.stringify(label)} — found: ` +
+              buttons.map((candidate) => JSON.stringify(candidate.textContent)).join(", "),
+          );
+        }
+        button.click();
+      },
       // Open a folder in Browse, through the same entry point "Show in Browse"
       // uses: Files tab, Browse view, expanded and scrolled to the folder. A test
       // that wants to read the tree has to ask for it — the Files panel starts on

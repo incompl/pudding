@@ -4712,47 +4712,60 @@ fn recovery_manifest_args(manifests: &[String]) -> Result<Vec<PathBuf>, String> 
         .collect()
 }
 
+// Resolve the named records again and fold the answers back into the report the
+// launch is holding. `held` is the whole report, `paths` only the entries the
+// retry was aimed at, and the return is the whole report as it now stands.
+//
+// Merged rather than replacing: entries this retry didn't name are still
+// unresolved, and the held report is what any later frontend attaching to this
+// process reads.
+//
+// The merged report is also what comes back, because the frontend rebuilds the
+// whole panel from this return. A retry only ever names the entries it can act
+// on — a copy with a readable record and bytes behind it — so handing back just
+// those would drop the ones it deliberately left alone: an orphan copy, a record
+// whose copy is already gone. Those are still unresolved, still the only place
+// their paths are written down, and still what the discard button acts on, so
+// they have to survive the retry.
+fn merge_retried_notices(held: &mut Vec<RecoveryNotice>, paths: &[PathBuf]) -> Vec<RecoveryNotice> {
+    let mut notices = Vec::new();
+    for path in paths {
+        if let Some(notice) = resolve_recovery_manifest(path) {
+            notices.push(notice);
+        }
+    }
+    sort_recovery_notices(&mut notices);
+    let retried: Vec<String> = paths.iter().map(|path| path_string(path)).collect();
+    held.retain(|notice| {
+        !notice
+            .manifest
+            .as_ref()
+            .is_some_and(|manifest| retried.contains(manifest))
+    });
+    held.extend(notices);
+    sort_recovery_notices(held.as_mut_slice());
+    held.clone()
+}
+
 // Re-attempt the entries the report is showing. The ordinary cause of a
 // preserved copy is a track that wasn't reachable at launch — a cloud file still
 // downloading, a drive not mounted yet — so a retry is the same resolution run
 // against storage that may have come back since.
+//
+// The wrapper is the argument vetting and the lock; the merge above is what the
+// tests drive. A poisoned lock falls back to resolving without merging, which
+// loses the entries this retry didn't name — the same answer as before, and the
+// alternative is refusing a restore that already happened.
 #[tauri::command]
 fn retry_metadata_recovery(
     manifests: Vec<String>,
     state: State<RecoveryNotices>,
 ) -> Result<Vec<RecoveryNotice>, String> {
     let paths = recovery_manifest_args(&manifests)?;
-    let mut notices = Vec::new();
-    for path in &paths {
-        if let Some(notice) = resolve_recovery_manifest(path) {
-            notices.push(notice);
-        }
+    match state.inner.lock() {
+        Ok(mut held) => Ok(merge_retried_notices(&mut held, &paths)),
+        Err(_) => Ok(merge_retried_notices(&mut Vec::new(), &paths)),
     }
-    sort_recovery_notices(&mut notices);
-    // Merged into the held report rather than replacing it: entries this retry
-    // didn't name are still unresolved, and the held report is what any later
-    // frontend attaching to this process reads.
-    //
-    // The merged report is also what comes back, because the frontend rebuilds
-    // the whole panel from this return. A retry only ever names the entries it
-    // can act on — a copy with a readable record and bytes behind it — so
-    // handing back just those would drop the ones it deliberately left alone:
-    // an orphan copy, a record whose copy is already gone. Those are still
-    // unresolved, still the only place their paths are written down, and still
-    // what the discard button acts on, so they have to survive the retry.
-    if let Ok(mut held) = state.inner.lock() {
-        let retried: Vec<String> = paths.iter().map(|path| path_string(path)).collect();
-        held.retain(|notice| {
-            !notice
-                .manifest
-                .as_ref()
-                .is_some_and(|manifest| retried.contains(manifest))
-        });
-        held.extend(notices.iter().cloned());
-        sort_recovery_notices(held.as_mut_slice());
-        return Ok(held.clone());
-    }
-    Ok(notices)
 }
 
 // What a discard managed, which is not always all of it or none of it: the pairs
@@ -4776,18 +4789,18 @@ fn discard_one_recovery(manifest: &Path) -> Result<(), DiscardFailure> {
     discard_recovery_pair(&backup_for_manifest(manifest), manifest)
 }
 
-// Throw away copies the user has decided they don't need. Destructive in the one
-// way that matters — for a track whose save was interrupted, this copy holds the
-// only original bytes left — so the frontend confirms before calling it.
-#[tauri::command]
-fn discard_metadata_recovery(
-    manifests: Vec<String>,
-    state: State<RecoveryNotices>,
-) -> Result<DiscardReport, String> {
-    let paths = recovery_manifest_args(&manifests)?;
+// Remove each pair in turn and account for what went. Alongside the report, the
+// records that actually went: the caller prunes the held report by them, and only
+// the ones that went may be pruned — a pair the filesystem refused is still on
+// disk and still has to be offered at the next launch.
+//
+// One refusal never stops the rest. Every pair is independent, and a run that
+// stopped at the first error would leave the user to press the button again for
+// each remaining copy with no way to tell which had gone.
+fn discard_recovery_set(paths: &[PathBuf]) -> (DiscardReport, Vec<String>) {
     let mut discarded = Vec::new();
     let mut failures = Vec::new();
-    for path in &paths {
+    for path in paths {
         match discard_one_recovery(path) {
             Ok(()) => discarded.push(path_string(path)),
             Err(failed) => {
@@ -4803,6 +4816,27 @@ fn discard_metadata_recovery(
             }
         }
     }
+    // Reported, not thrown. The deletions already happened one pair at a time,
+    // so an error return here would be telling the user nothing went when the
+    // only copy of an original is already unlinked. The count and the failure
+    // travel together and the frontend words all three outcomes from them.
+    let report = DiscardReport {
+        discarded: discarded.len(),
+        failure: (!failures.is_empty()).then(|| format!("Couldn't remove {}", failures.join("; "))),
+    };
+    (report, discarded)
+}
+
+// Throw away copies the user has decided they don't need. Destructive in the one
+// way that matters — for a track whose save was interrupted, this copy holds the
+// only original bytes left — so the frontend confirms before calling it.
+#[tauri::command]
+fn discard_metadata_recovery(
+    manifests: Vec<String>,
+    state: State<RecoveryNotices>,
+) -> Result<DiscardReport, String> {
+    let paths = recovery_manifest_args(&manifests)?;
+    let (report, discarded) = discard_recovery_set(&paths);
     if let Ok(mut held) = state.inner.lock() {
         held.retain(|notice| {
             !notice
@@ -4811,15 +4845,7 @@ fn discard_metadata_recovery(
                 .is_some_and(|manifest| discarded.contains(manifest))
         });
     }
-    // Reported, not thrown. The deletions already happened one pair at a time,
-    // and the held report above has been pruned to match, so an error return
-    // here would be telling the user nothing went when the only copy of an
-    // original is already unlinked. The count and the failure travel together
-    // and the frontend words all three outcomes from them.
-    Ok(DiscardReport {
-        discarded: discarded.len(),
-        failure: (!failures.is_empty()).then(|| format!("Couldn't remove {}", failures.join("; "))),
-    })
+    Ok(report)
 }
 
 fn path_and_descriptor_match(
@@ -5219,7 +5245,10 @@ fn direct_tag_write_uncoordinated<T>(
         .read(true)
         .write(true)
         .open(&target)
-        .map_err(|e| WriteFailure::io("Couldn't read that file", &e))?;
+        // Not "couldn't read": the lease above already read it. A track whose own
+        // mode forbids writing is the ordinary way here, and naming the read would
+        // send the user looking at the wrong half of the problem.
+        .map_err(|e| WriteFailure::io("Couldn't open that file for editing", &e))?;
     let target_stamp = file_stamp_from_metadata(
         &target_file
             .metadata()
@@ -5230,9 +5259,17 @@ fn direct_tag_write_uncoordinated<T>(
     // The original is the one durable recovery artifact.
     // std::fs::copy uses cloning where the platform/filesystem supports it and a
     // real copy elsewhere; correctness is identical in both cases.
-    let mut backup = BackupFile::new(
-        backup_sibling(&target).map_err(|e| WriteFailure::io("Couldn't save the tags", &e))?,
-    );
+    let mut backup = BackupFile::new(backup_sibling(&target).map_err(|e| {
+        // Name the recovery root, not the track. The track is usually fine; what
+        // has failed is Pudding's own staging area, and nothing else in the
+        // message points there.
+        log::error!(
+            "write_tags: reserving a recovery slot in {} for {} failed: {e}",
+            metadata_recovery_root().display(),
+            target.display()
+        );
+        WriteFailure::io("Couldn't prepare a recovery copy", &e)
+    })?);
     durable_copy(&target, &backup.path).map_err(|e| {
         log::error!("write_tags: preserving {} failed: {e}", target.display());
         WriteFailure::io("Couldn't prepare a recovery copy", &e)
@@ -10533,6 +10570,132 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Which records in the recovery root name this track? Asked one path at a
+    // time rather than as "the folder is empty", because unit tests share
+    // `metadata_recovery_root()` — a process-wide OnceLock a test must not set —
+    // and the tests running alongside this one are staging their own copies in
+    // there. Records, not copies: the launch sweep reads manifests, so a manifest
+    // is what turns a failed save into a report on the next start.
+    fn recovery_records_naming(target: &Path) -> Vec<PathBuf> {
+        let needle = target.to_string_lossy().into_owned();
+        let Ok(entries) = std::fs::read_dir(metadata_recovery_root()) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| is_recovery_manifest(path))
+            .filter(|path| {
+                // A substring, not a parse: a manifest another test is halfway
+                // through writing must not fail this read.
+                std::fs::read(path)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).contains(&needle))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    // A track whose own mode forbids writing. The refusal is the easy half; the
+    // half worth a test is where it happens and what it costs. It is refused on
+    // the open, before a recovery copy is staged or a byte is read for one, and
+    // non-fatally — one file's permissions say nothing about the next file in the
+    // batch. (There is nothing to assert about the recovery folder here, and that
+    // is the point: a save refused this early never put anything in it. The leak
+    // that would matter is one on the paths that do stage a copy, which
+    // `a_track_in_an_unwritable_folder_is_still_edited_in_place` covers.)
+    #[test]
+    fn a_read_only_track_is_refused_without_failing_the_batch() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, paths) = sample_copies("read-only-save", 1);
+        let track = PathBuf::from(&paths[0]);
+        let before = std::fs::read(&track).unwrap();
+        let inode = inode_of(&track);
+        std::fs::set_permissions(&track, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let failure = match write_one_file(&track, &album_patch("Night Bus"), &ArtworkChange::Keep)
+        {
+            Err(failure) => failure,
+            // Running as root would bypass the mode entirely and prove nothing.
+            Ok(_) => {
+                eprintln!("skipped: the file mode is not being enforced (root?)");
+                let _ = std::fs::set_permissions(&track, std::fs::Permissions::from_mode(0o600));
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        };
+
+        assert!(
+            !failure.fatal,
+            "one unwritable file is that file's problem, not the volume's: the batch goes on"
+        );
+        assert!(
+            failure.message.contains("for editing"),
+            "the message names the edit it could not make, not a read that worked: {}",
+            failure.message
+        );
+        assert_eq!(
+            std::fs::read(&track).unwrap(),
+            before,
+            "a refused save leaves the file byte for byte as it was"
+        );
+        assert_eq!(
+            inode_of(&track),
+            inode,
+            "and the same file, not a replacement"
+        );
+        assert!(
+            staged_leftovers(&dir).is_empty(),
+            "nothing staged beside it"
+        );
+
+        let _ = std::fs::set_permissions(&track, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The folder locked, the file itself still writable — a read-only share, or a
+    // mode a user set on the folder alone. A save must go through: the protocol
+    // edits the track through a descriptor it already holds, and its recovery copy
+    // lives in the app's own folder, so the track's directory is never written to.
+    // That is the opposite of the playlist path, which stages a sibling and so is
+    // refused here (`a_playlist_in_an_unwritable_directory_is_unchanged`) — the two
+    // writers differ deliberately, and a reader of either needs to know which.
+    #[test]
+    fn a_track_in_an_unwritable_folder_is_still_edited_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, paths) = sample_copies("locked-folder-save", 1);
+        let track = PathBuf::from(&paths[0]);
+        let inode = inode_of(&track);
+        // r-x: the file keeps its mode, the directory stops accepting new entries.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let saved = write_one_file(&track, &album_patch("Night Bus"), &ArtworkChange::Keep);
+
+        // Back before asserting: a failing assertion unwinds, and the leftover
+        // unwritable directory is the failure mode with no visible symptom until
+        // something else cannot clean up after itself.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // No root skip: this asserts the mode is *ignored*, which is what root
+        // would do anyway, so running as root cannot turn a pass into a false one.
+        saved.expect("an in-place edit needs nothing from the directory");
+        assert_eq!(album_of(&paths[0]).as_deref(), Some("Night Bus"));
+        assert_eq!(
+            inode_of(&track),
+            inode,
+            "the same file, edited where it lay"
+        );
+        assert!(
+            staged_leftovers(&dir).is_empty(),
+            "and no sibling was staged in a folder that would have refused one"
+        );
+        assert!(
+            recovery_records_naming(&track).is_empty(),
+            "a save that finished cleans up the record it staged"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn prepared_backup(target: &Path) -> (std::fs::File, FileStamp, String, BackupFile) {
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -10564,14 +10727,57 @@ mod tests {
         target: &Path,
         recovery_dir: &Path,
     ) -> (PathBuf, PathBuf, RecoveryManifest) {
+        prepared_recovery_manifest_named(target, recovery_dir, "test")
+    }
+
+    // The same, under a name of the caller's choosing — for the tests that need
+    // one recovery directory to hold several entries, which is the shape every
+    // real report has and the shape the retry and discard commands act on.
+    fn prepared_recovery_manifest_named(
+        target: &Path,
+        recovery_dir: &Path,
+        name: &str,
+    ) -> (PathBuf, PathBuf, RecoveryManifest) {
         std::fs::create_dir_all(recovery_dir).unwrap();
-        let backup = recovery_dir.join(".pudding-backup-test");
+        let backup = recovery_dir.join(format!(".pudding-backup-{name}"));
         durable_copy(target, &backup).unwrap();
         let stamp = file_stamp(target).unwrap();
         let hash = sha256_file(&backup).unwrap();
         let (manifest, manifest_path) =
             RecoveryManifest::prepare(target, &backup, stamp, hash).unwrap();
         (backup, manifest_path, manifest)
+    }
+
+    // Another program took the track's path: a new inode under the same name,
+    // which is newer information than the recovery record, so the sweep must
+    // refuse to overwrite it and keep the copy. The one way to make an entry
+    // reliably unrestorable.
+    fn replace_track(target: &Path) {
+        std::fs::remove_file(target).unwrap();
+        std::fs::write(target, b"replaced by another tagger").unwrap();
+    }
+
+    // A copy whose record a crash truncated mid-write. Planted by hand because
+    // there is no writer state that produces it: the pair is the writer's, and
+    // the damage is the interruption's.
+    fn planted_orphan_copy(recovery_dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+        std::fs::create_dir_all(recovery_dir).unwrap();
+        let backup = recovery_dir.join(format!(".pudding-backup-{name}"));
+        std::fs::write(&backup, b"the original bytes, whatever they belong to").unwrap();
+        let manifest = recovery_dir.join(format!(".pudding-backup-{name}.json"));
+        std::fs::write(&manifest, b"{\"version\":1,\"state\":\"prep").unwrap();
+        (backup, manifest)
+    }
+
+    // A pair with nothing behind it but its own two files — all a discard reads.
+    // It removes `<backup>` and `<backup>.json` and never opens either, so the
+    // bytes inside are beside the point and a whole save is not worth staging.
+    fn planted_discard_pair(recovery_dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let backup = recovery_dir.join(format!(".pudding-backup-{name}"));
+        let manifest = recovery_dir.join(format!(".pudding-backup-{name}.json"));
+        std::fs::write(&backup, b"original bytes").unwrap();
+        std::fs::write(&manifest, b"{}").unwrap();
+        (backup, manifest)
     }
 
     #[test]
@@ -11001,6 +11207,256 @@ mod tests {
             "the error names the record, not the copy it already removed"
         );
         assert!(!backup.exists(), "the copy went before the record refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // === Retrying and discarding a whole report ===
+    //
+    // The commands above these two functions are a lock and an argument check;
+    // everything that can be got wrong is in the merge and the per-pair loop.
+    // Both take already-vetted paths, so these tests never reach
+    // `metadata_recovery_root()` — a process-wide OnceLock a test must not set,
+    // and whose own gate is covered by `recovery_actions_refuse_paths_that_are_not_ours`.
+
+    // A retry names only the entries it can act on. The ones it deliberately
+    // leaves alone — an orphan copy, a record whose copy is already gone — are
+    // still unresolved, and the report is the only place their paths are written
+    // down, so dropping them would lose the user's only route to the bytes.
+    #[test]
+    fn a_retry_keeps_an_orphan_copy_it_could_not_act_on() {
+        let (dir, paths) = sample_copies("retry-keeps-orphan", 1);
+        let target = PathBuf::from(&paths[0]);
+        let recovery_dir = dir.join("recovery");
+        let (copy, manifest_path, _) =
+            prepared_recovery_manifest_named(&target, &recovery_dir, "named");
+        let (orphan_copy, orphan_manifest) = planted_orphan_copy(&recovery_dir, "orphan");
+        replace_track(&target);
+
+        let mut held = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+        assert_eq!(held.len(), 2, "both entries are reported at launch");
+
+        // The retry the panel makes: the one resolvable record, and nothing else.
+        let merged = merge_retried_notices(&mut held, &[manifest_path.clone()]);
+
+        assert_eq!(merged.len(), 2, "the orphan survived a retry it was not in");
+        // Ordered target-first, and an entry that names no track sorts ahead of
+        // one that does — so the orphan is the one with no target.
+        let orphan = &merged[0];
+        assert_eq!(orphan.target, None, "the orphan still names no track");
+        assert_eq!(
+            orphan.backup.as_deref(),
+            Some(&*orphan_copy.to_string_lossy()),
+            "and still points at the only thing it has to point at"
+        );
+        assert_eq!(
+            orphan.manifest.as_deref(),
+            Some(&*orphan_manifest.to_string_lossy()),
+            "so the discard button can still act on it"
+        );
+        assert!(!orphan.restored);
+        assert_eq!(
+            merged[1].target.as_deref(),
+            Some(&*target.to_string_lossy()),
+            "and the retried entry is still the one it was"
+        );
+        assert!(!merged[1].restored, "the track is still a replacement");
+        assert!(
+            orphan_copy.exists() && orphan_manifest.exists(),
+            "a retry must not touch the pair it was not aimed at"
+        );
+        assert!(copy.exists(), "nor the one it could not settle"); // Prepared, unrestorable.
+        assert_eq!(held.len(), 2, "and the held report is the merged one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The one entry whose answer a retry can change. A track that wasn't
+    // readable at launch — a cloud file still downloading, a drive not mounted,
+    // a mode the user has since fixed — is the ordinary reason a copy is kept,
+    // and the whole point of offering the button again.
+    #[test]
+    fn a_locked_track_is_restored_once_it_becomes_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, paths) = sample_copies("retry-unlocks", 1);
+        let target = PathBuf::from(&paths[0]);
+        let original = std::fs::read(&target).unwrap();
+        let recovery_dir = dir.join("recovery");
+        let (copy, manifest_path, _) = prepared_recovery_manifest(&target, &recovery_dir);
+
+        // Half-written and then unopenable: the inode is still the right one, so
+        // the only thing standing between this entry and a restore is the mode.
+        std::fs::write(&target, b"half-writt").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Running as root would open it anyway and prove nothing.
+        if std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&target)
+            .is_ok()
+        {
+            eprintln!("skipped: the file mode is not being enforced (root?)");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let mut held = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(!held[0].restored, "an unopenable track can't be put back");
+        assert!(
+            copy.exists() && manifest_path.exists(),
+            "so both halves are kept for the retry"
+        );
+
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let merged = merge_retried_notices(&mut held, &[manifest_path.clone()]);
+
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].restored,
+            "the retry finished what the launch couldn't"
+        );
+        assert_eq!(merged[0].manifest, None, "nothing left to act on");
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        assert!(
+            !copy.exists() && !manifest_path.exists(),
+            "and both halves are consumed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A track that is gone is not a track to write. Recreating it at the old
+    // path would hand the user a file their library still points at, with the
+    // right bytes and a new inode, after they deleted it — and would spend the
+    // only copy of the original doing it.
+    #[test]
+    fn a_missing_track_is_reported_rather_than_recreated() {
+        let (dir, paths) = sample_copies("recovery-missing-track", 1);
+        let target = PathBuf::from(&paths[0]);
+        let recovery_dir = dir.join("recovery");
+        let (copy, manifest_path, _) = prepared_recovery_manifest(&target, &recovery_dir);
+        std::fs::remove_file(&target).unwrap();
+
+        let notices = recover_incomplete_metadata_writes(&recovery_dir).unwrap();
+
+        assert_eq!(notices.len(), 1);
+        assert!(!notices[0].restored);
+        assert_eq!(
+            notices[0].target.as_deref(),
+            Some(&*target.to_string_lossy()),
+            "the track is named even though it isn't there"
+        );
+        assert_eq!(
+            notices[0].backup.as_deref(),
+            Some(&*copy.to_string_lossy()),
+            "and the copy is offered, because it is all there is"
+        );
+        assert!(
+            !target.exists(),
+            "a deleted track is not resurrected by a recovery sweep"
+        );
+        assert!(copy.exists() && manifest_path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The partial. The pairs go one at a time and a copy that is already
+    // unlinked stays unlinked, so "some of them went" is a real outcome — and
+    // the number is the only thing standing between the user and a report that
+    // reads as though nothing happened to bytes that are gone for good.
+    #[test]
+    fn a_discard_counts_what_went_when_one_copy_refuses() {
+        let dir =
+            std::env::temp_dir().join(format!("pudding-recovery-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pairs: Vec<(PathBuf, PathBuf)> = ["one", "two", "three"]
+            .iter()
+            .map(|name| planted_discard_pair(&dir, name))
+            .collect();
+        // A directory where the middle copy belongs: remove_file won't take it,
+        // which is as close as a test gets to a copy the filesystem won't give up.
+        std::fs::remove_file(&pairs[1].0).unwrap();
+        std::fs::create_dir(&pairs[1].0).unwrap();
+
+        let manifests: Vec<PathBuf> = pairs.iter().map(|(_, m)| m.clone()).collect();
+        let (report, discarded) = discard_recovery_set(&manifests);
+
+        assert_eq!(report.discarded, 2, "one refusal does not stop the rest");
+        let failure = report.failure.expect("the refusal is reported");
+        assert!(
+            failure.contains(&*pairs[1].0.to_string_lossy()),
+            "the message names the copy that refused: {failure}"
+        );
+        for other in [&pairs[0].0, &pairs[2].0] {
+            assert!(
+                !failure.contains(&*other.to_string_lossy()),
+                "and names nothing that went: {failure}"
+            );
+        }
+        assert!(
+            !pairs[0].0.exists()
+                && !pairs[0].1.exists()
+                && !pairs[2].0.exists()
+                && !pairs[2].1.exists(),
+            "the two that went are gone whole"
+        );
+        assert!(
+            pairs[1].0.exists() && pairs[1].1.exists(),
+            "and the refusing pair is still joined, so the next launch can offer it"
+        );
+        // Only the pairs that actually went may be pruned from the held report:
+        // the one still on disk has to come back.
+        assert_eq!(
+            discarded,
+            vec![path_string(&pairs[0].1), path_string(&pairs[2].1)]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // And the floor: a recovery folder that refuses every unlink. Nothing goes,
+    // so every refusal is named — one path with two more silently dropped would
+    // have the user clear a folder that is still full.
+    #[test]
+    fn a_discard_that_can_remove_nothing_names_every_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("pudding-recovery-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pairs: Vec<(PathBuf, PathBuf)> = ["one", "two", "three"]
+            .iter()
+            .map(|name| planted_discard_pair(&dir, name))
+            .collect();
+        // r-x: the files stay readable, the directory stops accepting unlinks.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let manifests: Vec<PathBuf> = pairs.iter().map(|(_, m)| m.clone()).collect();
+        let (report, discarded) = discard_recovery_set(&manifests);
+
+        // Put the mode back before asserting anything. A failing assertion
+        // unwinds, and an unwritable directory left behind is the one failure
+        // mode with no visible symptom until a later save can't stage its own
+        // recovery copy — the same hazard plant-recovery-copy.mjs's clean()
+        // orders itself around.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        if report.discarded == 3 {
+            eprintln!("skipped: the directory mode is not being enforced (root?)");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert_eq!(report.discarded, 0, "nothing could go");
+        assert!(discarded.is_empty(), "so nothing may be pruned");
+        let failure = report.failure.expect("a refusal with nothing to show");
+        for (copy, manifest) in &pairs {
+            assert!(
+                failure.contains(&*copy.to_string_lossy()),
+                "every refusal is named: {failure}"
+            );
+            assert!(
+                copy.exists() && manifest.exists(),
+                "and every pair is intact"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

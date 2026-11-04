@@ -8,6 +8,15 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { effect } from "@preact/signals-core";
 import { h, setText } from "./dom";
+import {
+  discardConfirmation,
+  discardOutcome,
+  discardRefusal,
+  manifestPaths,
+  recoveryOffersAction,
+  recoveryPanel,
+} from "./recovery-report";
+import type { RecoveryOutcome, RecoveryPanel } from "./recovery-report";
 import type {
   InlineEditorOptions,
   InlineEditorArtwork,
@@ -1439,9 +1448,6 @@ export function startTitleEdit(): void {
 //
 // Only the restored half is once-only. A kept copy is re-derived from the files
 // on disk at every launch, so missing this report is not the same as losing it.
-const trackName = (path: string): string => path.split("/").pop() || path;
-const plural = (n: number, one: string, many: string): string => (n === 1 ? one : many);
-
 export async function showMetadataRecoveryReport(): Promise<void> {
   let notices: RecoveryNotice[];
   try {
@@ -1453,244 +1459,76 @@ export async function showMetadataRecoveryReport(): Promise<void> {
   if (notices.length > 0) showRecoveryNotices(notices);
 }
 
-// What an interrupted update did to the whole selection, not just to the file
-// that was mid-write. The batch is strictly sequential and each file's library
-// row is committed as it goes (write_tags_to_files), so there are exactly three
-// regions and the user can't tell them apart by looking: everything before the
-// interruption is saved for good, one file was being rewritten, and everything
-// after it was never opened. Saying only what happened to the middle one is what
-// makes the report read as "some unknown part of my edit is in limbo".
-//
-// Hedged to "any other tracks" because the recovery record doesn't carry the
-// size of the batch it came from — it is written per file, and by the next
-// launch the selection it belonged to is gone. So the sentence has to be true of
-// a one-file save as well, where there are no other tracks and a flat claim
-// about them would be inventing siblings. The hedge reads the same for a real
-// batch and says nothing false for a single file.
-const batchContext = (many: boolean): string =>
-  many
-    ? "Any other tracks those updates had already finished kept their new tags, and any they never reached were left as they were."
-    : "Any other tracks the update had already finished kept their new tags, and any it never reached were left as they were.";
-
-// "when Pudding stopped" is true only of a crash or a force-quit. A copy the
-// writing process itself gave up on comes from a save the user watched fail and
-// was told about at the time (RecoveryState::Retained), so blaming a crash would
-// be telling them something that didn't happen.
-//
-// One sentence covers a whole group, so a cause can only be named when it is the
-// cause of every entry in that group. A group holding both kinds falls back to
-// the one thing true of all of them; that group is always plural, since a cause
-// belongs to a single entry.
-const interruption = (notices: RecoveryNotice[]): string => {
-  if (notices.every((notice) => notice.crashed)) return "when Pudding stopped";
-  if (notices.every((notice) => !notice.crashed))
-    return "when an earlier save failed and Pudding couldn't undo it";
-  return "when earlier updates were interrupted";
-};
-
-// The kept entries that still have bytes behind them. Every offer the report
-// makes about a copy — retry it, discard it, warn that it's the last original —
-// has to be counted from this and not from the entries, because an entry can
-// outlive the copy it was created for: a record whose copy has since been
-// deleted is still reported, and there is nothing left to put back.
-const withCopy = (notices: RecoveryNotice[]): RecoveryNotice[] =>
-  notices.filter((notice) => notice.backup !== null);
-
-// A copy whose record was too damaged to name a track. Nothing can be said about
-// which file it belongs to, so these get their own sentence rather than being
-// described with a path out of Application Support where a track name goes.
-const unidentified = (notices: RecoveryNotice[]): RecoveryNotice[] =>
-  notices.filter((notice) => notice.target === null);
-
-const manifestPaths = (notices: RecoveryNotice[]): string[] =>
-  notices
-    .map((notice) => notice.manifest)
-    .filter((manifest): manifest is string => manifest !== null);
-
-// How an entry is named in a sentence. A track is named by its file; a copy whose
-// record is unreadable has no track to name, and saying so is the whole point of
-// keeping `target` nullable.
-const label = (target: string | null): string =>
-  target === null ? "A recovery copy Pudding couldn't identify" : `“${trackName(target)}”`;
-
-function recoveryReportText(kept: RecoveryNotice[], restored: RecoveryNotice[]): string {
-  if (kept.length === 0) {
-    const mid =
-      restored.length === 1
-        ? `${label(restored[0].target)} was being rewritten ${interruption(restored)}, and has been put back the way it was before that update.`
-        : `${restored.length} tracks were being rewritten ${interruption(restored)}, and have been put back the way they were before those updates.`;
-    return `${mid} ${batchContext(restored.length > 1)}`;
-  }
-
-  const orphans = unidentified(kept);
-  const named = kept.filter((notice) => notice.target !== null);
-  const copied = withCopy(named);
-  const lost = named.filter((notice) => notice.backup === null);
-
-  const parts: string[] = [];
-  if (copied.length > 0) {
-    parts.push(
-      copied.length === 1
-        ? `${label(copied[0].target)} was being rewritten ${interruption(copied)}, and Pudding couldn't put the original back, so that file may be incomplete. A copy of the original is kept.`
-        : `${copied.length} tracks were being rewritten ${interruption(copied)}, and Pudding couldn't put the originals back, so those files may be incomplete. A copy of each original is kept.`,
-    );
-  }
-  if (lost.length > 0) {
-    parts.push(
-      lost.length === 1
-        ? `${label(lost[0].target)} was being rewritten ${interruption(lost)}, so that file may be incomplete and its recovery copy is gone too, so Pudding has nothing left to put back.`
-        : `${lost.length} tracks were being rewritten ${interruption(lost)}, so those files may be incomplete and their recovery copies are gone too, so Pudding has nothing left to put back.`,
-    );
-  }
-  if (orphans.length > 0) {
-    const also = copied.length > 0 || lost.length > 0 ? " also" : "";
-    parts.push(
-      orphans.length === 1
-        ? `Pudding${also} kept a recovery copy from an interrupted save, but couldn't read the record of which track it belongs to.`
-        : `Pudding${also} kept ${orphans.length} recovery copies from interrupted saves, but couldn't read the records of which tracks they belong to.`,
-    );
-  }
-  if (restored.length > 0) {
-    parts.push(
-      restored.length === 1
-        ? "One other interrupted track was put back the way it was."
-        : `${restored.length} other interrupted tracks were put back the way they were.`,
-    );
-  }
-  parts.push(batchContext(kept.length + restored.length > 1));
-
-  // A closing instruction only where there is something to do about it, and one
-  // at most. A copy that can be put back outranks a copy nobody can place,
-  // because that's the only case where the original can still get back where it
-  // belongs. A record whose copy is gone gets no line at all: there is nothing
-  // for Pudding to offer, and how to proceed with a file that may be damaged is
-  // the user's call to make on their own terms, not ours to prescribe.
-  if (copied.length > 0) {
-    parts.push(
-      copied.length === 1
-        ? "Retry the restore, or put the copy back in place yourself. It's the only original, so keep it until you're sure everything is in order."
-        : "Retry the restore, or put the copies back in place yourself. They're the only originals, so keep them until you're sure everything is in order.",
-    );
-  } else if (orphans.length > 0) {
-    parts.push(
-      orphans.length === 1
-        ? "The copy is at the path below; keep it until you've worked out which track it belongs to."
-        : "The copies are at the paths below; keep them until you've worked out which tracks they belong to.",
-    );
-  }
-  return parts.join(" ");
-}
-
-// `retried` is the set of records a retry just attempted, and its only job is to
-// stop this panel being the panel it was clicked from. The report is rebuilt
-// wholesale from what the backend hands back, so a retry that changed nothing
-// renders the same heading, the same sentence and the same reason as before it
-// ran — leaving the one signal that the attempt happened at all to be the
-// progress panel that already flashed past.
-//
-// What it achieved is counted by subtraction rather than by matching entries
-// back to what was sent: a restored notice carries no manifest, because there is
-// nothing left to act on, and an entry the retry found already complete comes
-// back as no notice at all. So the ones that moved are the ones no longer stuck.
-function showRecoveryNotices(notices: RecoveryNotice[], retried?: string[]): void {
-  const kept = notices.filter((notice) => !notice.restored);
-  const restored = notices.filter((notice) => notice.restored);
-  const records = kept.filter((notice) => notice.manifest !== null);
-  // Retrying resolves the record against the track it names, so an entry with no
-  // readable record and an entry with no copy left are both past retrying. They
-  // can still be discarded, which is the only thing left to do with them.
-  const retryable = records.filter((notice) => notice.target !== null && notice.backup !== null);
-  const copies = withCopy(records);
-
-  // Each kept copy gets its reason and the path its bytes are at — the path is
-  // the whole point of telling someone, since nobody goes looking in
-  // Application Support on a hunch.
-  const details: string[] = [];
-  for (const notice of kept) {
-    const name = notice.target ?? "A recovery copy Pudding couldn't identify";
-    details.push(`${name}: ${notice.reason ?? "Pudding couldn't put the original back."}`);
-    if (notice.backup) details.push(`Copy of the original: ${notice.backup}`);
-  }
-  // Listed whether or not a copy is still open. With one unresolved the restored
-  // tracks are context, not the headline, so the sentence only counts them and
-  // this is the one place they're named; with nothing unresolved the sentence
-  // names a lone track but still can't fit several, and a restore the user never
-  // asked for is exactly the case where they need to know which files on disk
-  // moved under them. Either way the list is where the paths are, so it is never
-  // the larger restore that says less.
-  for (const notice of restored) {
-    if (notice.target !== null) details.push(`${notice.target} — restored`);
-  }
-
-  const stuck = retried
-    ? kept.filter((notice) => notice.manifest !== null && retried.includes(notice.manifest)).length
-    : 0;
-  const settled = retried ? retried.length - stuck : 0;
-
-  const buttons: TagOperationButton[] = [];
-  if (retryable.length > 0) {
-    const manifests = manifestPaths(retryable);
-    // Offered again whether or not the last attempt helped: the reason a copy is
-    // stuck is usually storage that hasn't come back yet, and that can change
-    // between one press and the next.
-    buttons.push({
-      label: retried ? "Retry again" : "Retry restore",
-      onClick: () => void retryRecovery(manifests),
-    });
-  }
-  if (records.length > 0) {
-    // Nothing to throw away but the records themselves once their copies are
-    // gone, and clearing those is not the same offer as deleting an original.
-    // A set holding both kinds is named by neither: any count here would be a
-    // count of one kind standing in for the whole button, so it goes without
-    // one and the confirmation spells out what goes.
-    const discardLabel =
-      copies.length === 0
-        ? plural(records.length, "Clear record", "Clear records")
-        : copies.length === records.length
-          ? plural(copies.length, "Discard copy", "Discard copies")
-          : "Discard";
-    buttons.push({ label: discardLabel, onClick: () => void discardRecovery(records) });
-  }
-  buttons.push({
-    label: kept.length > 0 ? "Dismiss" : "Done",
-    primary: true,
-    onClick: closePaneEditor,
-  });
-
-  // Said first and in the retry's own terms, because after a retry that is the
-  // question the panel is answering; the account of what is left follows it
-  // unchanged. Nothing here claims a track was put back — a settled entry is one
-  // the backend stopped reporting, which is the restore in every case a retry
-  // can reach, but the heading rests on it having been settled either way.
-  const outcome = !retried
-    ? null
-    : stuck === 0
-      ? {
-          heading: plural(settled, "That entry is settled", "Those entries are settled"),
-          lead: "",
-        }
-      : settled === 0
-        ? {
-            heading: "The retry didn't help",
-            lead: `${plural(stuck, "That entry is", "Those entries are")} in the same state as before it ran.`,
-          }
-        : {
-            heading: "The retry settled some of them",
-            lead: `${settled} of ${retried.length} are resolved; the ${plural(stuck, "other is", "others are")} unchanged.`,
-          };
-
+// Mount the report. Every sentence, every button label and which buttons appear
+// at all come from recoveryPanel (recovery-report.ts) — this binds each offer to
+// the call behind it and hands the rest to the panel builder.
+function mountRecoveryPanel(panel: RecoveryPanel): void {
   openPaneEditor(
     "metadata",
     buildTagOperationPanel({
-      heading:
-        outcome?.heading ??
-        (kept.length > 0 ? "A metadata save didn't finish" : "Recovered an interrupted save"),
-      message: [outcome?.lead, recoveryReportText(kept, restored)].filter(Boolean).join(" "),
-      details: details.length > 0 ? details : undefined,
-      buttons,
+      heading: panel.heading,
+      message: panel.message,
+      details: panel.details.length > 0 ? panel.details : undefined,
+      buttons: panel.buttons.map((button) => {
+        switch (button.kind) {
+          case "retry":
+            return { label: button.label, onClick: () => void retryRecovery(button.manifests) };
+          case "discard":
+            return { label: button.label, onClick: () => void discardRecovery(button.records) };
+          case "dismiss":
+            // The only one that is the form's own submit: dismissing is what the
+            // user is expected to do with a report they have read.
+            return { label: button.label, primary: true, onClick: closePaneEditor };
+        }
+      }),
     }),
   );
+}
+
+function showRecoveryNotices(notices: RecoveryNotice[], retried?: string[]): void {
+  mountRecoveryPanel(recoveryPanel(notices, retried));
+}
+
+// The panel for an outcome with nothing left behind it: read it and close.
+function showRecoveryClosing(outcome: RecoveryOutcome): void {
+  openPaneEditor(
+    "metadata",
+    buildTagOperationPanel({
+      ...outcome,
+      buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
+    }),
+  );
+}
+
+// Where a retry's or a discard's own outcome goes, which is not always a panel
+// that only closes. A discard is partial by design and can be refused outright,
+// and a retry can throw before it runs; either way the entries the action didn't
+// settle are still on disk and still held by the backend — still unresolved, and
+// for a kept copy still the only original bytes that track has. The report is
+// only ever opened by showMetadataRecoveryReport, once, at launch, so mounting a
+// dead end over them is the report gone for the rest of the session: the copies
+// keep, but nothing in the window offers them again until the app restarts.
+//
+// So the held report is re-read and rebuilt around the outcome, which keeps the
+// offers for whatever survived. Only a report with no offer left gets the
+// closing panel — a discard that got through its whole list, where every record
+// the button named is gone and what remains is the restores the user has just
+// read about.
+async function showRecoveryOutcome(outcome: RecoveryOutcome, retried?: string[]): Promise<void> {
+  let notices: RecoveryNotice[] = [];
+  try {
+    notices = await invoke<RecoveryNotice[]>("metadata_recovery_notices");
+  } catch (e) {
+    // The outcome is the thing worth saying and is already in hand. A report
+    // that can't be re-read just means this is the closing panel after all.
+    console.error("metadata_recovery_notices failed", e);
+  }
+  const panel = notices.length > 0 ? recoveryPanel(notices, retried, outcome) : null;
+  if (panel !== null && recoveryOffersAction(panel)) {
+    mountRecoveryPanel(panel);
+    return;
+  }
+  showRecoveryClosing(outcome);
 }
 
 // The usual reason a copy is kept is that the track wasn't reachable at launch —
@@ -1714,136 +1552,46 @@ async function retryRecovery(manifests: string[]): Promise<void> {
   try {
     const notices = await invoke<RecoveryNotice[]>("retry_metadata_recovery", { manifests });
     if (notices.length === 0) {
-      openPaneEditor(
-        "metadata",
-        buildTagOperationPanel({
-          heading: "Nothing left to recover",
-          message: "Those saves turned out to be complete. Pudding cleaned up after them.",
-          buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
-        }),
-      );
+      showRecoveryClosing({
+        heading: "Nothing left to recover",
+        message: "Those saves turned out to be complete. Pudding cleaned up after them.",
+      });
       return;
     }
     showRecoveryNotices(notices, manifests);
   } catch (e) {
+    // The call never ran, so nothing moved: every entry it was aimed at is still
+    // unresolved and still has to be offered.
     console.error("retry_metadata_recovery failed", e);
-    openPaneEditor(
-      "metadata",
-      buildTagOperationPanel({
+    await showRecoveryOutcome(
+      {
         heading: "Couldn't retry the restore",
         message: typeof e === "string" ? e : "Couldn't put the original back.",
-        buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
-      }),
+      },
+      manifests,
     );
   }
 }
 
 // Destructive in the one way that matters: for a track whose save was
 // interrupted, this copy is the last place the original bytes exist. Hence the
-// confirmation, and hence wording that doesn't pretend the track is fine.
+// confirmation, and hence wording that doesn't pretend the track is fine. What
+// the confirmation and all three outcomes say is recovery-report.ts's; this
+// owns the native dialog and the call.
 async function discardRecovery(records: RecoveryNotice[]): Promise<void> {
   const manifests = manifestPaths(records);
   if (manifests.length === 0) return;
-  const copies = withCopy(records);
-  const bare = records.length - copies.length;
-  // Records whose copies are already gone hold nothing to lose, so there is
-  // nothing to warn about and nothing a confirmation would protect. They are
-  // still named in the warning when they travel with a copy, because the button
-  // removes them too and a confirmation that undercounts what it deletes isn't
-  // one.
-  if (copies.length > 0 && !(await confirmDiscard(copies, bare))) return;
-  // What the messages are about: the copies where there are any, since those are
-  // what the user agreed to lose, and the bare records only when they are all
-  // there is.
-  const thing = copies.length === 0 ? ["record", "records"] : ["copy", "copies"];
-  const counted = copies.length === 0 ? records.length : copies.length;
-  // Nothing went: the command refused the paths outright, or every pair failed.
-  const failed = (message: string): void =>
-    openPaneEditor(
-      "metadata",
-      buildTagOperationPanel({
-        heading: `Couldn't discard the recovery ${thing[0]}`,
-        message,
-        buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
-      }),
-    );
+  const ask = discardConfirmation(records);
+  if (ask && !(await confirm(ask.message, { title: ask.title, kind: "warning" }))) return;
   try {
     // The pairs are removed one at a time, so the count and the failure both
-    // come back and the three outcomes are worded apart below. What each kind
-    // was counts from the split, not from the total: one copy travelling with
-    // two copy-less records is not three copies.
+    // come back and the three outcomes are worded apart from them. A pair the
+    // filesystem refused is still on disk and the backend still holds it, so
+    // the outcome is mounted over the report rather than in place of it.
     const report = await invoke<DiscardReport>("discard_metadata_recovery", { manifests });
-    if (report.failure !== null) {
-      // The one thing this must never say is that nothing happened. Whatever
-      // went is unlinked, and for a copy that was the last original bytes
-      // anywhere, so a partial discard is reported as the partial loss it is.
-      //
-      // Counted off the whole set, which is why the noun can't come from the
-      // split: a count of a set that was all copies names copies however it
-      // lands, but which kind survived a mixed set isn't knowable from a total,
-      // and calling them all copies there is the overcount the split exists to
-      // avoid. So a mixed set is counted in entries and neither kind stands in
-      // for the other.
-      if (report.discarded > 0) {
-        const sets = copies.length > 0 && bare > 0 ? "entries" : thing[1];
-        openPaneEditor(
-          "metadata",
-          buildTagOperationPanel({
-            heading: "Couldn't discard all of them",
-            message: `${report.discarded} of ${manifests.length} recovery ${sets} are gone for good; the rest are still in place. ${report.failure}`,
-            buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
-          }),
-        );
-      } else {
-        failed(report.failure);
-      }
-      return;
-    }
-    const noun = plural(counted, thing[0], thing[1]);
-    const verb = counted > 1 ? "are" : "is";
-    const also =
-      copies.length > 0 && bare > 0
-        ? ` ${bare === 1 ? "A record" : `${bare} records`} with no copy left ${bare === 1 ? "was" : "were"} cleared too.`
-        : "";
-    openPaneEditor(
-      "metadata",
-      buildTagOperationPanel({
-        heading: `Recovery ${noun} discarded`,
-        message: `The ${noun} ${verb} gone.${also}`,
-        buttons: [{ label: "Done", primary: true, onClick: closePaneEditor }],
-      }),
-    );
+    await showRecoveryOutcome(discardOutcome(report, records));
   } catch (e) {
     console.error("discard_metadata_recovery failed", e);
-    failed(typeof e === "string" ? e : `Couldn't remove the recovery ${thing[0]}.`);
+    await showRecoveryOutcome(discardRefusal(records, typeof e === "string" ? e : undefined));
   }
-}
-
-// Named after the track where there is a track to name: a copy whose record is
-// unreadable can only be described as what it is.
-async function confirmDiscard(copies: RecoveryNotice[], bare: number): Promise<boolean> {
-  const many = copies.length > 1;
-  const only = copies[0].target;
-  const what = many
-    ? `${copies.length} recovery copies`
-    : only !== null
-      ? `the recovery copy of ${trackName(only)}`
-      : "a recovery copy Pudding couldn't match to a track";
-  const caveat = many
-    ? "Those tracks may still be incomplete on disk, and these are the only copies of the originals."
-    : only !== null
-      ? "That track may still be incomplete on disk, and this is the only copy of the original."
-      : "Some track may still be incomplete on disk, and this is the only copy of its original.";
-  // Mentioned, not warned about: these hold no bytes, so they belong in the
-  // account of what the button removes and not in the caveat about originals.
-  const rest =
-    bare === 0
-      ? ""
-      : bare === 1
-        ? " It also clears one record whose copy is already gone."
-        : ` It also clears ${bare} records whose copies are already gone.`;
-  return await confirm(`This deletes ${what}.${rest} ${caveat}`, {
-    title: many ? "Discard recovery copies?" : "Discard recovery copy?",
-    kind: "warning",
-  });
 }

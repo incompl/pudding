@@ -41,6 +41,9 @@ type Pending = {
 // has to re-narrow a `number | false` it can't actually receive.
 type Truthy<T> = Exclude<T, false | null | undefined | 0 | "">;
 
+/** A native dialog the app tried to put up, as the bridge's stub saw it. */
+export type NativeDialog = { title: string | null; message: string; kind: string | null };
+
 export type Driver = {
   css(id: string, text: string | null): Promise<void>;
   /**
@@ -59,6 +62,15 @@ export type Driver = {
   invoke(name: string, payload?: Record<string, unknown>): Promise<unknown>;
   /** Trigger a named frontend entry point (real UI code path). */
   action(name: string, arg?: unknown): Promise<unknown>;
+  /**
+   * Answer the app's native message/confirm dialogs with `label` instead of
+   * letting them appear: "Ok" accepts a confirm, "Cancel" declines it, and null
+   * puts the real dialogs back. The harness cannot dismiss an NSAlert, so a
+   * flow gated by one is only drivable with this installed first.
+   */
+  answerDialogs(label: "Ok" | "Cancel" | null): Promise<void>;
+  /** The dialogs answered since `answerDialogs` was last installed, in order. */
+  dialogs(): Promise<NativeDialog[]>;
   /** Poll `pred` until it returns truthy or the timeout elapses. */
   waitFor<T>(
     pred: () => Promise<T> | T,
@@ -68,6 +80,13 @@ export type Driver = {
 
 export type Harness = {
   driver: Driver;
+  /**
+   * The app process, or null when the harness attached to one it didn't spawn.
+   * Needed to address the app from outside the webview: the e2e bundle's
+   * executable is named `pudding` like the shipping one, so a process *name*
+   * can match the Pudding the developer has open instead.
+   */
+  pid: number | null;
   close(): Promise<void>;
 };
 
@@ -124,6 +143,8 @@ function makeDriver(ws: WebSocket): Driver {
     probe: () => send("probe") as Promise<Record<string, unknown>>,
     invoke: (name, payload) => send("invoke", { name, payload }),
     action: (name, arg) => send("action", { name, arg }),
+    answerDialogs: async (label) => void (await send("dialog", { answer: label })),
+    dialogs: () => send("dialogs") as Promise<NativeDialog[]>,
     // Re-declares the generic the Driver type states, so the cast below can name it.
     async waitFor<T>(
       pred: () => Promise<T> | T,
@@ -211,6 +232,7 @@ export function startHarness(options: {
       const driver = makeDriver(ws);
       resolve({
         driver,
+        pid: child?.pid ?? null,
         async close() {
           ws.terminate();
           wss.close();
