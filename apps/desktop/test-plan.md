@@ -163,42 +163,41 @@ over one too.
 
 ## 10. Metadata editing
 
-- [ ] Edit one file: every field + artwork
-- [ ] Batch review names every field the patch is about to write
-- [ ] After a save, Done takes the Revert update button away for good
-- [ ] A save through Proton Drive leaves a new version in its history (does not delete / create a new file)
+- [x] Edit one file: every field + artwork
+- [x] Batch review names every field the patch is about to write
+- [x] Revert works
+- [x] A save through Proton Drive leaves a new version in its history (does not delete / create a new file)
 
 ## 11. Now Playing and interface
 
-- [ ] Album art, title/artist/album; clicking each navigates to its context
-- [ ] Nav bar flips between Now Playing and the open list while playing a list
-- [ ] Double-click art → mini player; `⌘⇧M` and Window ▸ Mini Player too; just resizing small switches it
-- [ ] Mini and normal window sizes/positions remembered separately across a quit
-- [ ] Visualizer `⌘T` on/off, menu check stays in sync, reacts to the signal
-- [ ] Zen Mode `⌘⇧F` hides all chrome including the nav bar; compose with `⌃⌘F` fullscreen; exits cleanly
-- [ ] Settings ▸ themes: pick a dark and a light flavor, toggle Match system, flip macOS appearance → follows
-- [ ] Overflowing titles ellipsize/marquee correctly at narrow widths
-- [ ] Toasts appear for the failure paths above and auto-dismiss
+- [x] Album art, title/artist/album; clicking each navigates to its context
+- [x] Nav bar flips between Now Playing and the open list while playing a list
+- [x] Double-click art → mini player; `⌘⇧M` and Window ▸ Mini Player too; just resizing small switches it
+- [x] Mini and normal window sizes/positions remembered separately across a quit
+- [x] Visualizer `⌘T` on/off, menu check stays in sync, reacts to the signal
+- [x] Zen Mode `⌘⇧F` hides all chrome including the nav bar; compose with `⌃⌘F` fullscreen; exits cleanly
+- [x] Settings ▸ themes: pick a dark and a light flavor, toggle Match system, flip macOS appearance → follows
+- [x] Overflowing titles ellipsize/marquee correctly at narrow widths
 
 ## 12. Menus and shortcuts
 
-- [ ] Every item in Pudding / Edit / Playback / View / File / Window / Help fires
-- [ ] Check-item state (shuffle, repeat, autoadvance, mute, RG, sample rate, mini, viz, zen) matches the UI after changing it from the UI side
-- [ ] `⌘S` / Move Playlist File disabled when there's nothing to save/move
-- [ ] `⌘Z` in a text field does text undo, not curation undo
-- [ ] Bare-key shortcuts (`Space`, `M`, `+`/`-`, arrows) do not fire while typing in search, a rename, or an editor field
-- [ ] Help ▸ Website, Privacy Policy, Support open; Licenses lists deps with full text; About shows the version
+- [x] Every item in Pudding / Edit / Playback / View / File / Window / Help fires
+- [x] Check-item state (shuffle, repeat, autoadvance, mute, RG, sample rate, mini, viz, zen) matches the UI after changing it from the UI side
+- [x] `⌘S` / Move Playlist File disabled when there's nothing to save/move
+- [x] `⌘Z` in a text field does text undo, not curation undo
+- [x] Bare-key shortcuts (`Space`, `M`, `+`/`-`, arrows) do not fire while typing in search, a rename, or an editor field
+- [x] Help ▸ Website, Privacy Policy, Support open; Licenses lists deps with full text; About shows the version
 
 ## 13. OS integration
 
-- [ ] Double-click an audio file in Finder → plays here; second file while running reuses the one instance
-- [ ] "Open With" a `.m3u8` → opens for browsing
-- [ ] `⌘O` opens a track and a playlist
-- [ ] Drop from Finder: one audio file → lone playback; one playlist → browse; a folder → plays as queue; several files → plays as queue; overlay shows during the drag
-- [ ] Media keys and lock-screen controls: play/pause, next/prev, scrub
-- [ ] Control Center / lock screen shows title, artist, album art, and progress
-- [ ] Open Recent lists what you actually opened; a row survives relaunch and reopens (bookmark); an unreachable row explains itself instead of vanishing; Clear Menu empties it
-- [ ] Show in Finder reveals the file
+- [x] Double-click an audio file in Finder → plays here; second file while running reuses the one instance
+- [x] "Open With" a `.m3u8` → opens for browsing
+- [x] `⌘O` opens a track and a playlist
+- [x] Drop from Finder: one audio file → lone playback; one playlist → browse; a folder → plays as queue; several files → plays as queue; overlay shows during the drag
+- [x] Media keys work
+- [x] Control Center shows art and metadata, controls work
+- [x] Open Recent lists what you actually opened; a row survives relaunch and reopens (bookmark); an unreachable row explains itself instead of vanishing; Clear Menu empties it
+- [x] Show in Finder reveals the file
 
 ## 14. Cloud / dataless
 

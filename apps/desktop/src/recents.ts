@@ -70,21 +70,65 @@ export interface RecentAccess {
 }
 
 // Prepare an item for opening without ever touching it at hydrate time. New
-// opens freeze the picker/Finder grant first; old rows resolve their stored grant.
-// Both commands run before filesystem reads, so the backend and the audio thread
-// receive the same live authorization rather than a path that only looks valid.
+// opens freeze the picker/Finder/drop grant first; old rows resolve their stored
+// grant. Both commands run before filesystem reads, so the backend and the audio
+// thread receive the same live authorization rather than a path that only looks
+// valid.
+//
+// A stored blob is a *cache* of a grant, not the identity of the file, so a blob
+// that no longer resolves must not be reported as a file that is no longer there.
+// Blobs die for reasons that have nothing to do with the track: they are keyed to
+// the signing identity (so every dev rebuild orphans the whole list), and a
+// FileProvider volume — iCloud Drive, Dropbox, Proton Drive, anything under
+// ~/Library/CloudStorage — invalidates every bookmark into it when its domain is
+// re-created, which the provider does on its own schedule. The symptom was a file
+// that plays from the tree and from Finder but refuses to open from a drop or from
+// Open Recent, with "it may have moved" over a track that had not moved at all.
+//
+// So a dead blob falls through to the same path a never-opened file takes: mint a
+// fresh one from the path. That is not a workaround for the sandbox but the honest
+// order of trust — the grant we can take *now* outranks the one we wrote down. It
+// also cannot paper over a real absence: minting a bookmark for a file that is
+// gone (or that the sandbox will not extend to) fails in its own right, and the
+// caller still gets the error it would have shown anyway.
 export async function accessRecentItem(path: string): Promise<RecentAccess> {
   const existing = app.recentItems.find((item) => item.path === path);
-  let bookmark: string | null | undefined = existing?.bookmark;
-  if (!bookmark) {
-    bookmark = await invoke<string | null>("bookmark_recent_item", { path });
-    if (!bookmark) return { path, bookmark: null };
+  if (existing?.bookmark) {
+    const resolved = await resolveStoredGrant(existing.bookmark);
+    if (resolved) return persistAccess(existing, resolved);
   }
 
-  const resolved = await invoke<{ path: string; bookmark: string }>("resolve_recent_item", {
-    bookmark,
+  const minted = await invoke<string | null>("bookmark_recent_item", { path });
+  if (!minted) return { path, bookmark: null };
+  const resolved = await invoke<RecentAccess & { bookmark: string }>("resolve_recent_item", {
+    bookmark: minted,
   });
-  if (existing && (resolved.path !== existing.path || resolved.bookmark !== existing.bookmark)) {
+  return existing ? persistAccess(existing, resolved) : resolved;
+}
+
+// Resolve a blob we wrote down earlier, or null if it is no longer good for
+// anything. Null rather than a throw: the caller has a path and can re-derive, so
+// this is a cache miss, not a failure — the one case where swallowing the error is
+// right, which is why it is swallowed here and nowhere else in this file.
+async function resolveStoredGrant(
+  bookmark: string,
+): Promise<(RecentAccess & { bookmark: string }) | null> {
+  try {
+    return await invoke<RecentAccess & { bookmark: string }>("resolve_recent_item", { bookmark });
+  } catch (e) {
+    console.warn("stored grant for a recent item no longer resolves; re-deriving it", e);
+    return null;
+  }
+}
+
+// Write back whatever resolution learned: a path the bookmark followed to its new
+// home, or a blob that was refreshed (which a re-mint always is). Keeps the row's
+// position — reopening is not a new opening.
+function persistAccess(
+  existing: RecentItem,
+  resolved: RecentAccess & { bookmark: string },
+): RecentAccess {
+  if (resolved.path !== existing.path || resolved.bookmark !== existing.bookmark) {
     updateRecentItem(existing.path, { path: resolved.path, bookmark: resolved.bookmark });
   }
   return resolved;
