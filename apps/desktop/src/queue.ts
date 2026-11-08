@@ -294,7 +294,7 @@ function buildQueueRow(
   const text = h("span", { class: gridClasses("queue", "queue-text") });
   append(text, buildCells(t, cols, QUEUE_CELLS));
   // The row's one aside — "(Missing file)" for a playlist row whose file is gone,
-  // or a cloud file's "(Downloading...)" / "(Not downloaded)". Shared with the
+  // or a cloud file's cloud glyph / download spinner. Shared with the
   // left pane's two track lists, which draw the same marker from the same facts;
   // why it lives inside the title cell rather than in a column of its own is in
   // row-status.ts. A missing row is also dimmed and left without a click handler

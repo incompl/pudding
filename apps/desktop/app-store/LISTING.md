@@ -65,7 +65,7 @@ LIBRARY
 • A fast local metadata cache, scanned in the background and tested up to 500,000 tracks
 • Use the default columns or choose your own, with sortable headers
 • Multiple selection, where every menu action applies to everything selected
-• Cloud-friendly: a library in iCloud Drive, Proton Drive, or Dropbox scans without downloading anything, and files whose bytes are not on this Mac are marked "(Not downloaded)" until you play them
+• Cloud-friendly: a library in iCloud Drive, Proton Drive, or Dropbox scans without downloading anything, and files whose bytes are not on this Mac wear a small cloud until you play them
 • Drag music in from Finder, or open audio files you double-click there
 
 INTERNET RADIO

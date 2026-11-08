@@ -1651,8 +1651,8 @@ export function renderLeafTrackList(
     // the window positions rows by (row i at i * rowHeight).
     const cell = h("span", { class: gridClasses("library", "nav-cell") });
     append(cell, buildCells(t, cols, NAV_CELLS));
-    // The same aside the queue's rows wear — "(Not downloaded)" for a cloud file,
-    // "(Downloading...)" while the engine is parked on one. It is a fact about the
+    // The same aside the queue's rows wear — the cloud glyph for a cloud file, the
+    // download spinner while the engine is parked on one. It is a fact about the
     // file, so it belongs to every list the file appears in, not just the one on
     // the right (see row-status.ts). The live half — the marker moving from row to
     // row as the download does — is repainted by the fetchingPath effect in
@@ -3800,7 +3800,7 @@ function setupEffects(): void {
   // the hero owns the pane). Reads queuePlayingIndex too so the highlighted/
   // scrolled row tracks advances (and clears when the queue is merely stashed),
   // even when paneView's own fields are unchanged. fetchingPath for the same
-  // reason: the row the engine is parked on wears a "(Downloading...)" marker
+  // reason: the row the engine is parked on wears the download spinner
   // that has to move with it (see rowStatus). The other end of that story — the
   // download landing — repaints through applyDownloaded instead, because it
   // rewrites the row's fields and not just its marker.
@@ -3873,8 +3873,20 @@ function setupEffects(): void {
       });
   });
 
+  // The download spinner's rotation is one animation on <html>, parked unless
+  // something is actually coming down (see --row-spin). Not a per-row animation:
+  // the marker spans live on windowed rows that get rebuilt under them, and a
+  // row that owns no animation has none to lose. Parked rather than removed, so
+  // the toggle is a play-state change on an animation that is always declared —
+  // adding the animation here instead would race the whole-document style
+  // invalidation that body.dragging-noselect causes on the very click that
+  // starts the download.
+  effect(() => {
+    document.documentElement.classList.toggle("downloading", fetchingPath.value !== null);
+  });
+
   // The left pane's two track lists follow the engine's parked download the way the
-  // queue does: the row it is fetching wears "(Downloading...)" and gives it back
+  // queue does: the row it is fetching wears the download spinner and gives it back
   // when the wait moves on (see rowStatus). Both panes in one effect because both
   // read the one signal, and only the rows currently mounted need touching — a row
   // scrolled in later reads fetchingPath as it is built.

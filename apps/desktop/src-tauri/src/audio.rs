@@ -2247,7 +2247,7 @@ fn start_fetch(path: PathBuf, app: &AppHandle) -> Fetch {
         // Before the store, so the fresh row reaches the UI ahead of the
         // fetching-cleared event the decode thread emits on seeing it. Both repaint
         // the same row: out of order, it would blink back to a filename and a
-        // "(Not downloaded)" marker for a frame between them.
+        // cloud marker for a frame between them.
         if let Some(f) = &facts {
             emit_downloaded(&worker_app, &crate::row_from_facts(&worker_path, f));
         }

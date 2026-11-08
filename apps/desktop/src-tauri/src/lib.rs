@@ -215,8 +215,8 @@ struct FileEntry {
     gain: Option<f64>,
     created: Option<i64>,
     modified: Option<i64>,
-    // The file's bytes were not on this Mac at scan time. Shown as a
-    // "(Not downloaded)" row marker, in the same slot as "(Missing file)" — but
+    // The file's bytes were not on this Mac at scan time. Shown as a cloud
+    // glyph on the row, in the same slot as "(Missing file)" — but
     // unlike missing, the row stays playable: clicking it fetches the file.
     #[serde(rename = "notDownloaded")]
     not_downloaded: bool,
@@ -338,7 +338,7 @@ struct SearchResult {
     created: Option<i64>,
     modified: Option<i64>,
     // See the `dataless` column: the file's bytes were not on this Mac when the
-    // scan walked past it. Shown as a "(Not downloaded)" row marker in the same
+    // scan walked past it. Shown as a cloud glyph on the row, in the same
     // slot as "(Missing file)" — but unlike missing, the row stays playable,
     // because clicking it is what fetches the file.
     #[serde(rename = "notDownloaded")]
@@ -1173,7 +1173,7 @@ fn run_scan(root: PathBuf, db_path: PathBuf, app: &AppHandle) -> Result<(), Stri
 // keyed on exactly those two. It would eventually re-read the tags, since a NULL
 // duration is the scanner's "never actually read this one" retry flag — but
 // "eventually" means the next rescan, and until then the Files tree keeps showing
-// a filename and a "(Not downloaded)" marker for a track the user is listening to.
+// a filename and a cloud marker for a track the user is listening to.
 //
 // `facts` comes from the caller because it read the file already, to tell the UI
 // the same news (see audio.rs's fetch worker); reading it twice would be two

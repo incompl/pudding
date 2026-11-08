@@ -1,7 +1,7 @@
 // One file's cached facts, and the copies of them the UI is holding.
 //
-// Everything the app shows about a track — its title, its times, the
-// "(Not downloaded)" marker — is a copy of a scan-cache row, taken when the row
+// Everything the app shows about a track — its title, its times, the cloud
+// marker — is a copy of a scan-cache row, taken when the row
 // was built and never told about anything since. Two things change those facts
 // underneath: an explicit tag edit (editors.ts), and a cloud file finishing the
 // download that playing it started (engine-glue.ts). The copies live in the same
@@ -217,7 +217,7 @@ export function applyTagUpdates(
 
 // The other direction: a cloud file the user played has finished downloading, and
 // the row every surface is holding describes the file as the scanner last saw it —
-// flagged "(Not downloaded)", and untagged, because reading tags off a dataless
+// flagged not-downloaded, and untagged, because reading tags off a dataless
 // file is exactly what the scanner refuses to do. `track` is the file read again
 // now that it is local (audio.rs's fetch worker), and the backend has already
 // corrected the cache row it came from, so this is only about the copies.

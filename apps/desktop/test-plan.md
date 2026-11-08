@@ -201,10 +201,10 @@ over one too.
 
 ## 14. Cloud / dataless
 
-- [ ] Scan a cloud root → no downloads triggered (watch provider activity)
-- [ ] Evicted files marked "(Not downloaded)"
-- [ ] Play one → fetches, then plays; UI not frozen during the fetch
-- [ ] Let the OS evict it again, run a full scan → marking returns to "(Not downloaded)"
+- [x] Scan a cloud root → no downloads triggered (watch provider activity)
+- [x] Evicted files wear the cloud marker
+- [x] Play one and it fetches then plays
+- [x] Evict file and make sure it returns to not downloaded state
 - [ ] Unplug/eject a root's volume → graceful errors, no hang
 
 ## 15. Sandbox / release build

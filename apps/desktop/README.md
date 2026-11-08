@@ -83,7 +83,7 @@ raw ADTS cannot be made reliably gapless by anyone.
 - Review and revert a tag update in one place: a bulk edit names the fields and tracks it will change, shows its progress and result in the editor, and leaves a Revert update action there until you choose Done. Only the fields that save actually wrote are restored, so anything another tagger wrote is left alone — as is any file something else has changed in the meantime
 - Registered for audio file types: double-click a file in Finder and it plays here (single instance)
 - Drag music from Finder onto the window: a file or playlist opens, a folder or a multi-file drop plays as a queue
-- Cloud-friendly: point it at a library in iCloud Drive, Proton Drive, or Dropbox and it scans without downloading anything. Files whose bytes aren't on this Mac are marked "(Not downloaded)" and fetched only when you play them
+- Cloud-friendly: point it at a library in iCloud Drive, Proton Drive, or Dropbox and it scans without downloading anything. Files whose bytes aren't on this Mac wear a small cloud marker, which turns into a spinner while the bytes come down, and are fetched only when you play them
 
 ### Metadata editing and data safety
 

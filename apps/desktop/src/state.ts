@@ -255,7 +255,7 @@ export const fetchingPath = signal<string | null>(null);
 
 // Paths whose bytes came down during this session.
 //
-// Every "(Not downloaded)" the UI can draw comes from a boolean copied off the
+// Every not-downloaded marker the UI can draw comes from a boolean copied off the
 // scan cache when the row was built — into a tree node, a queue row, a playlist
 // row, a nav list — and a download that finishes an hour later reaches none of
 // those copies. Read *through* this set (see rowStatus), any copy comes out
@@ -274,8 +274,8 @@ export const fetchingPath = signal<string | null>(null);
 export const downloadedPaths = new Set<string>();
 
 // Whether a track is still cloud-only *right now*: the row's own flag, corrected
-// by the set above. The one place both readers agree — the "(Not downloaded)"
-// marker (rowStatus) and the greyed-out "Edit metadata..." (editMetadataItem),
+// by the set above. The one place both readers agree — the row's cloud marker
+// (rowStatus) and the greyed-out "Edit metadata..." (editMetadataItem),
 // which must match, since the marker is the whole explanation for the grey.
 export function isNotDownloaded(t: { path: string; notDownloaded?: boolean }): boolean {
   return !!t.notDownloaded && !downloadedPaths.has(t.path);

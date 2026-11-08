@@ -76,7 +76,7 @@ export const engine = new GaplessEngine({
   onFetching: (path) => {
     fetchingPath.value = path;
   },
-  // The file behind a "(Not downloaded)" row just landed, so every copy of that
+  // The file behind a cloud-marked row just landed, so every copy of that
   // row is describing a file that no longer exists in that state — marker, blank
   // title and all. See applyDownloaded.
   onDownloaded: (track) => {

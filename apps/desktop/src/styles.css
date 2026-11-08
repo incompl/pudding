@@ -39,7 +39,9 @@
      This recipe applies to the masks below and to icons in list rows, which are
      sized against row height. The topbar's six glyphs do NOT use it — they are
      cropped per icon so their INK matches the type beside them; see the topbar
-     icon recipe on .mode-btn svg before adding an icon up there.
+     icon recipe on .mode-btn svg before adding an icon up there. --cloud-icon is
+     cropped the same way for the same reason: it sits inline in a track title, so
+     it is measured against type rather than against the row.
 
      Line-art folder used as a mask in the search dropdown. Same recipe as the
      search-input magnifier; color comes from the element's background-color, so
@@ -89,6 +91,78 @@
   /* A small padlock, marking the "can't save while playing" note as an expected
      lock rather than an error. */
   --lock-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='18' height='11' x='3' y='11' rx='2' ry='2'/%3E%3Cpath d='M7 11V7a5 5 0 0 1 10 0v4'/%3E%3C/svg%3E");
+  /* The cloud for the row marker that says a track lives in the cloud and not yet
+     on this disk. Hand-drawn rather than Lucide's `cloud`, which is one big sweep
+     meeting one small one over a dead-straight base — correct, and too austere
+     next to a track title. This one is the union of three lobes (circles centred
+     (7,13.8) r3.4, (12,11.2) r4.2, (17,13.8) r3.4) closed by a base arc of r28.65
+     that is internally tangent to the outer two, so even the bottom edge carries a
+     little curve. The visible path is the four arcs between those crossings; the
+     numbers are kept here because the shape cannot be re-derived from the `d`
+     string alone.
+
+     Cropped to its own ink rather than carrying the house 24x24 box, for the same
+     reason the topbar's glyphs are: this marker is measured against the type it
+     trails, not against a row height, so the stylesheet has to be able to name its
+     INK height. See the topbar icon recipe on .mode-btn svg, and .row-status-cloud
+     for how the crop is spent. Stroke stays at the house's 2 units, which at this
+     crop renders the same 1.4px as the 24-box masks — the marker is one of the
+     family, just measured differently. Tinted by the span's own colour via
+     background-color, so it is as dim as the words it replaced. */
+  --cloud-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='2.6 6 18.8 12.7' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6.33 17.13A3.4 3.4 0 1 1 7.86 10.51A4.2 4.2 0 0 1 16.14 10.51A3.4 3.4 0 1 1 17.67 17.13A28.65 28.65 0 0 1 6.33 17.13Z'/%3E%3C/svg%3E");
+
+  /* The spinner for the row marker that says a track's bytes are coming down
+     right now — but only half of it. This is the closed ring the ink may land in;
+     how bright that ink is at each angle is a separate conic ramp painted behind
+     this mask (see .row-status-spinner). Split that way because the two jobs want
+     different renderers: the circle is rasterized by the SVG engine with its own
+     antialiasing, so the stroke's edges stay crisp at 1.4px, while the fade is a
+     gradient and so is perfectly smooth. A ring drawn *as* a fading stroke would
+     have to be one or the other.
+
+     A ring and not a sweep or a bar because nothing here knows how far along the
+     download is: `fetchingPath` is a single path and the provider reports no
+     progress, so a glyph that filled would be inventing a number.
+
+     Drawn to fill its own 0 0 20 20 box exactly, so `contain` lands the ink on
+     the box with nothing left over in either axis and the rotation therefore
+     turns about the box's centre, which is also the circle's: centre (10,10),
+     radius 7.8555, stroke 4.289, and 7.8555 + 4.289/2 is 10, so the stroke's
+     outer edge reaches every box edge. The two numbers move together — thicken
+     the stroke and the radius has to come in by half as much or the ink stops
+     filling the box. Any crop that was not centred on (10,10) would make the
+     glyph wobble as it turned.
+
+     Stroke 4.289, which at this mask's 8.86px render is 1.9px — deliberately
+     heavier than the 1.4px every other icon in the app puts down (see the stroke
+     note on --cloud-icon), and the one place the house weight is overruled. Two
+     reasons it has to be. A ring is the glyph here that cannot be drawn thin: at
+     9px a hairline arc in --text-dim reads as a smudge rather than a shape. And
+     the fade makes that worse, because most of this ring's circumference is only
+     a fraction of currentColor — a stroke that reads as a line at full alpha
+     reads as nothing at 8%, so the trail needs the extra weight more than the
+     head does.
+
+     Weight and not diameter, because the diameter is not available: the ink
+     height is pinned at 8.86px by the cap band (see the placement note on
+     .row-status-cloud / .row-status-spinner), and the next rung up that family,
+     9.86px, is a box the cloud shares — the spinner cannot take it alone without
+     the two markers disagreeing about size as a row flips between them. 1.9px is
+     where that trade stops: it leaves a 5.06px hole, still unmistakably a ring,
+     where 2.1px starts to close up into a disc.
+
+     CLOSED, which is what the geometry above buys: the ink is a whole annulus in
+     every frame, so the glyph's extents never change as it turns and the circle's
+     centre is the box's centre at every angle. The predecessor — two opposed
+     120-degree arcs — went further and kept the ink's *intensity* centroid pinned
+     there too, by being symmetric under a half turn. The fade cannot be: a ramp
+     falling to nothing over a full turn puts its centroid r/pi off centre, about
+     2.4 device px at 2x, swinging with the head. That is the trade this shape
+     makes, and the reason caliper's `mass`/`off` columns say nothing useful about
+     this marker — a ring is read by its circle, not by its brightest ink, so the
+     number that moves is not the one the eye is using. Measure it, if it ever
+     needs measuring, by the box the annulus fills. */
+  --spinner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23fff' stroke-width='4.289'%3E%3Ccircle cx='10' cy='10' r='7.8555'/%3E%3C/svg%3E");
 }
 
 /* Light mode: overrides only the neutral layers (bg → surfaces → text) and
@@ -2157,7 +2231,8 @@ body.np-zen.np-idle #now-playing-controls {
    highlight to each column the boundary passes under. body.dragging covers the
    splitter's drag too, where the same applies. The global `cursor: col-resize
    !important` already takes the pointer cursor away for both reasons. */
-body:not(.dragging) .colhead-cell.sortable:not(:has(.colhead-grip:hover)):hover {
+body:not(.dragging)
+  .colhead-cell.sortable:not(:has(.colhead-grip:hover)):hover {
   color: var(--text);
 }
 .colhead-cell.col-num {
@@ -2318,8 +2393,44 @@ body:not(.dragging) .colhead:hover .colhead-grip:hover::after {
 /* The playing queue row swaps its number for the equalizer glyph at rest; on hover
    the glyph gives way to the button (pause here, not play — see .playing .row-play).
    Gated on active playback so a paused row shows its number back, not a frozen
-   glyph (Apple Music / Spotify behavior — see body.playback-paused below). */
-body:not(.playback-paused) .queue-row.playing .queue-num-text {
+   glyph (Apple Music / Spotify behavior — see body.playback-paused below).
+
+   Gated a second time on the row not wearing the download spinner, which is the
+   same "nothing is coming out of this row" case in different clothes. Playing a
+   cloud file lights the row before a single byte exists: playback.ts sets the path
+   optimistically, and the engine reports `playing: true` on the Play command —
+   before the decode thread parks on the download (see seat_advance) — so for the
+   length of that wait, ~37s on a slow provider, the bars claimed audio the engine
+   had nothing to produce, while the marker after the title span to say exactly
+   that. The bars were the ones lying, so they stand down the way a pause stands
+   them down and the number comes back. One true statement per row.
+
+   Keyed off .row-status-spinner, the marker's own class, rather than a second class
+   painted beside it: the pane that paints the spinner has already decided this row
+   is waiting (see row-status.ts), and the gutter reads that decision instead of
+   being told it again, so the two cannot drift apart. Each of the three panes that
+   draws track rows repeats this pair; the reasoning is here, as the first of them
+   in the sheet.
+
+   Deliberately not html.downloading, which is the same wait but app-wide: the
+   decode frontier fetches the *next* track while the current one is still audible,
+   so a queue of cloud files would blank the bars on the row that is genuinely
+   playing. Only the row being fetched stands down.
+
+   Known gap, left alone on purpose: this covers the row that is waiting on its own
+   bytes, not the row that just finished. Mid-queue the frontier fetches the next
+   track about a second before the current one's audio runs out, so for the rest of
+   the download the *previous* row keeps its bars — the playhead has not moved
+   (no track-change is published until the file lands) and the transport is still
+   playing. Catching that needs the engine to report the moment its buffered audio
+   runs dry, which is a signal across the Rust/TS boundary and a second notion of
+   "not audible" alongside pause, for three bars on a row that reads as stale
+   rather than as contradictory. The whole between-tracks state is vague there —
+   the hero still shows the finished track, the position sits still — so it is
+   worth fixing as that, deliberately, rather than one glyph at a time. */
+body:not(.playback-paused)
+  .queue-row.playing:not(:has(.row-status-spinner))
+  .queue-num-text {
   visibility: hidden;
 }
 /* The glyph itself: shown for exactly as long as the row owns the playhead and
@@ -2328,7 +2439,9 @@ body:not(.playback-paused) .queue-row.playing .queue-num-text {
    gutter can flip its glyph off and on without any animation to lose (see .eq-bars).
    .eq-bars is pointer-events:none and absolutely positioned, so it neither eats the
    click nor holds layout either way. */
-body:not(.playback-paused) .queue-row.playing .eq-bars {
+body:not(.playback-paused)
+  .queue-row.playing:not(:has(.row-status-spinner))
+  .eq-bars {
   display: flex;
 }
 body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
@@ -2357,10 +2470,9 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
   background: none;
 }
 
-/* The row's status marker — "(Missing file)", or for a cloud file "(Not
-   downloaded)" / "(Downloading...)" — after the title (see rowStatus). One slot
-   for all three: they are the same kind of statement, and a row is only ever one
-   of them at a time.
+/* The row's status marker — "(Missing file)", or for a cloud file a cloud glyph
+   or a spinner — after the title (see rowStatus). One slot for all of them: they
+   are the same kind of statement, and a row is only ever one of them at a time.
 
    Not the queue's: the same span, the same ink and the same words are used by the
    navigator's leaf lists and by the browse tree, because the marker states a fact
@@ -2391,6 +2503,177 @@ body:not(.playback-paused) .queue-row.playing:hover .eq-bars {
      flush against the title. A margin holds in both layouts. */
   margin-left: 0.5em;
   color: var(--text-dim);
+}
+
+/* The two wordless markers — the not-downloaded cloud and the downloading
+   spinner — share one box, because they are two states of the same file in the
+   same slot: a row flips from one to the other mid-list, and anything they
+   disagreed about vertically would make the swap look like a jump.
+
+   Wordless at all, for two different reasons. The cloud is the one of the four
+   markers that is neither a fault nor a wait — the ordinary state of a library
+   that lives in iCloud — so on a long cloud-backed list the words were a
+   sentence repeated down every row. The spinner replaced "(Downloading...)"
+   because the dots in that phrase were already doing the spinner's job, badly:
+   a static ellipsis is a picture of motion, and three characters of it next to
+   a cloud glyph made the two states read as different kinds of thing rather
+   than one thing in progress. Both keep their words as the span's
+   title/aria-label, which is what a pointer and a screen reader get.
+
+   Measured against the type they trail, in px, because that type is 14px in all
+   three panes that draw these markers (body's size, which none of them override)
+   — the same footing as the topbar cluster, and for the same reason. An em box
+   would track a font-size no row here has.
+
+   Placed by ink height, nudged as little as possible (the topbar recipe on
+   .mode-btn svg explains why a fraction of a CSS px cannot be nudged at 2x). With
+   no offset at all, the box's bottom border edge lands exactly on the text
+   baseline — identically in both layouts, since a baseline-aligned flex item
+   synthesizes its baseline from its border box and an empty inline-block's
+   baseline is its bottom margin edge. So the ink would centre half its own height
+   above the baseline, and the cap band's centre is 4.93px up (14px x SF's 0.7046
+   cap ratio, halved). 8.86px of ink gets within 0.5px of that, and 0.5px is
+   exactly one device pixel at 2x — the one offset in this range that WebKit can
+   place without rounding. Hence this pair of numbers and not another. The family
+   of heights this works for is 6.86 / 7.86 / 8.86 / 9.86px, the ones whose half
+   leaves a multiple of 0.5px to offset by; a glyph added here takes one of those
+   or it cannot be placed.
+
+   The glyph is NOT centred in the line box: type does not centre in its own line
+   box (descender room exceeds the room above the cap top), so anything that does
+   reads high. Cap band, always. */
+.row-status-cloud,
+.row-status-spinner {
+  display: inline-block;
+  height: 8.86px;
+  position: relative;
+  bottom: 1px;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+
+/* Width follows the cloud crop's 1.48 aspect so `contain` is height-limited — the
+   ink is then exactly the 8.86px the shared rule asked for, with a hundredth of a
+   pixel of slack at the sides rather than any slack above or below.
+
+   Tinted by a flat currentColor behind the mask, so it is as dim as the words it
+   replaced. The spinner tints itself instead — that is the one thing the two
+   markers no longer share, which is why the fill is here and not in the rule
+   above. */
+.row-status-cloud {
+  width: 13.12px;
+  background-color: currentColor;
+  -webkit-mask-image: var(--cloud-icon);
+  mask-image: var(--cloud-icon);
+}
+
+/* Square, because the mask is: --spinner-icon fills its 20x20 box exactly, so an
+   8.86px square box puts 8.86px of ink in both axes with no slack anywhere — which
+   is also what keeps the ring concentric with the box it turns inside of. The ring
+   is a CSS px narrower than the cloud is wide; that is the shape's own proportion,
+   not a size difference, since both put down 8.86px of ink against the same cap
+   band.
+
+   The trail. Behind the ring sits a conic ramp of currentColor instead of the
+   cloud's flat fill, so the ring is bright at one point and fades away around the
+   rest of its circumference: one shape chasing itself, which is what says
+   "underway" without claiming to know how far along it is.
+
+   The ramp runs the way the glyph runs. Conic angles grow clockwise from twelve
+   o'clock and `rotate()` is clockwise too, so the ink a point of the ring has
+   already swept past lies at *smaller* angles — alpha therefore climbs with the
+   angle and the bright head sits at 360deg, its hard edge against the 0deg tail
+   it meets. Reverse one and the comet flies backwards, tail first.
+
+   The stops are a curve, not a straight line: a linear 0-to-1 ramp leaves the
+   ring half-lit a half turn behind the head, which reads as a ring of uneven
+   brightness rather than as a trail. Weighting the climb toward the head keeps
+   most of the circumference faint, and the last 15deg is held solid so the head
+   is a dot with a size rather than an infinitely thin seam.
+
+   It reads the angle rather than owning the animation — see --row-spin. */
+.row-status-spinner {
+  width: 8.86px;
+  -webkit-mask-image: var(--spinner-icon);
+  mask-image: var(--spinner-icon);
+  background-image: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    color-mix(in srgb, currentColor 8%, transparent) 120deg,
+    color-mix(in srgb, currentColor 24%, transparent) 220deg,
+    color-mix(in srgb, currentColor 55%, transparent) 300deg,
+    currentColor 345deg,
+    currentColor 360deg
+  );
+  transform: rotate(var(--row-spin));
+}
+
+/* The spinner's rotation, driven exactly the way the equalizer bars are and for
+   the same reasons: one registered property, one animation, on an element that is
+   never re-rendered, never hidden and never display-toggled, with every spinner a
+   follower that reads the number. See the long note on --eq-1 — `display: none`
+   cancels a running animation outright, and a whole-document style invalidation
+   landing in the window where the cascade would restart it can eat the restart,
+   which the drag arm triggers on every single click. A status span owning no
+   animation is what makes that unreachable: the row windower can rebuild its row,
+   paintStatus can swap the span between cloud and spinner, and there is nothing on
+   it to lose.
+
+   On html rather than body, unlike the bars: body's animations are parked by
+   .playback-paused, and a download in flight while the user pauses is still in
+   flight — a spinner that froze the moment you hit pause would read as a hung
+   download. html carries no such state.
+
+   Parked rather than cancelled when nothing is downloading, which is the other
+   half of the eq-bars lesson: play-state is a state change on the same animation,
+   so the thing that eats a restart has nothing to eat here, and a paused animation
+   costs no frames. Were this toggled by adding and removing the animation instead,
+   the restart would be racing the very invalidation above — a download starts on a
+   click, which is exactly when body.dragging-noselect lands.
+
+   0.9s, and that 0.9s is one visual cycle: a single head means the art no longer
+   repeats every half turn, so the period is the cadence the eye reads. The two-arc
+   spinner this replaced ran at 1.4s for exactly that reason — two cycles a turn,
+   0.7s apiece — and keeping 1.4s here would have halved the apparent speed. */
+@property --row-spin {
+  syntax: "<angle>";
+  inherits: true;
+  /* Where a stopped spinner sits: the head at twelve o'clock, as drawn. Under
+     prefers-reduced-motion, and at the E2E shutter once freeze() has cancelled
+     the driver, this is the frame that shows. The ring is closed, so a stopped
+     spinner is still a whole ring in the slot and still reads as a wait — it is
+     only the brightness that has stopped travelling. */
+  initial-value: 0deg;
+}
+
+html {
+  animation: row-spin 0.9s linear infinite;
+  animation-play-state: paused;
+}
+
+/* Set while fetchingPath holds a path (see the effect in main.ts). */
+html.downloading {
+  animation-play-state: running;
+}
+
+@keyframes row-spin {
+  to {
+    --row-spin: 360deg;
+  }
+}
+
+/* Users who ask for less motion get the static ring (the registered initial value)
+   instead of the rotation — the same trade the equalizer bars make. The marker
+   still says "cloud file, not resting", and the words are still on the span for a
+   pointer and a screen reader. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    animation: none;
+  }
 }
 
 /* Trailing, the marker is in the ellipsis's path — so the title cell takes the
@@ -4706,11 +4989,18 @@ body.playback-paused {
 /* The playing tree row swaps its number for the equalizer glyph at rest; on hover
    the glyph gives way to the button (pause here, not play — see .playing .row-play).
    Gated on active playback so a paused row shows its number back, not a frozen
-   glyph. */
-body:not(.playback-paused) .node-label.playing .icon.track .track-num {
+   glyph — and on the row not wearing the download spinner, which is the same case
+   for the same reason (the full account is on the queue's copy of this pair). */
+body:not(.playback-paused)
+  .node-label.playing:not(:has(.row-status-spinner))
+  .icon.track
+  .track-num {
   visibility: hidden;
 }
-body:not(.playback-paused) .node-label.playing .icon.track .eq-bars {
+body:not(.playback-paused)
+  .node-label.playing:not(:has(.row-status-spinner))
+  .icon.track
+  .eq-bars {
   display: flex;
 }
 body:not(.playback-paused) .node-label.playing:hover .icon.track .eq-bars {
@@ -5576,11 +5866,17 @@ body:not(.playback-paused) .nav-row.playing:not(.open) .nav-gutter .eq-bars {
 
 /* ...and swaps its number for the equalizer glyph at rest; on hover the glyph gives
    way to the button (pause here, not play — see .playing .row-play). Gated on
-   active playback so a paused row shows its number back, not a frozen glyph. */
-body:not(.playback-paused) .nav-track-row.playing .nav-num-text {
+   active playback so a paused row shows its number back, not a frozen glyph — and
+   on the row not wearing the download spinner, which is the same case for the same
+   reason (the full account is on the queue's copy of this pair). */
+body:not(.playback-paused)
+  .nav-track-row.playing:not(:has(.row-status-spinner))
+  .nav-num-text {
   visibility: hidden;
 }
-body:not(.playback-paused) .nav-track-row.playing .eq-bars {
+body:not(.playback-paused)
+  .nav-track-row.playing:not(:has(.row-status-spinner))
+  .eq-bars {
   display: flex;
 }
 body:not(.playback-paused) .nav-track-row.playing:hover .eq-bars {

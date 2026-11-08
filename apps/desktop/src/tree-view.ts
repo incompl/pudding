@@ -335,8 +335,8 @@ function renderTreeRow(row: TreeRow, index: number): HTMLElement {
   if (!node.isFolder && !node.isPlaylist && node.title && node.artist && showArtist) {
     text.appendChild(h("span", { class: "artist", text: node.artist }));
   }
-  // A cloud file says so here too — "(Not downloaded)", or "(Downloading...)" while
-  // the engine is parked on it. Same marker, same words, same dim ink as the queue's
+  // A cloud file says so here too — the cloud glyph, or the spinner while
+  // the engine is parked on it. Same marker, same ink as the queue's
   // rows (see row-status.ts): it is a fact about the file, and the browse tree is
   // where the user meets the file first. Folders and playlists are not files and
   // never wear one. Repainted in place as the download moves (repaintTreeStatus).

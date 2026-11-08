@@ -1253,7 +1253,7 @@ function openMetadataEditor(paths: string[], note?: string): Promise<void> {
 // A cloud-only file is kept out of it either way. Reading a dataless file
 // materializes it — a download the user didn't ask for, per file. Playing such a
 // track is the one action that downloads it (audio.rs parks a worker thread on the
-// fetch); once it lands, the row's "(Not downloaded)" clears and the verb comes
+// fetch); once it lands, the row's cloud marker clears and the verb comes
 // back with it. The two menu items below differ only in *when* they can know:
 // see editMetadataItem and editMetadataProviderItem.
 //
