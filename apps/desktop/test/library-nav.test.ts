@@ -53,6 +53,7 @@ interface Fixture {
   folderTree: FakeEl;
   createBtn: FakeEl;
   filesEmpty: FakeEl;
+  filesEmptyTitle: FakeEl;
   filesEmptyLead: FakeEl;
   filesEmptyChoose: FakeEl;
   calls: Call[];
@@ -74,6 +75,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
   const folderTree = doc.registerRoot("folder-tree");
   const createBtn = doc.registerRoot("create-playlist-btn");
   const filesEmpty = doc.registerRoot("files-empty");
+  const filesEmptyTitle = doc.registerRoot("files-empty-title");
   const filesEmptyLead = doc.registerRoot("files-empty-lead");
   const filesEmptyChoose = doc.registerRoot("files-empty-choose");
 
@@ -123,6 +125,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     decadeTracks: async (decade) =>
       songs.filter((t) => (decade === 1990 ? t.album === "Debut" : t.album === "Split")),
     libraryEmpty: () => null,
+    libraryRootsAway: () => 1,
     renderLeafTrackList: (tracks, ctx) => {
       leafCtx.push(ctx);
       leafTracks.push(tracks);
@@ -152,6 +155,7 @@ function setup(over: Partial<LibraryNavDeps> = {}, initial?: NavStep[]): Fixture
     folderTree,
     createBtn,
     filesEmpty,
+    filesEmptyTitle,
     filesEmptyLead,
     filesEmptyChoose,
     calls,
@@ -222,6 +226,45 @@ test("no library folder shows the concise setup prompt", async () => {
   assert.ok(filesEmptyLead.classList.contains("hidden"), "first run needs no lead copy");
   assert.equal(filesEmptyChoose.textContent, "Choose Music Folder");
   assert.equal(labels(container).length, 0, "springboard must not be built");
+});
+
+// An ejected external is not an empty library, and the prompt must not say it is:
+// every row for that folder is still in the DB (the scan carries rows it could not
+// walk through the prune), so the copy says "plug it back in" rather than "no music
+// was found", which reads as a library that has been lost.
+test("an unreachable root says reconnect the drive, not no music found", async () => {
+  const { filesEmpty, filesEmptyTitle, filesEmptyLead, filesEmptyChoose } = setup({
+    libraryEmpty: () => "unreachable",
+  });
+  await flush();
+  assert.ok(!filesEmpty.classList.contains("hidden"), "prompt must show");
+  assert.equal(filesEmptyTitle.textContent, "Library folder unavailable");
+  assert.match(filesEmptyLead.textContent, /Reconnect the drive and your music comes back/);
+  assert.doesNotMatch(filesEmptyLead.textContent, /No music was found/);
+  assert.ok(!filesEmptyLead.classList.contains("hidden"), "an absent root must explain itself");
+  assert.equal(filesEmptyChoose.textContent, "Add Another Folder");
+});
+
+test("the unreachable copy pluralizes with the configured folder count", async () => {
+  const { filesEmptyTitle, filesEmptyLead } = setup({
+    libraryEmpty: () => "unreachable",
+    libraryRootsAway: () => 2,
+  });
+  await flush();
+  assert.equal(filesEmptyTitle.textContent, "Library folders unavailable");
+  assert.match(filesEmptyLead.textContent, /Reconnect the drives/);
+});
+
+// The title is shared with the other two states, so a prompt that opened for an
+// absent drive and then became a real empty library must take its words back.
+test("the get-started title returns after an unreachable render", async () => {
+  const { filesEmptyTitle, deps } = setup({ libraryEmpty: () => "unreachable" });
+  await flush();
+  assert.equal(filesEmptyTitle.textContent, "Library folder unavailable");
+  (deps as { libraryEmpty: () => string }).libraryEmpty = () => "empty";
+  repaintNavPane();
+  await flush();
+  assert.equal(filesEmptyTitle.textContent, "Let's get started");
 });
 
 // The third state: mid-refresh nothing is known yet, and main.ts reports null so

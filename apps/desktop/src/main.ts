@@ -120,6 +120,7 @@ import {
   streamListPathSet,
   streamListWritable,
   libraryHasContent,
+  libraryRootsAway,
   libraryTreeLoaded,
   treeSelection,
   paneEditor,
@@ -201,6 +202,7 @@ import { setupSearch } from "./search";
 import {
   refreshTree,
   refreshLibrary,
+  refreshRootAvailability,
   holdLibraryRoots,
   setLibraryRoots,
   renderLibraryRootRows,
@@ -3777,6 +3779,7 @@ function setupEffects(): void {
   effect(() => {
     libraryRootSet.value;
     libraryHasContent.value;
+    libraryRootsAway.value;
     libraryTreeLoaded.value;
     renderNav();
   });
@@ -4592,8 +4595,11 @@ async function init(): Promise<void> {
         : !libraryRootSet.value
           ? "no-root"
           : !libraryHasContent.value
-            ? "empty"
+            ? libraryRootsAway.value
+              ? "unreachable"
+              : "empty"
             : null,
+    libraryRootsAway: () => libraryRootsAway.value,
     setBrowseActive,
     markNavFocused: () => {
       app.lastSelectionPane = "nav";
@@ -4726,8 +4732,26 @@ async function init(): Promise<void> {
   // opened from anywhere, and every edit made in another app while Pudding sat in
   // the background — which is exactly when you'd have been making them.
   await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-    if (focused) void reloadChangedPlaylists();
+    if (!focused) return;
+    void reloadChangedPlaylists();
+    // The same reasoning one layer out, for the folders rather than the files in
+    // them: the volume observer below is the push notification for a drive coming
+    // or going, and this is the backstop for everything it cannot see — a cable
+    // pulled while the machine slept, a share that dropped, and the non-macOS
+    // build where there is no observer at all. The check gates itself on an actual
+    // change, so an ordinary focus costs one open() per folder and nothing else.
+    void refreshRootAvailability();
   });
+
+  // A volume mounted, unmounted, or was renamed — not necessarily one a library
+  // folder lives on, which is why the reaction is gated rather than assumed (see
+  // refreshRootAvailability). Debounced because a single disk image can post
+  // several of these in a row, one per partition, and they all ask the same
+  // question.
+  await listen(
+    "volumes-changed",
+    debounce(() => void refreshRootAvailability(), 250),
+  );
 
   await listen<string>("open-file", (event) => {
     openAssociatedFile(event.payload);

@@ -527,6 +527,19 @@ export const libraryHasContent = signal(false);
 // libraryRootSet and libraryHasContent are both false mid-refresh, which is
 // indistinguishable from "no library" unless something says "not known yet".
 export const libraryTreeLoaded = signal(false);
+// How many configured library folders failed to list — an ejected external, a
+// share that stopped answering. Kept as a count rather than a flag because the
+// get-started prompt needs both halves of the answer: whether to speak at all,
+// and whether to say "drive" or "drives".
+//
+// The reason it exists at all is that libraryHasContent being false has two very
+// different meanings. A folder that opened and holds no music is a library to set
+// up; a folder that is simply away is a library to plug back in, with every row
+// for it still sitting in the DB (see preserve_unreadable in lib.rs). Those want
+// different words. A signal rather than a read of app.invalidLibraryRoots because
+// the empty-state effect has to re-run when the answer flips, and a plain Set
+// cannot tell it to.
+export const libraryRootsAway = signal(0);
 
 export const treeSelection = signal<Set<string>>(new Set());
 

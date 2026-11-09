@@ -70,12 +70,13 @@
       <section id="left">
         <div class="tab-panel" id="tab-files">
           <!-- Get-started prompt shown across the whole Files panel whenever it
-               has nothing to browse — no library folder configured, or one that
-               holds no music — hiding the navigator/tree/footer. First run needs
-               no explaining beyond the button, so the lead only appears for the
-               configured-but-empty case; see library-nav's render(). -->
+               has nothing to browse — no library folder configured, one that is
+               away (an ejected drive), or one that holds no music — hiding the
+               navigator/tree/footer. First run needs no explaining beyond the
+               button, so it alone shows no lead; the other two set both the title
+               and the lead from here. See library-nav's render(). -->
           <div id="files-empty" class="panel-empty hidden">
-            <h2 class="files-empty-title">Let's get started</h2>
+            <h2 id="files-empty-title" class="files-empty-title">Let's get started</h2>
             <p id="files-empty-lead" class="files-empty-copy hidden"></p>
             <div class="files-empty-actions">
               <button id="files-empty-choose" type="button" class="files-empty-primary">Choose Music Folder</button>

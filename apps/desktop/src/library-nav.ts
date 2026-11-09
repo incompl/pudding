@@ -149,12 +149,18 @@ export interface LibraryNavDeps {
   // navigation change from render().
   persistLocation: (steps: NavStep[]) => void;
   // Why the Files panel has nothing to browse, or null when it has something.
-  // "no-root" is a fresh install with no library folder configured; "empty" is a
-  // configured folder holding no music — an empty folder, or a drive that didn't
-  // mount. Both are dead ends for every view and the folder tree, so both swap the
-  // whole panel for the get-started prompt (#files-empty); only the wording differs.
-  // main.ts re-renders whenever this changes.
-  libraryEmpty: () => "no-root" | "empty" | null;
+  // "no-root" is a fresh install with no library folder configured; "unreachable"
+  // is nothing to browse with at least one folder refusing to list — an ejected
+  // external, a share that stopped answering; "empty" is nothing to browse with
+  // every folder having opened fine.
+  // All three are dead ends for every view and the folder tree, so all three swap
+  // the whole panel for the get-started prompt (#files-empty); only the wording
+  // differs. main.ts re-renders whenever this changes.
+  libraryEmpty: () => "no-root" | "unreachable" | "empty" | null;
+  // How many configured library folders could not be listed, which is only ever
+  // asked for the "unreachable" prompt's plural. Injected rather than imported for
+  // the same reason libraryEmpty is: this module never reaches into app state.
+  libraryRootsAway: () => number;
   // Tell the Browse folder tree whether it's the active view. The tree defers its
   // (costly) DOM build while hidden, so entering Browse flushes any pending build.
   // Injected rather than imported so this module never pulls in tree-view/main.
@@ -188,6 +194,7 @@ let container: HTMLElement;
 let folderTree: HTMLElement;
 let createBtn: HTMLElement;
 let filesEmpty: HTMLElement;
+let filesEmptyTitle: HTMLElement;
 let filesEmptyLead: HTMLElement;
 let filesEmptyChoose: HTMLButtonElement;
 const stack: Pane[] = [];
@@ -1148,13 +1155,31 @@ function render(keep: NavScroll = NO_SCROLL): void {
   filesEmpty.classList.toggle("hidden", empty === null);
   if (empty !== null) {
     // First run says nothing but the invitation: the button is the whole story.
-    // A configured root that turned up no music does need explaining, so the lead
-    // appears only there.
+    // The other two do need explaining, so the lead appears for those.
+    //
+    // A library that is only unplugged is not the same news as one with nothing in
+    // it, and the difference is worth the words: "no music was found" over an
+    // ejected drive reads as a library that has been lost, when in fact every row
+    // is still in the DB waiting for the volume (see preserve_unreadable). So the
+    // title names the state and the lead names the one thing that fixes it. The
+    // button stays the same offer in both — the folder is still configured, and
+    // pointing somewhere else is a reasonable thing to want either way.
     filesEmptyLead.classList.toggle("hidden", empty === "no-root");
+    const plural = deps.libraryRootsAway() > 1;
+    filesEmptyTitle.textContent =
+      empty === "unreachable"
+        ? plural
+          ? "Library folders unavailable"
+          : "Library folder unavailable"
+        : "Let's get started";
     filesEmptyLead.textContent =
       empty === "no-root"
         ? ""
-        : "No music was found in your library folder.";
+        : empty === "unreachable"
+          ? plural
+            ? "Reconnect the drives and your music comes back."
+            : "Reconnect the drive and your music comes back."
+          : "No music was found in your library folder.";
     filesEmptyChoose.textContent =
       empty === "no-root" ? "Choose Music Folder" : "Add Another Folder";
     folderTree.classList.add("hidden");
@@ -1252,6 +1277,7 @@ export function initLibraryNav(d: LibraryNavDeps, initial?: NavStep[]): void {
   folderTree = document.getElementById("folder-tree") as HTMLElement;
   createBtn = document.getElementById("create-playlist-btn") as HTMLElement;
   filesEmpty = document.getElementById("files-empty") as HTMLElement;
+  filesEmptyTitle = document.getElementById("files-empty-title") as HTMLElement;
   filesEmptyLead = document.getElementById("files-empty-lead") as HTMLElement;
   filesEmptyChoose = document.getElementById("files-empty-choose") as HTMLButtonElement;
 

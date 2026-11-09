@@ -11,6 +11,7 @@ import {
   app,
   libraryHasContent,
   libraryRootSet,
+  libraryRootsAway,
   libraryTreeLoaded,
   streamListPathSet,
   streamListPathValid,
@@ -79,6 +80,7 @@ export async function refreshTree(roots: string[]): Promise<void> {
   libraryTreeLoaded.value = false;
   libraryRootSet.value = roots.length > 0;
   app.invalidLibraryRoots = new Set();
+  libraryRootsAway.value = 0;
   if (roots.length === 0) {
     // The panel-wide get-started prompt (files-empty effect) covers this case;
     // the tree stays empty behind it.
@@ -109,6 +111,11 @@ export async function refreshTree(roots: string[]): Promise<void> {
       }
     }),
   );
+  // Every root has now been tried, so publish how many refused — the get-started
+  // prompt says "plug it back in" rather than "no music found" when any did. Set
+  // before renderTree so the empty-state effect has the answer the first time it
+  // reads it.
+  libraryRootsAway.value = app.invalidLibraryRoots.size;
   renderLibraryRootRows();
   if (roots.length === 1) {
     app.rootNode = nodes[0];
@@ -431,6 +438,85 @@ export async function setLibraryRoots(paths: string[]): Promise<void> {
   );
   await refreshTree(app.libraryRoots);
   void refreshPlaylistIndex();
+}
+
+// Re-check whether the configured folders are actually there, and put the app
+// back in step with the answer if it changed.
+//
+// Driven by volume mounts and unmounts (see src-tauri/src/volumes.rs) and by the
+// window regaining focus, which between them cover a drive ejected from Finder, a
+// cable pulled, a share that dropped, and the same three in reverse. Both are
+// "something might have happened" nudges rather than statements about the roots,
+// so the first thing this does is establish whether anything did: every nudge
+// runs the gate, and only a changed answer runs the reaction.
+//
+// The reaction is deliberately the ordinary roots-committed path with the same
+// set of roots. A root leaving the building and a root coming back need the same
+// five things done — re-take the grants, redraw the Settings rows, rescan,
+// re-watch, rebuild the tree — and setLibraryRoots is where those five already
+// live in the right order. (Re-watching is not incidental: notify's watch on a
+// departed root is dead and does not self-heal, so without this a drive that came
+// back would be un-watched until the next launch.) What it does *not* do is pop
+// the Files panel home the way a root the user removed does: the folder is still
+// configured, its tracks are still in the DB — the scan carries rows it could not
+// walk straight through the prune — and a drive that comes back in ten seconds
+// should not have cost the user their place.
+export async function refreshRootAvailability(): Promise<void> {
+  // Two nudges can arrive around one gesture — ejecting from Finder posts the
+  // unmount notification and hands Pudding the focus back — and the second would
+  // otherwise run its gate against the invalid-root set the first has not finished
+  // replacing yet, concluding a second time that everything changed and starting a
+  // second rescan and tree rebuild over the top of the first. So one at a time,
+  // with a nudge that lands mid-check remembered rather than dropped: it may be
+  // the drive coming back, and the state it would have corrected is the one the
+  // user is looking at.
+  if (checkingAvailability) {
+    recheckAvailability = true;
+    return;
+  }
+  checkingAvailability = true;
+  try {
+    do {
+      recheckAvailability = false;
+      await checkRootAvailability();
+    } while (recheckAvailability);
+  } finally {
+    checkingAvailability = false;
+  }
+}
+
+let checkingAvailability = false;
+let recheckAvailability = false;
+
+// One pass of the above: gate, then react. See refreshRootAvailability.
+async function checkRootAvailability(): Promise<void> {
+  if (!app.libraryRoots.length) return;
+  // Re-take the grants *before* the gate, but only when something is already
+  // known to be unreachable. Sandboxed, the probe below opens the folder and so
+  // needs the access root_access holds, and the hold for a volume that went away
+  // did not survive it — without this a returning drive would answer "still gone"
+  // forever and never recover. Skipped in the common case (nothing is wrong, a USB
+  // stick was plugged in), where it would be pure grant churn and a settings write.
+  if (app.invalidLibraryRoots.size) await holdLibraryRoots();
+  let unreachable: string[];
+  try {
+    unreachable = await invoke<string[]>("unreachable_roots", { paths: app.libraryRoots });
+  } catch (e) {
+    // Nothing is known now, and the next nudge asks again. Acting on a failed
+    // probe would mean rebuilding the tree on a guess.
+    console.error("unreachable_roots failed", e);
+    return;
+  }
+  // Compared against the set the *tree* produced, which is what the app is
+  // currently showing the user — red Settings rows, an emptied branch. The probe
+  // is read_dir for exactly this reason: it fails where list_dir fails, so the two
+  // can agree on a folder that is present but won't open, and a nudge that changes
+  // nothing stays free. See unreachable_roots.
+  const same =
+    unreachable.length === app.invalidLibraryRoots.size &&
+    unreachable.every((p) => app.invalidLibraryRoots.has(p));
+  if (same) return;
+  await setLibraryRoots(app.libraryRoots);
 }
 
 // Rebuild the Settings library-folder rows from `libraryRoots`. Each row is a

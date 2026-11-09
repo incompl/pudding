@@ -1216,6 +1216,10 @@ fn collect_playlists(dir: &Path, out: &mut Vec<PlaylistRef>, visited: &mut HashS
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        // Same rule the tree and the scan walk by: hidden is not ours to show.
+        if crate::is_hidden_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };

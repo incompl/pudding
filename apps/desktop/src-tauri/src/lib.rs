@@ -15,6 +15,9 @@ mod playlist;
 // primitive it drives is bookmarks.rs; pub for the same reason bookmarks is —
 // examples/sandbox_check.rs drives this exact code inside a real sandbox.
 pub mod root_access;
+// Being told when a volume mounts or unmounts, so an ejected external does not
+// leave the app drawing a library that is no longer there.
+mod volumes;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -965,6 +968,11 @@ fn walk_audio(
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        // Skipped whole, directories included, so a `.Trashes` or a Spotlight index
+        // at the top of an external volume is not descended into either.
+        if is_hidden_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         // std::fs::metadata follows symlinks; entry.file_type() does not. Following lets
         // a user organize their library with symlinks to dirs / files.
         let Ok(meta) = std::fs::metadata(&path) else {
@@ -1446,6 +1454,9 @@ async fn list_dir(path: String, db: State<'_, DbHandle>) -> Result<DirListing, S
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            if is_hidden_name(&name) {
+                continue;
+            }
             // Prefer the dirent's file type — readdir already carries it, so no
             // extra syscall. Only fall back to a full metadata() (a stat per entry
             // that follows symlinks) when the entry IS a symlink or the type wasn't
@@ -2066,6 +2077,34 @@ fn watch_libraries(
     Ok(())
 }
 
+// Which of these library roots cannot be reached right now.
+//
+// The cheap gate in front of an expensive reaction: the frontend is nudged by
+// every volume that mounts or unmounts and by every window focus, and only a
+// changed answer here is allowed to cost a rescan and a tree rebuild (see
+// refreshRootAvailability).
+//
+// `read_dir` rather than a stat, and that is the whole point of the choice: this
+// has to return the same verdict list_dir would, because what the frontend
+// compares it against is the invalid-root set that list_dir produced. A stat
+// would call a folder that is present but refuses to open — a permission that
+// changed, a share that mounted without answering — reachable, disagree with the
+// tree forever, and make every focus and every USB stick rebuild the library.
+// Opening the directory is the same syscall list_dir fails on, and it is still
+// only an opendir: Rust's ReadDir is lazy, so nothing is enumerated here.
+//
+// Async so it runs off the main thread. This is the one call in the app that is
+// *expected* to be aimed at a volume that may have stopped answering, and a dead
+// network mount can hold an open for its full timeout; the UI thread must not be
+// the one waiting.
+#[tauri::command]
+async fn unreachable_roots(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|path| std::fs::read_dir(path).is_err())
+        .collect()
+}
+
 #[tauri::command]
 fn get_art(path: String) -> Option<String> {
     let path = std::path::Path::new(&path);
@@ -2288,6 +2327,22 @@ fn image_mime_from_ext(path: &str) -> &'static str {
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aiff", "aif",
 ];
+
+// A filesystem entry the library never shows, judged by its name alone. A leading
+// dot is the Unix hidden convention and Finder honors it, so a folder looks the
+// same in Pudding as it does there.
+//
+// The case that forced this: macOS writes an AppleDouble sidecar (`._Take.mp3` —
+// the resource fork and extended attributes) beside every file it copies onto a
+// volume that cannot hold them, which is every FAT/exFAT stick and most NAS
+// shares. Those carry the audio extension, so without this each track on such a
+// volume appears twice, the second one an unplayable few-KB stub.
+//
+// Only the name is read. The separate macOS UF_HIDDEN flag would cost a stat per
+// entry and hides nothing that turns up inside a music folder.
+pub(crate) fn is_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
+}
 
 fn is_audio_path(s: &str) -> bool {
     Path::new(s)
@@ -3914,8 +3969,10 @@ fn is_storage_fatal(e: &std::io::Error) -> bool {
 // step a cross-device copy, which is the thing this is all here to avoid.
 //
 // The name deliberately carries no audio extension: is_audio_path goes by
-// extension alone and list_dir does not skip dotfiles, so a temp called
-// `.track.mp3` would show up as a song in any scan that overlapped the save. lofty
+// extension alone, so a temp called `.track.mp3` is audio by that test and would
+// show up as a song in any scan that overlapped the save. The leading dot now
+// keeps it out of the listings too (is_hidden_name), making this the second of two
+// guards rather than the only one. lofty
 // identifies a container by sniffing the bytes it is handed and never by the name
 // (write_id3v2 builds its own Probe over the open file), so dropping the extension
 // costs nothing.
@@ -7448,6 +7505,11 @@ pub fn run() {
             // it up to drive play/pause/seek.
             now_playing::install(&app.handle());
 
+            // Start listening for volumes coming and going, so a library root on
+            // an external drive stops being drawn as present the moment it is
+            // ejected — and comes back, rescanned and re-watched, when it returns.
+            volumes::install(&app.handle());
+
             // Cold-start file open on Windows/Linux arrives as a CLI arg. On macOS
             // it arrives later via RunEvent::Opened (handled below).
             let argv: Vec<String> = std::env::args().collect();
@@ -7790,6 +7852,7 @@ pub fn run() {
             to_file_url,
             rescan_libraries,
             watch_libraries,
+            unreachable_roots,
             search_tracks,
             search_folders,
             folder_tracks,
@@ -10074,6 +10137,31 @@ mod tests {
 
         assert!(files.is_empty());
         assert_eq!(unreadable, vec![gone]);
+    }
+
+    // The AppleDouble sidecar: macOS leaves a `._Name.mp3` beside every file it
+    // copies to a FAT stick or a NAS share, and it carries the audio extension. It
+    // is not a song, and neither is anything else under a hidden name.
+    #[test]
+    fn the_walk_skips_hidden_entries() {
+        let dir = std::env::temp_dir().join(format!("pudding-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let trashes = dir.join(".Trashes");
+        std::fs::create_dir_all(&trashes).expect("mkdir");
+        std::fs::write(dir.join("Soup.mp3"), b"x").expect("seed");
+        std::fs::write(dir.join("._Soup.mp3"), b"x").expect("seed");
+        std::fs::write(dir.join(".DS_Store"), b"x").expect("seed");
+        std::fs::write(trashes.join("Deleted.mp3"), b"x").expect("seed");
+
+        let mut files = Vec::new();
+        let mut visited = HashSet::new();
+        let mut unreadable = Vec::new();
+        walk_audio(&dir, &mut files, &mut visited, &mut unreadable);
+
+        assert_eq!(files, vec![dir.join("Soup.mp3")]);
+        assert!(unreadable.is_empty(), "a skipped folder is not a hole");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // The opposite case, and the one that makes deleting work at all: a folder the

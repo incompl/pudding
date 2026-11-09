@@ -205,7 +205,10 @@ over one too.
 - [x] Evicted files wear the cloud marker
 - [x] Play one and it fetches then plays
 - [x] Evict file and make sure it returns to not downloaded state
-- [ ] Unplug/eject a root's volume → graceful errors, no hang
+- [x] Unplug/eject a root's volume → graceful errors, no hang
+- [x] Eject a root's volume while running → Files panel says the folder is unavailable, Settings row outlines red (no relaunch needed)
+- [x] Reconnect it → tree, views and the folder watcher all come back; a file added while it was away shows up
+- [x] Mount an unrelated volume → nothing in the library redraws
 
 ## 15. Sandbox / release build
 
