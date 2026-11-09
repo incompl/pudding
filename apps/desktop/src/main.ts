@@ -4270,6 +4270,14 @@ async function init(): Promise<void> {
   // paths, which is only true because the backend is holding those grants by the
   // time they run. See holdLibraryRoots.
   await bootStep("hold-roots", () => holdLibraryRoots());
+  // Start the playlist walk here — the earliest point it can run, since
+  // hold-roots is what reclaims the sandbox grant on each root and this walks
+  // them. Deliberately not awaited, and deliberately ahead of init-nav below: the
+  // walk is what the root menu's Playlists section, the Add-to-playlist submenu
+  // and searchable playlists all read, and every one of them reads as "you have
+  // none" until it lands. Fired from here it usually beats the first render, so
+  // that render paints the final list instead of a placeholder it then replaces.
+  void refreshPlaylistIndex();
   // First run (key never set): adopt the default stream list the backend seeds
   // in the app data dir, and persist it so it shows in settings and can be
   // repointed. An explicit "" (user cleared the path) is respected, not reseeded.
@@ -4820,7 +4828,6 @@ async function init(): Promise<void> {
   }
 
   await bootStep("refresh-tree", () => refreshTree(app.libraryRoots));
-  void refreshPlaylistIndex();
   await bootStep("refresh-streams", () => refreshStreams(streamListPath));
 
   // Flush the boot report once init's synchronous work is done. Deferred inside

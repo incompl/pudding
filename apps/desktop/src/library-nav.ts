@@ -92,8 +92,8 @@ export interface LibraryNavDeps {
   listAllAlbums: () => Promise<SearchAlbum[]>;
   // The current playlist index, read synchronously from the in-memory cache
   // (app.playlistIndex) — NOT a per-render filesystem walk. `loaded` is false until
-  // the first walk lands so the root menu can show "Loading..." rather than a false
-  // "No playlists yet". refreshNavPlaylists() re-renders the root when the cache
+  // the first walk lands so the root menu can show "Loading..." rather than a
+  // falsely empty section. refreshNavPlaylists() re-renders the root when the cache
   // updates (fs watcher / our own writes), keeping this in step.
   playlistIndex: () => { loaded: boolean; items: PlaylistRef[] };
   artistAlbums: (artist: string) => Promise<SearchAlbum[]>;
@@ -446,13 +446,13 @@ function rootMenuBody(): HTMLElement {
   // filesystem walk — that walk froze the UI for ~1s on large libraries). The cache
   // is kept fresh by refreshPlaylistIndex (fs watcher + our own writes), which calls
   // refreshNavPlaylists() to re-render this root when it changes. Until the first
-  // walk lands, show "Loading..." rather than a false "No playlists yet".
+  // walk lands, show "Loading..." rather than a bare header that reads as "you have
+  // none"; once it has, no playlists means no rows at all — the Create playlist
+  // button under the header is the whole empty state.
   const plHost = list();
   const { loaded, items } = deps.playlistIndex();
   if (!loaded) {
     plHost.appendChild(h("div", { class: "nav-placeholder-row", text: "Loading..." }));
-  } else if (items.length === 0) {
-    plHost.appendChild(h("div", { class: "nav-placeholder-row", text: "No playlists yet" }));
   } else {
     for (const p of items) {
       const row = addNavRow(
@@ -1037,6 +1037,10 @@ function back(): void {
 // own writes) — that's the only place the playlist list is shown, so there's
 // nothing to refresh while drilled into a view.
 export function refreshNavPlaylists(): void {
+  // The boot walk is kicked off before initLibraryNav (see init in main.ts), so it
+  // can land before there is a pane to re-render. Nothing to do then: init's own
+  // render() reads the index it just filled.
+  if (!deps) return;
   if (stack.length === 0) render();
 }
 
