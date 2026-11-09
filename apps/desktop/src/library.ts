@@ -36,6 +36,7 @@ import {
   KEY_STREAM_LIST_PATH,
 } from "./main";
 import { refreshPlaylistIndex } from "./playlists";
+import { invalidateNavListCache, popNavToRoot } from "./library-nav";
 
 // The final path segment (trailing slashes ignored) — the folder's display name
 // when several library roots share the top level. Falls back to the whole path.
@@ -384,6 +385,7 @@ export async function holdLibraryRoots(): Promise<void> {
 // duplicates are dropped so the array stays clean. Passing [] tears every
 // watcher down and returns the Files panel to its get-started prompt.
 export async function setLibraryRoots(paths: string[]): Promise<void> {
+  const before = app.libraryRoots;
   const seen = new Set<string>();
   const cleaned = paths
     .map(normalizeRootPath)
@@ -399,6 +401,19 @@ export async function setLibraryRoots(paths: string[]): Promise<void> {
   app.rootBookmarks = Object.fromEntries(
     app.libraryRoots.flatMap((p) => (app.rootBookmarks[p] ? [[p, app.rootBookmarks[p]]] : [])),
   );
+  // The Files panel's drill location is a place in the library — an album, an
+  // artist — and a folder that just LEFT the set may have been the only thing
+  // holding it up: remove a root, add a different one, and the open pane would
+  // otherwise keep the old album's title over a list with no rows in it. So pop
+  // home, and drop the memoized view lists that still mirror the departed
+  // folder's tracks. Keyed on departures, not on any difference: adding a folder
+  // can't invalidate a place in the ones already there, and taking the user's
+  // place away is not something an append has earned. Membership, not order —
+  // no gesture here reorders the set, and a reorder wouldn't matter if one did.
+  if (before.some((p) => !app.libraryRoots.includes(p))) {
+    invalidateNavListCache();
+    popNavToRoot();
+  }
   await app.store.set(KEY_LIBRARY_ROOTS, app.libraryRoots);
   await app.store.set(KEY_ROOT_BOOKMARKS, app.rootBookmarks);
   await app.store.save();

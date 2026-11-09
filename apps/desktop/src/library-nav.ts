@@ -1154,7 +1154,7 @@ function render(keep: NavScroll = NO_SCROLL): void {
     filesEmptyLead.textContent =
       empty === "no-root"
         ? ""
-        : "No music was found in your library folder. Drop files there or add another folder.";
+        : "No music was found in your library folder.";
     filesEmptyChoose.textContent =
       empty === "no-root" ? "Choose Music Folder" : "Add Another Folder";
     folderTree.classList.add("hidden");
