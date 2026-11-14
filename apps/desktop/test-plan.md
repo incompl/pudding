@@ -212,6 +212,11 @@ over one too.
 
 ## 15. Sandbox / release build
 
+Build and install the app under test with
+`pnpm release --install` so it lands the way a store install would (see
+`src-tauri/MAS-BUILD.md`). `pnpm desktop:build` is unsandboxed and proves nothing
+in this section.
+
 - [ ] Distribution-signed app launches; roots restore from bookmarks after relaunch
 - [ ] Stream list path, playlist writes, and tag writes all succeed under the sandbox
 - [ ] External links open from the sandboxed build

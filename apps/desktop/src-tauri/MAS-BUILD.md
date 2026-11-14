@@ -48,11 +48,11 @@ embedded distribution profile cannot be uploaded to App Store Connect.
    Application**) certificate and private key in the release keychain.
 4. Install a **Mac Installer Distribution** (or legacy **3rd Party Mac Developer
    Installer**) certificate and private key.
-5. Note the profile's App ID Prefix — the 10-character Team ID. Every
-   distribution build needs it in the environment as `TEAM_ID`; the generator
-   turns it into `com.apple.developer.team-identifier = TEAM_ID` and
+5. The profile's App ID Prefix is the 10-character Team ID. `pnpm release`
+   reads it out of the profile, so it does not have to be set anywhere; the
+   generator turns it into `com.apple.developer.team-identifier = TEAM_ID` and
    `com.apple.application-identifier = TEAM_ID.com.incompl.pudding`. To inspect
-   the result without building:
+   the result without building, pass it explicitly:
 
    ```sh
    TEAM_ID=ABCDE12345 apps/desktop/tools/gen-distribution-entitlements.sh
@@ -63,71 +63,82 @@ embedded distribution profile cannot be uploaded to App Store Connect.
    rustup target add aarch64-apple-darwin x86_64-apple-darwin
    ```
 
-List the usable identities before building:
+`pnpm release` finds both certificates itself, scoped to the profile's team, and
+refuses to guess if it finds none or more than one. To see what is installed:
 
 ```sh
+security find-identity -v              # includes the installer certificate
 security find-identity -v -p codesigning
 ```
 
-Tauri's current macOS bundler copies custom `bundle.macOS.files` into the app's
-`Contents` directory. No manual post-bundle profile copy or re-sign step is
-needed; doing either after Tauri signs would invalidate the signature.
-
 ## Build the upload artifact
 
-Use a clean checkout or a fresh Cargo target directory for every upload. Pudding
-uses sequential integer build numbers: `bundle.macOS.bundleVersion` starts at
-`1` and must be incremented before every upload, including replacements for the
-same marketing version. App Store Connect will reject a reused build number.
-
-From the repository root:
-
 ```sh
-TEAM_ID=ABCDE12345 \
-  APPLE_SIGNING_IDENTITY="Apple Distribution: YOUR NAME (ABCDE12345)" \
-  pnpm build:mas:distribution
+pnpm release          # build, verify, package
+pnpm release --bump   # increment the build number first (every upload)
+pnpm release --clean  # discard the release target dirs first
 ```
 
-The distribution script regenerates `Entitlements.distribution.plist` from
-`$TEAM_ID`, targets `universal-apple-darwin`, merges both MAS overlays, embeds
-the profile, signs with the distribution identity, and emits:
+`tools/release-build.sh` is the whole path: it checks the profile, derives
+`$TEAM_ID` from it, finds the two signing certificates for that team, runs
+`build:mas:distribution`, proves the result, and packages it. Nothing has to be
+set in the environment — `TEAM_ID`, `APPLE_SIGNING_IDENTITY` and
+`INSTALLER_SIGNING_IDENTITY` are honoured if set, and a `TEAM_ID` that disagrees
+with the profile is an error rather than a silent override.
+
+It verifies the app that was built rather than the config meant to produce it,
+and fails on anything that would be rejected or would ship wrong: a missing or
+stale `embedded.provisionprofile`, a signature from the wrong identity,
+entitlements that differ from `Entitlements.plist` plus the two identifier keys
+(a lost sandbox is called out on its own, being the one loss that would sign,
+upload and run), a binary that is not both `arm64` and `x86_64`, a wrong
+category or version, and any document type whose `LSHandlerRank` came out
+`Default` — which would seize mp3 from Music on a user's first launch.
+
+The first run on a machine raises a keychain prompt for each signing key, one
+for the application certificate and one for the installer certificate. Answer
+both with **Always Allow**, not Allow: plain Allow authorises a single use and
+prompts again on the next build. An unanswered prompt does not fail — signing
+blocks inside CMS with no message and no timeout, which looks exactly like a
+slow link step, and stays that way if the dialog was dismissed or the
+SecurityAgent drawing it got orphaned (`pkill -9 SecurityAgent` clears that;
+macOS respawns it). The script probes both keys before building so this surfaces
+in the first seconds rather than after a full universal compile. To authorise
+the keys once, without any prompt, run this yourself — it asks for the login
+keychain password:
+
+```sh
+security set-key-partition-list \
+  -S apple-tool:,apple:,codesign: -s \
+  ~/Library/Keychains/login.keychain-db
+```
+
+Use a clean checkout or `--clean` for every upload. Pudding uses sequential
+integer build numbers: `bundle.macOS.bundleVersion` starts at `1` and must be
+incremented before every upload, including replacements for the same marketing
+version. App Store Connect will reject a reused build number. `--bump`
+increments it; commit that change with the release.
+
+The outputs are:
 
 ```text
 apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Pudding.app
+apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Pudding.pkg
 ```
 
-Set convenient shell variables for the following verification commands:
+The `.pkg` is signed with the installer identity, not the application identity.
+Tauri's current macOS bundler copies custom `bundle.macOS.files` into the app's
+`Contents` directory, so no manual post-bundle profile copy or re-sign step is
+needed; doing either after Tauri signs would invalidate the signature.
+
+To inspect a built app by hand:
 
 ```sh
 APP_PATH="apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Pudding.app"
-PKG_PATH="apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Pudding.pkg"
-```
-
-Verify the bundle before packaging it:
-
-```sh
-test -f "$APP_PATH/Contents/embedded.provisionprofile"
-codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-codesign -d --entitlements - "$APP_PATH"
 codesign -dvvv "$APP_PATH"
+codesign -d --entitlements - --xml "$APP_PATH" | plutil -p -
 lipo -archs "$APP_PATH/Contents/MacOS/pudding"
 plutil -p "$APP_PATH/Contents/Info.plist"
-```
-
-The checks should show both `arm64` and `x86_64`, the sandbox/file/network
-entitlements plus the application/team identifiers, `LSApplicationCategoryType`
-set to Music, a unique `CFBundleVersion`, and the expected hardened-runtime
-signature flags.
-
-Package the app with the installer identity (not the application identity):
-
-```sh
-xcrun productbuild \
-  --sign "Mac Installer Distribution: YOUR NAME (TEAM_ID)" \
-  --component "$APP_PATH" /Applications \
-  "$PKG_PATH"
-
-pkgutil --check-signature "$PKG_PATH"
 ```
 
 Upload the signed package with Transporter or `xcrun altool`, wait for processing,
@@ -145,6 +156,17 @@ Apple operating system. Revisit the declaration before enabling France.
 ## Release smoke test
 
 Test the exact distribution-signed app before upload:
+
+Install the package the way the store would, rather than copying the app by
+hand (`pnpm release --install` does this, and asks for sudo):
+
+```sh
+sudo installer -store -pkg \
+  apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Pudding.pkg \
+  -target /
+```
+
+Then work through section 15 of `apps/desktop/test-plan.md`:
 
 1. Launch with a fresh app-data container.
 2. Play the bundled sample.
