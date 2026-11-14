@@ -4,10 +4,18 @@ Pudding keeps direct-distribution builds unsandboxed. The App Store settings are
 layered on only for MAS builds:
 
 - `tauri.mas.conf.json` enables the sandbox entitlements and produces an `.app`.
+  It embeds no provisioning profile, so what it builds launches on the build
+  machine. This is the layer `pnpm build:mas:local` and `pnpm release --install`
+  stop at, and the only one that can be tested here. Signing is still driven by
+  `APPLE_SIGNING_IDENTITY`: `release-build.sh` exports it, but run
+  `pnpm build:mas:local` bare and Tauri skips signing altogether, leaving the
+  linker's ad-hoc signature, which carries **no entitlements and no sandbox**.
+  Set the variable (`-` for ad-hoc) whenever invoking it by hand.
 - `tauri.mas.distribution.conf.json` embeds the local provisioning profile at
   `Contents/embedded.provisionprofile` using Tauri's supported
   `bundle.macOS.files` mapping, and signs with `Entitlements.distribution.plist`
-  instead of `Entitlements.plist`.
+  instead of `Entitlements.plist`. What it builds is uploadable and, as a
+  consequence, unlaunchable here — see Release smoke test.
 
 Two files are deliberately not committed, because both are specific to one Apple
 Developer account:
@@ -155,16 +163,36 @@ Apple operating system. Revisit the declaration before enabling France.
 
 ## Release smoke test
 
-Test the exact distribution-signed app before upload:
+The distribution-signed app **cannot be launched on the build machine**, and no
+install method changes that. It carries `com.apple.application-identifier` and
+`com.apple.developer.team-identifier`, which are restricted entitlements that
+only a provisioning profile can authorise, and the profile it embeds is a Mac
+App Store production profile, which names no devices. So `taskgated-helper`
+rules the profile ineligible ("Only Development Provisioning Profiles can be
+installed in System Settings"), `amfid` answers "No matching profile found"
+(-413), and the kernel kills the process at exec. All the user sees is the
+dialog "Pudding.app couldn't be opened"; the reason is in
+`log show --last 5m --predicate 'process == "amfid"'`.
 
-Install the package the way the store would, rather than copying the app by
-hand (`pnpm release --install` does this, and asks for sudo):
+`sudo installer -store -pkg …` is not a way around it. Store mode validates the
+package against a code requirement that only Apple's re-signing certificate
+satisfies, hands the install to `installd` out of process, and **exits 0 whether
+or not anything was installed** — the refusal shows up only in
+`/var/log/install.log`, as `PKInstallErrorDomain Code=132` over
+`NSOSStatusErrorDomain Code=-67050`. Nothing appears on the terminal, including
+the sudo password prompt, because `installd` is doing the work.
+
+Test the locally launchable build instead:
 
 ```sh
-sudo installer -store -pkg \
-  apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Pudding.pkg \
-  -target /
+pnpm release --install
 ```
+
+That builds the sandbox-signed app — same code, same sandbox, same entitlements,
+no embedded profile — and copies it into `/Applications` owned by `root:wheel`,
+which is what a store install leaves behind. It then re-reads the installed copy
+and compares its CDHash against the app it just built, so a copy that did not
+land fails loudly instead of being tested in place of the real one.
 
 Then work through section 15 of `apps/desktop/test-plan.md`:
 

@@ -217,7 +217,9 @@ Build and install the app under test with
 `src-tauri/MAS-BUILD.md`). `pnpm desktop:build` is unsandboxed and proves nothing
 in this section.
 
-- [ ] Distribution-signed app launches; roots restore from bookmarks after relaunch
+`--install` builds the sandbox-signed app (not the submission-signed one) and moves it to `Applications`.
+
+- [ ] Sandbox-signed app launches; roots restore from bookmarks after relaunch
 - [ ] Stream list path, playlist writes, and tag writes all succeed under the sandbox
 - [ ] External links open from the sandboxed build
 - [ ] App icon correct in Dock, Finder, and About

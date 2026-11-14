@@ -30,11 +30,59 @@
 # picked up by accident.
 #
 # Usage:
-#   tools/release-build.sh              build, verify, package
-#   tools/release-build.sh --bump       increment the build number first (uploads)
+#   tools/release-build.sh --install    build the LOCAL build and install it
+#                                       (sudo: needs your password and a tty)
+#   tools/release-build.sh --submit     build the SUBMISSION build, bump the
+#                                       build number, package it for upload
+#   tools/release-build.sh              build, verify and package the submission
+#                                       build without bumping or installing
+#   tools/release-build.sh --bump       increment the build number first
 #   tools/release-build.sh --clean      discard the release target dirs first
-#   tools/release-build.sh --install    install the .pkg the way the store would
 #   tools/release-build.sh --no-pkg     stop at the verified .app
+#
+# There are two builds here, and the flag picks which one:
+#
+#   --install  signs src-tauri/Entitlements.plist and embeds no provisioning
+#              profile. Sandboxed, universal, and it LAUNCHES on this Mac, so
+#              it is the app the sandbox section of test-plan.md is testing.
+#              Not uploadable: the store requires the profile.
+#   --submit   signs Entitlements.distribution.plist, which adds
+#              com.apple.application-identifier and
+#              com.apple.developer.team-identifier, and embeds
+#              AppStore.provisionprofile. Uploadable, and it CANNOT launch
+#              here.
+#
+# The second build is not a choice, and what it costs is local launchability.
+# Those two added entitlements are RESTRICTED: only a provisioning profile may
+# authorise them, and a Mac App Store production profile names no devices, so
+# this Mac is not among them. taskgated-helper rules the profile ineligible
+# ("Only Development Provisioning Profiles can be installed in System
+# Settings"), amfid answers "No matching profile found" (-413), and the kernel
+# kills the process at exec. All the user sees is "Pudding.app couldn't be
+# opened"; `log show --last 5m` has the real reason. How the app is installed
+# changes none of this -- it is the signature, not the delivery.
+#
+# Otherwise the two are the same app: same source, same compile, same sandbox
+# entitlements, same Info.plist, same two architectures, and every check below
+# runs over both. They differ in two entitlement strings and one embedded file,
+# none of which is code. What neither build can reproduce is the store receipt:
+# Apple strips this signature on upload, re-signs the app with its own
+# certificate, and injects Contents/_MASReceipt/receipt, so a store-signed
+# Pudding exists only after processing -- on a tester's machine, via TestFlight.
+# Anything that reads the receipt is tested there rather than here.
+#
+# Both builds land in the same bundle/macos directory, so whichever ran last is
+# what is in it; the Done summary says which. --install never packages, so a
+# .pkg in that directory is always a submission package.
+#
+# --install copies the app into /Applications rather than installing a .pkg.
+# productbuild emits a <relocate> entry for the bundle, which tells installd to
+# find any existing copy of com.incompl.pudding on the disk and install THERE
+# instead of at the package's own install-location: a debug build sitting in
+# target/debug was enough to make installer(8) report success, overwrite that
+# debug bundle, and leave /Applications empty. The submission .pkg is left
+# exactly as Apple will receive it rather than restructured for local testing;
+# the Install step explains why copying gives up nothing.
 #
 # Overrides: APPLE_SIGNING_IDENTITY, INSTALLER_SIGNING_IDENTITY, TEAM_ID.
 set -euo pipefail
@@ -45,21 +93,44 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "FAIL: macOS only" >&2; exit 1
 fi
 
-BUMP=0 CLEAN=0 INSTALL=0 MAKE_PKG=1
+BUMP=0 CLEAN=0 INSTALL=0 SUBMIT=0 MAKE_PKG=1
 for arg in "$@"; do
   case "$arg" in
     --bump) BUMP=1 ;;
     --clean) CLEAN=1 ;;
     --install) INSTALL=1 ;;
+    --submit) SUBMIT=1 ;;
     --no-pkg) MAKE_PKG=0 ;;
     -h|--help) sed -n '/^# Usage:/,/^# Overrides:/p' "$0" | cut -c3-; exit 0 ;;
     *) echo "FAIL: unknown option '$arg' (try --help)" >&2; exit 1 ;;
   esac
 done
-# --install needs the package it installs.
-if (( INSTALL && ! MAKE_PKG )); then
-  echo "FAIL: --install and --no-pkg contradict each other" >&2; exit 1
+# The modes are exclusive because they are two differently signed builds of the
+# same app and one directory holds the result. --submit also spends a build
+# number that cannot be spent twice, so it is the step taken once the local
+# build has been tested -- in an earlier run.
+if (( INSTALL && SUBMIT )); then
+  echo "FAIL: --install and --submit build differently signed apps and cannot" >&2
+  echo "      be combined. Test with --install, then re-run with --submit." >&2
+  exit 1
 fi
+# LOCAL is how the app is signed; INSTALL is what is done with it afterwards.
+# One flag sets both today, and they are kept apart because every check below
+# that branches is branching on the signature, not on the install.
+LOCAL=$INSTALL
+if (( LOCAL )); then MODE=local; else MODE=submission; fi
+# An upload is rejected outright if the build number was used before, so
+# --submit bumps rather than leaving that to be remembered.
+if (( SUBMIT )); then BUMP=1; fi
+# --submit uploads the package, so it needs one built.
+if (( SUBMIT && ! MAKE_PKG )); then
+  echo "FAIL: --no-pkg contradicts --submit" >&2; exit 1
+fi
+# A local build is never packaged, and nothing is lost by that: the Install step
+# copies the app in, and a package built from a local build is not submittable.
+# Leaving one in the output directory, named exactly like the real thing, is a
+# trap rather than a convenience.
+if (( LOCAL )); then MAKE_PKG=0; fi
 
 TAURI_CONF="src-tauri/tauri.conf.json"
 PROFILE="src-tauri/AppStore.provisionprofile"
@@ -71,6 +142,19 @@ PKG="$OUT_DIR/Pudding.pkg"
 
 step() { printf '\n==> %s\n' "$1"; }
 fail() { echo "FAIL: $1" >&2; exit 1; }
+
+# A local build neither embeds the profile nor signs anything the profile has to
+# authorise, so a stale or mismatched profile cannot affect its result. The
+# profile is still read in that mode, because it is where the Team ID and
+# therefore the signing identity come from; what changes is that a problem with
+# it is reported instead of fatal.
+profile_problem() {
+  if (( LOCAL )); then
+    printf 'warn %s\n' "$1" >&2
+  else
+    fail "$1"
+  fi
+}
 
 # ---------------------------------------------------------------- preflight
 
@@ -109,8 +193,9 @@ read -r PROFILE_APPID PROFILE_EXPIRY PROFILE_DAYS PROFILE_NAME <<<"$PROFILE_FACT
 TEAM_FROM_PROFILE="${PROFILE_APPID%%.*}"
 BUNDLE_FROM_PROFILE="${PROFILE_APPID#*.}"
 
-(( PROFILE_DAYS > 0 )) || fail "the provisioning profile expired on $PROFILE_EXPIRY.
-      Download a fresh Mac App Store Connect profile and replace $PROFILE."
+(( PROFILE_DAYS > 0 )) || profile_problem "the provisioning profile expired on
+      $PROFILE_EXPIRY. Download a fresh Mac App Store Connect profile and
+      replace $PROFILE."
 
 # An environment TEAM_ID is allowed, but only if it agrees with the profile.
 # Disagreement means one of them is stale, and signing with the stale one is
@@ -125,7 +210,7 @@ export TEAM_ID
 BUNDLE_ID=$(python3 -c "
 import json; print(json.load(open('$TAURI_CONF'))['identifier'])")
 [[ -n "$BUNDLE_ID" ]] || fail "no identifier in $TAURI_CONF"
-[[ "$BUNDLE_ID" == "$BUNDLE_FROM_PROFILE" ]] || fail \
+[[ "$BUNDLE_ID" == "$BUNDLE_FROM_PROFILE" ]] || profile_problem \
   "the profile was issued for '$BUNDLE_FROM_PROFILE' but this app is
       '$BUNDLE_ID'. App Store Connect rejects that mismatch."
 
@@ -321,11 +406,17 @@ fi
 # app in place for the verification below to pass on.
 rm -rf "$OUT_DIR"
 
-step "Build (universal, sandboxed, distribution-signed)"
-# The build command itself is not restated here: build:mas:distribution owns it,
-# regenerates Entitlements.distribution.plist from $TEAM_ID, and merges both MAS
-# config overlays.
-pnpm build:mas:distribution
+# Neither build command is restated here: the package.json scripts own them,
+# including which entitlements file gets signed and whether the profile is
+# embedded. build:mas:distribution also regenerates
+# Entitlements.distribution.plist from $TEAM_ID.
+if (( LOCAL )); then
+  step "Build (universal, sandboxed, locally launchable)"
+  pnpm build:mas:local
+else
+  step "Build (universal, sandboxed, distribution-signed)"
+  pnpm build:mas:distribution
+fi
 
 # ---------------------------------------------------------------- verify
 
@@ -333,13 +424,23 @@ step "Verify the bundle"
 
 [[ -d "$APP" ]] || fail "the build produced no $APP"
 
-# 1. The embedded profile has to be there, and has to be the profile just
-#    checked above rather than an older one left in the bundle.
+# 1. The embedded profile: required in the submission build, forbidden in the
+#    local one. A production profile in a locally signed app is exactly what
+#    makes macOS refuse to launch it, so this is not tidiness -- it is the check
+#    that the app under test can run at all.
 EMBEDDED="$APP/Contents/embedded.provisionprofile"
-[[ -f "$EMBEDDED" ]] || fail "$EMBEDDED is missing; the app cannot be uploaded"
-cmp -s "$EMBEDDED" "$PROFILE" \
-  || fail "the embedded profile differs from $PROFILE"
-echo "ok   embedded.provisionprofile matches $PROFILE"
+if (( LOCAL )); then
+  [[ ! -e "$EMBEDDED" ]] || fail "the local build embedded a provisioning
+      profile. A Mac App Store profile names no devices, so this Mac cannot
+      launch what it authorises. Only tauri.mas.distribution.conf.json should
+      embed one."
+  echo "ok   no embedded profile, so this Mac will launch it"
+else
+  [[ -f "$EMBEDDED" ]] || fail "$EMBEDDED is missing; the app cannot be uploaded"
+  cmp -s "$EMBEDDED" "$PROFILE" \
+    || fail "the embedded profile differs from $PROFILE"
+  echo "ok   embedded.provisionprofile matches $PROFILE"
+fi
 
 # 2. Signature.
 codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/     /'
@@ -350,20 +451,23 @@ AUTHORITY=$(codesign -dvvv "$APP" 2>&1 | sed -nE 's/^Authority=(.*)$/\1/p' | hea
   || fail "signed by '$AUTHORITY', expected '$APPLE_SIGNING_IDENTITY'"
 echo "ok   signing authority $AUTHORITY"
 
-# 3. Entitlements, read back off the signed app. Checked as a whole against the
-#    generated distribution list, which is in turn checked against the one
-#    committed source plus exactly the two identifier keys. No list is restated
-#    here, so this cannot drift from what the sandbox check tests.
+# 3. Entitlements, read back off the signed app. The submission build is checked
+#    as a whole against the generated distribution list, which is in turn
+#    checked against the one committed source plus exactly the two identifier
+#    keys; the local build is checked against that committed source alone, which
+#    is also what proves it has none of the restricted entitlements that would
+#    stop it launching. No list is restated here, so neither check can drift
+#    from what the sandbox check tests.
 ENT_DUMP=$(mktemp "${TMPDIR:-/tmp}/pudding-ent.XXXXXX")
 trap 'rm -f "$ENT_DUMP"' EXIT
 codesign -d --entitlements - --xml "$APP" >"$ENT_DUMP" 2>/dev/null \
   || codesign -d --entitlements :- "$APP" >"$ENT_DUMP" 2>/dev/null \
   || fail "could not read the entitlements back off $APP"
 
-python3 - "$BASE_ENT" "$DIST_ENT" "$ENT_DUMP" "$TEAM_ID" "$BUNDLE_ID" <<'PY'
+python3 - "$MODE" "$BASE_ENT" "$DIST_ENT" "$ENT_DUMP" "$TEAM_ID" "$BUNDLE_ID" <<'PY'
 import plistlib, sys
 
-base_p, dist_p, signed_p, team, bundle = sys.argv[1:6]
+mode, base_p, dist_p, signed_p, team, bundle = sys.argv[1:7]
 
 def load(path):
     with open(path, "rb") as f:
@@ -373,11 +477,7 @@ def load(path):
         data = data[start:]
     return plistlib.loads(data)
 
-base, dist, signed = load(base_p), load(dist_p), load(signed_p)
-
-expected = dict(base)
-expected["com.apple.application-identifier"] = f"{team}.{bundle}"
-expected["com.apple.developer.team-identifier"] = team
+base, signed = load(base_p), load(signed_p)
 
 def diff(label, got, want):
     problems = []
@@ -390,8 +490,23 @@ def diff(label, got, want):
             problems.append(f"{label} has {k} = {got[k]!r}, expected {want[k]!r}")
     return problems
 
-problems = diff("the generated distribution list", dist, expected)
-problems += diff("the signed app", signed, dist)
+if mode == "local":
+    # The committed list and nothing besides. The two identifier keys are
+    # RESTRICTED entitlements: with no profile to authorise them the kernel
+    # refuses to exec the app, so their absence is what makes this build
+    # testable rather than a detail of it.
+    problems = diff("the signed app", signed, base)
+    summary = f"ok   {len(signed)} entitlements match {base_p} exactly, sandbox on"
+else:
+    expected = dict(base)
+    expected["com.apple.application-identifier"] = f"{team}.{bundle}"
+    expected["com.apple.developer.team-identifier"] = team
+    dist = load(dist_p)
+    problems = diff("the generated distribution list", dist, expected)
+    problems += diff("the signed app", signed, dist)
+    summary = (f"ok   {len(signed)} entitlements match, sandbox on, "
+               f"application-identifier {expected['com.apple.application-identifier']}")
+
 if problems:
     for p in problems:
         print(f"FAIL: {p}", file=sys.stderr)
@@ -402,8 +517,7 @@ if problems:
 if signed.get("com.apple.security.app-sandbox") is not True:
     sys.exit("FAIL: the signed app is NOT sandboxed")
 
-print(f"ok   {len(signed)} entitlements match, sandbox on, "
-      f"application-identifier {signed['com.apple.application-identifier']}")
+print(summary)
 PY
 
 # 4. Both architectures. A missing rustup target is caught in preflight, but a
@@ -472,31 +586,87 @@ fi
 
 if (( INSTALL )); then
   step "Install"
-  # -store is the documented Mac App Store install path, so the installed copy
-  # is placed the way a store install would place it rather than by hand.
-  echo "installing $PKG to /Applications (sudo)"
-  sudo installer -store -pkg "$PKG" -target /
-  echo "ok   installed"
+  # There is no .pkg in this mode, and nothing is given up by copying instead
+  # of installing one. A package has no install scripts, declares
+  # postinstall-action="none", and its entire payload is this one bundle, so
+  # installer(8) and this copy would place the identical app in the identical
+  # place -- except that installer(8) also obeys the package's <relocate> entry
+  # and would put it over some other copy of com.incompl.pudding. The header
+  # has the full account.
+  #
+  # ditto, not cp: it is the tool that reproduces a bundle exactly, including
+  # xattrs, ACLs and resource forks, so the copy's signature still verifies.
+  INSTALLED="/Applications/$(basename "$APP")"
+  BUILT_CDHASH=$(codesign -dvvv "$APP" 2>&1 | sed -nE 's/^CDHash=([0-9a-f]+)$/\1/p' | head -1)
+  [[ -n "$BUILT_CDHASH" ]] || fail "could not read the CDHash of $APP"
+
+  # A guard, because the next command is `sudo rm -rf`. $INSTALLED is derived,
+  # so this can only fail if something above changed, and the cost of being
+  # wrong here is somebody else's /Applications.
+  [[ "$INSTALLED" == /Applications/*.app ]] || fail \
+    "refusing to remove '$INSTALLED': not an app bundle in /Applications"
+
+  echo "installing $APP to $INSTALLED"
+  echo "(sudo asks for $(id -un)'s password on this terminal)"
+  # Replaced rather than copied over: a stale file from an older build that no
+  # longer ships would otherwise survive inside the bundle and be signed for.
+  sudo rm -rf "$INSTALLED"
+  sudo ditto "$APP" "$INSTALLED"
+  # ditto run under sudo keeps the source's ownership, which would leave the
+  # app owned by the building user. A store-installed app is root:wheel.
+  sudo chown -R root:wheel "$INSTALLED"
+
+  [[ -d "$INSTALLED" ]] || fail "$INSTALLED does not exist after the copy"
+
+  # The installed copy is read back rather than assumed -- the same rule as
+  # every other check here, and the check that caught the relocation above.
+  INSTALLED_CDHASH=$(codesign -dvvv "$INSTALLED" 2>&1 \
+    | sed -nE 's/^CDHash=([0-9a-f]+)$/\1/p' | head -1)
+  [[ "$INSTALLED_CDHASH" == "$BUILT_CDHASH" ]] || fail \
+    "$INSTALLED is not the app that was just built: CDHash $INSTALLED_CDHASH,
+      expected $BUILT_CDHASH. The copy did not land, so section 15 would test
+      the wrong app."
+  codesign --verify --strict --deep "$INSTALLED" 2>/dev/null || fail \
+    "$INSTALLED does not verify after being copied in. The bundle was damaged
+      in transit, so it is not the app that was just built."
+  echo "ok   installed $INSTALLED ($BUILT_CDHASH)"
 fi
 
 # ---------------------------------------------------------------- summary
 
 step "Done"
 echo "app              $APP"
-(( MAKE_PKG )) && echo "pkg              $PKG"
+if (( LOCAL )); then
+  echo "build            local: sandboxed, launches here, NOT uploadable"
+else
+  echo "build            submission: uploadable, will NOT launch here"
+fi
+if (( MAKE_PKG )); then echo "pkg              $PKG"; fi
 echo "version          $MARKETING_VERSION ($BUILD_NUMBER)"
 echo "team             $TEAM_ID"
 echo
 echo "Next:"
-if (( INSTALL )); then
-  echo "  * Test the installed app — apps/desktop/test-plan.md section 15."
-else
-  echo "  * Test this exact app — apps/desktop/test-plan.md section 15. Run again"
-  echo "    with --install to put it in /Applications the way the store would."
-fi
-echo "  * Before uploading, the build number must not have been used before."
-echo "    Run with --bump to increment it, and commit that with the release."
-if (( MAKE_PKG )); then
+if (( SUBMIT )); then
+  echo "  * Commit the bundleVersion bump with the release."
   echo "  * Upload the .pkg with Transporter or xcrun altool, then select the"
   echo "    processed build in App Store Connect. See src-tauri/MAS-BUILD.md."
+  echo "  * This app will not launch on this Mac, by design: it is signed"
+  echo "    against a profile that names no devices. --install builds the one"
+  echo "    that does."
+  echo "  * Apple re-signs the app and injects the store receipt as it"
+  echo "    processes the upload, so test anything that reads the receipt"
+  echo "    through TestFlight — no build here can reproduce it."
+elif (( INSTALL )); then
+  echo "  * Test the installed app — apps/desktop/test-plan.md section 15."
+  echo "  * Same code, same sandbox and same entitlements as the submission"
+  echo "    build, which differs only in the two identifier entitlements and"
+  echo "    the embedded profile. Once this passes, re-run with --submit."
+else
+  echo "  * This build will not launch on this Mac, by design. Run again with"
+  echo "    --install to build and install the one that will — test-plan.md"
+  echo "    section 15."
+  if (( MAKE_PKG )); then
+    echo "  * Once it passes, re-run with --submit to prepare the upload."
+    echo "    See src-tauri/MAS-BUILD.md."
+  fi
 fi

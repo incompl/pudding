@@ -2894,8 +2894,13 @@ function setupSettings(restoredEq: EqState | null): void {
   });
 
   // The About panel's main line is "pudding <version>"; the version is the app
-  // version from tauri.conf.json, read via the Tauri app API.
-  void getVersion().then((v) => { aboutVersionEl.textContent = `pudding ${v}`; });
+  // version from tauri.conf.json, read via the Tauri app API. A dev build's
+  // version is whatever the last release set, so it names itself instead.
+  if (import.meta.env.DEV) {
+    aboutVersionEl.textContent = "pudding dev build";
+  } else {
+    void getVersion().then((v) => { aboutVersionEl.textContent = `pudding ${v}`; });
+  }
 
   // The first-run Files panel exposes its one useful action directly: choose a
   // folder through the same bookmark-aware path as Settings. The bundled sample
