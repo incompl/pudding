@@ -207,6 +207,7 @@ import {
   setLibraryRoots,
   renderLibraryRootRows,
   setStreamListPath,
+  holdStreamList,
   browseLibraryRoot,
   browseStreamListPath,
   refreshStreams,
@@ -329,6 +330,11 @@ export const KEY_LIBRARY_ROOTS = "libraryRoots";
 export const KEY_ROOT_BOOKMARKS = "libraryRootBookmarks";
 // Value stays "manifestPath" (the pre-rename key) so existing saved settings survive.
 export const KEY_STREAM_LIST_PATH = "manifestPath";
+// The security-scoped bookmark for that path, base64. Sandboxed, this — not the
+// path — is what survives a relaunch; see src-tauri/src/stream_access.rs. Absent
+// for a list that needs no grant (remote, the seeded default inside the app's own
+// container, anything at all when unsandboxed) or one we could not mint for.
+export const KEY_STREAM_LIST_BOOKMARK = "streamListBookmark";
 const KEY_SPLITTER_WIDTH = "splitterWidth";
 export const KEY_VOLUME = "volume";
 // The level unmuting returns to when the slider itself is parked at zero. Saved
@@ -4297,6 +4303,12 @@ async function init(): Promise<void> {
       console.error("default_stream_list_path failed", e);
     }
   }
+  // And reclaim its sandbox grant, for the same reason hold-roots runs above: the
+  // read below, and every station edit after it, opens a plain path. A list the
+  // user pointed outside the app's container has no permission attached to that
+  // path on this launch until the bookmark is resolved. See holdStreamList.
+  app.streamListBookmark = (await app.store.get<string>(KEY_STREAM_LIST_BOOKMARK)) ?? null;
+  streamListPath = await bootStep("hold-stream-list", () => holdStreamList(streamListPath));
   const splitterWidth = (await app.store.get<string>(KEY_SPLITTER_WIDTH)) ?? null;
   const storedVolume = await app.store.get<number>(KEY_VOLUME);
   volume.value = typeof storedVolume === "number" ? Math.max(0, Math.min(1, storedVolume)) : 1;

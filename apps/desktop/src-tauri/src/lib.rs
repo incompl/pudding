@@ -8,6 +8,9 @@ mod recent_access;
 // for one. Read it before touching the scanner's or the decode thread's I/O.
 mod dataless;
 mod icy;
+// Replacing a file's contents through the grant on the file alone, for when
+// staging a sibling next to it is denied. See write_durably.
+mod item_replace;
 mod now_playing;
 mod output_device;
 mod playlist;
@@ -15,6 +18,8 @@ mod playlist;
 // primitive it drives is bookmarks.rs; pub for the same reason bookmarks is —
 // examples/sandbox_check.rs drives this exact code inside a real sandbox.
 pub mod root_access;
+// The same, for the one file the stream list setting points at.
+mod stream_access;
 // Being told when a volume mounts or unmounts, so an ejected external does not
 // leave the app drawing a library that is no longer there.
 mod volumes;
@@ -5100,6 +5105,11 @@ fn mpeg_payload_matches(original: &Path, edited: &Path) -> Result<bool, std::io:
 //
 // A target that isn't there yet (a new playlist, the common case) has nothing to
 // clone and nothing to inherit, so it starts from an empty file.
+// Staging on its own, with no fallback behind it. Every write in the app goes
+// through write_durably instead; this is what the tests drive to pin the staging
+// behaviour itself — symlinked targets, leftovers, a full disk — so a test would
+// not count as a use and this would warn without the allow.
+#[allow(dead_code)]
 pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     write_atomic_checked(target, bytes, || Ok(()))
 }
@@ -5152,9 +5162,52 @@ pub(crate) fn write_atomic_checked(
 }
 
 // Never retry a failed staged write by truncating the original. A file-only
-// sandbox grant or an unwritable directory must fail safely too.
-pub(crate) fn write_durably(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
-    write_atomic(target, bytes).map_err(safe_save_error)
+// sandbox grant or an unwritable directory must fail safely too — so the one
+// retry here is the system's own atomic replacement, which needs no grant on the
+// folder and still leaves either the old contents or the new (item_replace.rs).
+// Only a denial is retried: a full disk or a read-only volume will not answer the
+// second attempt any differently, and the first error is the one worth reporting.
+// pub for the same reason bookmarks and root_access are: the only honest test of
+// the fallback needs a real file-only sandbox grant, which means the separate
+// signed binary in examples/sandbox_check.rs.
+pub fn write_durably(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    write_durably_checked(target, bytes, || Ok(()))
+}
+
+// The same, carrying `write_atomic_checked`'s last-look validation into both
+// attempts. `Fn` rather than `FnOnce` because there are two: a denial happens while
+// staging, before the check is ever reached, so the fallback still owes the caller
+// one — and both callers' checks are re-reads, which is what makes that sound.
+pub fn write_durably_checked(
+    target: &Path,
+    bytes: &[u8],
+    before_replace: impl Fn() -> Result<(), std::io::Error>,
+) -> Result<(), std::io::Error> {
+    let staged = match write_atomic_checked(target, bytes, || before_replace()) {
+        Ok(()) => return Ok(()),
+        Err(e) if is_staging_denied(&e) => e,
+        Err(e) => return Err(safe_save_error(e)),
+    };
+    use crate::item_replace::ReplaceFailure;
+    match crate::item_replace::replace_contents_checked(target, bytes, before_replace) {
+        Ok(()) => Ok(()),
+        // The caller's own veto, verbatim. Mapping this to the staging denial would
+        // tell the user to fix folder permissions over a file that something else
+        // edited underneath them — and would hide the conflict the caller reports
+        // by its exact text (PLAYLIST_CONFLICT).
+        Err(ReplaceFailure::Vetoed(e)) => Err(e),
+        // Both errors matter here and only one can be returned. The caller gets the
+        // denial, which is the one with something to do about it; the log keeps the
+        // reason the fallback could not cover it.
+        Err(ReplaceFailure::Failed(e)) => {
+            log::warn!(
+                "atomic replacement of {} failed after staging was denied: {}",
+                target.display(),
+                e
+            );
+            Err(safe_save_error(staged))
+        }
+    }
 }
 
 fn safe_save_error(e: std::io::Error) -> std::io::Error {
@@ -7217,6 +7270,7 @@ pub fn run() {
         // them; see root_access.rs.
         .manage(root_access::RootAccess::default())
         .manage(recent_access::RecentAccess::default())
+        .manage(stream_access::StreamListAccess::default())
         // Single-instance must be the first plugin. When a second launch happens
         // (e.g. user double-clicks another mp3 on Windows/Linux), this callback
         // fires in the running instance with the new process's argv.
@@ -7927,6 +7981,7 @@ pub fn run() {
             root_access::hold_library_roots,
             recent_access::bookmark_recent_item,
             recent_access::resolve_recent_item,
+            stream_access::hold_stream_list,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -9957,7 +10012,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A file-only grant must never cause a truncating fallback.
+    // A directory that refuses new entries must never be answered by truncating the
+    // file in place. Mode bits, not a sandbox grant: write_durably does fall back to
+    // the system's atomic replacement when *the sandbox* denies staging, and that
+    // fallback is denied here too — it still has to rename inside this directory.
+    // The sandbox case is the one thing this cannot stand in for, and is asserted
+    // for real in examples/sandbox_check.rs (phase 8).
     #[test]
     fn a_station_edit_without_directory_access_preserves_the_file() {
         use std::os::unix::fs::PermissionsExt;

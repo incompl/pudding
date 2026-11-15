@@ -10,6 +10,9 @@
 //            container (never into the granted directory — that becomes
 //            unreadable in phase 3 and the blob would go with it).
 //   resolve  read the blob back, hold the root, and read a file through the grant.
+//   bookmark-file  freeze a grant on one FILE under that directory, and persist it.
+//   save     with the directory denied again, resolve that file bookmark alone and
+//            write to it through the shipping save path.
 //   socket   where tauri-plugin-single-instance's rendezvous socket can live.
 //   network  connect to $PUDDING_PROBE_ADDR, expecting $PUDDING_EXPECT_NET.
 //
@@ -22,6 +25,7 @@
 // at startup — so what passes here is the shipping path and not a parallel one
 // written to be testable.
 
+use pudding_lib::bookmarks::Bookmark;
 use pudding_lib::root_access::{bookmark_root, RootAccess, StoredRoot};
 use std::io::ErrorKind;
 use std::net::TcpStream;
@@ -46,8 +50,18 @@ fn fail(msg: &str) -> ! {
 /// Where the bookmark blob lives between phases. Inside the sandbox $HOME is the
 /// app container, which stays readable no matter which entitlements are stripped.
 fn blob_path() -> PathBuf {
+    container().join("sandbox-check.bookmark")
+}
+
+/// The file bookmark's blob, kept apart from the directory's so the save phase
+/// cannot pass by accidentally resolving a grant on the whole folder.
+fn file_blob_path() -> PathBuf {
+    container().join("sandbox-check.file-bookmark")
+}
+
+fn container() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| fail("HOME is not set"));
-    PathBuf::from(home).join("sandbox-check.bookmark")
+    PathBuf::from(home)
 }
 
 fn phase_deny() {
@@ -148,6 +162,149 @@ fn phase_resolve() {
              other than the bookmark",
         ),
         Err(e) => fail(&format!("unexpected error after release: {e}")),
+    }
+}
+
+/// Freeze a grant on ONE FILE, the way browseStreamListPath does the moment the
+/// file picker returns. Runs while the music entitlement still reaches the folder,
+/// because that is what stands in for the picker here.
+fn phase_bookmark_file() {
+    let file = env_var("PUDDING_GRANTED_FILE");
+    if let Err(e) = std::fs::read_to_string(&file) {
+        fail(&format!(
+            "cannot read {file} before bookmarking it ({e}) — the probe file is \
+             missing or outside ~/Music"
+        ));
+    }
+    let Some(blob) = bookmark_root(file.clone()) else {
+        fail("bookmarking the file returned nothing — the grant could not be frozen");
+    };
+    if let Err(e) = std::fs::write(file_blob_path(), &blob) {
+        fail(&format!("persisting the file blob to the container: {e}"));
+    }
+    println!("  ok: bookmarked the file {file}");
+}
+
+/// Saving into a file the sandbox grants while its FOLDER is denied.
+///
+/// This is the case a stream list parked outside the container actually lands in,
+/// and the one that cannot be reproduced unsandboxed or by granting a folder: the
+/// picker extends the sandbox to the chosen file and nothing around it. Three
+/// things are asserted, and the middle one is what keeps the other two honest:
+///
+///   * the file itself reads through the bookmark alone;
+///   * staging a sibling next to it — what write_atomic does first, and all it
+///     ever did — is DENIED, so the fallback below is not passing for free;
+///   * write_durably still lands the new bytes, via the system's atomic
+///     replacement (item_replace.rs).
+///
+/// Deliberately the shipping entry point rather than replace_contents directly:
+/// what has to be true is that a station edit saves, and that runs through
+/// write_durably's denial check, its fallback, and its error mapping.
+fn phase_save() {
+    let blob = std::fs::read_to_string(file_blob_path())
+        .unwrap_or_else(|e| fail(&format!("reading the persisted file blob: {e}")));
+    let bookmark = Bookmark::from_base64(blob.trim())
+        .unwrap_or_else(|| fail("the persisted file blob is not a bookmark"));
+    let access = bookmark
+        .resolve()
+        .unwrap_or_else(|e| fail(&format!("resolving the file bookmark: {e}")));
+    let path = access.path().to_path_buf();
+
+    let before = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        fail(&format!(
+            "reading {} through the grant: {e}",
+            path.display()
+        ))
+    });
+    println!(
+        "  ok: read the file through its own bookmark ({} bytes)",
+        before.len()
+    );
+
+    // The first syscall write_atomic makes, in isolation. If the folder lets this
+    // through, the grant is wider than a picked file's and the save below would
+    // prove nothing about the case this phase exists for.
+    let sibling = path.with_file_name(".sandbox-check-sibling");
+    match std::fs::write(&sibling, b"x") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&sibling);
+            fail(&format!(
+                "staged a sibling at {} — the folder is reachable, so this phase \
+                 says nothing about a file-only grant",
+                sibling.display()
+            ));
+        }
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            println!("  ok: staging a sibling in the same folder is denied");
+        }
+        Err(e) => fail(&format!(
+            "staging a sibling failed as {:?} rather than PermissionDenied — this \
+             would pass for the wrong reason",
+            e.kind()
+        )),
+    }
+
+    let body = "#EXTM3U\n#EXTINF:-1,Saved under the sandbox\nhttp://example.invalid/s\n";
+    if let Err(e) = pudding_lib::write_durably(&path, body.as_bytes()) {
+        fail(&format!(
+            "write_durably could not save through the file grant alone: {e} — a \
+             stream list outside the container is readable but not editable"
+        ));
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(after) if after == body => {
+            println!("  ok: write_durably replaced the file through the grant alone");
+        }
+        Ok(after) => fail(&format!(
+            "the save reported success but the file holds {after:?}"
+        )),
+        // Worth distinguishing: the replacement lands a new inode, and if the
+        // sandbox extension did not follow the name, the app would save once and
+        // then lose the file it is editing.
+        Err(e) => fail(&format!(
+            "saved, but the file is no longer readable ({e}) — the grant did not \
+             survive the replacement"
+        )),
+    }
+
+    // The validated form, which every playlist save uses. The check has to keep its
+    // veto inside the fallback: it is the only thing standing between a slow save
+    // and an edit that landed underneath it, and a fallback that published anyway
+    // would clobber the file rather than report a conflict.
+    let refused = pudding_lib::write_durably_checked(&path, b"clobbered\n", || {
+        Err(std::io::Error::other("a conflicting edit landed"))
+    });
+    match refused {
+        Ok(()) => fail("the check was ignored — a conflicting save would overwrite the file"),
+        Err(e) if e.to_string().contains("a conflicting edit landed") => {
+            println!("  ok: a refusing check still vetoes the replacement");
+        }
+        Err(e) => fail(&format!(
+            "refused, but as {e} rather than the check's own error — the conflict \
+             would reach the user as a permissions problem"
+        )),
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(after) if after == body => println!("  ok: the vetoed save left the file untouched"),
+        Ok(after) => fail(&format!(
+            "the vetoed save still changed the file: {after:?}"
+        )),
+        Err(e) => fail(&format!("the file is gone after a vetoed save: {e}")),
+    }
+
+    // And once more with a check that passes, since a veto that always fires would
+    // satisfy the assertion above while making every save impossible.
+    let second = "#EXTM3U\n#EXTINF:-1,Saved again\nhttp://example.invalid/t\n";
+    if let Err(e) = pudding_lib::write_durably_checked(&path, second.as_bytes(), || Ok(())) {
+        fail(&format!(
+            "a validated save through the file grant failed: {e}"
+        ));
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(after) if after == second => println!("  ok: a passing check saves through the grant"),
+        Ok(after) => fail(&format!("the validated save left {after:?}")),
+        Err(e) => fail(&format!("unreadable after the validated save: {e}")),
     }
 }
 
@@ -253,10 +410,12 @@ fn main() {
         Some("deny") => phase_deny(),
         Some("create") => phase_create(),
         Some("resolve") => phase_resolve(),
+        Some("bookmark-file") => phase_bookmark_file(),
+        Some("save") => phase_save(),
         Some("socket") => phase_socket(),
         Some("network") => phase_network(),
         other => fail(&format!(
-            "expected deny|create|resolve|socket|network, got {:?}",
+            "expected deny|create|resolve|bookmark-file|save|socket|network, got {:?}",
             other.unwrap_or("nothing")
         )),
     }

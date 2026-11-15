@@ -219,8 +219,10 @@ in this section.
 
 `--install` builds the sandbox-signed app (not the submission-signed one) and moves it to `Applications`.
 
-- [ ] Sandbox-signed app launches; roots restore from bookmarks after relaunch
-- [ ] Stream list path, playlist writes, and tag writes all succeed under the sandbox
-- [ ] External links open from the sandboxed build
-- [ ] App icon correct in Dock, Finder, and About
-- [ ] Quit with playback running → clean exit, sample rate restored, state persisted
+- [x] Sandbox-signed app launches; roots restore from bookmarks after relaunch
+- [x] Playlist writes and tag writes succeed under the sandbox
+- [x] Point the stream list at a file outside the app container, relaunch → it still reads
+- [x] Drag a playlist in from outside every library root, reorder it → the autosave lands
+- [x] External links in help menu open from the sandboxed build
+- [x] App icon correct in Dock and Finder
+- [x] Quit with playback running → clean exit

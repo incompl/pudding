@@ -73,12 +73,16 @@ pub struct HeldRoot {
 /// freeze and nothing needs one; sandboxed, the consequence is that this root will
 /// not survive the next launch, which surfaces then as a folder that won't open.
 /// Logged either way so a sandboxed failure is findable rather than silent.
-fn mint(path: &str) -> Option<String> {
+///
+/// Shared with stream_access.rs, which has the same thing to do with one file: the
+/// mechanics of freezing a grant carry no policy, and a second copy of them would
+/// only be a second place for the `Unsupported` carve-out to go wrong.
+pub(crate) fn mint(path: &str) -> Option<String> {
     match Bookmark::create(path) {
         Ok(bm) => Some(bm.to_base64()),
         Err(Error::Unsupported) => None,
         Err(e) => {
-            log::warn!("could not bookmark library root {}: {}", path, e);
+            log::warn!("could not bookmark {}: {}", path, e);
             None
         }
     }

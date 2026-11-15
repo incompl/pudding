@@ -40,6 +40,9 @@ export interface AppState {
   // src-tauri/src/root_access.rs. Sparse: a root reachable without one (~/Music
   // via its entitlement, or any path at all when unsandboxed) has no entry.
   rootBookmarks: Record<string, string>;
+  // The same, for the stream list's one path — see src-tauri/src/stream_access.rs.
+  // Null when the list needs no grant, or when one could never be minted.
+  streamListBookmark: string | null;
   invalidLibraryRoots: Set<string>;
   // File-tree multi-select Shift-range pivot (path of the last click).
   selectionAnchor: string | null;
@@ -150,6 +153,7 @@ export const app: AppState = {
   rootNode: null,
   libraryRoots: [],
   rootBookmarks: {},
+  streamListBookmark: null,
   invalidLibraryRoots: new Set<string>(),
   selectionAnchor: null,
   lastSelectionPane: null,

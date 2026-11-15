@@ -781,3 +781,11 @@ export interface HeldRoot {
   bookmark: string | null;
   error: string | null;
 }
+
+// The stream list as `hold_stream_list` reports it back. Same two fields as a root,
+// and they mean the same things; no `error`, because an unreachable stream list is
+// already the state refreshStreams renders ("Invalid stream list path").
+export interface HeldStreamList {
+  path: string;
+  bookmark: string | null;
+}

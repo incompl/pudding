@@ -6,7 +6,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { h } from "./dom";
-import type { DirListing, TreeNode, StreamList, HeldRoot } from "./types";
+import type { DirListing, TreeNode, StreamList, HeldRoot, HeldStreamList } from "./types";
 import {
   app,
   libraryHasContent,
@@ -35,6 +35,7 @@ import {
   KEY_LIBRARY_ROOTS,
   KEY_ROOT_BOOKMARKS,
   KEY_STREAM_LIST_PATH,
+  KEY_STREAM_LIST_BOOKMARK,
 } from "./main";
 import { refreshPlaylistIndex } from "./playlists";
 import { invalidateNavListCache, popNavToRoot } from "./library-nav";
@@ -570,11 +571,61 @@ export function renderLibraryRootRows(): void {
   });
 }
 
+// Take — and keep — the OS-level grant for the configured stream list, for the same
+// reason holdLibraryRoots does it for each root: sandboxed, the picker's grant dies
+// with the process, and a path alone comes back EPERM on the next launch — the
+// stream pane saying "Invalid stream list path" over a file that never moved. Must
+// run before read_stream_list, and before any station edit rewrites the file.
+//
+// Returns the path to actually use: a bookmark follows a file the user renamed or
+// moved, so it can differ from the one that was stored.
+export async function holdStreamList(path: string): Promise<string> {
+  if (!path || isRemoteStreamList(path)) return path;
+  let held: HeldStreamList;
+  try {
+    held = await invoke<HeldStreamList>("hold_stream_list", {
+      path,
+      bookmark: app.streamListBookmark,
+    });
+  } catch (e) {
+    // Nothing here is load-bearing when the app isn't sandboxed, so a failure means
+    // carrying on with the configured path — the read either works or reports why.
+    console.error("hold_stream_list failed", e);
+    return path;
+  }
+
+  // A fresh blob comes back when one was minted or the old one is aging out; null
+  // means keep what's stored, which is also the answer when the file was
+  // unreachable — an unplugged drive shouldn't cost the user their grant.
+  if (held.bookmark) app.streamListBookmark = held.bookmark;
+  if (held.bookmark || held.path !== path) {
+    streamListPathInput.value = held.path;
+    await app.store.set(KEY_STREAM_LIST_PATH, held.path);
+    await app.store.set(KEY_STREAM_LIST_BOOKMARK, app.streamListBookmark);
+    await app.store.save();
+  }
+  return held.path;
+}
+
 export async function setStreamListPath(value: string): Promise<void> {
+  const before = (await app.store.get<string>(KEY_STREAM_LIST_PATH)) ?? "";
   streamListPathInput.value = value;
+  // A blob belongs to the file it was minted from, so repointing the setting drops
+  // it: resolving the old one against a new path would follow the *old* file back
+  // over the user's choice, and holding its grant would be holding the wrong file's.
+  // An unchanged path keeps its blob — committing the field without editing it (a
+  // blur fires "change") must not spend a grant that cannot be re-minted while the
+  // file is unreachable.
+  if (value !== before) {
+    app.streamListBookmark = null;
+    await app.store.set(KEY_STREAM_LIST_BOOKMARK, null);
+  }
   await app.store.set(KEY_STREAM_LIST_PATH, value);
   await app.store.save();
-  await refreshStreams(value);
+  // Freeze the grant now. For a picked file this is the one moment it exists — the
+  // picker extended the sandbox to this process only — and for a typed path it is
+  // a no-op that costs a log line.
+  await refreshStreams(await holdStreamList(value));
 }
 
 // Open a folder picker for the library. With an index, it repoints that row;

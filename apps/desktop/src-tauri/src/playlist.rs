@@ -35,7 +35,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::State;
 
-use crate::{fetch_meta, write_atomic_checked, write_durably, DbHandle};
+use crate::{fetch_meta, write_durably, write_durably_checked, DbHandle};
 
 pub const PLAYLIST_EXTS: &[&str] = &["m3u", "m3u8"];
 
@@ -1007,14 +1007,19 @@ fn write_playlist_inner(
         .map(|bytes| Preserved::from_content(&decode_bytes(bytes), &playlist_base_dir(path)))
         .unwrap_or_default();
     let content = serialize(path, name, tracks, &preserved, conn)?;
-    write_atomic_checked(Path::new(path), content.as_bytes(), || {
+    // write_durably_checked, not write_atomic_checked: a playlist opened from
+    // outside every library root — dragged in, or reopened from Open Recent — is
+    // granted as one file under the sandbox, and staging a sibling beside it is
+    // denied. It already applies safe_save_error, so the mapping here is only to a
+    // string. The conflict check runs against whichever attempt gets that far.
+    write_durably_checked(Path::new(path), content.as_bytes(), || {
         let current = current_bytes(path).map_err(std::io::Error::other)?;
         if current != original {
             return Err(std::io::Error::other(PLAYLIST_CONFLICT));
         }
         Ok(())
     })
-    .map_err(|e| crate::safe_save_error(e).to_string())?;
+    .map_err(|e| e.to_string())?;
     Ok(PlaylistStamp {
         mtime: file_mtime_ms(path),
         revision: content_revision(content.as_bytes()),

@@ -22,13 +22,17 @@
 #   sign FULL (every shipping entitlement)
 #     1 deny      a path with no grant is EPERM     -> the sandbox is really enforcing
 #     2 create    bookmark a dir under ~/Music, reachable via the music entitlement
+#     2b bookmark-file  freeze a grant on ONE FILE in there, the way the stream-list
+#                       picker does
 #     3 socket    where a single-instance socket can and cannot live
 #     4 network   loopback connect succeeds
 #   re-sign WITHOUT network.client
 #     5 control   that same connect is now denied      <- makes 4 mean something
 #   re-sign WITHOUT the music entitlement
-#     6 control   that same dir is now denied directly <- makes 7 mean something
+#     6 control   that same dir is now denied directly <- makes 7 and 8 mean something
 #     7 resolve   a SEPARATE process reads it via the bookmark alone
+#     8 save      a file-only grant: the file reads, a staged sibling is DENIED, and
+#                 write_durably still lands the bytes (item_replace.rs)
 #
 # Five things that are not obvious and are encoded here (credit to
 # apple-scoped-bookmarks, which hit the first four — see the header of bookmarks.rs):
@@ -69,6 +73,9 @@ LISTENER_PID=""
 
 mkdir -p "$GRANTED" "$UNGRANTED" "$APP/Contents/MacOS"
 echo "hello-from-the-test" > "$GRANTED/canary.txt"
+# Stands in for a stream list the user picked outside the app container: phase 8
+# gets a grant on this FILE and nothing around it.
+printf '#EXTM3U\n' > "$GRANTED/stations.m3u8"
 echo "must-not-be-readable" > "$UNGRANTED/secret.txt"
 # Phase 6 re-points the deny probe at GRANTED, and that probe insists on
 # PermissionDenied rather than NotFound — so the probe file has to exist here too,
@@ -171,6 +178,7 @@ import json; print('/tmp/%s_si.sock' % json.load(open('src-tauri/tauri.conf.json
 
 EXE="$APP/Contents/MacOS/sandbox_check"
 export PUDDING_GRANTED_DIR="$GRANTED"
+export PUDDING_GRANTED_FILE="$GRANTED/stations.m3u8"
 export PUDDING_UNGRANTED_DIR="$UNGRANTED"
 export PUDDING_PROBE_ADDR="127.0.0.1:$PROBE_PORT"
 export PUDDING_SI_SOCKET="$SI_SOCKET"
@@ -187,6 +195,9 @@ echo "==> phase 1: the sandbox is actually enforcing"
 
 echo "==> phase 2: create + persist a bookmark (into the app container)"
 "$EXE" create
+
+echo "==> phase 2b: freeze a grant on one file, as the stream-list picker does"
+"$EXE" bookmark-file
 
 echo "==> phase 3: the single-instance rendezvous socket"
 "$EXE" socket
@@ -211,7 +222,11 @@ PUDDING_UNGRANTED_DIR="$GRANTED" "$EXE" deny
 echo "==> phase 7: resolve in a SEPARATE process, via the bookmark alone"
 "$EXE" resolve
 
+echo "==> phase 8: save into a file whose FOLDER is denied"
+"$EXE" save
+
 echo
 echo "PASS: with the granting entitlement removed, the directory is denied"
 echo "      directly and reachable only through the persisted bookmark;"
+echo "      a file granted on its own still saves though its folder is denied;"
 echo "      the network is reachable only with network.client."
