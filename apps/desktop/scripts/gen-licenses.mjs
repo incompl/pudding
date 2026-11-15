@@ -193,13 +193,44 @@ function lucideComponent() {
   };
 }
 
-// lucideComponent joins the list here, before the supplement pass below, so its
-// notice is attached the same way every other text-less component's is. (The Rust
-// standard library is pushed after that pass — it recovers its text from the
-// toolchain and needs no supplement.)
-const components = [...cargoComponents(), ...npmComponents(), lucideComponent()].sort(
-  (a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version),
-);
+// --- The bundled sample recording ------------------------------------------
+//
+// `pudding sample.mp3` and the cover art inside its APIC frame ship in the app
+// bundle as a resource, so they are third-party work we redistribute — the same
+// blind spot as the icon artwork above, and the one NOTICE promises this panel
+// closes. No dependency graph will ever mention a resource file.
+//
+// It carries a `note` rather than a license text because there is no notice to
+// reproduce: a public-domain work has no terms, and the honest thing to publish
+// is where it came from and why we believe it is free to redistribute. That is a
+// statement of provenance, not an upstream file, so it does not belong in
+// scripts/licenses-supplement.
+function sampleTrackComponent() {
+  return {
+    name: "Pudding Sample",
+    version: "bundled audio",
+    ecosystem: "vendored",
+    license: "Public domain",
+    note:
+      "A spoken-word recording of Lewis Carroll's \"Through the Looking-Glass\", " +
+      "read by Peter Yearsley. Carroll's text and this reading of it are both in " +
+      "the public domain, as is the cover art stored in the file's tags. Bundled " +
+      "so playback can be tried on a Mac with no music on it yet; it is never " +
+      "added to your library.",
+    text: -1,
+  };
+}
+
+// Both vendored entries join the list here, before the supplement pass below, so
+// Lucide's notice is attached the same way every other text-less component's is.
+// (The Rust standard library is pushed after that pass — it recovers its text
+// from the toolchain and needs no supplement.)
+const components = [
+  ...cargoComponents(),
+  ...npmComponents(),
+  lucideComponent(),
+  sampleTrackComponent(),
+].sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
 
 // --- Canonical texts for packages that ship none ---------------------------
 //

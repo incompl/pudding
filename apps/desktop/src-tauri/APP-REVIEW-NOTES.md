@@ -6,11 +6,13 @@ for the submitted binary.
 ---
 
 Pudding is a standalone macOS music player for user-selected local audio files
-and user-supplied internet radio URLs. It has no account, login, purchases,
-subscriptions, advertising, analytics, or cloud service. The app does not ship
-third-party music. The bundled “Pudding Sample” track and its artwork are owned
-for distribution by the developer and are included so playback can be tested on
-a clean Mac.
+and internet radio stations — a short default station list included with the
+operators’ permission, plus any stream URL the user adds. It has no account,
+login, purchases, subscriptions, advertising, analytics, or cloud service. The
+app ships no commercial or licensed third-party music. The bundled “Pudding
+Sample” track is a public-domain spoken-word recording of Lewis Carroll’s
+“Through the Looking-Glass,” read by Peter Yearsley, and its cover artwork is
+public domain as well. It is included so playback can be tested on a clean Mac.
 
 ### Test local playback and first-run folder access
 
@@ -33,7 +35,7 @@ configured library are intentionally not restored across launches.
 ### Test metadata editing
 
 1. Use a writable test audio file in the selected music folder and keep a backup.
-2. Right-click the track and choose **Edit Tags**.
+2. Right-click the track and choose **Edit metadata...**
 3. Change a text field such as Title, then click **Save**.
 4. Reopen the editor or inspect the file in another tag reader to confirm the
    change was written to the selected file.
@@ -55,13 +57,16 @@ configured library are intentionally not restored across launches.
 
 ### Test internet radio
 
-1. Open the **Streams** tab. A writable empty stream list is created locally on
-   first launch.
-2. Click **Add stream** and enter a direct HTTP or HTTPS Icecast/SHOUTcast audio
-   stream URL that the reviewer is authorized to use.
-3. Save and double-click the station. Pudding connects directly to that provider;
-   live streams replace the seek bar with a **Live Broadcast** indicator and show
-   ICY now-playing metadata when the station supplies it.
+1. Open the **Streams** tab. A writable stream list is created locally on first
+   launch, seeded with a short default set of stations that are included with
+   their operators' permission. The list is an ordinary `.m3u8` file holding
+   URLs; no audio is bundled with it.
+2. Double-click a station. Pudding connects directly to that provider; live
+   streams replace the seek bar with a **Live Broadcast** indicator and show ICY
+   now-playing metadata when the station supplies it.
+3. To test adding a station, click **Add stream**, enter a direct HTTP or HTTPS
+   Icecast/SHOUTcast audio stream URL that the reviewer is authorized to use,
+   and save.
 4. Pause to disconnect and resume to reconnect to the live edge.
 
 ### Privacy and support

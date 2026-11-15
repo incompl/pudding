@@ -2952,12 +2952,15 @@ function setupSettings(restoredEq: EqState | null): void {
 // offered under a choice; `note` replaces the text for the rare package that
 // publishes no notice at all to reproduce. Exactly one of a real `text` or a
 // `note` is always present — the generator fails the build otherwise.
+//
+// `url` is optional because a vendored asset need not have a project page behind
+// it: the bundled sample recording is a public-domain file, not a package.
 interface LicenseComponent {
   name: string;
   version: string;
   ecosystem: "cargo" | "npm" | "rust" | "vendored";
   license: string;
-  url: string;
+  url?: string;
   text: number;
   elected?: string;
   note?: string;
@@ -3045,15 +3048,20 @@ function renderLicenses(data: LicenseManifest): void {
 
       // Labelled "Source" rather than left as a bare link: the MPL-2.0 packages
       // (symphonia and friends) must tell you where to get their source, and for
-      // everything else it's the project page anyway.
-      const source = document.createElement("p");
-      source.className = "license-source";
-      source.append("Source: ");
-      const link = document.createElement("a");
-      link.href = c.url;
-      link.textContent = c.url;
-      source.append(link);
-      detail.append(source);
+      // everything else it's the project page anyway. A vendored asset can have
+      // no project page at all, and a line reading "Source: undefined" would be
+      // worse than no line, so the whole paragraph is skipped when there is no
+      // URL — its `note` says where the thing came from instead.
+      if (c.url) {
+        const source = document.createElement("p");
+        source.className = "license-source";
+        source.append("Source: ");
+        const link = document.createElement("a");
+        link.href = c.url;
+        link.textContent = c.url;
+        source.append(link);
+        detail.append(source);
+      }
 
       // Offered under a choice of licenses: say which one the text below is, so
       // it doesn't read as the package's only terms.
