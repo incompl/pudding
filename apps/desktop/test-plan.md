@@ -125,7 +125,7 @@ over one too.
 
 - [x] No queue → context menu offers only **Create queue**
 - [x] With a queue → **Play next** inserts after playhead, **Add to queue** appends
-- [ ] Counts in labels are right for a multi-select (`Play 5 next`)
+- [x] Counts in labels are right for a multi-select (`Play 5 next`)
 - [x] Drag to reorder; `Delete` removes selected rows
 - [x] `⌘Z` / `⌘⇧Z` undo and redo a reorder, an insert and a remove; playing track stays found across undo
 - [x] Queue ends → stops, no playhead; pressing play restarts from the top
