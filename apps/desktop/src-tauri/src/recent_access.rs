@@ -71,10 +71,7 @@ pub fn resolve_recent_item(
         bookmark.to_base64()
     };
 
-    let previous = std::mem::replace(
-        &mut *access.held.lock().map_err(|e| e.to_string())?,
-        Some(scoped),
-    );
+    let previous = (*access.held.lock().map_err(|e| e.to_string())?).replace(scoped);
     drop(previous);
 
     Ok(AccessedRecent {

@@ -520,6 +520,17 @@ fn playlist_base_dir(path: &str) -> PathBuf {
 
 // --- Commands ---------------------------------------------------------------
 
+// What a playlist file yields before the database is consulted: the display name
+// if the M3U carried one, the parsed rows, the mtime read ahead of the bytes, and
+// the revision stamp the reload check compares against.
+#[derive(Debug)]
+struct PlaylistFile {
+    name: Option<String>,
+    entries: Vec<ParsedEntry>,
+    mtime: Option<i64>,
+    revision: String,
+}
+
 // The file half of a read: stat, decode, parse — and the two ceilings that decide
 // whether this is a playlist at all. Split from the command so both can be tested
 // without a database, and so the ceilings sit next to the work they bound.
@@ -528,9 +539,7 @@ fn playlist_base_dir(path: &str) -> PathBuf {
 // pair new content with an older mtime, which only costs a redundant reload later.
 // The other order pairs old content with a newer mtime and the staleness is never
 // noticed at all.
-fn read_rows(
-    path: &str,
-) -> Result<(Option<String>, Vec<ParsedEntry>, Option<i64>, String), String> {
+fn read_rows(path: &str) -> Result<PlaylistFile, String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let mtime = mtime_ms(&meta);
     // Size first, before a byte is read: past this the file is not a playlist that
@@ -549,14 +558,24 @@ fn read_rows(
     if entries.len() > MAX_PLAYLIST_ROWS {
         return Err(format!("not a playlist: {path} has {} rows", entries.len()));
     }
-    Ok((name, entries, mtime, content_revision(&bytes)))
+    Ok(PlaylistFile {
+        name,
+        entries,
+        mtime,
+        revision: content_revision(&bytes),
+    })
 }
 
 // Open a playlist file: decode, parse, and resolve each row's metadata against
 // the library DB (falling back to `#EXTINF`/filename for out-of-library rows).
 #[tauri::command]
 pub fn read_playlist(path: String, db: State<DbHandle>) -> Result<PlaylistData, String> {
-    let (name, entries, mtime, revision) = read_rows(&path)?;
+    let PlaylistFile {
+        name,
+        entries,
+        mtime,
+        revision,
+    } = read_rows(&path)?;
 
     let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
     let meta_map = {
@@ -1140,7 +1159,9 @@ fn move_playlist_inner(old_path: &str, new_path: &str, conn: &Connection) -> Res
 #[tauri::command]
 pub fn rename_playlist(path: String, name: String, db: State<DbHandle>) -> Result<(), String> {
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let (_, entries, _, revision) = read_rows(&path)?;
+    let PlaylistFile {
+        entries, revision, ..
+    } = read_rows(&path)?;
     write_playlist_inner(
         &path,
         &name,
@@ -1201,7 +1222,7 @@ pub async fn list_all_playlists(root: String) -> Result<Vec<PlaylistRef>, String
         let mut out: Vec<PlaylistRef> = Vec::new();
         let mut visited: HashSet<PathBuf> = HashSet::new();
         collect_playlists(Path::new(&root), &mut out, &mut visited);
-        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out.sort_by_key(|a| a.name.to_lowercase());
         out
     })
     .await
@@ -1367,7 +1388,9 @@ mod tests {
         let path = file.to_str().unwrap();
         let original = b"#EXTM3U\na.mp3\n";
         std::fs::write(&file, original).unwrap();
-        let (_, entries, _, revision) = read_rows(path).unwrap();
+        let PlaylistFile {
+            entries, revision, ..
+        } = read_rows(path).unwrap();
         let rows = entries_as_rows(entries);
         // Same byte length and same mtime: a millisecond timestamp is not a revision.
         let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
@@ -1406,7 +1429,7 @@ mod tests {
         let second =
             write_playlist_inner(path, "Second", &[], Some(&first.revision), false, &db).unwrap();
         assert_ne!(first.revision, second.revision);
-        assert_eq!(read_rows(path).unwrap().3, second.revision);
+        assert_eq!(read_rows(path).unwrap().revision, second.revision);
         assert!(
             write_playlist_inner(path, "Stale", &[], Some(&first.revision), false, &db).is_err()
         );
@@ -1662,7 +1685,7 @@ mod tests {
         let contents = std::fs::read_to_string(&file).unwrap();
         assert!(contents.contains("\n./#1 Crush.mp3\n"), "{contents}");
         assert!(contents.contains("\n./#Album/song.mp3\n"), "{contents}");
-        let (_, entries, _, _) = read_rows(path).unwrap();
+        let PlaylistFile { entries, .. } = read_rows(path).unwrap();
         assert_eq!(
             entries.iter().map(|e| &e.path).collect::<Vec<_>>(),
             rows.iter().map(|r| &r.path).collect::<Vec<_>>()
@@ -1676,7 +1699,7 @@ mod tests {
             &db,
         )
         .unwrap();
-        assert_eq!(read_rows(path).unwrap().1.len(), 2);
+        assert_eq!(read_rows(path).unwrap().entries.len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2222,7 +2245,7 @@ mod tests {
         // A real playlist of ordinary size is untouched by either.
         let fine = root.join("fine.m3u8");
         std::fs::write(&fine, "#EXTM3U\n#PLAYLIST:Fine\n/a.mp3\n").unwrap();
-        let (name, entries, _mtime, _revision) = read_rows(fine.to_str().unwrap()).unwrap();
+        let PlaylistFile { name, entries, .. } = read_rows(fine.to_str().unwrap()).unwrap();
         assert_eq!(name.as_deref(), Some("Fine"));
         assert_eq!(entries.len(), 1);
 

@@ -130,16 +130,18 @@ pub use imp::{is_dataless, never_materialize_on_this_thread, path_is_dataless};
 /// One byte is enough. The provider materializes the whole file before the first
 /// read returns, so there is nothing to be gained by reading further, and the
 /// caller reopens the finished file through the normal path anyway.
+//
+// The read amount is deliberately unhandled, hence the allow: a zero-length file
+// reads 0 bytes and is already as materialized as it will ever get, so a count of
+// 0 is a success rather than a short read to retry. `read_exact` would be wrong
+// here for exactly that reason — it would turn the empty file into UnexpectedEof.
+// Only the error matters.
+#[allow(clippy::unused_io_amount)]
 pub fn materialize(path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Read;
     let mut buf = [0u8; 1];
     let mut file = std::fs::File::open(path)?;
-    match file.read(&mut buf) {
-        // A zero-length file reads 0 bytes and is already as materialized as it
-        // will ever get; that is not a failure.
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
-    }
+    file.read(&mut buf).map(|_| ())
 }
 
 #[cfg(test)]

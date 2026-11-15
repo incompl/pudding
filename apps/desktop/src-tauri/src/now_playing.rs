@@ -135,7 +135,7 @@ mod imp {
                     toggle(app);
                 }
             });
-            add_handler(&center.togglePlayPauseCommand(), &app, |app| toggle(app));
+            add_handler(&center.togglePlayPauseCommand(), &app, toggle);
 
             // next / previous have no engine concept; hand them to the frontend
             // queue logic.

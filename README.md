@@ -60,7 +60,8 @@ cd apps/desktop
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-CI runs desktop frontend unit tests and the website check/build in separate jobs.
+CI runs desktop frontend unit tests, the Rust clippy/test suite on macOS, and
+the website check/build in separate jobs.
 Native desktop builds and UI tests use the workflow documented in the
 [desktop guide](apps/desktop/README.md) and [E2E guide](apps/desktop/e2e/README.md).
 

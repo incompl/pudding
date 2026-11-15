@@ -917,7 +917,6 @@ pub fn start(app: AppHandle) -> Result<AudioEngine, String> {
     // and only this thread may own a stream. See output_thread_loop.
     {
         let device = device.clone();
-        let stream_cfg = stream_cfg.clone();
         let shared = Arc::clone(&shared);
         let rate_ownership = Arc::clone(&rate_ownership);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
@@ -3582,19 +3581,19 @@ fn append_planar(
     let channels = decoded.spec().channels().count().min(expected_channels);
     match decoded {
         GenericAudioBufferRef::F32(buf) => {
-            for c in 0..channels {
-                into[c].extend_from_slice(buf.plane(c).unwrap_or(&[]));
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend_from_slice(buf.plane(c).unwrap_or(&[]));
             }
         }
         GenericAudioBufferRef::F64(buf) => {
-            for c in 0..channels {
-                into[c].extend(buf.plane(c).unwrap_or(&[]).iter().map(|&v| v as f32));
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(buf.plane(c).unwrap_or(&[]).iter().map(|&v| v as f32));
             }
         }
         GenericAudioBufferRef::S32(buf) => {
             let scale = 1.0 / (i32::MAX as f32);
-            for c in 0..channels {
-                into[c].extend(
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(
                     buf.plane(c)
                         .unwrap_or(&[])
                         .iter()
@@ -3605,8 +3604,8 @@ fn append_planar(
         GenericAudioBufferRef::S24(buf) => {
             // S24 samples ride in i32 with values in [-2^23, 2^23-1].
             let scale = 1.0 / 8_388_608.0;
-            for c in 0..channels {
-                into[c].extend(
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(
                     buf.plane(c)
                         .unwrap_or(&[])
                         .iter()
@@ -3618,8 +3617,8 @@ fn append_planar(
             // Signed PCM spans [-2^(bits-1), 2^(bits-1)-1]. Using MAX adds
             // gain and maps the negative endpoint below -1.0.
             let scale = 1.0 / 32_768.0;
-            for c in 0..channels {
-                into[c].extend(
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(
                     buf.plane(c)
                         .unwrap_or(&[])
                         .iter()
@@ -3629,8 +3628,8 @@ fn append_planar(
         }
         GenericAudioBufferRef::S8(buf) => {
             let scale = 1.0 / 128.0;
-            for c in 0..channels {
-                into[c].extend(
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(
                     buf.plane(c)
                         .unwrap_or(&[])
                         .iter()
@@ -3640,8 +3639,8 @@ fn append_planar(
         }
         GenericAudioBufferRef::U32(buf) => {
             let scale = 1.0 / (u32::MAX as f32 / 2.0);
-            for c in 0..channels {
-                into[c].extend(
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(
                     buf.plane(c)
                         .unwrap_or(&[])
                         .iter()
@@ -3651,8 +3650,8 @@ fn append_planar(
         }
         GenericAudioBufferRef::U24(buf) => {
             let scale = 1.0 / 8_388_608.0;
-            for c in 0..channels {
-                into[c].extend(
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(
                     buf.plane(c)
                         .unwrap_or(&[])
                         .iter()
@@ -3662,8 +3661,8 @@ fn append_planar(
         }
         GenericAudioBufferRef::U16(buf) => {
             let scale = 1.0 / 32_768.0;
-            for c in 0..channels {
-                into[c].extend(
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(
                     buf.plane(c)
                         .unwrap_or(&[])
                         .iter()
@@ -3673,8 +3672,8 @@ fn append_planar(
         }
         GenericAudioBufferRef::U8(buf) => {
             let scale = 1.0 / 128.0;
-            for c in 0..channels {
-                into[c].extend(
+            for (c, dst) in into.iter_mut().enumerate().take(channels) {
+                dst.extend(
                     buf.plane(c)
                         .unwrap_or(&[])
                         .iter()
@@ -3708,15 +3707,19 @@ fn interleave_stereo(planar: &[Vec<f32>], input_channels: usize) -> Vec<f32> {
     let frames = planar[0].len();
     let mut out = Vec::with_capacity(frames * OUT_CHANNELS);
     if input_channels == 1 {
-        for i in 0..frames {
-            let v = planar[0][i];
+        for &v in &planar[0] {
             out.push(v);
             out.push(v);
         }
     } else {
-        for i in 0..frames {
-            out.push(planar[0][i]);
-            out.push(planar[1][i]);
+        // Both channels are sliced to `frames` up front so a short second plane
+        // still panics the way the old indexed loop did. Zipping the whole vecs
+        // would instead truncate in silence, and a half-length interleave is an
+        // audible glitch where a plane mismatch is a decoder bug worth hearing.
+        let (left, right) = (&planar[0][..frames], &planar[1][..frames]);
+        for (&l, &r) in left.iter().zip(right) {
+            out.push(l);
+            out.push(r);
         }
     }
     out
@@ -4895,7 +4898,7 @@ mod replaygain_tests {
     fn write_rg_tags(path: &std::path::Path, items: &[(ItemKey, &str)]) {
         let mut t = Tag::new(TagType::Mp4Ilst);
         for (k, v) in items {
-            assert!(t.insert_text(k.clone(), (*v).to_string()), "insert {k:?}");
+            assert!(t.insert_text(*k, (*v).to_string()), "insert {k:?}");
         }
         t.save_to_path(path, WriteOptions::default())
             .expect("write RG tags to fixture");

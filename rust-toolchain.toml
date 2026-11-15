@@ -1,0 +1,11 @@
+# Pinned so CI is reproducible and the `-D warnings` clippy gate can only change
+# when this line does — a floating stable would redden an unrelated PR the day a
+# new lint ships.
+#
+# `targets` is not optional here: pinning a version creates a toolchain separate
+# from `stable`, and installed targets are per-toolchain, so the universal MAS
+# build would otherwise lose x86_64 the moment this file landed.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

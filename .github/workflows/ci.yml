@@ -22,6 +22,29 @@ jobs:
       - run: pnpm --filter @pudding/desktop install --frozen-lockfile
       - run: pnpm desktop:test
 
+  rust:
+    name: Desktop Rust clippy and tests
+    # macOS, not ubuntu: the audio engine and the Now Playing / media-key code are
+    # objc2 bindings against CoreAudio and MediaPlayer.framework, so the macOS
+    # branches are the ones worth compiling. Runner minutes are free on a public
+    # repo, and cmake (needed by symphonia-adapter-libopus) is preinstalled.
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the version rust-toolchain.toml pins, with clippy and rustfmt.
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # The 7 #[ignore]d tests want real audio hardware, the network, or
+      # security-scoped bookmark entitlements, none of which a runner has.
+      - run: cargo test
+
   website:
     name: Website check and build
     runs-on: ubuntu-latest

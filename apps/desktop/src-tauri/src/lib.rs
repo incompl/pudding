@@ -1489,12 +1489,12 @@ async fn list_dir(path: String, db: State<'_, DbHandle>) -> Result<DirListing, S
         }
         folders.sort_by_key(|s| s.to_lowercase());
         // Playlists sort after all tracks, alphabetically by display name.
-        playlists.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        playlists.sort_by_key(|a| a.name.to_lowercase());
 
         let fulls: Vec<String> = file_names.iter().map(|n| join_path(&path, n)).collect();
         let meta_map = fetch_meta(conn, &fulls)?;
         let mut files: Vec<FileEntry> = Vec::with_capacity(file_names.len());
-        for (name, full) in file_names.into_iter().zip(fulls.into_iter()) {
+        for (name, full) in file_names.into_iter().zip(fulls) {
             let m = meta_map.get(&full).cloned().unwrap_or_default();
             files.push(FileEntry {
                 name,
@@ -2254,7 +2254,7 @@ fn fetch_stream_image(image: &str) -> Option<String> {
         // it says image, otherwise fall back to the URL's extension.
         let mime = match resp.body().mime_type() {
             Some(ct) if ct.starts_with("image/") => ct.to_string(),
-            _ => image_mime_from_ext(&image).to_string(),
+            _ => image_mime_from_ext(image).to_string(),
         };
         let mut bytes = Vec::new();
         // take() caps memory; reading one byte past the limit distinguishes
@@ -2270,7 +2270,7 @@ fn fetch_stream_image(image: &str) -> Option<String> {
             return None;
         }
         (bytes, mime)
-    } else if let Some(path) = file_url_to_path(&image) {
+    } else if let Some(path) = file_url_to_path(image) {
         let meta = std::fs::metadata(&path).ok()?;
         if meta.len() > MAX_STREAM_IMAGE_BYTES {
             log::warn!("stream image too large for {image}");
@@ -3433,6 +3433,10 @@ struct TagWriteReport {
 // the restore directly while it is showing that batch's result.
 struct UndoOffer {
     batch: i64,
+    // Nothing in the UI reads this yet — the Edit menu draws the offer without
+    // naming a count — but the journal tests assert it to pin that rows group by
+    // batch. Kept for them, hence the allow rather than a deletion.
+    #[allow(dead_code)]
     tracks: usize,
 }
 
@@ -4956,6 +4960,11 @@ fn restore_after_failed_write(
 // Hold Pudding's writer lease across the only non-atomic interval. The caller's
 // write closure edits the already-open descriptor; any write or verification
 // failure is rolled back through that same descriptor, never through a rename.
+// Eight parameters, one over clippy's ceiling: five are the distinct facts a
+// rollback needs about the pre-write file and three are the caller's write, verify
+// and restore steps. Bundling them into a struct would move the same values one
+// level down without making this safer or shorter to read.
+#[allow(clippy::too_many_arguments)]
 fn perform_direct_write(
     target: &Path,
     target_file: &mut std::fs::File,
@@ -5183,7 +5192,7 @@ pub fn write_durably_checked(
     bytes: &[u8],
     before_replace: impl Fn() -> Result<(), std::io::Error>,
 ) -> Result<(), std::io::Error> {
-    let staged = match write_atomic_checked(target, bytes, || before_replace()) {
+    let staged = match write_atomic_checked(target, bytes, &before_replace) {
         Ok(()) => return Ok(()),
         Err(e) if is_staging_denied(&e) => e,
         Err(e) => return Err(safe_save_error(e)),
@@ -6889,15 +6898,14 @@ async fn list_all_songs(db: State<'_, DbHandle>) -> Result<Vec<SongRow>, String>
         let t0 = std::time::Instant::now();
         // TRACK_COLUMNS without `track`: this list's gutter is a positional index,
         // so the metadata ordinal would be dead weight on every row of the library.
-        let sql = format!(
-            "SELECT path, title, artist, album, album_artist, disc,
+        let sql = "SELECT path, title, artist, album, album_artist, disc,
                     year, genre, duration, bitrate, sample_rate, bit_depth,
                     rg_track_gain, created, mtime, dataless
              FROM tracks
              ORDER BY artist IS NULL, artist COLLATE NOCASE,
                       album COLLATE NOCASE, disc, track,
                       title COLLATE NOCASE"
-        );
+            .to_string();
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         // Columnar/tuple rows (see SongRow): the whole-library list is large enough
         // at the scale target that repeating the JSON field names per row dominates
@@ -7542,7 +7550,7 @@ pub fn run() {
             // Seed the default stream list file so a fresh install has a valid,
             // writable set of stations. The frontend adopts this path only when
             // no stream list has ever been configured.
-            if let Err(e) = ensure_default_stream_list(&app.handle()) {
+            if let Err(e) = ensure_default_stream_list(app.handle()) {
                 log::warn!("could not create default stream list: {e}");
             }
 
@@ -7557,18 +7565,18 @@ pub fn run() {
             // Register system Now Playing / media-key handlers (macOS). Must run
             // after the audio engine is managed: the remote-command handlers look
             // it up to drive play/pause/seek.
-            now_playing::install(&app.handle());
+            now_playing::install(app.handle());
 
             // Start listening for volumes coming and going, so a library root on
             // an external drive stops being drawn as present the moment it is
             // ejected — and comes back, rescanned and re-watched, when it returns.
-            volumes::install(&app.handle());
+            volumes::install(app.handle());
 
             // Cold-start file open on Windows/Linux arrives as a CLI arg. On macOS
             // it arrives later via RunEvent::Opened (handled below).
             let argv: Vec<String> = std::env::args().collect();
             if let Some(path) = find_openable_in_argv(&argv) {
-                deliver_open_file(&app.handle(), path);
+                deliver_open_file(app.handle(), path);
             }
 
             // About opens our own in-app About panel (name/version + credit) in
@@ -9888,8 +9896,7 @@ mod tests {
 
         // Staged on the same volume, so there is nowhere for these bytes to go.
         let err = write_atomic(&target, &vec![b'x'; 8 * 1024 * 1024])
-            .err()
-            .expect("the volume is full, this cannot succeed");
+            .expect_err("the volume is full, this cannot succeed");
         assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
 
         assert_eq!(
@@ -10106,8 +10113,7 @@ mod tests {
         std::fs::write(&target, "#EXTM3U\n/Music/a.mp3\n").expect("seed");
 
         let err = write_durably(&target, &vec![b'x'; 8 * 1024 * 1024])
-            .err()
-            .expect("the volume is full, this cannot succeed");
+            .expect_err("the volume is full, this cannot succeed");
         assert_eq!(err.kind(), std::io::ErrorKind::StorageFull);
         assert_eq!(
             std::fs::read_to_string(&target).expect("read after"),
@@ -11276,7 +11282,7 @@ mod tests {
         let root = metadata_recovery_root();
         std::fs::create_dir_all(&root).unwrap();
         let pid = std::process::id();
-        let mut pair = |suffix: &str| {
+        let pair = |suffix: &str| {
             let backup = root.join(format!(".pudding-backup-discard-{pid}-{suffix}"));
             durable_copy(&target, &backup).unwrap();
             let stamp = file_stamp(&target).unwrap();
@@ -11384,7 +11390,7 @@ mod tests {
         assert_eq!(held.len(), 2, "both entries are reported at launch");
 
         // The retry the panel makes: the one resolvable record, and nothing else.
-        let merged = merge_retried_notices(&mut held, &[manifest_path.clone()]);
+        let merged = merge_retried_notices(&mut held, std::slice::from_ref(&manifest_path));
 
         assert_eq!(merged.len(), 2, "the orphan survived a retry it was not in");
         // Ordered target-first, and an entry that names no track sorts ahead of
@@ -11456,7 +11462,7 @@ mod tests {
         );
 
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let merged = merge_retried_notices(&mut held, &[manifest_path.clone()]);
+        let merged = merge_retried_notices(&mut held, std::slice::from_ref(&manifest_path));
 
         assert_eq!(merged.len(), 1);
         assert!(
