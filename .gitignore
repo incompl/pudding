@@ -43,3 +43,7 @@ dist-ssr
 # Entitlements.plist plus $TEAM_ID; the distribution overlay signs with it. The
 # Team ID is account-specific, so the result is never committed.
 /apps/desktop/src-tauri/Entitlements.distribution.plist
+
+# Pudding Mobile: xcodebuild output from scripts/sim.sh, and per-user Xcode state
+/apps/mobile/ios/build/
+xcuserdata/

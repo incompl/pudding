@@ -1,0 +1,18 @@
+{
+  "name": "@pudding/mobile",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "typecheck": "tsc",
+    "sim": "scripts/sim.sh",
+    "sim:dev": "scripts/sim.sh --dev"
+  },
+  "devDependencies": {
+    "typescript": "~7.0.2",
+    "vite": "^8.3.4"
+  }
+}
