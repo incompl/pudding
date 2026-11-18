@@ -6,6 +6,8 @@ struct WebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(BundleSchemeHandler(), forURLScheme: BundleSchemeHandler.scheme)
+        config.userContentController.addScriptMessageHandler(
+            StationsBridge(), contentWorld: .page, name: StationsBridge.name)
 
         let web = WKWebView(frame: .zero, configuration: config)
         // Insets are CSS's job (env(safe-area-inset-*)); don't let UIKit add its own.

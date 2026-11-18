@@ -27,3 +27,21 @@ body {
 #app {
   padding: calc(env(safe-area-inset-top) + 16px) 16px env(safe-area-inset-bottom);
 }
+
+.stations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.stations li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+.stations img {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+}

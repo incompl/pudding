@@ -55,12 +55,12 @@ const METADATA_RECOVERY_DIR: &str = "metadata-recovery";
 static METADATA_RECOVERY_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 // Default stream list seeded on first run, alongside the library DB in the app
-// data dir. The editable M3U template lives beside the Tauri crate, so adding a
+// data dir. The editable M3U template lives in packages/lib (shared with mobile), so adding a
 // station does not require changing Rust. Its contents are copied only when the
 // user's list does not exist; the path remains an editable setting and existing
 // personal lists are never replaced.
 const DEFAULT_STREAM_LIST_FILE: &str = "streams.m3u8";
-const DEFAULT_STREAM_LIST: &str = include_str!("../default-streams.m3u8");
+const DEFAULT_STREAM_LIST: &str = include_str!("../../../../packages/lib/default-streams.m3u8");
 
 // Identifies the app on every outbound HTTP request: stream list and station-art
 // fetches here, plus the ICY stream connection in the icy module. Public
