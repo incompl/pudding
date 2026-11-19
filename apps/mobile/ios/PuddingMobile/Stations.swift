@@ -1,9 +1,7 @@
 import Foundation
-import WebKit
 
-/// A radio station. Field names match desktop's `Stream` (src/types.ts) so the
-/// web layers can share code.
-struct Station: Codable {
+/// A radio station. Field names match desktop's `Stream` (src/types.ts).
+struct Station: Codable, Equatable {
     var name: String
     var url: String
     var image: String?
@@ -11,7 +9,7 @@ struct Station: Codable {
 
 /// The station list, kept as an app setting (UserDefaults). The first read on a
 /// fresh install seeds it from packages/lib/default-streams.m3u8, which the
-/// "Bundle web build" phase copies into the app.
+/// "Bundle default stations" phase copies into the app.
 enum Stations {
     private static let key = "stations"
 
@@ -75,45 +73,5 @@ enum Stations {
             image = String(attrs[r].dropFirst("tvg-logo=\"".count).dropLast())
         }
         return (name.isEmpty ? nil : name, image?.isEmpty == true ? nil : image)
-    }
-}
-
-/// JS ↔ Swift bridge for the station list. From the web layer:
-///
-///     window.webkit.messageHandlers.stations.postMessage({ op: "list" })
-///     window.webkit.messageHandlers.stations.postMessage({ op: "save", stations })
-///
-/// Each returns a promise; "list" resolves to the station array.
-final class StationsBridge: NSObject, WKScriptMessageHandlerWithReply {
-    static let name = "stations"
-
-    /// Returns (result, nil) to resolve the JS promise, or (nil, message) to reject it.
-    func userContentController(
-        _ controller: WKUserContentController,
-        didReceive message: WKScriptMessage
-    ) async -> (Any?, String?) {
-        guard let body = message.body as? [String: Any], let op = body["op"] as? String else {
-            return (nil, "expected { op }")
-        }
-        do {
-            switch op {
-            case "list":
-                let data = try JSONEncoder().encode(Stations.load())
-                return (try JSONSerialization.jsonObject(with: data), nil)
-            case "save":
-                // Checked first: JSONSerialization raises an ObjC exception (a
-                // crash, not a throw) on input it can't encode.
-                guard let list = body["stations"] as? [Any],
-                      JSONSerialization.isValidJSONObject(list)
-                else { return (nil, "save: expected { stations: [...] }") }
-                let raw = try JSONSerialization.data(withJSONObject: list)
-                Stations.save(try JSONDecoder().decode([Station].self, from: raw))
-                return (nil, nil)
-            default:
-                return (nil, "unknown op: \(op)")
-            }
-        } catch {
-            return (nil, "\(op): \(error)")
-        }
     }
 }

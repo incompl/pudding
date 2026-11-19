@@ -38,8 +38,6 @@
     "website:preview": "pnpm --filter @pudding/website preview",
     "check": "pnpm --filter @pudding/desktop typecheck && pnpm website:check",
     "screenshots:update": "pnpm --filter @pudding/desktop screenshots:update",
-    "mobile:dev": "pnpm --filter @pudding/mobile dev",
-    "mobile:sim": "pnpm --filter @pudding/mobile sim",
-    "mobile:sim:dev": "pnpm --filter @pudding/mobile sim:dev"
+    "mobile:sim": "pnpm --filter @pudding/mobile sim"
   }
 }

@@ -4,21 +4,24 @@ Independent music apps. Oldschool taste, newschool features.
 
 - **[Pudding Desktop](apps/desktop/README.md)** — the macOS music player for local files and internet radio, built with Tauri, Rust, and TypeScript.
 - **[Website](apps/website/README.md)** — the static Astro site introducing Pudding, live at [puddingisgood.com](https://puddingisgood.com).
-- **Pudding Mobile** — planned as a separate radio-focused app with its own mobile UI. Its stack is undecided; there is no mobile implementation yet.
+- **[Pudding Mobile](apps/mobile/README.md)** — an internet radio app for iPhone, built natively with SwiftUI and AVPlayer. In early development.
 
 ## Repository layout
 
 ```text
 apps/
   desktop/    Desktop source, Rust crate, tests, scripts, and build configuration
+  mobile/     Native SwiftUI iPhone app (Xcode project under ios/)
   website/    Astro pages, styles, assets, and build configuration
+packages/
+  lib/        Code and data shared between apps
 ```
 
-Add `apps/mobile/` when development starts. Add `packages/<name>/` when there is
-concrete code or data to share. Applications may consume shared packages but
-should not import another application's source. Each app owns its dependencies,
-UI, tests, and build output. Native mobile tooling can coexist with the JavaScript
-workspace; choosing pnpm does not choose the mobile stack.
+Add `packages/<name>/` when there is concrete code or data to share.
+Applications may consume shared packages but should not import another
+application's source. Each app owns its dependencies,
+UI, tests, and build output. Native mobile tooling coexists with the JavaScript
+workspace.
 
 The root is a private pnpm workspace with one JavaScript lockfile. The desktop
 Rust crate keeps its own Cargo manifest and lockfile under `apps/desktop/src-tauri`.
