@@ -75,7 +75,15 @@ struct SettingsView: View {
                 }
             } label: {
                 HStack(spacing: 4) {
-                    Text(current.name)
+                    // Sized to the longest name so the label's frame never
+                    // changes: the menu swaps the text mid-dismiss, and a
+                    // longer name otherwise draws clipped to the old width.
+                    ZStack(alignment: .trailing) {
+                        ForEach(Theme.themes(for: scheme)) { t in
+                            Text(t.name).hidden()
+                        }
+                        Text(current.name)
+                    }
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 12, weight: .medium))
                 }
