@@ -10,16 +10,21 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            // A Group hands its modifiers to each row inside it.
-            Group {
-                Toggle("Match System", isOn: Binding(
-                    get: { theme.mode == .system },
-                    set: { theme.setMatchSystem($0, showing: showing) }
-                ))
-                themeRow("Dark Theme", .dark)
-                themeRow("Light Theme", .light)
+            Section {
+                // A Group hands its modifiers to each row inside it.
+                Group {
+                    Toggle("Match System", isOn: Binding(
+                        get: { theme.mode == .system },
+                        set: { theme.setMatchSystem($0, showing: showing) }
+                    ))
+                    themeRow("Dark Theme", .dark)
+                    themeRow("Light Theme", .light)
+                }
+                .listRowBackground(Palette.raised)
+            } header: {
+                Text("Appearance")
+                    .foregroundStyle(Palette.muted)
             }
-            .listRowBackground(Palette.raised)
         }
         .scrollContentBackground(.hidden)
         .safeAreaInset(edge: .top, spacing: 0) { header }

@@ -161,7 +161,6 @@ struct StationList: View {
                 .foregroundStyle(Palette.fg)
             HStack {
                 Button("Settings") { showSettings = true }
-                    .font(.system(size: 17))
                 Spacer()
                 Button(editMode.isEditing ? "Done" : "Edit") {
                     // Editing works on the whole list, so it ends any search.
@@ -169,8 +168,8 @@ struct StationList: View {
                     query = ""
                     withAnimation { editMode = editMode.isEditing ? .inactive : .active }
                 }
-                .font(.system(size: 17, weight: editMode.isEditing ? .semibold : .regular))
             }
+            .font(.system(size: 17))
             .foregroundStyle(Palette.accent)
         }
         // UIKit's standard inline navigation bar: 44pt with the contents
@@ -300,15 +299,18 @@ private struct StationRow: View {
             // The accent marks the now-playing bar's station; the bar carries its
             // song and the pause button.
             Text(station.name)
-                .font(.system(size: 17))
+                // Semibold when accented: thin accent text loses contrast on
+                // some themes.
+                .font(.system(size: 17, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(isActive ? Palette.accent : Palette.fg)
             Spacer(minLength: 0)
             if editing {
                 // Says what a tap does in Edit mode. The whole row is the
-                // target; Edit mode puts the reorder handle after it.
+                // target; Edit mode puts the reorder handle after it. Gray like
+                // that handle, so the accent stays the active station's alone.
                 Image(systemName: "pencil")
                     .font(.system(size: 17))
-                    .foregroundStyle(Palette.accent)
+                    .foregroundStyle(Palette.muted)
                     .accessibilityHidden(true)
             }
         }
