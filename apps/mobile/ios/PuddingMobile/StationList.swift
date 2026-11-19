@@ -296,6 +296,24 @@ private struct StationRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Artwork(url: station.image)
+                .overlay {
+                    // Says what a tap does in Edit mode. The whole row is the
+                    // target; the art darkens so the white pencil reads on any
+                    // image (and on the empty placeholder). Always present and
+                    // faded by opacity with its own animation: List rows don't
+                    // reliably pick up the Edit toggle's withAnimation.
+                    ZStack {
+                        Color.black.opacity(0.6)
+                        Image(systemName: "pencil")
+                            .font(.system(size: 26, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .opacity(editing ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.25), value: editing)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
             // The accent marks the now-playing bar's station; the bar carries its
             // song and the pause button.
             Text(station.name)
@@ -304,15 +322,6 @@ private struct StationRow: View {
                 .font(.system(size: 17, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(isActive ? Palette.accent : Palette.fg)
             Spacer(minLength: 0)
-            if editing {
-                // Says what a tap does in Edit mode. The whole row is the
-                // target; Edit mode puts the reorder handle after it. Gray like
-                // that handle, so the accent stays the active station's alone.
-                Image(systemName: "pencil")
-                    .font(.system(size: 17))
-                    .foregroundStyle(Palette.muted)
-                    .accessibilityHidden(true)
-            }
         }
     }
 
